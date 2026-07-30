@@ -1,0 +1,4 @@
+interface:
+  display_name: "Threadshare"
+  short_description: "Share Codex and Claude sessions safely"
+  default_prompt: "Use $threadshare to share this Codex session and return the verified viewer URL."

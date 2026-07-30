@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { exportClaudeJsonl, exportCodexJsonl } from "../src/session-export.mjs";
+import {
+  exportClaudeJsonl,
+  exportCodexJsonl,
+  resolveSessionFile,
+} from "../src/session-export.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -14,7 +21,26 @@ test("prints CLI help with either help spelling", () => {
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /threadshare share <codex\|claude>/);
+    assert.match(result.stdout, /https:\/\/cloud-thread\.team-harness\.com/);
     assert.equal(result.stderr, "");
+  }
+});
+
+test("finds Codex Cloud sessions below CODEX_HOME", async () => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "threadshare-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  try {
+    const sessions = path.join(codexHome, "sessions", "2026", "07", "30");
+    await mkdir(sessions, { recursive: true });
+    const sessionFile = path.join(sessions, "rollout-cloud-session-123.jsonl");
+    await writeFile(sessionFile, "");
+    process.env.CODEX_HOME = codexHome;
+
+    assert.equal(await resolveSessionFile("codex", "cloud-session-123"), sessionFile);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    await rm(codexHome, { recursive: true, force: true });
   }
 });
 

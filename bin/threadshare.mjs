@@ -3,12 +3,16 @@ import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 import { exportSession } from "../src/session-export.mjs";
 
+const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
+
 function usage() {
   return `Usage:
   threadshare export <codex|claude> <session-id|file> [--output <file|->]
-  threadshare publish <history.json|-> --url <service-url> [--json]
-  threadshare share <codex|claude> <session-id|file> --url <service-url> [--json]
-  threadshare validate <history.json|->`;
+  threadshare publish <history.json|-> [--url <service-url>] [--json]
+  threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
+  threadshare validate <history.json|->
+
+Default service: ${DEFAULT_THREADSHARE_URL}`;
 }
 
 function parseArgs(args) {
@@ -33,7 +37,7 @@ function parseArgs(args) {
 }
 
 function serviceUrl(value) {
-  const url = new URL(value ?? process.env.THREADSHARE_URL ?? "");
+  const url = new URL(value ?? process.env.THREADSHARE_URL ?? DEFAULT_THREADSHARE_URL);
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new Error("Threadshare service URL must use HTTP or HTTPS");
   }

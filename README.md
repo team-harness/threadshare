@@ -1,21 +1,28 @@
 # Threadshare
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 Threadshare is a self-hostable API, read-only web viewer, and CLI for sharing AI coding-agent conversation threads. It is independent of Paseo, Codex, Claude Code, a particular cloud, and a personal domain.
 
 The repository owns the portable `threadshare-history@v1` protocol. Producers convert their native conversation data into this format; Threadshare validates, stores, and serves it at a stable URL.
 
 ## Quick Start
 
-Install the CLI from this checkout, or run it through `npx` after publishing the package:
+Install the public CLI package:
 
 ```bash
-npm install
-npm link
-threadshare share codex <session-id-or-jsonl-file> --url https://share.example.com
-threadshare share claude <session-id-or-jsonl-file> --url https://share.example.com --json
+npm install --global @team-harness/threadshare
+threadshare share codex <session-id-or-jsonl-file>
+threadshare share claude <session-id-or-jsonl-file> --json
 ```
 
-The plain command prints a viewer URL. `--json` prints `{"id":"...","url":"..."}`, which is intended for agents and scripts.
+Run without installing:
+
+```bash
+npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
+```
+
+The CLI defaults to the hosted service at `https://cloud-thread.team-harness.com`. Override it with `--url <service-url>` or `THREADSHARE_URL`. The plain command prints a viewer URL. `--json` prints `{"id":"...","url":"..."}`, which is intended for agents and scripts.
 
 The CLI deliberately exports only user messages, assistant text, thoughts, and tool calls. It does not upload raw session metadata, system prompts, credentials, or provider configuration.
 
@@ -23,12 +30,24 @@ The CLI deliberately exports only user messages, assistant text, thoughts, and t
 
 ```text
 threadshare export <codex|claude> <session-id|file> [--output <file|->]
-threadshare publish <history.json|-> --url <service-url> [--json]
-threadshare share <codex|claude> <session-id|file> --url <service-url> [--json]
+threadshare publish <history.json|-> [--url <service-url>] [--json]
+threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
-`export` finds Codex sessions under `~/.codex/sessions` and Claude Code sessions under `~/.claude/projects`; pass an explicit JSONL path when a partial identifier is ambiguous. `publish` accepts a `threadshare-history@v1` file or stdin, so any agent can integrate without a provider-specific SDK.
+`export` finds Codex sessions under `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`; Claude Code sessions are read from `~/.claude/projects`. Pass an explicit JSONL path when a partial identifier is ambiguous. `publish` accepts a `threadshare-history@v1` file or stdin, so any agent can integrate without a provider-specific SDK.
+
+## Agent Skill
+
+The bundled `threadshare` Skill teaches Codex and Codex Cloud when and how to share a session, verify the resulting JSON, and avoid disclosing local paths or transcript contents during routine checks.
+
+Install it for Codex from GitHub:
+
+```bash
+npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
+```
+
+For Codex Cloud, install it at project scope during environment setup by omitting `--global`. The Skill lives at [`skills/threadshare`](./skills/threadshare).
 
 ## Protocol
 
@@ -114,7 +133,7 @@ Paseo is one producer. Configure its daemon with the Threadshare public URL:
 ```json
 {
   "daemon": {
-    "chatShare": { "baseUrl": "https://share.example.com" }
+    "chatShare": { "baseUrl": "https://cloud-thread.team-harness.com" }
   }
 }
 ```

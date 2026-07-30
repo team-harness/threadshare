@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 
 export const THREADSHARE_HISTORY_FORMAT = "threadshare-history@v1";
 
@@ -191,7 +192,7 @@ export async function resolveSessionFile(provider, value) {
   if (value.includes("/") || value.endsWith(".jsonl")) return path.resolve(value);
   const root =
     provider === "codex"
-      ? path.join(os.homedir(), ".codex", "sessions")
+      ? path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"), "sessions")
       : path.join(os.homedir(), ".claude", "projects");
   const matches = (await walk(root)).filter((file) => path.basename(file).includes(value));
   if (matches.length === 0) throw new Error(`No ${provider} session matches ${value}`);

@@ -2,9 +2,36 @@
   "name": "@team-harness/threadshare",
   "version": "0.1.0",
   "description": "Self-hostable API, viewer, and CLI for sharing AI agent conversation threads",
+  "keywords": [
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "conversation",
+    "sharing"
+  ],
+  "homepage": "https://github.com/team-harness/threadshare#readme",
+  "bugs": "https://github.com/team-harness/threadshare/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/team-harness/threadshare.git"
+  },
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "threadshare": "./bin/threadshare.mjs"
+  },
+  "files": [
+    "bin/",
+    "README.zh-CN.md",
+    "schema/",
+    "skills/",
+    "src/session-export.mjs"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "vite",
