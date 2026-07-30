@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "bin": {
-    "threadshare": "./bin/threadshare.mjs"
+    "threadshare": "bin/threadshare.mjs"
   },
   "files": [
     "bin/",
