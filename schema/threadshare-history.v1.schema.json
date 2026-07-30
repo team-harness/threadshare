@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.dev/schema/threadshare-history.v1.schema.json",
+  "title": "Threadshare history",
+  "description": "A portable, read-only representation of an AI agent conversation thread.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schemaVersion", "exportedAt", "conversation", "entries"],
+  "properties": {
+    "format": { "const": "threadshare-history@v1" },
+    "schemaVersion": { "const": 1 },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "conversation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "source": { "enum": ["paseo", "codex", "claude", "other"] }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "role", "markdown"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "message" },
+        "role": { "enum": ["user", "assistant"] },
+        "markdown": { "type": "string" }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "name", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "tool" },
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["running", "completed", "failed", "canceled"] },
+        "input": {},
+        "output": {},
+        "error": {}
+      }
+    },
+    "thought": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "text", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "thought" },
+        "text": { "type": "string" },
+        "status": { "enum": ["loading", "ready"] }
+      }
+    },
+    "todo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "items"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "todo" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "completed"],
+            "properties": {
+              "text": { "type": "string" },
+              "completed": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "activity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "message", "level"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "activity" },
+        "message": { "type": "string" },
+        "level": { "enum": ["system", "info", "success", "error"] }
+      }
+    },
+    "compaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "createdAt", "kind", "status"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "kind": { "const": "compaction" },
+        "status": { "enum": ["loading", "completed"] },
+        "trigger": { "enum": ["auto", "manual"] },
+        "preTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "entry": {
+      "oneOf": [
+        { "$ref": "#/$defs/message" },
+        { "$ref": "#/$defs/tool" },
+        { "$ref": "#/$defs/thought" },
+        { "$ref": "#/$defs/todo" },
+        { "$ref": "#/$defs/activity" },
+        { "$ref": "#/$defs/compaction" }
+      ]
+    }
+  }
+}

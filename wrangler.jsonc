@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "threadshare",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-29",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+  },
+  "r2_buckets": [
+    {
+      "binding": "THREADSHARE_BUCKET",
+      "bucket_name": "threadshare-shares",
+    },
+  ],
+}

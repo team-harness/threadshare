@@ -1,0 +1,37 @@
+{
+  "name": "@team-harness/threadshare",
+  "version": "0.1.0",
+  "description": "Self-hostable API, viewer, and CLI for sharing AI agent conversation threads",
+  "type": "module",
+  "bin": {
+    "threadshare": "./bin/threadshare.mjs"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run build:void",
+    "build:void": "vite build",
+    "build:cloudflare": "vite build --mode cloudflare",
+    "build:fc": "npm run build:cloudflare && node scripts/build-fc.mjs",
+    "preview": "vite preview",
+    "deploy": "npm run deploy:void",
+    "deploy:void": "void deploy",
+    "deploy:cloudflare": "npm run build:cloudflare && wrangler deploy --config wrangler.jsonc",
+    "deploy:fc": "npm run build:fc && (cd fc && licell deploy)",
+    "dev:cloudflare": "npm run build:cloudflare && wrangler dev --local --config wrangler.jsonc",
+    "test:fc": "npm run build:fc && node --test fc/handler.test.cjs",
+    "test:cli": "node --test test/cli.test.mjs",
+    "test": "npm run test:cli && npm run test:fc"
+  },
+  "dependencies": {
+    "markdown-it": "14.3.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "vite": "8.1.5",
+    "void": "0.10.10",
+    "wrangler": "4.114.0"
+  },
+  "overrides": {
+    "@cloudflare/vite-plugin": "1.47.0"
+  }
+}

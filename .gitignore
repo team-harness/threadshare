@@ -1,0 +1,9 @@
+node_modules/
+.licell/
+.void/
+.wrangler/
+dist/
+fc/.licell/
+fc/dist/
+fc/static-assets.ts
+api/fc-handler.cjs
