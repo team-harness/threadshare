@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { exportClaudeJsonl, exportCodexJsonl } from "../src/session-export.mjs";
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+test("prints CLI help with either help spelling", () => {
+  for (const argument of ["help", "--help"]) {
+    const result = spawnSync(process.execPath, [path.join(root, "bin/threadshare.mjs"), argument], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /threadshare share <codex\|claude>/);
+    assert.equal(result.stderr, "");
+  }
+});
 
 test("exports Codex messages and tool calls without session metadata", () => {
   const history = exportCodexJsonl(

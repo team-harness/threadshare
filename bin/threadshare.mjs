@@ -21,8 +21,8 @@ function parseArgs(args) {
       continue;
     }
     const key = value.slice(2);
-    if (key === "json") {
-      options.json = true;
+    if (key === "json" || key === "help") {
+      options[key] = true;
       continue;
     }
     const next = args[++index];
@@ -81,28 +81,30 @@ async function publish(history, url) {
 async function main() {
   const { positionals, options } = parseArgs(process.argv.slice(2));
   const [command, provider, session] = positionals;
-  if (!command || command === "--help" || command === "help") {
+  if (!command || command === "help" || options.help) {
     process.stdout.write(`${usage()}\n`);
     return;
   }
   if (command === "validate") {
+    if (!provider) throw new Error(usage());
     validateHistory(JSON.parse(await readInput(provider)));
     process.stdout.write("Valid threadshare-history@v1\n");
     return;
   }
   if (command === "export") {
-    if (provider !== "codex" && provider !== "claude") throw new Error(usage());
+    if ((provider !== "codex" && provider !== "claude") || !session) throw new Error(usage());
     const history = await exportSession(provider, session);
     await writeOutput(options.output, `${JSON.stringify(history, null, 2)}\n`);
     return;
   }
   if (command === "publish") {
+    if (!provider) throw new Error(usage());
     const result = await publish(validateHistory(JSON.parse(await readInput(provider))), options.url);
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
     return;
   }
   if (command === "share") {
-    if (provider !== "codex" && provider !== "claude") throw new Error(usage());
+    if ((provider !== "codex" && provider !== "claude") || !session) throw new Error(usage());
     const result = await publish(await exportSession(provider, session), options.url);
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
     return;
