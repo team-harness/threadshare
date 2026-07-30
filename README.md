@@ -128,7 +128,9 @@ npm run deploy:void
 
 ## Paseo Integration
 
-Paseo is one producer. Configure its daemon with the Threadshare public URL:
+[team-harness/paseo](https://github.com/team-harness/paseo) is a customized
+Paseo distribution with built-in Thread Share support. Configure its daemon
+with the Threadshare public URL:
 
 ```json
 {

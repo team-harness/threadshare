@@ -141,7 +141,9 @@ npm run deploy:void
 
 ## Paseo 接入
 
-Paseo 是 Threadshare 协议的一个生产者。默认共享服务已经是 `https://cloud-thread.team-harness.com`；自行部署后，可以在 daemon 配置中覆盖：
+[team-harness/paseo](https://github.com/team-harness/paseo) 是我们定制的
+Paseo 版本，已内置 Thread Share 支持。默认共享服务为
+`https://cloud-thread.team-harness.com`；自行部署后，可以在 daemon 配置中覆盖：
 
 ```json
 {
