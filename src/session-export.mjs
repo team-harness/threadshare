@@ -6,10 +6,33 @@ import { parseTree } from "jsonc-parser";
 
 export const THREADSHARE_HISTORY_FORMAT = "threadshare-history@v1";
 
+const entryProvenance = new WeakMap();
+
 const SESSION_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_UUID_IN_TEXT_PATTERN =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+const HIDDEN_USER_MESSAGE_TAGS = new Set([
+  "codex_internal_context",
+  "command-message",
+  "command-name",
+  "developer_instructions",
+  "environment_context",
+  "ide_opened_file",
+  "ide_selection",
+  "local-command-caveat",
+  "local-command-stdout",
+  "paseo-system",
+  "skill",
+  "subagent_notification",
+  "system-reminder",
+  "system_instructions",
+  "task-notification",
+  "turn_aborted",
+  "user_action",
+  "user_instructions",
+]);
 
 const BEARER_PROSE_TERMS = new Set([
   "authentication",
@@ -56,6 +79,13 @@ function textFromPart(part) {
   if (typeof part.output_text === "string") return redactSecrets(part.output_text);
   if (typeof part.input_text === "string") return redactSecrets(part.input_text);
   return "";
+}
+
+function isHiddenUserMessage(content) {
+  const text = textFromContent(content).trimStart();
+  if (/^# AGENTS\.md instructions(?:\s|$)/u.test(text)) return true;
+  const tag = /^<([A-Za-z][A-Za-z0-9_-]*)(?:\s[^>]*)?>/u.exec(text)?.[1];
+  return tag !== undefined && HIDDEN_USER_MESSAGE_TAGS.has(tag);
 }
 
 function isSensitiveKey(key) {
@@ -137,7 +167,7 @@ function isSensitiveKey(key) {
   );
 }
 
-function redactSecrets(value) {
+export function redactSecrets(value) {
   return value
     .replace(
       /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
@@ -272,6 +302,16 @@ function baseHistory(provider, source, sessionId, title, exportedAt = Date.now()
   };
 }
 
+function appendEntry(history, entry, recordIndex) {
+  history.entries.push(entry);
+  entryProvenance.set(entry, { recordIndex, toolResults: [] });
+  return entry;
+}
+
+export function getEntryProvenance(entry) {
+  return entryProvenance.get(entry);
+}
+
 function entryId(provider, index, kind) {
   return `${provider}:${kind}:${index + 1}`;
 }
@@ -289,11 +329,15 @@ function contentEntryId(base, kind, partIndex, partCount) {
   return partCount === 1 ? base : `${base}:${kind}:${partIndex + 1}`;
 }
 
-function applyToolResult(tool, result, failed) {
+function applyToolResult(tool, result, failed, recordIndex) {
   if (!tool) return;
+  const value = sanitizeVisibleValue(result);
+  delete tool.output;
+  delete tool.error;
   tool.status = failed ? "failed" : "completed";
-  if (failed) tool.error = sanitizeVisibleValue(result);
-  else tool.output = sanitizeVisibleValue(result);
+  if (failed) tool.error = value;
+  else tool.output = value;
+  entryProvenance.get(tool)?.toolResults.push({ failed, recordIndex, value });
 }
 
 export function exportCodexJsonl(raw, options = {}) {
@@ -314,16 +358,17 @@ export function exportCodexJsonl(raw, options = {}) {
     const payload = record.payload;
     const createdAt = iso(record.timestamp ?? payload.timestamp, history.exportedAt);
     if (payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
+      if (payload.role === "user" && isHiddenUserMessage(payload.content)) continue;
       if (!Array.isArray(payload.content)) {
         const markdown = textFromContent(payload.content);
         if (markdown) {
-          history.entries.push({
+          appendEntry(history, {
             id: payload.id ?? entryId("codex", index, payload.role),
             createdAt,
             kind: "message",
             role: payload.role,
             markdown,
-          });
+          }, index);
         }
         continue;
       }
@@ -338,25 +383,25 @@ export function exportCodexJsonl(raw, options = {}) {
                 ? redactSecrets(part.summary)
                 : "";
           if (!text) continue;
-          history.entries.push({
+          appendEntry(history, {
             id: contentEntryId(baseId, "thought", partIndex, payload.content.length),
             createdAt,
             kind: "thought",
             text,
             status: "ready",
-          });
+          }, index);
           continue;
         }
 
         const markdown = textFromPart(part);
         if (markdown) {
-          history.entries.push({
+          appendEntry(history, {
             id: contentEntryId(baseId, "message", partIndex, payload.content.length),
             createdAt,
             kind: "message",
             role: payload.role,
             markdown,
-          });
+          }, index);
         }
       }
       continue;
@@ -364,13 +409,13 @@ export function exportCodexJsonl(raw, options = {}) {
     if (payload.type === "reasoning") {
       const text = textFromContent(payload.summary);
       if (text) {
-        history.entries.push({
+        appendEntry(history, {
           id: payload.id ?? entryId("codex", index, "thought"),
           createdAt,
           kind: "thought",
           text,
           status: "ready",
-        });
+        }, index);
       }
       continue;
     }
@@ -384,7 +429,7 @@ export function exportCodexJsonl(raw, options = {}) {
         status: "running",
         input: parseToolInput(payload.arguments ?? payload.input),
       };
-      history.entries.push(tool);
+      appendEntry(history, tool, index);
       tools.set(id, tool);
       continue;
     }
@@ -393,6 +438,7 @@ export function exportCodexJsonl(raw, options = {}) {
         tools.get(payload.call_id ?? payload.id),
         payload.error ?? payload.output,
         payload.status === "failed" || payload.error != null,
+        index,
       );
     }
   }
@@ -421,16 +467,17 @@ export function exportClaudeJsonl(raw, options = {}) {
     const content = record.message?.content;
     const createdAt = iso(record.timestamp, history.exportedAt);
     const role = record.message?.role === "assistant" || record.type === "assistant" ? "assistant" : "user";
+    if (role === "user" && isHiddenUserMessage(content)) continue;
     if (!Array.isArray(content)) {
       const markdown = textFromContent(content);
       if (markdown) {
-        history.entries.push({
+        appendEntry(history, {
           id: record.uuid ?? entryId("claude", index, role),
           createdAt,
           kind: "message",
           role,
           markdown,
-        });
+        }, index);
       }
       continue;
     }
@@ -440,25 +487,25 @@ export function exportClaudeJsonl(raw, options = {}) {
       if (part.type !== "thinking" && part.type !== "tool_use" && part.type !== "tool_result") {
         const markdown = textFromPart(part);
         if (markdown) {
-          history.entries.push({
+          appendEntry(history, {
             id: contentEntryId(baseId, "message", partIndex, content.length),
             createdAt,
             kind: "message",
             role,
             markdown,
-          });
+          }, index);
         }
       }
       if (part.type === "thinking" && typeof part.thinking === "string") {
         const text = redactSecrets(part.thinking);
         if (!text) continue;
-        history.entries.push({
+        appendEntry(history, {
           id: contentEntryId(baseId, "thought", partIndex, content.length),
           createdAt,
           kind: "thought",
           text,
           status: "ready",
-        });
+        }, index);
       }
       if (part.type === "tool_use") {
         const id = part.id ?? contentEntryId(baseId, "tool", partIndex, content.length);
@@ -470,7 +517,7 @@ export function exportClaudeJsonl(raw, options = {}) {
           status: "running",
           input: sanitizeVisibleValue(part.input),
         };
-        history.entries.push(tool);
+        appendEntry(history, tool, index);
         tools.set(id, tool);
       }
       if (part.type === "tool_result") {
@@ -478,6 +525,7 @@ export function exportClaudeJsonl(raw, options = {}) {
           tools.get(part.tool_use_id),
           part.content,
           part.is_error === true || part.status === "failed",
+          index,
         );
       }
     }

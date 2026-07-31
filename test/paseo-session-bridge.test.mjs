@@ -330,6 +330,128 @@ test("shares a Paseo agent with one-line JSON output", async () => {
   }
 });
 
+test("lists candidates and publishes a bounded Paseo range through the shared selector", async () => {
+  const nativeRaw = (sessionId) =>
+    [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-07-31T00:00:00.000Z",
+        payload: { session_id: sessionId },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-31T00:00:01.000Z",
+        payload: {
+          type: "message",
+          id: "paseo-range-start",
+          role: "user",
+          content: [{ type: "input_text", text: "Start Paseo range" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-31T00:00:02.000Z",
+        payload: {
+          type: "message",
+          id: "paseo-range-answer",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Included answer" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-31T00:00:03.000Z",
+        payload: {
+          type: "message",
+          id: "paseo-range-boundary",
+          role: "user",
+          content: [{ type: "input_text", text: "Share this Paseo session" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-31T00:00:04.000Z",
+        payload: {
+          type: "message",
+          id: "paseo-range-orchestration",
+          role: "assistant",
+          content: [{ type: "output_text", text: "PRIVATE ORCHESTRATION" }],
+        },
+      }),
+    ].join("\n");
+  const fixture = await createPaseoFixture();
+  await writeFile(
+    path.join(
+      fixture.env.CODEX_HOME,
+      "sessions",
+      "2026",
+      "07",
+      "31",
+      `rollout-${fixture.nativeSessionId}.jsonl`,
+    ),
+    nativeRaw(fixture.nativeSessionId),
+  );
+
+  let received;
+  const server = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "11111111-2222-4333-8444-555555555555" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const candidates = runCli(fixture, [
+      "messages",
+      "paseo",
+      fixture.agentRef,
+      "--format",
+      "json",
+    ]);
+    assert.equal(candidates.status, 0, candidates.stderr);
+    const page = JSON.parse(candidates.stdout);
+    assert.equal(page.boundaryId, "paseo-range-boundary");
+    assert.deepEqual(page.messages.map((message) => message.id), ["paseo-range-start"]);
+
+    const shared = await execFileAsync(
+      process.execPath,
+      [
+        cli,
+        "share",
+        "paseo",
+        fixture.agentRef,
+        "--from",
+        "paseo-range-start",
+        "--before",
+        page.boundaryId,
+        "--url",
+        serviceUrl,
+        "--json",
+      ],
+      { encoding: "utf8", env: fixture.env },
+    );
+    assert.equal(shared.stderr, "");
+    assert.deepEqual(
+      received.entries.map((entry) => entry.id),
+      ["paseo-range-start", "paseo-range-answer"],
+    );
+    assert.equal(received.conversation.source, "paseo");
+    assert.doesNotMatch(JSON.stringify(received), /PRIVATE ORCHESTRATION/);
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await fixture.cleanup();
+  }
+});
+
 test("rejects malformed Paseo agent references before invoking Paseo", async () => {
   const fixture = await createPaseoFixture();
   try {

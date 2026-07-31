@@ -41,6 +41,32 @@ https://cloud-thread.team-harness.com/?id=<share-id>
 
 Agent 或脚本可以增加 `--json`，获得单行 `{"id":"...","url":"..."}` 响应。
 
+### 从某条用户消息开始分享
+
+人在交互式终端中可以让 Threadshare 展示最近 10 个用户 turn，再选择共享会话的起点：
+
+```bash
+threadshare share paseo <agent-id-or-prefix> --pick-start
+```
+
+输入 `m` 再加载 10 条更早的消息，输入 `q` 取消。被选中的用户 turn 会包含在分享中，内容一直延续到当前快照末尾。`--pick-start` 不能与 `--from` 或 `--before` 一起使用。
+
+Agent 应使用非交互候选命令。它会把最后一个用户 turn 作为排他边界，从而排除“请分享”、后续加载更多、序号选择和分享工具调用本身：
+
+```bash
+threadshare messages paseo <agent-id-or-prefix> --format json
+threadshare messages paseo <agent-id-or-prefix> --format json \
+  --before <original-boundary-id> --offset <next-offset>
+threadshare share paseo <agent-id-or-prefix> \
+  --from <selected-message-id> --before <original-boundary-id> --json
+```
+
+`messages` 默认按从新到旧返回边界前最近 10 个候选，单行 JSON 包含 `boundaryId`、`boundaryPreview`、`messages`、`hasMore` 和 `nextOffset`。Agent 应确认 `boundaryPreview` 对应当前分享指令，只向用户展示带序号的预览；加载更多时始终复用首次的 `boundaryId`，不向用户暴露内部消息 ID。如果当前请求还没有写入原生 session，应重试一次或停止，不能猜测边界。
+
+脚本已经知道准确用户消息 ID 时，可以直接使用范围参数：`--from` 包含起点，`--before` 排除结束边界。`--from last-user` 表示 `--before` 之前最后一个用户 turn；未提供边界时表示快照中的最后一个用户 turn。同一原生用户 turn 包含多个文本 block 时始终作为整体选择。
+
+同时未提供 `--from` 和 `--before` 时，`share` 与 `export` 保持默认行为，处理完整的可见会话快照。显式传入空的范围值属于非法参数，命令会在发布前退出，避免选取失败后静默退化为全量分享。
+
 Viewer 链接不会公开列出，但它不带访问鉴权。任何获得链接的人都能读取对应会话，因此分享前应先检查内容。
 
 分享 Paseo agent 时，本机需要安装 `paseo` CLI 且 daemon 可访问。Threadshare 会定位它引用的原生 Codex 或 Claude session，不修改 Paseo，也不上传 Paseo 状态文件。
@@ -63,13 +89,15 @@ export THREADSHARE_URL=https://threadshare.example.com
 ## CLI 命令
 
 ```text
-threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--output <file|->]
+threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
+threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
 - `share`：一步完成原生会话导出与发布。
+- `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
 - `export`：只生成规范 JSON，不上传。
 - `publish`：上传已有的 `threadshare-history@v1` 文档。
 - `validate`：在本地校验协议文档。
@@ -104,7 +132,9 @@ Skill 会优先使用已安装的 CLI，不存在时回退到 `npx`。Codex Clou
 
 Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接。任何获得链接的人都能读取对应会话。
 
-导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。
+导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。原生日志有时会把 Agent 注入的编排上下文记录为 `role: "user"`，Threadshare 会把这类已知 wrapper 视为隐藏内容，并从全量与范围导出中排除。
+
+范围分享会先关联工具调用与结果，再重建工具在排他边界时的状态。即使工具调用发生在 `--before` 之前，边界之后才写入的结果也不会进入分享。
 
 常见凭据字段和 token 模式会尽力脱敏。可见消息、工具输入或输出仍可能包含未被识别的敏感数据，因此分享前应检查会话内容。
 

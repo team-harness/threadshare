@@ -41,6 +41,32 @@ https://cloud-thread.team-harness.com/?id=<share-id>
 
 Add `--json` for the one-line `{"id":"...","url":"..."}` response expected by agents and scripts.
 
+### Share From A User Message
+
+In an interactive terminal, let Threadshare show the 10 most recent user turns and choose where the shared conversation starts:
+
+```bash
+threadshare share paseo <agent-id-or-prefix> --pick-start
+```
+
+Enter `m` to load 10 older turns or `q` to cancel. The selected user turn is included, and the share continues to the end of the snapshot. `--pick-start` cannot be combined with `--from` or `--before`.
+
+Agents use the non-interactive candidate command instead. It treats the latest user turn as an exclusive boundary, which keeps the sharing request and the subsequent selection workflow out of the published conversation:
+
+```bash
+threadshare messages paseo <agent-id-or-prefix> --format json
+threadshare messages paseo <agent-id-or-prefix> --format json \
+  --before <original-boundary-id> --offset <next-offset>
+threadshare share paseo <agent-id-or-prefix> \
+  --from <selected-message-id> --before <original-boundary-id> --json
+```
+
+`messages` returns the 10 most recent candidates before the boundary, newest first. Its one-line JSON contains `boundaryId`, `boundaryPreview`, `messages`, `hasMore`, and `nextOffset`. An agent should verify that `boundaryPreview` matches the current sharing request, show only numbered previews to the user, retain the original `boundaryId` while loading more, and keep message IDs internal. If the current request is not yet persisted, retry once or stop instead of guessing the boundary.
+
+For scripts that already know the exact user-message ID, `--from` is inclusive and `--before` is exclusive. `--from last-user` selects the last user turn before `--before`, or the snapshot's last user turn when no boundary is supplied. A native user turn with multiple text blocks is always selected as one unit.
+
+When neither `--from` nor `--before` is supplied, `share` and `export` keep their default behavior and process the full visible snapshot. An explicitly empty range value is invalid and exits without publishing, so a failed selection cannot silently become a full share.
+
 Viewer URLs are unlisted, not access-controlled. Anyone with the URL can read the shared conversation, so review the content before sharing it.
 
 Paseo sharing requires the local `paseo` CLI and a reachable daemon. Threadshare resolves the agent's native Codex or Claude session without modifying Paseo or uploading its state file.
@@ -63,13 +89,15 @@ export THREADSHARE_URL=https://threadshare.example.com
 ## CLI Reference
 
 ```text
-threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--output <file|->]
+threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
+threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
 - `share` exports and publishes a native session in one step.
+- `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
 - `export` creates canonical JSON without uploading it.
 - `publish` uploads an existing `threadshare-history@v1` document.
 - `validate` checks a protocol document locally.
@@ -104,7 +132,9 @@ The Skill uses the installed CLI when available and falls back to `npx`. For Cod
 
 Viewer URLs are read-only and unlisted, but they are not access-controlled. Anyone with a URL can read the shared conversation.
 
-The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration.
+The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration. Native logs sometimes encode agent-injected orchestration context as `role: "user"`; Threadshare treats known wrappers of that kind as hidden in both full and ranged exports.
+
+For a ranged share, Threadshare first associates tool results with their calls and then reconstructs each tool's state at the exclusive boundary. A result written after `--before` is not included, even when its call occurred earlier.
 
 Common credential fields and token patterns are redacted on a best-effort basis. Visible messages and tool input or output can still contain sensitive data that is not recognized, so review a conversation before sharing it.
 
