@@ -1,17 +1,17 @@
-import { readFile, readdir } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
-import process from "node:process";
 import { parseTree } from "jsonc-parser";
+import {
+  SESSION_UUID_IN_TEXT_PATTERN,
+  SESSION_UUID_PATTERN,
+  resolveSessionFile,
+} from "./session-files.mjs";
+
+export { resolveSessionFile } from "./session-files.mjs";
 
 export const THREADSHARE_HISTORY_FORMAT = "threadshare-history@v1";
 
 const entryProvenance = new WeakMap();
-
-const SESSION_UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SESSION_UUID_IN_TEXT_PATTERN =
-  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 const HIDDEN_USER_MESSAGE_TAGS = new Set([
   "codex_internal_context",
@@ -86,6 +86,29 @@ function isHiddenUserMessage(content) {
   if (/^# AGENTS\.md instructions(?:\s|$)/u.test(text)) return true;
   const tag = /^<([A-Za-z][A-Za-z0-9_-]*)(?:\s[^>]*)?>/u.exec(text)?.[1];
   return tag !== undefined && HIDDEN_USER_MESSAGE_TAGS.has(tag);
+}
+
+export function visibleUserMarkdown(provider, record) {
+  let content;
+  if (provider === "codex") {
+    const payload = record?.type === "response_item" ? record.payload : undefined;
+    if (payload?.type !== "message" || payload.role !== "user") return "";
+    content = payload.content;
+  } else if (provider === "claude") {
+    if (
+      record?.type !== "user" ||
+      record.message?.role !== "user" ||
+      record.isMeta === true ||
+      record.isSidechain === true ||
+      record.isCompactSummary === true
+    ) {
+      return "";
+    }
+    content = record.message?.content;
+  } else {
+    return "";
+  }
+  return isHiddenUserMessage(content) ? "" : textFromContent(content);
 }
 
 function isSensitiveKey(key) {
@@ -531,37 +554,6 @@ export function exportClaudeJsonl(raw, options = {}) {
     }
   }
   return history;
-}
-
-async function walk(root) {
-  const files = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const file = path.join(root, entry.name);
-    if (entry.isDirectory()) files.push(...(await walk(file)));
-    else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(file);
-  }
-  return files;
-}
-
-export async function resolveSessionFile(provider, value, options = {}) {
-  if (value.includes("/") || value.endsWith(".jsonl")) return path.resolve(value);
-  const environment = options.environment ?? process.env;
-  const home = environment.HOME || os.homedir();
-  const root =
-    provider === "codex"
-      ? path.join(environment.CODEX_HOME ?? path.join(home, ".codex"), "sessions")
-      : path.join(home, ".claude", "projects");
-  let files;
-  try {
-    files = await walk(root);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-    files = [];
-  }
-  const matches = files.filter((file) => path.basename(file).includes(value));
-  if (matches.length === 0) throw new Error(`No ${provider} session matches ${value}`);
-  if (matches.length > 1) throw new Error(`Multiple ${provider} sessions match ${value}; pass a file path`);
-  return matches[0];
 }
 
 export async function exportSession(provider, session, options = {}) {

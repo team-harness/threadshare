@@ -18,7 +18,18 @@ Threadshare 需要 Node.js 20 或更高版本。
 npm install --global @team-harness/threadshare
 ```
 
-### 2. 分享会话
+### 2. 查找会话
+
+不知道原生 session ID 时，可以列出最近更新的 10 个会话：
+
+```bash
+threadshare sessions codex
+threadshare sessions claude
+```
+
+每项包含完整 session ID、更新时间、项目、Git 分支，以及经过脱敏的首条可见用户请求预览。该命令只读取本机文件，不上传任何内容。使用 `--offset <n>` 和 `--limit <n>` 分页；Agent 或脚本增加 `--format json`，可获得稳定的单行响应。
+
+### 3. 分享会话
 
 根据会话所属的 provider 选择命令：
 
@@ -89,6 +100,7 @@ export THREADSHARE_URL=https://threadshare.example.com
 ## CLI 命令
 
 ```text
+threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
 threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
 threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
@@ -97,6 +109,7 @@ threadshare validate <history.json|->
 ```
 
 - `share`：一步完成原生会话导出与发布。
+- `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
 - `export`：只生成规范 JSON，不上传。
 - `publish`：上传已有的 `threadshare-history@v1` 文档。
@@ -110,7 +123,7 @@ threadshare validate history.json
 threadshare publish history.json --json
 ```
 
-Codex 会话优先从 `$CODEX_HOME/sessions` 查找，未配置时使用 `~/.codex/sessions`。Claude Code 会话从 `~/.claude/projects` 查找。部分 ID 有歧义时，可以传入明确的 JSONL 路径。
+Codex 会话优先从 `$CODEX_HOME/sessions` 查找，未配置时使用 `~/.codex/sessions`。Claude Code 会话从 `~/.claude/projects` 查找。`sessions` 只列带 canonical UUID 的主会话，并排除 Claude subagent 日志；重复 ID 会被跳过并明确报告，不会任意选择文件。部分 ID 有歧义时，可以传入明确的 JSONL 路径。
 
 Paseo agent 必须使用完整 UUID 或唯一 UUID 前缀。Threadshare 会通过 Paseo CLI 获取 daemon home，只读取匹配的本地 agent 元数据，再把原生 session ID 交给 Codex 或 Claude 导出器。
 
@@ -133,6 +146,8 @@ Skill 会优先使用已安装的 CLI，不存在时回退到 `npx`。Codex Clou
 Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接。任何获得链接的人都能读取对应会话。
 
 导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。原生日志有时会把 Agent 注入的编排上下文记录为 `role: "user"`，Threadshare 会把这类已知 wrapper 视为隐藏内容，并从全量与范围导出中排除。
+
+本机 `sessions` 命令不会发布会话正文。它先读取文件元数据，再对请求页中的每个 session 最多扫描开头 1 MiB，以生成 best-effort 摘要。预览文本使用与分享相同的凭据脱敏规则；项目与分支仅作为本地识别信息。
 
 范围分享会先关联工具调用与结果，再重建工具在排他边界时的状态。即使工具调用发生在 `--before` 之前，边界之后才写入的结果也不会进入分享。
 

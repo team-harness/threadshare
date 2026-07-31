@@ -1,6 +1,6 @@
 ---
 name: threadshare
-description: Share Codex, Codex Cloud, Claude Code, or Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI and return a verified read-only viewer URL. Use when a user asks to share, publish, export, or validate an agent conversation, requests a link to the current session, or needs agent-readable thread JSON.
+description: Find and share Codex, Codex Cloud, Claude Code, or Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI and return a verified read-only viewer URL. Use when a user asks to list, find, share, publish, export, or validate an agent conversation, requests a link to the current session, or needs agent-readable thread JSON.
 ---
 
 # Threadshare
@@ -12,6 +12,7 @@ Use the `threadshare` CLI to export visible conversation content and publish it 
 - Share a Codex or Codex Cloud session: `threadshare share codex <session-id-or-jsonl-file> --json`
 - Share a Claude Code session: `threadshare share claude <session-id-or-jsonl-file> --json`
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
+- List local native sessions: `threadshare sessions <codex|claude> --format json`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
 - Publish an existing protocol file: `threadshare publish <file|-> --json`
@@ -43,6 +44,8 @@ Prefer an exact session ID or explicit JSONL path from the task context.
 
 - Codex local and Codex Cloud sessions are searched below `$CODEX_HOME/sessions` when `CODEX_HOME` is set, otherwise `~/.codex/sessions`.
 - Claude Code sessions are searched below `~/.claude/projects`.
+- When no exact native ID is available, run `threadshare sessions <codex|claude> --format json`. It returns the 10 most recently updated canonical main sessions with complete IDs, timestamps, project, branch, redacted first-request previews, `hasMore`, and `nextOffset`. Use `--offset <nextOffset>` to load another page.
+- Do not assume the newest result is the requested session when several entries are plausible. Show the user numbered summaries with complete IDs and retain the preview-to-ID mapping. Do not print local JSONL paths. Duplicate IDs are excluded and reported through `skippedAmbiguous`.
 - Paseo agents use a full agent UUID or a unique UUID prefix. The local Paseo CLI and daemon must be available; Threadshare resolves the native Codex or Claude session without printing its handle or the Paseo state path.
 - A partial session ID is acceptable only when it identifies exactly one file.
 - If several sessions may be active, inspect file paths, modification times, and sizes without printing conversation content. Do not assume the newest file is the requested session.

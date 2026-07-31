@@ -18,7 +18,18 @@ Threadshare requires Node.js 20 or newer.
 npm install --global @team-harness/threadshare
 ```
 
-### 2. Share a Conversation
+### 2. Find a Session
+
+When you do not already have the native session ID, list the 10 most recently updated sessions:
+
+```bash
+threadshare sessions codex
+threadshare sessions claude
+```
+
+Each entry includes the complete session ID, update time, project, Git branch, and a redacted preview of the first visible user request. This command reads local files only and does not upload anything. Use `--offset <n>` and `--limit <n>` to page, or add `--format json` for the stable one-line response expected by agents and scripts.
+
+### 3. Share a Conversation
 
 Choose the provider that owns the session:
 
@@ -89,6 +100,7 @@ export THREADSHARE_URL=https://threadshare.example.com
 ## CLI Reference
 
 ```text
+threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
 threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
 threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
@@ -97,6 +109,7 @@ threadshare validate <history.json|->
 ```
 
 - `share` exports and publishes a native session in one step.
+- `sessions` lists canonical native Codex or Claude sessions without uploading. Text is for people; `--format json` is the stable automation surface. The default and maximum page sizes are 10 and 50.
 - `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
 - `export` creates canonical JSON without uploading it.
 - `publish` uploads an existing `threadshare-history@v1` document.
@@ -110,7 +123,7 @@ threadshare validate history.json
 threadshare publish history.json --json
 ```
 
-Codex sessions are searched below `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`. Claude Code sessions are searched below `~/.claude/projects`. An explicit JSONL path can be used when a partial ID is ambiguous.
+Codex sessions are searched below `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`. Claude Code sessions are searched below `~/.claude/projects`. `sessions` lists canonical UUID-backed main sessions and excludes Claude subagent logs. Ambiguous duplicate IDs are skipped and reported instead of selecting an arbitrary file. An explicit JSONL path can be used when a partial ID is ambiguous.
 
 A Paseo agent reference must be a full UUID or a unique UUID prefix. Threadshare asks the Paseo CLI for the daemon home, reads only the matching local agent metadata, and passes its native session ID to the regular Codex or Claude exporter.
 
@@ -133,6 +146,8 @@ The Skill uses the installed CLI when available and falls back to `npx`. For Cod
 Viewer URLs are read-only and unlisted, but they are not access-controlled. Anyone with a URL can read the shared conversation.
 
 The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration. Native logs sometimes encode agent-injected orchestration context as `role: "user"`; Threadshare treats known wrappers of that kind as hidden in both full and ranged exports.
+
+The local `sessions` command does not publish transcripts. It reads file metadata and scans at most the first 1 MiB of each session on the requested page to obtain a best-effort summary. Preview text uses the same credential redaction as sharing; project and branch remain local identification metadata.
 
 For a ranged share, Threadshare first associates tool results with their calls and then reconstructs each tool's state at the exclusive boundary. A result written after `--before` is not included, even when its call occurred earlier.
 

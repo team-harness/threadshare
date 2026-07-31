@@ -13,9 +13,15 @@ import {
   selectHistoryRange,
 } from "../src/history-selection.mjs";
 import { exportSession } from "../src/session-export.mjs";
+import {
+  DEFAULT_SESSION_PAGE_SIZE,
+  MAX_SESSION_PAGE_SIZE,
+  listSessions,
+} from "../src/session-listing.mjs";
 
 const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
+const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
 const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start"]);
 const historySchema = JSON.parse(
   readFileSync(new URL("../schema/threadshare-history.v1.schema.json", import.meta.url), "utf8"),
@@ -26,6 +32,7 @@ const validateCanonicalHistory = ajv.compile(historySchema);
 
 function usage() {
   return `Usage:
+  threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
   threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
   threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
   threadshare publish <history.json|-> [--url <service-url>] [--json]
@@ -34,6 +41,43 @@ function usage() {
 
 Range: omit --from and --before for the full visible snapshot; empty values are rejected.
 Default service: ${DEFAULT_THREADSHARE_URL}`;
+}
+
+function providerLabel(provider) {
+  return provider === "codex" ? "Codex" : "Claude";
+}
+
+function formatSessionPage(page, offset, limit) {
+  const label = providerLabel(page.provider);
+  const lines = [];
+  if (page.sessions.length === 0) {
+    lines.push(page.total === 0
+      ? `No ${label} sessions found.`
+      : `No ${label} sessions at offset ${offset} (${page.total} total).`);
+  } else {
+    lines.push(
+      `${label} sessions ${offset + 1}-${offset + page.sessions.length} of ${page.total} (newest first)`,
+    );
+    for (const [index, session] of page.sessions.entries()) {
+      lines.push("", `${offset + index + 1}. ${session.id}`, `   Updated: ${session.updatedAt}`);
+      if (session.project) lines.push(`   Project: ${session.project}`);
+      if (session.branch) lines.push(`   Branch: ${session.branch}`);
+      lines.push(`   First request: ${session.preview ?? "(unavailable)"}`);
+    }
+  }
+  if (page.skippedAmbiguous > 0) {
+    lines.push(
+      "",
+      `Warning: skipped ${page.skippedAmbiguous} ambiguous session ID${page.skippedAmbiguous === 1 ? "" : "s"}; use an explicit JSONL path.`,
+    );
+  }
+  if (page.hasMore) {
+    lines.push(
+      "",
+      `More: threadshare sessions ${page.provider} --offset ${page.nextOffset} --limit ${limit}`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function parseArgs(args) {
@@ -76,23 +120,23 @@ function sessionCommand(command, positionals, options, allowed) {
   return { provider, session };
 }
 
-function parsePageInteger(name, value, fallback) {
+function parsePageInteger(name, value, fallback, maximum = MAX_MESSAGE_PAGE_SIZE) {
   if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) {
     throw new Error(
       name === "limit"
-        ? `--limit must be an integer from 1 to ${MAX_MESSAGE_PAGE_SIZE}`
+        ? `--limit must be an integer from 1 to ${maximum}`
         : "--offset must be a non-negative integer",
     );
   }
   const parsed = Number(value);
   if (
     !Number.isSafeInteger(parsed) ||
-    (name === "limit" && (parsed < 1 || parsed > MAX_MESSAGE_PAGE_SIZE))
+    (name === "limit" && (parsed < 1 || parsed > maximum))
   ) {
     throw new Error(
       name === "limit"
-        ? `--limit must be an integer from 1 to ${MAX_MESSAGE_PAGE_SIZE}`
+        ? `--limit must be an integer from 1 to ${maximum}`
         : "--offset must be a non-negative integer",
     );
   }
@@ -218,6 +262,27 @@ async function main() {
     validateCommandShape(command, positionals, options, 2, new Set());
     validateHistory(JSON.parse(await readInput(positionals[1])));
     process.stdout.write("Valid threadshare-history@v1\n");
+    return;
+  }
+  if (command === "sessions") {
+    validateCommandShape(command, positionals, options, 2, new Set(["format", "limit", "offset"]));
+    const provider = positionals[1];
+    if (!NATIVE_SESSION_PROVIDERS.has(provider)) throw new Error(usage());
+    const format = options.format ?? "text";
+    if (format !== "text" && format !== "json") {
+      throw new Error("--format must be text or json");
+    }
+    const limit = parsePageInteger(
+      "limit",
+      options.limit,
+      DEFAULT_SESSION_PAGE_SIZE,
+      MAX_SESSION_PAGE_SIZE,
+    );
+    const offset = parsePageInteger("offset", options.offset, 0);
+    const result = await listSessions(provider, { limit, offset });
+    process.stdout.write(
+      format === "json" ? `${JSON.stringify(result)}\n` : formatSessionPage(result, offset, limit),
+    );
     return;
   }
   if (command === "messages") {

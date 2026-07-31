@@ -79,6 +79,7 @@ test("prints CLI help with either help spelling", () => {
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /threadshare share <codex\|claude\|paseo>/);
+    assert.match(result.stdout, /threadshare sessions <codex\|claude>/);
     assert.match(result.stdout, /threadshare messages <codex\|claude\|paseo>/);
     assert.match(result.stdout, /--from <user-message-id\|last-user>/);
     assert.match(result.stdout, /--pick-start/);
@@ -90,6 +91,8 @@ test("prints CLI help with either help spelling", () => {
 
 test("keeps the bundled Skill aligned with the agent pagination workflow", () => {
   const skill = readFileSync(path.join(root, "skills", "threadshare", "SKILL.md"), "utf8");
+  assert.match(skill, /sessions <codex\|claude> --format json/);
+  assert.match(skill, /Do not assume the newest result is the requested session/);
   assert.match(skill, /messages <provider> <session> --format json/);
   assert.match(skill, /--before <original-boundary-id> --offset <next-offset>/);
   assert.match(
