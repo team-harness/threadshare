@@ -1,19 +1,25 @@
 import { defineHandler } from "void";
 import { storage } from "void/storage";
-import { isShareId } from "../../../../src/share-schema";
+import { jsonResponse } from "../../../../src/share-api";
+import { isShareId, shareKey } from "../../../../src/share-schema";
 
 export const GET = defineHandler(async (context) => {
-  const id = context.req.param("id");
-  if (!isShareId(id)) return context.notFound();
+  try {
+    const id = context.req.param("id");
+    if (!isShareId(id)) return jsonResponse(404, { error: "Shared history was not found" });
 
-  const object = await storage.get(`shares/${id}.json`);
-  if (!object) return context.notFound();
+    const object = await storage.get(shareKey(id));
+    if (!object) return jsonResponse(404, { error: "Shared history was not found" });
+    const body = await new Response(object.body).arrayBuffer();
 
-  const headers = new Headers({
-    "cache-control": "private, no-store",
-    "content-type": "application/json; charset=utf-8",
-  });
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  return new Response(object.body, { headers });
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("cache-control", "private, no-store");
+    headers.set("content-type", "application/json; charset=utf-8");
+    headers.set("etag", object.httpEtag);
+    return new Response(body, { headers });
+  } catch (error) {
+    console.error("Threadshare API request failed", error);
+    return jsonResponse(500, { error: "Unable to process shared history" });
+  }
 });

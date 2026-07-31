@@ -1,15 +1,25 @@
 #!/usr/bin/env node
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 import { exportSession } from "../src/session-export.mjs";
 
 const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
+const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
+const historySchema = JSON.parse(
+  readFileSync(new URL("../schema/threadshare-history.v1.schema.json", import.meta.url), "utf8"),
+);
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
+const validateCanonicalHistory = ajv.compile(historySchema);
 
 function usage() {
   return `Usage:
-  threadshare export <codex|claude> <session-id|file> [--output <file|->]
+  threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--output <file|->]
   threadshare publish <history.json|-> [--url <service-url>] [--json]
-  threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
+  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--url <service-url>] [--json]
   threadshare validate <history.json|->
 
 Default service: ${DEFAULT_THREADSHARE_URL}`;
@@ -45,7 +55,11 @@ function serviceUrl(value) {
 }
 
 async function readInput(file) {
-  return file === "-" ? readFile(0, "utf8") : readFile(file, "utf8");
+  if (file !== "-") return readFile(file, "utf8");
+  process.stdin.setEncoding("utf8");
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return chunks.join("");
 }
 
 async function writeOutput(file, value) {
@@ -57,14 +71,10 @@ async function writeOutput(file, value) {
 }
 
 function validateHistory(history) {
-  if (
-    !history ||
-    history.format !== "threadshare-history@v1" ||
-    history.schemaVersion !== 1 ||
-    !history.conversation ||
-    !Array.isArray(history.entries)
-  ) {
-    throw new Error("Input is not a threadshare-history@v1 document");
+  if (!validateCanonicalHistory(history)) {
+    const issue = validateCanonicalHistory.errors?.[0];
+    const detail = issue ? `: ${issue.instancePath || "/"} ${issue.message}` : "";
+    throw new Error(`Input is not a valid threadshare-history@v1 document${detail}`);
   }
   return history;
 }
@@ -82,6 +92,14 @@ async function publish(history, url) {
   return { id: payload.id, url: `${serviceUrl(url)}/?id=${encodeURIComponent(payload.id)}` };
 }
 
+async function exportProviderSession(provider, session) {
+  if (provider === "paseo") {
+    const { exportPaseoSession } = await import("../src/paseo-session-bridge.mjs");
+    return exportPaseoSession(session);
+  }
+  return exportSession(provider, session);
+}
+
 async function main() {
   const { positionals, options } = parseArgs(process.argv.slice(2));
   const [command, provider, session] = positionals;
@@ -96,8 +114,8 @@ async function main() {
     return;
   }
   if (command === "export") {
-    if ((provider !== "codex" && provider !== "claude") || !session) throw new Error(usage());
-    const history = await exportSession(provider, session);
+    if (!SESSION_PROVIDERS.has(provider) || !session) throw new Error(usage());
+    const history = validateHistory(await exportProviderSession(provider, session));
     await writeOutput(options.output, `${JSON.stringify(history, null, 2)}\n`);
     return;
   }
@@ -108,8 +126,11 @@ async function main() {
     return;
   }
   if (command === "share") {
-    if ((provider !== "codex" && provider !== "claude") || !session) throw new Error(usage());
-    const result = await publish(await exportSession(provider, session), options.url);
+    if (!SESSION_PROVIDERS.has(provider) || !session) throw new Error(usage());
+    const result = await publish(
+      validateHistory(await exportProviderSession(provider, session)),
+      options.url,
+    );
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
     return;
   }

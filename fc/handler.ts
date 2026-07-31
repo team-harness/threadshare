@@ -1,6 +1,11 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { parseShareBody, SHARE_CORS_HEADERS } from "../src/share-api";
-import { isShareId } from "../src/share-schema";
+import {
+  declaredBodyIsTooLarge,
+  isJsonContentType,
+  parseShareBody,
+  SHARE_CORS_HEADERS,
+} from "../src/share-api";
+import { CHAT_SHARE_MAX_BYTES, isShareId, shareKey } from "../src/share-schema";
 import staticAssets from "./static-assets";
 
 type Environment = Record<string, string | undefined>;
@@ -26,6 +31,7 @@ interface HandlerOptions {
   assets?: StaticAssets;
   environment?: Environment;
   fetchImpl?: typeof fetch;
+  logger?: Pick<Console, "error">;
 }
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
@@ -65,10 +71,6 @@ function environmentValue(environment: Environment, name: string, legacyName?: s
   const value = environment[name]?.trim() ?? environment[legacyName ?? ""]?.trim();
   if (!value) throw new Error(`Missing ${name}`);
   return value;
-}
-
-function shareKey(id: string): string {
-  return `shares/${id}.json`;
 }
 
 function encodeObjectKey(key: string): string {
@@ -162,6 +164,7 @@ export function createHandler({
   assets = staticAssets,
   environment = process.env,
   fetchImpl = fetch,
+  logger = console,
 }: HandlerOptions = {}) {
   return async function handler(event: FcEvent): Promise<FcResponse> {
     const method = eventMethod(event);
@@ -173,7 +176,22 @@ export function createHandler({
         }
         if (method !== "POST") return json(405, { error: "Method not allowed" });
 
-        const parsed = parseShareBody(header(event, "content-type"), eventBody(event));
+        const contentType = header(event, "content-type");
+        if (!isJsonContentType(contentType)) {
+          return json(415, { error: "Content-Type must be application/json" });
+        }
+        const contentLength = header(event, "content-length");
+        if (declaredBodyIsTooLarge(contentLength ?? null)) {
+          return json(413, { error: "Shared history is too large" });
+        }
+        if (
+          event.isBase64Encoded &&
+          event.body &&
+          Buffer.byteLength(event.body, "base64") > CHAT_SHARE_MAX_BYTES
+        ) {
+          return json(413, { error: "Shared history is too large" });
+        }
+        const parsed = parseShareBody(contentType, eventBody(event));
         if (!parsed.ok) return json(parsed.status, { error: parsed.error });
         const id = randomUUID();
         await saveHistory(JSON.stringify(parsed.history), id, environment, fetchImpl);
@@ -184,12 +202,13 @@ export function createHandler({
       if (match) {
         if (method !== "GET") return json(405, { error: "Method not allowed" });
         if (!isShareId(match[1])) return json(404, { error: "Shared history was not found" });
-        return loadHistory(match[1], environment, fetchImpl);
+        return await loadHistory(match[1], environment, fetchImpl);
       }
 
       if (path.startsWith("/api/")) return json(404, { error: "Not found" });
       return staticResponse(path, method, assets);
-    } catch {
+    } catch (error) {
+      logger.error("Threadshare API request failed", error);
       return json(500, { error: "Unable to process shared history" });
     }
   };

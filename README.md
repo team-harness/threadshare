@@ -14,6 +14,7 @@ Install the public CLI package:
 npm install --global @team-harness/threadshare
 threadshare share codex <session-id-or-jsonl-file>
 threadshare share claude <session-id-or-jsonl-file> --json
+threadshare share paseo <agent-id-or-prefix> --json
 ```
 
 Run without installing:
@@ -24,18 +25,24 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 The CLI defaults to the hosted service at `https://cloud-thread.team-harness.com`. Override it with `--url <service-url>` or `THREADSHARE_URL`. The plain command prints a viewer URL. `--json` prints `{"id":"...","url":"..."}`, which is intended for agents and scripts.
 
-The CLI deliberately exports only user messages, assistant text, thoughts, and tool calls. It does not upload raw session metadata, system prompts, credentials, or provider configuration.
+The CLI deliberately exports only visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records; excludes raw system prompts and provider configuration; and redacts common credential fields and token patterns on a best-effort basis. Visible content can still contain sensitive data that the exporter does not recognize, so review a session before sharing it with anyone who has the link.
 
 ## CLI
 
 ```text
 threadshare export <codex|claude> <session-id|file> [--output <file|->]
+threadshare export paseo <agent-id-or-prefix> [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
 threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
+threadshare share paseo <agent-id-or-prefix> [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
-`export` finds Codex sessions under `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`; Claude Code sessions are read from `~/.claude/projects`. Pass an explicit JSONL path when a partial identifier is ambiguous. `publish` accepts a `threadshare-history@v1` file or stdin, so any agent can integrate without a provider-specific SDK.
+`export` finds Codex sessions under `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`; Claude Code sessions are read from `~/.claude/projects`. Pass an explicit JSONL path when a partial identifier is ambiguous.
+
+For a Paseo agent, pass its full ID or a unique UUID prefix. Threadshare asks the installed Paseo CLI to inspect the agent and locate the daemon home, reads only the matching local agent metadata, then exports the referenced native Codex or Claude session through the same provider exporter. Other Paseo providers are rejected. A running agent produces a best-effort snapshot of content already persisted by its native provider; an in-flight tail may be absent. This command requires a reachable local Paseo daemon, but Threadshare has no Paseo package dependency and does not parse the Paseo timeline.
+
+`publish` accepts a `threadshare-history@v1` file or stdin, so any agent can integrate without a provider-specific SDK.
 
 ## Agent Skill
 
@@ -128,9 +135,15 @@ npm run deploy:void
 
 ## Paseo Integration
 
-[team-harness/paseo](https://github.com/team-harness/paseo) is a customized
-Paseo distribution with built-in Thread Share support. Configure its daemon
-with the Threadshare public URL:
+To share a local Codex- or Claude-backed Paseo agent without changing Paseo, use the CLI bridge:
+
+```bash
+threadshare share paseo <agent-id-or-prefix> --json
+```
+
+The resulting canonical conversation uses the Paseo agent ID and title, sets `source` to `paseo`, and retains `provider` as `codex` or `claude`. Threadshare never uploads the Paseo state file or native session handle.
+
+For native producer integration, [team-harness/paseo](https://github.com/team-harness/paseo) is a customized Paseo distribution with built-in Thread Share support. Configure its daemon with the Threadshare public URL:
 
 ```json
 {
@@ -147,5 +160,6 @@ Paseo only uploads validated transcript JSON to this API. It contains no cloud c
 ```bash
 npm run build:cloudflare
 npm run test:cli
+npm run test:api
 npm run test:fc
 ```

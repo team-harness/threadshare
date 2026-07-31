@@ -9,7 +9,7 @@
   "properties": {
     "format": { "const": "threadshare-history@v1" },
     "schemaVersion": { "const": 1 },
-    "exportedAt": { "type": "string", "format": "date-time" },
+    "exportedAt": { "$ref": "#/$defs/timestamp" },
     "conversation": {
       "type": "object",
       "additionalProperties": false,
@@ -28,13 +28,18 @@
     }
   },
   "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt](?:[01]\\d|2[0-3]):[0-5]\\d:(?:[0-5]\\d|60)(?:\\.\\d+)?(?:[Zz]|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+    },
     "message": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "createdAt", "kind", "role", "markdown"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "message" },
         "role": { "enum": ["user", "assistant"] },
         "markdown": { "type": "string" }
@@ -46,7 +51,7 @@
       "required": ["id", "createdAt", "kind", "name", "status"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "tool" },
         "name": { "type": "string", "minLength": 1 },
         "status": { "enum": ["running", "completed", "failed", "canceled"] },
@@ -61,7 +66,7 @@
       "required": ["id", "createdAt", "kind", "text", "status"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "thought" },
         "text": { "type": "string" },
         "status": { "enum": ["loading", "ready"] }
@@ -73,7 +78,7 @@
       "required": ["id", "createdAt", "kind", "items"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "todo" },
         "items": {
           "type": "array",
@@ -95,7 +100,7 @@
       "required": ["id", "createdAt", "kind", "message", "level"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "activity" },
         "message": { "type": "string" },
         "level": { "enum": ["system", "info", "success", "error"] }
@@ -107,7 +112,7 @@
       "required": ["id", "createdAt", "kind", "status"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
         "kind": { "const": "compaction" },
         "status": { "enum": ["loading", "completed"] },
         "trigger": { "enum": ["auto", "manual"] },

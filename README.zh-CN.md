@@ -14,6 +14,7 @@ Threadshare 是一个可自行部署的 Agent 会话分享服务，由只读 Web
 npm install --global @team-harness/threadshare
 threadshare share codex <session-id-or-jsonl-file>
 threadshare share claude <session-id-or-jsonl-file> --json
+threadshare share paseo <agent-id-or-prefix> --json
 ```
 
 也可以不安装，直接运行：
@@ -24,18 +25,22 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 CLI 默认使用 `https://cloud-thread.team-harness.com`。可以通过 `--url <service-url>` 或 `THREADSHARE_URL` 覆盖。普通输出是 Viewer 链接；`--json` 输出 `{"id":"...","url":"..."}`，适合 Agent 和脚本处理。
 
-CLI 只导出用户消息、Assistant 文本、思考和工具调用，不上传原始 system prompt、凭证或 provider 配置。可见消息和工具输入输出仍可能包含敏感信息，分享前应确认会话适合公开给持有链接的人。
+CLI 只导出可见的用户消息、Assistant 文本、思考和工具活动。它会跳过隐藏记录、元记录和 sidechain 记录，不导出原始 system prompt 与 provider 配置，并尽力脱敏常见凭据字段和 token 模式。可见内容仍可能包含导出器无法识别的敏感信息，分享前应确认会话适合公开给持有链接的人。
 
 ## CLI
 
 ```text
 threadshare export <codex|claude> <session-id|file> [--output <file|->]
+threadshare export paseo <agent-id-or-prefix> [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
 threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
+threadshare share paseo <agent-id-or-prefix> [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
 Codex 会话优先从 `$CODEX_HOME/sessions` 查找，未配置时使用 `~/.codex/sessions`；Claude Code 会话从 `~/.claude/projects` 查找。可以传完整 session ID、能够唯一匹配的部分 ID，或者 JSONL 文件路径。部分 ID 命中多个文件时必须改用更完整的 ID 或路径。
+
+Paseo agent 可以传完整 ID 或唯一 UUID 前缀。Threadshare 会通过已安装的 Paseo CLI 查询 agent 信息和 daemon home，只读取匹配的本地 agent 元数据，再把其中引用的原生 Codex 或 Claude session 交给同一套 provider exporter。其他 Paseo provider 会被拒绝。运行中的 agent 只能导出原生 provider 已持久化内容的 best-effort 快照，可能不含仍在写入的尾部。此命令要求本机 Paseo daemon 可达，但 Threadshare 不依赖 Paseo 软件包，也不解析 Paseo timeline。
 
 只导出，不上传：
 
@@ -141,9 +146,15 @@ npm run deploy:void
 
 ## Paseo 接入
 
-[team-harness/paseo](https://github.com/team-harness/paseo) 是我们定制的
-Paseo 版本，已内置 Thread Share 支持。默认共享服务为
-`https://cloud-thread.team-harness.com`；自行部署后，可以在 daemon 配置中覆盖：
+无需修改 Paseo，即可通过 CLI bridge 分享本机由 Codex 或 Claude 驱动的 Paseo agent：
+
+```bash
+threadshare share paseo <agent-id-or-prefix> --json
+```
+
+生成的 canonical conversation 使用 Paseo agent ID 和标题，`source` 为 `paseo`，`provider` 保留为 `codex` 或 `claude`。Threadshare 不会上传 Paseo 状态文件或原生 session handle。
+
+如需原生 producer 集成，[team-harness/paseo](https://github.com/team-harness/paseo) 是我们定制的 Paseo 版本，已内置 Thread Share 支持。默认共享服务为 `https://cloud-thread.team-harness.com`；自行部署后，可以在 daemon 配置中覆盖：
 
 ```json
 {
@@ -160,5 +171,6 @@ Paseo 只向 API 上传经过转换的会话 JSON，不包含云凭证，也不�
 ```bash
 npm run build:cloudflare
 npm run test:cli
+npm run test:api
 npm run test:fc
 ```

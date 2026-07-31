@@ -28,6 +28,7 @@
     "README.zh-CN.md",
     "schema/",
     "skills/",
+    "src/paseo-session-bridge.mjs",
     "src/session-export.mjs"
   ],
   "publishConfig": {
@@ -46,14 +47,19 @@
     "deploy:fc": "npm run build:fc && (cd fc && licell deploy)",
     "dev:cloudflare": "npm run build:cloudflare && wrangler dev --local --config wrangler.jsonc",
     "test:fc": "npm run build:fc && node --test fc/handler.test.cjs",
-    "test:cli": "node --test test/cli.test.mjs",
-    "test": "npm run test:cli && npm run test:fc"
+    "test:cli": "node --test test/cli.test.mjs test/paseo-session-bridge.test.mjs",
+    "test:api": "node --import tsx --test test/share-api.test.mjs test/worker.test.mjs",
+    "test": "npm run test:cli && npm run test:api && npm run test:fc"
   },
   "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "jsonc-parser": "3.3.1",
     "markdown-it": "14.3.0",
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "tsx": "4.23.1",
     "vite": "8.1.5",
     "void": "0.10.10",
     "wrangler": "4.114.0"
