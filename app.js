@@ -2,6 +2,12 @@ import markdownit from "markdown-it";
 
 const conversation = document.querySelector("#conversation");
 const MESSAGE_ANCHOR_PREFIX = "message-";
+const QUICK_START_URL = "https://github.com/team-harness/threadshare#quick-start";
+const SHARE_COMMANDS = [
+  "threadshare share codex <session-id-or-jsonl-file>",
+  "threadshare share claude <session-id-or-jsonl-file>",
+  "threadshare share paseo <agent-id-or-prefix>",
+];
 
 function messageAnchorId(entry) {
   return `${MESSAGE_ANCHOR_PREFIX}${entry.id}`;
@@ -67,6 +73,23 @@ async function copyAssistantMarkdown(markdown, button) {
   }
 }
 
+async function copyCommand(command, button) {
+  try {
+    await navigator.clipboard.writeText(command);
+    button.classList.add("copied");
+    button.setAttribute("aria-label", "Command copied");
+    button.title = "Command copied";
+    window.setTimeout(() => {
+      button.classList.remove("copied");
+      button.setAttribute("aria-label", "Copy command");
+      button.title = "Copy command";
+    }, 1600);
+  } catch {
+    button.setAttribute("aria-label", "Unable to copy command");
+    button.title = "Unable to copy command";
+  }
+}
+
 async function copyHistorySourceLink(sourceUrl, link) {
   try {
     await navigator.clipboard.writeText(sourceUrl);
@@ -107,6 +130,68 @@ function element(name, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function quickStartLink(text, className) {
+  const link = element("a", className, text);
+  link.href = QUICK_START_URL;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  return link;
+}
+
+function renderCommand(command) {
+  const row = element("div", "command-row");
+  const code = element("code", "", command);
+  const button = element("button", "copy-button command-copy-button");
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy command");
+  button.title = "Copy command";
+  button.append(copyIcon());
+  button.addEventListener("click", () => {
+    void copyCommand(command, button);
+  });
+  row.append(code, button);
+  return row;
+}
+
+function renderQuickStart() {
+  document.title = "Threadshare";
+  conversation.removeAttribute("aria-busy");
+
+  const quickStart = element("section", "quick-start");
+  quickStart.append(
+    element("h1", "", "Share an agent conversation"),
+    element("p", "quick-start-intro", "Create a read-only link from a local agent session."),
+  );
+
+  const installStep = element("section", "quick-start-step");
+  installStep.append(
+    element("h2", "", "1. Install the CLI"),
+    renderCommand("npm install --global @team-harness/threadshare"),
+  );
+
+  const shareStep = element("section", "quick-start-step");
+  shareStep.append(element("h2", "", "2. Share a session"));
+  for (const command of SHARE_COMMANDS) shareStep.append(renderCommand(command));
+
+  quickStart.append(
+    installStep,
+    shareStep,
+    quickStartLink("View full documentation on GitHub", "quick-start-link"),
+  );
+  conversation.replaceChildren(quickStart);
+}
+
+function renderSharePrompt() {
+  const prompt = element("aside", "share-prompt");
+  const copy = element("div", "share-prompt-copy");
+  copy.append(
+    element("strong", "", "Want to share your own agent conversation?"),
+    element("p", "", "Turn a local Codex, Claude Code, or Paseo session into a read-only link."),
+  );
+  prompt.append(copy, quickStartLink("How to share", "share-prompt-link"));
+  return prompt;
 }
 
 function formatTime(value) {
@@ -397,13 +482,17 @@ function renderHistory(history, id) {
     }
   }
 
+  conversation.append(renderSharePrompt());
   focusCurrentMessageAnchor();
 }
 
 async function loadHistory() {
   const searchParams = new URLSearchParams(window.location.search);
   const id = searchParams.get("id");
-  if (!id) return;
+  if (!id) {
+    renderQuickStart();
+    return;
+  }
   if (!isHistoryId(id)) {
     conversation.replaceChildren(element("div", "error-state", "This share link is invalid."));
     return;
