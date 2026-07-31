@@ -2,62 +2,95 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Threadshare 是一个可自行部署的 Agent 会话分享服务，由只读 Web Viewer、HTTP API 和 CLI 组成。它不依赖 Paseo、Codex、Claude Code 或特定云厂商。
+Threadshare 可以把 Codex、Claude Code 和 Paseo agent 会话转换成只读 Web 链接。
 
-本仓库拥有通用的 `threadshare-history@v1` 协议。不同 Agent 的原始会话会先转换为这一格式，再由 Threadshare 校验、存储并生成稳定的只读链接。
+安装 CLI 后即可使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) 提供的默认托管服务，无需先部署服务端。
+
+需要自有域名、存储或基础设施控制时，可以独立部署同一套 Viewer、API 和 `threadshare-history@v1` 通用协议。Threadshare 不依赖特定 Agent provider 或云平台。
 
 ## 快速开始
 
-通过 npm 全局安装：
+Threadshare 需要 Node.js 20 或更高版本。
+
+### 1. 安装 CLI
 
 ```bash
 npm install --global @team-harness/threadshare
-threadshare share codex <session-id-or-jsonl-file>
-threadshare share claude <session-id-or-jsonl-file> --json
-threadshare share paseo <agent-id-or-prefix> --json
 ```
 
-也可以不安装，直接运行：
+### 2. 分享会话
+
+根据会话所属的 provider 选择命令：
+
+```bash
+# Codex 或 Codex Cloud
+threadshare share codex <session-id-or-jsonl-file>
+
+# Claude Code
+threadshare share claude <session-id-or-jsonl-file>
+
+# 使用 Codex 或 Claude 的 Paseo agent
+threadshare share paseo <agent-id-or-prefix>
+```
+
+`share` 会导出可见会话内容、执行协议校验、上传到默认托管服务，并输出 Viewer 链接：
+
+```text
+https://cloud-thread.team-harness.com/?id=<share-id>
+```
+
+Agent 或脚本可以增加 `--json`，获得单行 `{"id":"...","url":"..."}` 响应。
+
+Viewer 链接不会公开列出，但它不带访问鉴权。任何获得链接的人都能读取对应会话，因此分享前应先检查内容。
+
+分享 Paseo agent 时，本机需要安装 `paseo` CLI 且 daemon 可访问。Threadshare 会定位它引用的原生 Codex 或 Claude session，不修改 Paseo，也不上传 Paseo 状态文件。
+
+### 不安装直接运行
 
 ```bash
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-CLI 默认使用 `https://cloud-thread.team-harness.com`。可以通过 `--url <service-url>` 或 `THREADSHARE_URL` 覆盖。普通输出是 Viewer 链接；`--json` 输出 `{"id":"...","url":"..."}`，适合 Agent 和脚本处理。
+### 使用其他 Threadshare 服务端
 
-CLI 只导出可见的用户消息、Assistant 文本、思考和工具活动。它会跳过隐藏记录、元记录和 sidechain 记录，不导出原始 system prompt 与 provider 配置，并尽力脱敏常见凭据字段和 token 模式。可见内容仍可能包含导出器无法识别的敏感信息，分享前应确认会话适合公开给持有链接的人。
+CLI 默认连接托管服务。需要使用独立部署时，可以为单次命令或当前 shell 覆盖地址：
 
-## CLI
+```bash
+threadshare share codex <session-id> --url https://threadshare.example.com
+export THREADSHARE_URL=https://threadshare.example.com
+```
+
+## CLI 命令
 
 ```text
-threadshare export <codex|claude> <session-id|file> [--output <file|->]
-threadshare export paseo <agent-id-or-prefix> [--output <file|->]
+threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
-threadshare share paseo <agent-id-or-prefix> [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
-Codex 会话优先从 `$CODEX_HOME/sessions` 查找，未配置时使用 `~/.codex/sessions`；Claude Code 会话从 `~/.claude/projects` 查找。可以传完整 session ID、能够唯一匹配的部分 ID，或者 JSONL 文件路径。部分 ID 命中多个文件时必须改用更完整的 ID 或路径。
+- `share`：一步完成原生会话导出与发布。
+- `export`：只生成规范 JSON，不上传。
+- `publish`：上传已有的 `threadshare-history@v1` 文档。
+- `validate`：在本地校验协议文档。
 
-Paseo agent 可以传完整 ID 或唯一 UUID 前缀。Threadshare 会通过已安装的 Paseo CLI 查询 agent 信息和 daemon home，只读取匹配的本地 agent 元数据，再把其中引用的原生 Codex 或 Claude session 交给同一套 provider exporter。其他 Paseo provider 会被拒绝。运行中的 agent 只能导出原生 provider 已持久化内容的 best-effort 快照，可能不含仍在写入的尾部。此命令要求本机 Paseo daemon 可达，但 Threadshare 不依赖 Paseo 软件包，也不解析 Paseo timeline。
-
-只导出，不上传：
+例如，先检查导出内容再发布：
 
 ```bash
 threadshare export codex <session-id> --output history.json
 threadshare validate history.json
-```
-
-上传已有的协议 JSON：
-
-```bash
 threadshare publish history.json --json
 ```
 
-## Agent Skill
+Codex 会话优先从 `$CODEX_HOME/sessions` 查找，未配置时使用 `~/.codex/sessions`。Claude Code 会话从 `~/.claude/projects` 查找。部分 ID 有歧义时，可以传入明确的 JSONL 路径。
 
-仓库内置 `threadshare` Skill，用来规范 Codex 和 Codex Cloud 如何定位会话、执行分享、验证返回 JSON，以及避免在常规检查中输出聊天正文和本地路径。
+Paseo agent 必须使用完整 UUID 或唯一 UUID 前缀。Threadshare 会通过 Paseo CLI 获取 daemon home，只读取匹配的本地 agent 元数据，再把原生 session ID 交给 Codex 或 Claude 导出器。
+
+目前只支持使用 Codex 或 Claude 的 Paseo agent。运行中的 agent 只能导出原生 provider 已持久化内容的 best-effort 快照，可能不包含仍在写入的尾部。
+
+## 安装 Codex Skill
+
+仓库内置 `threadshare` Skill，用来规范 Codex 和 Codex Cloud 如何定位、分享和验证会话，并避免在常规检查中输出聊天正文或本地路径。
 
 为 Codex 全局安装：
 
@@ -65,11 +98,73 @@ threadshare publish history.json --json
 npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-Codex Cloud 可以在环境初始化阶段执行同一命令，但去掉 `--global`，将 Skill 安装到项目范围。Skill 源文件位于 [`skills/threadshare`](./skills/threadshare)。
+Skill 会优先使用已安装的 CLI，不存在时回退到 `npx`。Codex Cloud 可在环境初始化阶段去掉 `--global`，安装到项目范围。源文件位于 [`skills/threadshare`](./skills/threadshare)。
 
-## JSON 协议
+## 隐私与分享边界
 
-规范文件位于 [`schema/threadshare-history.v1.schema.json`](./schema/threadshare-history.v1.schema.json)。基础结构如下：
+Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接。任何获得链接的人都能读取对应会话。
+
+导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。
+
+常见凭据字段和 token 模式会尽力脱敏。可见消息、工具输入或输出仍可能包含未被识别的敏感数据，因此分享前应检查会话内容。
+
+## 独立部署 Threadshare
+
+使用默认托管服务时可以跳过本节。需要控制域名、对象存储、地域、限流策略或发布周期时，再选择独立部署。
+
+首先准备仓库：
+
+```bash
+git clone https://github.com/team-harness/threadshare.git
+cd threadshare
+npm install
+```
+
+部署完成后，通过 `--url` 或 `THREADSHARE_URL` 将 CLI 指向新域名。Viewer 与 API 必须使用同一个 origin。
+
+### Cloudflare Workers + R2
+
+```bash
+npx wrangler login
+npx wrangler r2 bucket create threadshare-shares
+npm run deploy:cloudflare
+```
+
+`wrangler.jsonc` 使用 `THREADSHARE_BUCKET` 绑定 R2，并通过 Workers Assets 托管 Viewer。首次部署后可在 Cloudflare 绑定自定义域名。不要提交 account ID、API Token 或存储凭据。
+
+### 阿里云函数计算 + OSS
+
+```bash
+npm run build:fc
+cd fc
+licell login
+licell workspace init --type api --app threadshare-fc --runtime nodejs22 \
+  --entry dist/index.cjs --target prod --disable-vpc --region cn-shanghai
+licell oss create threadshare-shares-your-name --acl private --public-access-block on
+licell env set THREADSHARE_OSS_BUCKET threadshare-shares-your-name
+licell env set THREADSHARE_OSS_REGION cn-shanghai
+licell env set THREADSHARE_OSS_ACCESS_KEY_ID <ram-access-key-id>
+licell env set THREADSHARE_OSS_ACCESS_KEY_SECRET <ram-access-key-secret>
+cd ..
+npm run deploy:fc
+```
+
+FC 负责代理私有 OSS 的读写。建议使用独立 RAM 身份，并将权限限制为 `shares/` 前缀的 `GetObject` 和 `PutObject`。
+
+`fc/.licell/`、`.void/` 和 `.wrangler/` 下的本地部署状态已被 Git 忽略，不应提交。
+
+### Void Viewer
+
+Void 可以部署 Vite Viewer。对外开放写入 API 前，需要先绑定对象存储：
+
+```bash
+npx void init
+npm run deploy:void
+```
+
+## 协议与 API
+
+新的 producer 需要把原生会话转换为 `threadshare-history@v1`。规范文件位于 [`schema/threadshare-history.v1.schema.json`](./schema/threadshare-history.v1.schema.json)。
 
 ```json
 {
@@ -86,13 +181,11 @@ Codex Cloud 可以在环境初始化阶段执行同一命令，但去掉 `--glob
 }
 ```
 
-Entry 支持消息、工具调用、思考、待办、活动记录和上下文压缩标记。Viewer 将所有文本视为不可信内容：原始 HTML 会被转义，不安全链接只显示为文本。
+Entry 可以表示消息、工具调用、思考、待办、活动或上下文压缩标记。Viewer 将会话文本视为不可信内容：原始 HTML 会被转义，不安全链接只保留标签文本。
 
-迁移期间，API 仍接收旧 Paseo v1 JSON；所有新生产者都应输出 `threadshare-history@v1`。
+旧 Paseo v1 格式只用于迁移兼容。新的 producer 必须使用 `threadshare-history@v1`，Threadshare 运行时不依赖 Paseo。
 
-## HTTP API
-
-Viewer 与 API 使用同一域名：
+### HTTP API
 
 ```text
 POST /api/v1/shares       -> { "id": "<uuid>" }
@@ -100,73 +193,31 @@ GET  /api/v1/shares/:id   -> threadshare history JSON
 Viewer                    -> /?id=<uuid>#message-<entry-id>
 ```
 
-上传接口只接收 `application/json`，严格校验协议，最大 5 MiB。服务端始终生成 `shares/<uuid>.json`，客户端不能指定对象路径、文件名或 MIME 类型。公开部署时应在网关或 CDN 配置限流。
+`POST` 只接收 `application/json`，严格校验协议，最大负载为 5 MiB。服务端始终生成 `shares/<uuid>.json`，客户端不能指定对象路径、文件名或 MIME 类型。
 
-## 部署
+历史读取响应使用 `Cache-Control: no-store`，避免共享会话被中间缓存保留。
 
-### Cloudflare Workers + R2
+公开部署时应在网关或 CDN 配置限流。
 
-```bash
-npm install
-npx wrangler login
-npx wrangler r2 bucket create threadshare-shares
-npm run deploy:cloudflare
-```
+### Paseo 作为 Producer
 
-`wrangler.jsonc` 通过 `THREADSHARE_BUCKET` 绑定 R2，并使用 Workers Assets 托管 Viewer。第一次部署完成后可在 Cloudflare 绑定自定义域名。不要提交 account ID、API Token 或存储凭证。
+快速开始中的 CLI bridge 无需修改 Paseo。如需原生 producer 集成，[team-harness/paseo](https://github.com/team-harness/paseo) 是内置 Thread Share 支持的定制版本。
 
-### 阿里云 FC + OSS
-
-```bash
-npm install
-npm run build:fc
-cd fc
-licell login
-licell workspace init --type api --app threadshare-fc --runtime nodejs22 \
-  --entry dist/index.cjs --target prod --disable-vpc --region cn-shanghai
-licell oss create threadshare-shares-your-name --acl private --public-access-block on
-licell env set THREADSHARE_OSS_BUCKET threadshare-shares-your-name
-licell env set THREADSHARE_OSS_REGION cn-shanghai
-licell env set THREADSHARE_OSS_ACCESS_KEY_ID <ram-access-key-id>
-licell env set THREADSHARE_OSS_ACCESS_KEY_SECRET <ram-access-key-secret>
-cd ..
-npm run deploy:fc
-```
-
-FC 负责代理私有 OSS 的读写。建议使用仅允许访问 `shares/` 前缀 `GetObject` 和 `PutObject` 的独立 RAM 身份。`.licell/` 中的本地部署状态不会提交到仓库。
-
-### Void
-
-为应用绑定 Object Storage 后执行：
-
-```bash
-npx void init
-npm run deploy:void
-```
-
-## Paseo 接入
-
-无需修改 Paseo，即可通过 CLI bridge 分享本机由 Codex 或 Claude 驱动的 Paseo agent：
-
-```bash
-threadshare share paseo <agent-id-or-prefix> --json
-```
-
-生成的 canonical conversation 使用 Paseo agent ID 和标题，`source` 为 `paseo`，`provider` 保留为 `codex` 或 `claude`。Threadshare 不会上传 Paseo 状态文件或原生 session handle。
-
-如需原生 producer 集成，[team-harness/paseo](https://github.com/team-harness/paseo) 是我们定制的 Paseo 版本，已内置 Thread Share 支持。默认共享服务为 `https://cloud-thread.team-harness.com`；自行部署后，可以在 daemon 配置中覆盖：
+在 daemon 中配置 Threadshare 服务地址：
 
 ```json
 {
   "daemon": {
-    "chatShare": { "baseUrl": "https://your-threadshare.example.com" }
+    "chatShare": { "baseUrl": "https://cloud-thread.team-harness.com" }
   }
 }
 ```
 
-Paseo 只向 API 上传经过转换的会话 JSON，不包含云凭证，也不依赖本仓库的具体部署方式。
+Paseo 只上传经过校验的会话 JSON，不包含云凭据，也不依赖本仓库的具体部署方式。
 
-## 验证
+## 开发验证
+
+根据改动范围运行对应检查：
 
 ```bash
 npm run build:cloudflare

@@ -2,63 +2,169 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Threadshare is a self-hostable API, read-only web viewer, and CLI for sharing AI coding-agent conversation threads. It is independent of Paseo, Codex, Claude Code, a particular cloud, and a personal domain.
+Threadshare turns Codex, Claude Code, and Paseo agent conversations into read-only web links.
 
-The repository owns the portable `threadshare-history@v1` protocol. Producers convert their native conversation data into this format; Threadshare validates, stores, and serves it at a stable URL.
+Install the CLI and share through the hosted service at [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) without deploying anything first.
+
+The same viewer, API, and portable `threadshare-history@v1` format can be self-hosted when you need your own domain, storage, or infrastructure controls. Threadshare remains independent of any agent provider or cloud platform.
 
 ## Quick Start
 
-Install the public CLI package:
+Threadshare requires Node.js 20 or newer.
+
+### 1. Install the CLI
 
 ```bash
 npm install --global @team-harness/threadshare
-threadshare share codex <session-id-or-jsonl-file>
-threadshare share claude <session-id-or-jsonl-file> --json
-threadshare share paseo <agent-id-or-prefix> --json
 ```
 
-Run without installing:
+### 2. Share a Conversation
+
+Choose the provider that owns the session:
+
+```bash
+# Codex or Codex Cloud
+threadshare share codex <session-id-or-jsonl-file>
+
+# Claude Code
+threadshare share claude <session-id-or-jsonl-file>
+
+# A Codex- or Claude-backed Paseo agent
+threadshare share paseo <agent-id-or-prefix>
+```
+
+`share` exports visible conversation content, validates it, uploads it to the default hosted service, and prints a Viewer URL:
+
+```text
+https://cloud-thread.team-harness.com/?id=<share-id>
+```
+
+Add `--json` for the one-line `{"id":"...","url":"..."}` response expected by agents and scripts.
+
+Viewer URLs are unlisted, not access-controlled. Anyone with the URL can read the shared conversation, so review the content before sharing it.
+
+Paseo sharing requires the local `paseo` CLI and a reachable daemon. Threadshare resolves the agent's native Codex or Claude session without modifying Paseo or uploading its state file.
+
+### Run Without Installing
 
 ```bash
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-The CLI defaults to the hosted service at `https://cloud-thread.team-harness.com`. Override it with `--url <service-url>` or `THREADSHARE_URL`. The plain command prints a viewer URL. `--json` prints `{"id":"...","url":"..."}`, which is intended for agents and scripts.
+### Use Another Threadshare Server
 
-The CLI deliberately exports only visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records; excludes raw system prompts and provider configuration; and redacts common credential fields and token patterns on a best-effort basis. Visible content can still contain sensitive data that the exporter does not recognize, so review a session before sharing it with anyone who has the link.
+The hosted service is the default. Override it per command or for the current shell when you want to use a self-hosted deployment:
 
-## CLI
+```bash
+threadshare share codex <session-id> --url https://threadshare.example.com
+export THREADSHARE_URL=https://threadshare.example.com
+```
+
+## CLI Reference
 
 ```text
-threadshare export <codex|claude> <session-id|file> [--output <file|->]
-threadshare export paseo <agent-id-or-prefix> [--output <file|->]
+threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--output <file|->]
 threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude> <session-id|file> [--url <service-url>] [--json]
-threadshare share paseo <agent-id-or-prefix> [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--url <service-url>] [--json]
 threadshare validate <history.json|->
 ```
 
-`export` finds Codex sessions under `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`; Claude Code sessions are read from `~/.claude/projects`. Pass an explicit JSONL path when a partial identifier is ambiguous.
+- `share` exports and publishes a native session in one step.
+- `export` creates canonical JSON without uploading it.
+- `publish` uploads an existing `threadshare-history@v1` document.
+- `validate` checks a protocol document locally.
 
-For a Paseo agent, pass its full ID or a unique UUID prefix. Threadshare asks the installed Paseo CLI to inspect the agent and locate the daemon home, reads only the matching local agent metadata, then exports the referenced native Codex or Claude session through the same provider exporter. Other Paseo providers are rejected. A running agent produces a best-effort snapshot of content already persisted by its native provider; an in-flight tail may be absent. This command requires a reachable local Paseo daemon, but Threadshare has no Paseo package dependency and does not parse the Paseo timeline.
+For example, review an export before publishing it:
 
-`publish` accepts a `threadshare-history@v1` file or stdin, so any agent can integrate without a provider-specific SDK.
+```bash
+threadshare export codex <session-id> --output history.json
+threadshare validate history.json
+threadshare publish history.json --json
+```
 
-## Agent Skill
+Codex sessions are searched below `$CODEX_HOME/sessions` when configured, otherwise `~/.codex/sessions`. Claude Code sessions are searched below `~/.claude/projects`. An explicit JSONL path can be used when a partial ID is ambiguous.
 
-The bundled `threadshare` Skill teaches Codex and Codex Cloud when and how to share a session, verify the resulting JSON, and avoid disclosing local paths or transcript contents during routine checks.
+A Paseo agent reference must be a full UUID or a unique UUID prefix. Threadshare asks the Paseo CLI for the daemon home, reads only the matching local agent metadata, and passes its native session ID to the regular Codex or Claude exporter.
 
-Install it for Codex from GitHub:
+Only Codex- and Claude-backed Paseo agents are supported. A running agent produces a best-effort snapshot of content already persisted by its native provider, so an in-flight tail may be absent.
+
+## Install the Codex Skill
+
+The bundled `threadshare` Skill teaches Codex and Codex Cloud how to locate, share, and verify sessions without printing transcript contents or local paths during routine checks.
+
+Install it globally for Codex:
 
 ```bash
 npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-For Codex Cloud, install it at project scope during environment setup by omitting `--global`. The Skill lives at [`skills/threadshare`](./skills/threadshare).
+The Skill uses the installed CLI when available and falls back to `npx`. For Codex Cloud, omit `--global` during environment setup to install it at project scope. The source lives in [`skills/threadshare`](./skills/threadshare).
 
-## Protocol
+## Privacy and Sharing Model
 
-The canonical JSON Schema is [schema/threadshare-history.v1.schema.json](./schema/threadshare-history.v1.schema.json). A document starts as follows:
+Viewer URLs are read-only and unlisted, but they are not access-controlled. Anyone with a URL can read the shared conversation.
+
+The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration.
+
+Common credential fields and token patterns are redacted on a best-effort basis. Visible messages and tool input or output can still contain sensitive data that is not recognized, so review a conversation before sharing it.
+
+## Self-Host Threadshare
+
+You can use the default hosted service without this section. Self-host when you need to control the domain, object storage, region, rate limits, or deployment lifecycle.
+
+Start from a repository checkout:
+
+```bash
+git clone https://github.com/team-harness/threadshare.git
+cd threadshare
+npm install
+```
+
+After deployment, point the CLI at the new origin with `--url` or `THREADSHARE_URL`. The Viewer and API must use the same origin.
+
+### Cloudflare Workers + R2
+
+```bash
+npx wrangler login
+npx wrangler r2 bucket create threadshare-shares
+npm run deploy:cloudflare
+```
+
+`wrangler.jsonc` serves the Vite assets and binds `THREADSHARE_BUCKET` to R2. Bind a custom domain in Cloudflare after the first deploy. Do not commit account IDs, API tokens, or bucket credentials.
+
+### Alibaba Cloud Function Compute + OSS
+
+```bash
+npm run build:fc
+cd fc
+licell login
+licell workspace init --type api --app threadshare-fc --runtime nodejs22 \
+  --entry dist/index.cjs --target prod --disable-vpc --region cn-shanghai
+licell oss create threadshare-shares-your-name --acl private --public-access-block on
+licell env set THREADSHARE_OSS_BUCKET threadshare-shares-your-name
+licell env set THREADSHARE_OSS_REGION cn-shanghai
+licell env set THREADSHARE_OSS_ACCESS_KEY_ID <ram-access-key-id>
+licell env set THREADSHARE_OSS_ACCESS_KEY_SECRET <ram-access-key-secret>
+cd ..
+npm run deploy:fc
+```
+
+FC proxies reads and writes to a private OSS bucket. Use a dedicated RAM principal limited to `GetObject` and `PutObject` on the `shares/` prefix.
+
+Local state under `fc/.licell/`, `.void/`, and `.wrangler/` is ignored by Git and must not be committed.
+
+### Void Viewer
+
+Void can deploy the Vite Viewer. Bind object storage before exposing a write API:
+
+```bash
+npx void init
+npm run deploy:void
+```
+
+## Protocol and API
+
+New producers convert native conversations to `threadshare-history@v1`. The canonical schema is [`schema/threadshare-history.v1.schema.json`](./schema/threadshare-history.v1.schema.json).
 
 ```json
 {
@@ -75,13 +181,11 @@ The canonical JSON Schema is [schema/threadshare-history.v1.schema.json](./schem
 }
 ```
 
-Entries are messages, tool calls, thoughts, todos, activity records, or compaction markers. The viewer treats all transcript text as untrusted: raw HTML is escaped and unsafe links remain labels.
+Entries can represent messages, tool calls, thoughts, todos, activity, or compaction markers. The Viewer treats transcript text as untrusted: raw HTML is escaped and unsafe links remain labels.
 
-For migration only, the API also accepts the former Paseo v1 shape. New producers must emit `threadshare-history@v1`; Threadshare does not require Paseo at runtime.
+The legacy Paseo v1 shape is accepted only for migration. New producers must use `threadshare-history@v1`, and Threadshare does not require Paseo at runtime.
 
-## HTTP API
-
-The viewer and API use one origin:
+### HTTP API
 
 ```text
 POST /api/v1/shares       -> { "id": "<uuid>" }
@@ -89,61 +193,17 @@ GET  /api/v1/shares/:id   -> threadshare history JSON
 Viewer                    -> /?id=<uuid>#message-<entry-id>
 ```
 
-`POST` accepts only `application/json`, strictly validates the document, and limits payloads to 5 MiB. Storage keys are always `shares/<uuid>.json`; clients cannot choose object keys, file names, or MIME types. Configure rate limits at the hosting edge for publicly exposed instances.
+`POST` accepts only `application/json`, strictly validates the document, and limits payloads to 5 MiB. Storage keys are always `shares/<uuid>.json`; clients cannot choose object keys, file names, or MIME types.
 
-## Deploy
+History reads use `Cache-Control: no-store` so a shared transcript is not retained by intermediary caches.
 
-### Cloudflare Workers + R2
+Configure rate limits at the hosting edge for publicly exposed instances.
 
-```bash
-npm install
-npx wrangler login
-npx wrangler r2 bucket create threadshare-shares
-npm run deploy:cloudflare
-```
+### Paseo as a Producer
 
-`wrangler.jsonc` serves Vite assets and binds `THREADSHARE_BUCKET` to R2. Bind a custom domain in Cloudflare after the first deploy. Do not commit account IDs, API tokens, or bucket credentials.
+The CLI bridge in Quick Start works without changing Paseo. For native producer integration, [team-harness/paseo](https://github.com/team-harness/paseo) is a customized distribution with built-in Thread Share support.
 
-### Alibaba Cloud Function Compute + OSS
-
-```bash
-npm install
-npm run build:fc
-cd fc
-licell login
-licell workspace init --type api --app threadshare-fc --runtime nodejs22 \
-  --entry dist/index.cjs --target prod --disable-vpc --region cn-shanghai
-licell oss create threadshare-shares-your-name --acl private --public-access-block on
-licell env set THREADSHARE_OSS_BUCKET threadshare-shares-your-name
-licell env set THREADSHARE_OSS_REGION cn-shanghai
-licell env set THREADSHARE_OSS_ACCESS_KEY_ID <ram-access-key-id>
-licell env set THREADSHARE_OSS_ACCESS_KEY_SECRET <ram-access-key-secret>
-cd ..
-npm run deploy:fc
-```
-
-FC proxies reads and writes to a private bucket. Use a dedicated RAM principal limited to `GetObject` and `PutObject` on the `shares/` prefix. Deployment state under `.licell/`, `.void/`, and `.wrangler/` is ignored by Git.
-
-### Void
-
-Void deployment is supported for the Vite viewer. Bind its object storage before exposing a write API, then deploy with:
-
-```bash
-npx void init
-npm run deploy:void
-```
-
-## Paseo Integration
-
-To share a local Codex- or Claude-backed Paseo agent without changing Paseo, use the CLI bridge:
-
-```bash
-threadshare share paseo <agent-id-or-prefix> --json
-```
-
-The resulting canonical conversation uses the Paseo agent ID and title, sets `source` to `paseo`, and retains `provider` as `codex` or `claude`. Threadshare never uploads the Paseo state file or native session handle.
-
-For native producer integration, [team-harness/paseo](https://github.com/team-harness/paseo) is a customized Paseo distribution with built-in Thread Share support. Configure its daemon with the Threadshare public URL:
+Configure its daemon with a Threadshare origin:
 
 ```json
 {
@@ -153,9 +213,11 @@ For native producer integration, [team-harness/paseo](https://github.com/team-ha
 }
 ```
 
-Paseo only uploads validated transcript JSON to this API. It contains no cloud credentials and does not depend on this repository's deployment implementation.
+Paseo uploads only validated transcript JSON. It contains no cloud credentials and does not depend on this repository's deployment implementation.
 
-## Verification
+## Development
+
+Run the checks affected by a change:
 
 ```bash
 npm run build:cloudflare
