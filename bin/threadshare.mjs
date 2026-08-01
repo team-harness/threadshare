@@ -21,12 +21,16 @@ import {
   readSharedHistory,
   validateHistory,
 } from "../src/share-read.mjs";
+import {
+  createPreflightResult,
+  formatPreflightResult,
+} from "../src/share-preflight.mjs";
 import { parseShareReference } from "../src/share-url.mjs";
 
 const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
-const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start", "revoke"]);
+const BOOLEAN_OPTIONS = new Set(["dry-run", "help", "json", "pick-start", "report", "revoke"]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 function usage() {
   return `Usage:
@@ -34,7 +38,7 @@ function usage() {
   threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
   threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
   threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
   threadshare read <share-url> --format <json|markdown>
   threadshare revoke <share-url> --token <token> [--json]
   threadshare validate <history.json|->
@@ -409,16 +413,41 @@ async function main() {
       command,
       positionals,
       options,
-      new Set(["before", "expires", "from", "json", "pick-start", "revoke", "url"]),
+      new Set([
+        "before",
+        "dry-run",
+        "expires",
+        "from",
+        "json",
+        "pick-start",
+        "report",
+        "revoke",
+        "url",
+      ]),
     );
+    const dryRun = options["dry-run"] === true;
+    if (options.report && !dryRun) throw new Error("--report requires --dry-run");
     if (options["pick-start"] && (options.from || options.before)) {
       throw new Error("--pick-start cannot be combined with --from or --before");
     }
     if (options["pick-start"]) requireInteractiveTerminal();
     const expiresInSeconds = parseExpiresDuration(options.expires);
+    if (dryRun) serviceUrl(options.url);
     const exported = validateHistory(await exportProviderSession(provider, session));
     const from = options["pick-start"] ? await pickStartMessage(exported) : options.from;
     const history = rangedHistory(exported, { ...options, from });
+    if (dryRun) {
+      const result = createPreflightResult(history, {
+        expiresInSeconds,
+        includeReport: options.report === true,
+        revoke: options.revoke === true,
+      });
+      process.stdout.write(
+        options.json ? `${JSON.stringify(result)}\n` : formatPreflightResult(result),
+      );
+      if (!result.valid) process.exitCode = 1;
+      return;
+    }
     const result = await publish(history, options.url, {
       expiresInSeconds,
       revoke: options.revoke === true,

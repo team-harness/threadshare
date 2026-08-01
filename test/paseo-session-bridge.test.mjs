@@ -330,6 +330,40 @@ test("shares a Paseo agent with one-line JSON output", async () => {
   }
 });
 
+test("dry-runs a Paseo agent without contacting the share service", async () => {
+  const fixture = await createPaseoFixture();
+  try {
+    const result = runCli(fixture, [
+      "share",
+      "paseo",
+      fixture.agentRef,
+      "--dry-run",
+      "--report",
+      "--revoke",
+      "--url",
+      "http://127.0.0.1:1",
+      "--json",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout.split("\n").length, 2);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.dryRun, true);
+    assert.equal(payload.valid, true);
+    assert.deepEqual(payload.intent, { expiresInSeconds: null, revoke: true });
+    assert.equal(payload.report.entryKinds.message, 1);
+    assert.equal(payload.report.entryKinds.tool, 1);
+    assert.equal(payload.report.userTurns, 1);
+    assert.equal(Object.hasOwn(payload, "id"), false);
+    assert.equal(Object.hasOwn(payload, "url"), false);
+    assert.equal(Object.hasOwn(payload, "revokeToken"), false);
+    assert.doesNotMatch(result.stdout, new RegExp(fixture.nativeSessionId));
+    assert.doesNotMatch(result.stdout, new RegExp(fixture.directory));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("lists candidates and publishes a bounded Paseo range through the shared selector", async () => {
   const nativeRaw = (sessionId) =>
     [

@@ -16,6 +16,7 @@ import {
   exportSessionById,
   resolveSessionFile,
 } from "../src/session-export.mjs";
+import { CHAT_SHARE_MAX_BYTES } from "../src/share-read.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = path.join(root, "bin", "threadshare.mjs");
@@ -596,6 +597,165 @@ test("reads Viewer and API URLs as JSON or Markdown without following redirects"
   }
 });
 
+test("dry-runs Codex and Claude shares with safe aggregate reports and no network", async () => {
+  const codex = await createCliSession(codexCliJsonl(3), "codex-dry-run.jsonl");
+  const claude = await createCliSession(
+    [
+      JSON.stringify({
+        type: "user",
+        uuid: "claude-dry-user",
+        timestamp: "2026-07-31T00:00:01.000Z",
+        message: { role: "user", content: "api_key: claude-dry-secret" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        uuid: "claude-dry-assistant",
+        timestamp: "2026-07-31T00:00:02.000Z",
+        message: { role: "assistant", content: "Claude dry answer" },
+      }),
+    ].join("\n"),
+    "claude-dry-run.jsonl",
+  );
+  const unreachableService = "http://127.0.0.1:1";
+
+  try {
+    const codexResult = await execFileAsync(
+      process.execPath,
+      [
+        cli,
+        "share",
+        "codex",
+        codex.file,
+        "--from",
+        "cli-user-2",
+        "--before",
+        "cli-user-3",
+        "--dry-run",
+        "--report",
+        "--expires",
+        "2h",
+        "--revoke",
+        "--url",
+        unreachableService,
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    const codexPayload = JSON.parse(codexResult.stdout);
+    assert.equal(codexResult.stderr, "");
+    assert.equal(codexResult.stdout.split("\n").length, 2);
+    assert.equal(codexPayload.dryRun, true);
+    assert.equal(codexPayload.valid, true);
+    assert.deepEqual(codexPayload.intent, { expiresInSeconds: 7200, revoke: true });
+    assert.deepEqual(codexPayload.report.entryKinds, {
+      message: 2,
+      tool: 0,
+      thought: 0,
+      todo: 0,
+      activity: 0,
+      compaction: 0,
+    });
+    assert.deepEqual(codexPayload.report.messageRoles, { user: 1, assistant: 1 });
+    assert.equal(codexPayload.report.userTurns, 1);
+    assert.equal(codexPayload.report.redactionMarkers, 0);
+    assert.equal(Object.hasOwn(codexPayload, "id"), false);
+    assert.equal(Object.hasOwn(codexPayload, "url"), false);
+    assert.equal(Object.hasOwn(codexPayload, "revokeToken"), false);
+
+    const claudeResult = await execFileAsync(
+      process.execPath,
+      [
+        cli,
+        "share",
+        "claude",
+        claude.file,
+        "--dry-run",
+        "--report",
+        "--url",
+        unreachableService,
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    const claudePayload = JSON.parse(claudeResult.stdout);
+    assert.equal(claudePayload.valid, true);
+    assert.deepEqual(claudePayload.intent, { expiresInSeconds: null, revoke: false });
+    assert.deepEqual(claudePayload.report.messageRoles, { user: 1, assistant: 1 });
+    assert.ok(claudePayload.report.redactionMarkers >= 1);
+    assert.doesNotMatch(claudeResult.stdout, /claude-dry-secret|Claude dry answer/);
+
+    const human = await execFileAsync(
+      process.execPath,
+      [cli, "share", "codex", codex.file, "--dry-run", "--report", "--url", unreachableService],
+      { encoding: "utf8" },
+    );
+    assert.equal(human.stderr, "");
+    assert.match(human.stdout, /Dry run: valid/);
+    assert.match(human.stdout, /No data was uploaded/);
+    assert.match(human.stdout, /Entries:/);
+    assert.match(human.stdout, /User turns:/);
+    assert.doesNotMatch(human.stdout, /CLI request|CLI answer|codex-dry-run|threadshare-cli-range/);
+  } finally {
+    await rm(codex.directory, { recursive: true, force: true });
+    await rm(claude.directory, { recursive: true, force: true });
+  }
+});
+
+test("returns a machine-readable invalid dry run for an oversized export", async () => {
+  const raw = [
+    JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-07-31T00:00:00.000Z",
+      payload: { session_id: "oversized-dry-run" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-07-31T00:00:01.000Z",
+      payload: {
+        type: "message",
+        id: "oversized-user",
+        role: "user",
+        content: [{ type: "input_text", text: "x".repeat(CHAT_SHARE_MAX_BYTES) }],
+      },
+    }),
+  ].join("\n");
+  const fixture = await createCliSession(raw, "oversized-dry-run.jsonl");
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          cli,
+          "share",
+          "codex",
+          fixture.file,
+          "--dry-run",
+          "--report",
+          "--revoke",
+          "--url",
+          "http://127.0.0.1:1",
+          "--json",
+        ],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.equal(error.stderr, "");
+        const payload = JSON.parse(error.stdout);
+        assert.equal(payload.dryRun, true);
+        assert.equal(payload.valid, false);
+        assert.match(payload.error, /5 MiB/);
+        assert.ok(payload.report.bytes > payload.report.limitBytes);
+        assert.deepEqual(payload.intent, { expiresInSeconds: null, revoke: true });
+        assert.equal(Object.hasOwn(payload, "revokeToken"), false);
+        return true;
+      },
+    );
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects unsafe command option combinations before exporting or publishing", async () => {
   const fixture = await createCliSession(codexCliJsonl(2));
   const scenarios = [
@@ -678,6 +838,14 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "json",
       ],
       expected: /valid Threadshare viewer or API URL/,
+    },
+    {
+      args: ["share", "codex", fixture.file, "--report"],
+      expected: /--report requires --dry-run/,
+    },
+    {
+      args: ["publish", fixture.file, "--dry-run"],
+      expected: /--dry-run is not valid for publish/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--format", "json"],

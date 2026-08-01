@@ -2,8 +2,8 @@
 epic: ../epics/lightweight-sharing-evolution.md
 phase: executing
 approved_revision: 0f8f1b78ca6747eac74057e928c9c8986e96dbc3d0887870ae86b40dfe19dc37
-current_item: ITEM-4
-next_action: implement local publish preflight for ITEM-4
+current_item: ITEM-5
+next_action: implement long-conversation Viewer navigation for ITEM-5
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -15,7 +15,7 @@ remote_publish: final
 - [x] ITEM-1
 - [x] ITEM-2
 - [x] ITEM-3
-- [ ] ITEM-4
+- [x] ITEM-4
 - [ ] ITEM-5
 - [ ] ITEM-6
 
@@ -66,3 +66,10 @@ remote_publish: final
 - ITEM-3 review round 2 target：staged diff SHA-256 `154755497ef4b088b8d841e90a4a4fa73256ed45f2e584b907896ea59e26dc40`，基线 `db7c2cd`。
 - ITEM-3 reviewer round 2：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `32ae3f9a-2d9d-42f8-92ce-2e22b7c04cce`，turn `096092b2-066c-4a27-84ba-b815c189f642`，result message `01d4cdfd-be0f-42f9-a3b8-35c3c2b13f12`，状态 completed，已销毁 reviewer。
 - ITEM-3 round 2 findings：0 Blocking、0 Important、3 Minor，结论可创建里程碑提交。Minor 为导出的 Markdown formatter 依赖调用方先验证、自由字符串可能影响 Markdown 外观，以及被忽略的 message fragment 可含控制字符；当前 CLI 始终先严格验证、JSON 提供无损替代、fragment 不进入请求，均不改变批准契约。
+- ITEM-3 milestone commit：`2bc44db`（`feat: add agent-native share reading`），仅本地提交，未推送。
+- 2026-08-01 ITEM-4 TDD：先观察 `--dry-run` / `--report` 被当成缺值选项、Paseo/Codex/Claude 预检失败以及共享预检模块缺失，随后实现转绿。
+- 2026-08-01 ITEM-4 自查：仅 `share` 接受 `--dry-run`，`--report` 离开 dry run 严格失败；预检执行真实 provider 导出、范围选择、脱敏、canonical validation、服务 URL/过期选项校验和紧凑 JSON 5 MiB 检查，但在 `fetch` 与 capability token 生成前返回；JSON 稳定包含 `dryRun`、`valid` 与生命周期 `intent`，详细报告只含字节、entry kind、message role、原生 user turn 和 `[REDACTED]` 标记计数，不持有或输出正文、工具数据、本地路径或 provider 配置；超限返回 `valid: false`、不伪造 id/url，并以非零退出。
+- 2026-08-01 ITEM-4 候选验证：`npm test` 通过（CLI 85 tests、API/Worker 25 tests、FC 14 tests），Cloudflare 与 FC build 均通过；三种 provider、范围预检、关闭端口无网络、超限、严格组合、人类/单行 JSON、隐私聚合与多 message block 单原生 turn 均有测试。
+- ITEM-4 review round 1 target：staged diff SHA-256 `26c8b26ff84b79b8d05d1016c3889565c709fb8174d853806b724d1f3fb97e82`，基线 `2bc44db`。
+- ITEM-4 reviewer round 1：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `ab0dc86e-c5dc-4139-93a1-6e3162df28c9`，turn `a3560130-88d2-4dfc-815c-671f318836bf`，result message `b3c6ac4b-ba32-423a-ab44-9c2b08287fb6`，状态 completed，已销毁 reviewer。
+- ITEM-4 round 1 findings：0 Blocking、0 Important、4 Minor，结论可创建里程碑提交。AGENTS 的实际发布/dry-run JSON 限定在 ITEM-6 同步；`[REDACTED]` 常量重复、病态递归深度与用户正文同名字面量造成的近似计数均不影响当前 exporter 数据、隐私或 `valid` 结果，保持现状。
