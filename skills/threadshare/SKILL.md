@@ -1,6 +1,6 @@
 ---
 name: threadshare
-description: Find and share Codex, Codex Cloud, Claude Code, or Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI and return a verified read-only viewer URL. Use when a user asks to list, find, share, publish, export, or validate an agent conversation, requests a link to the current session, or needs agent-readable thread JSON.
+description: Find, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI. Use when a user asks to list, find, publish, export, validate, or share an agent conversation; requests a link to the current session; or needs agent-readable thread JSON or Markdown.
 ---
 
 # Threadshare
@@ -14,8 +14,11 @@ Use the `threadshare` CLI to export visible conversation content and publish it 
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
 - List local native sessions: `threadshare sessions <codex|claude> --format json`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
+- Preflight without uploading: `threadshare share <provider> <session-or-agent> --dry-run --report --json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
 - Publish an existing protocol file: `threadshare publish <file|-> --json`
+- Read a canonical share: `threadshare read <viewer-or-api-url> --format <json|markdown>`
+- Revoke a capability-enabled share: `threadshare revoke <viewer-or-api-url> --token <token> --json`
 - Validate an existing protocol file: `threadshare validate <file|->`
 
 Use an installed `threadshare` binary when available. Otherwise run the same arguments with:
@@ -38,6 +41,15 @@ When the user asks for the full conversation, use the regular `share` command wi
 
 Do not infer a start from fuzzy text when more than one preview could match. Agents must not use interactive `--pick-start` or `--from last-user`: later selection messages can change what "last" means. `--pick-start` is for a person running the CLI in a terminal; it displays 10 turns at a time and includes the snapshot's latest real user turn.
 
+## Choose Lifecycle Options
+
+Keep the default permanent, non-revocable share unless the user explicitly requests another lifecycle.
+
+- Add `--expires <duration>` only when requested. Durations use an integer plus `m`, `h`, or `d`, from `1m` through `365d`; require the actual share result to contain `expiresAt`.
+- Add `--revoke` only when requested. The actual `--json` result contains a one-time `revokeToken`; the service stores only its SHA-256 digest.
+- Treat `revokeToken` as a capability. Never add it to a URL, verification request, transcript excerpt, log, or issue. Show the user one revoke command exactly once and explain that the token cannot be recovered.
+- Expired and revoked shares return 404. Expiration guarantees read denial; physical deletion is best-effort lazy cleanup.
+
 ## Resolve A Session
 
 Prefer an exact session ID or explicit JSONL path from the task context.
@@ -54,11 +66,18 @@ Prefer an exact session ID or explicit JSONL path from the task context.
 ## Share And Verify
 
 1. Confirm that the user asked to share the conversation. A Viewer URL is unlisted, but anyone with the URL can read it.
-2. Run `share` with `--json` and capture the one-line `{ "id", "url" }` result.
-3. Verify that `id` is present and that `url` uses the expected Threadshare origin.
-4. Fetch `/api/v1/shares/<id>` and verify `format == "threadshare-history@v1"`. Verify `conversation.source` matches the selected input (`paseo` for a bridged Paseo agent, otherwise the native provider).
-5. For a ranged share, verify that the first exported native turn matches the selected candidate and that the boundary entry is absent.
-6. Return the Viewer URL. Include the exported entry count when useful.
+2. Run the exact intended `share` arguments with `--dry-run --report --json`. Require `dryRun == true` and `valid == true`; do not invent an `id` or URL from a dry run.
+3. Run the same `share` arguments after removing both `--dry-run` and `--report`; keep `--json`, and capture the one-line actual result containing `id` and `url`.
+4. Verify that `id` is present, `url` uses the expected Threadshare origin, and any requested `expiresAt` or `revokeToken` is present.
+5. Read `/api/v1/shares/<id>` and verify `format == "threadshare-history@v1"`, the entry count, and `conversation.source` (`paseo` for a bridged agent, otherwise the native provider). Do not echo the transcript during routine verification.
+6. For a ranged share, verify that the first exported native turn matches the selected candidate and that the boundary entry is absent.
+7. Return the Viewer URL and entry count when useful. If revocation was requested, also return one `threadshare revoke <url> --token <token>` command and do not repeat the token elsewhere.
+
+## Read Or Revoke An Existing Share
+
+- When a user or agent needs the complete shared conversation, use `threadshare read <url> --format json` for structured processing or `--format markdown` for reading. Do not scrape the Viewer HTML.
+- `read` accepts canonical Viewer or API URLs and ignores a valid `#message-...` anchor. It refuses redirects, enforces the 5 MiB limit, and rejects legacy Paseo history; ask for a fresh canonical share when legacy data is rejected.
+- Revoke only on an explicit user request and only with the exact capability token they supplied or asked you to retain from creation. Do not guess tokens or retry a failed revoke with modified credentials.
 
 The exporter skips hidden, metadata, sidechain, and known agent-injected orchestration records; omits raw system prompts and provider configuration; and redacts common credential fields and token patterns on a best-effort basis. Visible messages and tool input/output can still contain sensitive data that it does not recognize; do not share a session when the task indicates those contents must remain private.
 

@@ -52,6 +52,40 @@ https://cloud-thread.team-harness.com/?id=<share-id>
 
 Add `--json` for the one-line `{"id":"...","url":"..."}` response expected by agents and scripts.
 
+### Check Before Uploading
+
+Run the same export, range selection, validation, and 5 MiB size check without contacting the service:
+
+```bash
+threadshare share codex <session-id> --dry-run
+threadshare share codex <session-id> --dry-run --report --json
+```
+
+`--report` adds aggregate byte size and limit, total entries, entry kinds, message roles, native user turns, and redaction markers. It does not include transcript text, tool data, provider settings, or local paths. A failed or oversized dry run exits non-zero and never falls back to publishing.
+
+### Control Share Lifetime
+
+Shares are permanent and not revocable by default. Choose an expiration from 1 minute to 365 days, or request a one-time revocation capability:
+
+```bash
+threadshare share codex <session-id> --expires 7d
+threadshare share codex <session-id> --revoke --json
+threadshare revoke <viewer-url> --token <revoke-token> --json
+```
+
+The server confirms an expiration as `expiresAt`. With `--revoke`, human output prints a one-time revoke command to stderr while `--json` includes `revokeToken`. Store that token when the share is created: it cannot be recovered, it must never be added to the Viewer URL, and the service stores only its SHA-256 digest. Expired and revoked shares read as 404. Expiration is enforced at read time; physical object deletion is best-effort and may wait until a later read.
+
+### Read a Share with an Agent
+
+Use the CLI instead of scraping the Viewer when an agent needs the complete canonical conversation:
+
+```bash
+threadshare read '<viewer-or-api-url>' --format json
+threadshare read '<viewer-url>#message-<entry-id>' --format markdown
+```
+
+`read` accepts canonical Viewer and API URLs, ignores a valid message anchor, refuses redirects, enforces the 5 MiB limit, and validates `threadshare-history@v1` again. The Viewer remains optimized for people with a user-turn directory and collapsed tool/thought details; its single-line agent prompt copies the same source JSON URL.
+
 ### Share From A User Message
 
 In an interactive terminal, let Threadshare show the 10 most recent user turns and choose where the shared conversation starts:
@@ -103,16 +137,20 @@ export THREADSHARE_URL=https://threadshare.example.com
 threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
 threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
 threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--url <service-url>] [--json]
+threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+threadshare read <share-url> --format <json|markdown>
+threadshare revoke <share-url> --token <token> [--json]
 threadshare validate <history.json|->
 ```
 
-- `share` exports and publishes a native session in one step.
+- `share` exports and publishes a native session in one step. `--dry-run` stops before network access; `--report` is valid only with `--dry-run`.
 - `sessions` lists canonical native Codex or Claude sessions without uploading. Text is for people; `--format json` is the stable automation surface. The default and maximum page sizes are 10 and 50.
 - `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
 - `export` creates canonical JSON without uploading it.
-- `publish` uploads an existing `threadshare-history@v1` document.
+- `publish` uploads an existing `threadshare-history@v1` document. `share` and `publish` accept `--expires` and `--revoke`.
+- `read` downloads and validates a canonical share as JSON or Markdown without following redirects.
+- `revoke` deletes a capability-enabled share. The raw token is sent only as Bearer authorization.
 - `validate` checks a protocol document locally.
 
 For example, review an export before publishing it:
@@ -144,6 +182,8 @@ The Skill uses the installed CLI when available and falls back to `npx`. For Cod
 ## Privacy and Sharing Model
 
 Viewer URLs are read-only and unlisted, but they are not access-controlled. Anyone with a URL can read the shared conversation.
+
+By default, a share has no expiration and no revoke capability. `--expires` adds a logical read deadline; `--revoke` creates a client-held capability whose raw value is shown only at creation. Do not place capability tokens in URLs, transcripts, issue trackers, or logs.
 
 The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration. Native logs sometimes encode agent-injected orchestration context as `role: "user"`; Threadshare treats known wrappers of that kind as hidden in both full and ranged exports.
 
@@ -194,7 +234,7 @@ cd ..
 npm run deploy:fc
 ```
 
-FC proxies reads and writes to a private OSS bucket. Use a dedicated RAM principal limited to `GetObject` and `PutObject` on the `shares/` prefix.
+FC proxies reads and writes to a private OSS bucket. Use a dedicated RAM principal limited to `GetObject`, `PutObject`, and `DeleteObject` on the `shares/` prefix.
 
 Local state under `fc/.licell/`, `.void/`, and `.wrangler/` is ignored by Git and must not be committed.
 
@@ -233,12 +273,17 @@ The legacy Paseo v1 shape is accepted only for migration. New producers must use
 ### HTTP API
 
 ```text
-POST /api/v1/shares       -> { "id": "<uuid>" }
-GET  /api/v1/shares/:id   -> threadshare history JSON
-Viewer                    -> /?id=<uuid>#message-<entry-id>
+POST   /api/v1/shares       -> { "id": "<uuid>", "expiresAt"?: "...", "revocable"?: true }
+GET    /api/v1/shares/:id   -> threadshare history JSON or 404
+DELETE /api/v1/shares/:id   -> 204 with a valid Bearer revoke capability
+Viewer                      -> /?id=<uuid>#message-<entry-id>
 ```
 
 `POST` accepts only `application/json`, strictly validates the document, and limits payloads to 5 MiB. Storage keys are always `shares/<uuid>.json`; clients cannot choose object keys, file names, or MIME types.
+
+Lifecycle metadata stays outside the portable history. A client may send `x-threadshare-expires-in` with 60 to 31,536,000 seconds and/or `x-threadshare-revoke-token-sha256` with a SHA-256 base64url digest. New objects use an internal `threadshare-object@v1` wrapper, while successful `GET` responses always return only the history. Old bare history objects remain readable.
+
+Expiration is checked on every read and triggers best-effort lazy deletion. `DELETE` requires `Authorization: Bearer <raw-token>` and intentionally returns the same 404 for a missing object, unsupported revocation, or an invalid capability. Revocation is a CLI/direct-API operation and is not exposed through Viewer CORS or browser UI.
 
 History reads use `Cache-Control: no-store` so a shared transcript is not retained by intermediary caches.
 
@@ -267,6 +312,7 @@ Run the checks affected by a change:
 ```bash
 npm run build:cloudflare
 npm run test:cli
+npm run test:viewer
 npm run test:api
 npm run test:fc
 ```

@@ -1,9 +1,9 @@
 ---
 epic: ../epics/lightweight-sharing-evolution.md
-phase: executing
+phase: acceptance
 approved_revision: 1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb
-current_item: ITEM-6
-next_action: synchronize documentation and run final delivery checks for ITEM-6
+current_item: acceptance
+next_action: run integration verification and a fresh acceptance review
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -17,7 +17,7 @@ remote_publish: final
 - [x] ITEM-3
 - [x] ITEM-4
 - [x] ITEM-5
-- [ ] ITEM-6
+- [x] ITEM-6
 
 ## 临时决策与证据
 
@@ -81,3 +81,13 @@ remote_publish: final
 - ITEM-5 review round 2 target：staged diff SHA-256 `de0d94dd227e65c1e87b4dec6409fa2483c32e1832d686ad3284c54f54751ecd`，基线 `815a0af`。
 - ITEM-5 reviewer round 2：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `96b9109a-24a3-443e-80b1-0162fdf1cace`，native session `705c1591-3d5d-40cf-acfd-88a409ea9f6c`，状态 completed，无回退。
 - ITEM-5 round 2 findings：0 Blocking、0 Important、4 Nit，结论可合；Round 1 Important 已闭环。Nit 为不影响目标浏览器的 `matchMedia` 可选链疑问、目录导航不进入浏览器历史/不放行修饰键、公开锚点前缀双写及未来 DOM 冒烟测试建议，均不改变当前批准契约，保持已审查候选不再移动。
+- ITEM-5 milestone commit：`55c59f8`（`feat: improve viewer navigation`），仅本地提交，未推送。
+- 2026-08-02 ITEM-6 文档同步：README 中英双语从默认服务优先的使用路径补齐预检、读取、过期、撤销、Viewer 导航和独立部署权限；CLI reference 与当前 `--help` 逐行一致；`AGENTS.md` 同步 lifecycle、内部包装、CLI JSON 与 Viewer ownership；bundled Skill 增加预检、读取、生命周期和 capability 处理约束，`openai.yaml` 已重新生成。
+- 2026-08-02 ITEM-6 候选验证：`npm test` 通过（CLI 85 tests、Viewer state 2 tests、API/Worker 25 tests、FC 14 tests），独立 `npm run build:cloudflare` 通过，Skill `quick_validate.py` 返回 `Skill is valid!`。
+- 2026-08-02 ITEM-6 包检查：`npm pack --dry-run --json` 仅列出 16 个 CLI、协议、Skill、README、license/package metadata 所需文件；实际 `0.4.0` tarball 已安装到独立临时 prefix，安装产物的 `threadshare --help` 与仓库帮助文本一致，未依赖源码 checkout。
+- ITEM-6 review round 1 target：staged diff SHA-256 `32657459895f882ff86aef8023ec4c0cf5579185725f18297bc15abc4298997a`，基线 `55c59f8`。
+- ITEM-6 reviewer round 1：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `87b48663-eab3-4ec2-bdf7-50c9aa584479`，native session `3856537f-3bcc-47a3-b21d-72dc7cd3c236`，状态 completed，无回退，已归档。
+- ITEM-6 round 1 findings：0 Blocking、1 Important、3 Nit，结论有条件可合。Important 为 `AGENTS.md` 验证清单遗漏 `test:api`；已补齐。同步收紧三个 Nit：明确正式分享移除 `--dry-run` 与 `--report`、为 read URL 示例加 shell 引号、补全 preflight report 的字节与 entry 聚合字段。
+- ITEM-6 review round 2 target：staged diff SHA-256 `d96aa3b7b35a5b4e595130b50bcae3491cc56667ecb12fa91d4dab9bd2a53b91`，基线 `55c59f8`。
+- ITEM-6 reviewer round 2：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `87a820e7-915c-42d0-bd74-27097aa3ab80`，native session `3a6480a6-8fad-447e-8eaf-e1dae1ce34ed`，状态 completed，无回退，已归档。
+- ITEM-6 round 2 findings：0 Blocking、0 Important、2 Nit，结论可合；Round 1 Important 与三个 Nit 均闭环。剩余 Nit 为既有外部 Skill 校验脚本路径可复现性说明，以及中文 API 摘要未重复英文块中的 `Bearer` 一词；正文已明确 Authorization 语义，均不移动已通过候选。

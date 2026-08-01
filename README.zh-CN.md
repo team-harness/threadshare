@@ -52,6 +52,40 @@ https://cloud-thread.team-harness.com/?id=<share-id>
 
 Agent 或脚本可以增加 `--json`，获得单行 `{"id":"...","url":"..."}` 响应。
 
+### 上传前预检
+
+使用和正式分享相同的导出、范围选择、协议校验与 5 MiB 大小检查，但不连接服务端：
+
+```bash
+threadshare share codex <session-id> --dry-run
+threadshare share codex <session-id> --dry-run --report --json
+```
+
+`--report` 只增加字节数与上限、entry 总数和类型、消息角色、原生用户 turn、脱敏标记等聚合计数，不包含会话正文、工具数据、provider 配置或本地路径。预检失败或超限时命令以非零状态退出，绝不会退化为正式发布。
+
+### 控制分享有效期
+
+分享默认永久有效且不可撤销。可以选择 1 分钟至 365 天的有效期，或申请一次性的撤销 capability：
+
+```bash
+threadshare share codex <session-id> --expires 7d
+threadshare share codex <session-id> --revoke --json
+threadshare revoke <viewer-url> --token <revoke-token> --json
+```
+
+服务端通过 `expiresAt` 确认到期时间。使用 `--revoke` 时，人类输出会把一次性撤销命令写到 stderr，`--json` 则包含 `revokeToken`。该 token 只在创建时出现，无法找回，不能放进 Viewer URL；服务端只保存它的 SHA-256 摘要。过期或已撤销的分享读取时统一返回 404。到期后会立即禁止访问，物理对象采用 best-effort 懒删除，可能要等到后续读取才清理。
+
+### 让 Agent 读取分享
+
+Agent 需要完整规范会话时，应使用 CLI，而不是抓取 Viewer 页面：
+
+```bash
+threadshare read '<viewer-or-api-url>' --format json
+threadshare read '<viewer-url>#message-<entry-id>' --format markdown
+```
+
+`read` 接受规范的 Viewer 和 API URL，会忽略合法的消息锚点、拒绝重定向、执行 5 MiB 上限并重新校验 `threadshare-history@v1`。Viewer 继续面向人类阅读，提供用户 turn 目录以及默认折叠的工具和 thought 详情；单行 Agent 引导复制的是同一个 source JSON URL。
+
 ### 从某条用户消息开始分享
 
 人在交互式终端中可以让 Threadshare 展示最近 10 个用户 turn，再选择共享会话的起点：
@@ -103,16 +137,20 @@ export THREADSHARE_URL=https://threadshare.example.com
 threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
 threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
 threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-threadshare publish <history.json|-> [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--url <service-url>] [--json]
+threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+threadshare read <share-url> --format <json|markdown>
+threadshare revoke <share-url> --token <token> [--json]
 threadshare validate <history.json|->
 ```
 
-- `share`：一步完成原生会话导出与发布。
+- `share`：一步完成原生会话导出与发布。`--dry-run` 会在网络访问前停止，`--report` 只能与 `--dry-run` 一起使用。
 - `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
 - `export`：只生成规范 JSON，不上传。
-- `publish`：上传已有的 `threadshare-history@v1` 文档。
+- `publish`：上传已有的 `threadshare-history@v1` 文档。`share` 和 `publish` 都支持 `--expires` 与 `--revoke`。
+- `read`：不跟随重定向，下载并校验规范分享，再输出 JSON 或 Markdown。
+- `revoke`：删除启用 capability 的分享；原始 token 只通过 Bearer authorization 发送。
 - `validate`：在本地校验协议文档。
 
 例如，先检查导出内容再发布：
@@ -144,6 +182,8 @@ Skill 会优先使用已安装的 CLI，不存在时回退到 `npx`。Codex Clou
 ## 隐私与分享边界
 
 Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接。任何获得链接的人都能读取对应会话。
+
+分享默认没有到期时间，也没有撤销 capability。`--expires` 增加逻辑访问截止时间；`--revoke` 创建由客户端保管、只在创建时展示一次的 capability。不要把 capability token 放进 URL、会话正文、Issue 或日志。
 
 导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。原生日志有时会把 Agent 注入的编排上下文记录为 `role: "user"`，Threadshare 会把这类已知 wrapper 视为隐藏内容，并从全量与范围导出中排除。
 
@@ -194,7 +234,7 @@ cd ..
 npm run deploy:fc
 ```
 
-FC 负责代理私有 OSS 的读写。建议使用独立 RAM 身份，并将权限限制为 `shares/` 前缀的 `GetObject` 和 `PutObject`。
+FC 负责代理私有 OSS 的读写。建议使用独立 RAM 身份，并将权限限制为 `shares/` 前缀的 `GetObject`、`PutObject` 和 `DeleteObject`。
 
 `fc/.licell/`、`.void/` 和 `.wrangler/` 下的本地部署状态已被 Git 忽略，不应提交。
 
@@ -233,12 +273,17 @@ Entry 可以表示消息、工具调用、思考、待办、活动或上下文�
 ### HTTP API
 
 ```text
-POST /api/v1/shares       -> { "id": "<uuid>" }
-GET  /api/v1/shares/:id   -> threadshare history JSON
-Viewer                    -> /?id=<uuid>#message-<entry-id>
+POST   /api/v1/shares       -> { "id": "<uuid>", "expiresAt"?: "...", "revocable"?: true }
+GET    /api/v1/shares/:id   -> threadshare history JSON 或 404
+DELETE /api/v1/shares/:id   -> capability 有效时返回 204
+Viewer                      -> /?id=<uuid>#message-<entry-id>
 ```
 
 `POST` 只接收 `application/json`，严格校验协议，最大负载为 5 MiB。服务端始终生成 `shares/<uuid>.json`，客户端不能指定对象路径、文件名或 MIME 类型。
+
+生命周期元数据不会进入可移植 history。客户端可以通过 `x-threadshare-expires-in` 发送 60 至 31,536,000 秒的有效期，并可通过 `x-threadshare-revoke-token-sha256` 发送 SHA-256 base64url 摘要。新对象使用内部 `threadshare-object@v1` 包装，成功的 `GET` 永远只返回其中的 history；旧的裸 history 对象仍可读取。
+
+每次读取都会检查到期时间，并尝试 best-effort 懒删除。`DELETE` 需要 `Authorization: Bearer <raw-token>`；对象不存在、未启用撤销或 capability 错误时故意统一返回 404。撤销只面向 CLI 或直接 API，不开放 Viewer CORS，也不提供浏览器内撤销 UI。
 
 历史读取响应使用 `Cache-Control: no-store`，避免共享会话被中间缓存保留。
 
@@ -267,6 +312,7 @@ Paseo 只上传经过校验的会话 JSON，不包含云凭据，也不依赖本
 ```bash
 npm run build:cloudflare
 npm run test:cli
+npm run test:viewer
 npm run test:api
 npm run test:fc
 ```
