@@ -1,7 +1,7 @@
 ---
-status: active
+status: accepted
 created: 2026-08-01
-work: ../work/epic-lightweight-sharing-evolution.md
+accepted: 2026-08-02
 ---
 
 # Threadshare 轻量分享能力演进
@@ -145,14 +145,40 @@ Threadshare 已提供 Codex、Claude Code 与 Paseo 会话导出、匿名只读�
 
 ## 最终交付索引
 
-待执行完成后补充。
+最终范围与批准范围一致：交付可选过期与撤销、Agent 原生读取、本地发布预检、长会话 Viewer 导航，以及对应的双云适配、测试和文档；未引入账户、数据库、KV、队列、指标平台、定时清理或新的云控制面依赖。
+
+| 交付 | 提交 | 结果 |
+| --- | --- | --- |
+| ITEM-1：内部对象包装与可选过期 | `933aab0` | 新对象使用 `threadshare-object@v1`，兼容旧裸 history；到期严格拒读并懒删除。 |
+| ITEM-2：Capability 撤销 | `db7c2cd` | 客户端持有 256-bit token，服务端只保存摘要；固定 DELETE 路由统一 404 语义。 |
+| ITEM-3：Agent 原生读取 | `2bc44db` | 新增受限 URL、禁止重定向且重新校验的 JSON/Markdown 读取命令。 |
+| ITEM-4：本地发布预检 | `815a0af` | 新增无网络 dry run 与不含正文的聚合报告。 |
+| ITEM-5：Viewer 长会话导航 | `55c59f8` | 新增 user turn 目录、逐项折叠与紧凑 Agent JSON 引导。 |
+| ITEM-6：集成、文档与交付检查 | `177db32` | README 双语、CLI help、bundled Skill、维护契约与打包边界同步。 |
+| Acceptance 修复 | `50c202c` | CLI 可处理完整 256-bit revoke token 值域，包括 `--` 前缀。 |
+| 验收证据记录 | `9f00ecf` | 汇总集成验证、审查与 owner gate，作为最终接受基线。 |
+
+上述实现与验收提交已于 2026-08-02 推送至 `origin/main`。
 
 ## 整体验收
 
-待所有子项完成后，由 fresh reviewer 按本文件批准版本进行 acceptance review，再由 owner 做最终接受。
+- 批准契约 SHA-256：`1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb`。
+- 最终验证通过：CLI 86 tests、Viewer 2 tests、API/Worker 25 tests、FC 14 tests；Cloudflare build、Skill quick validation、16 文件 npm pack 清单及实际 tarball 隔离安装均通过。
+- Viewer 真实浏览器覆盖 1440x1000、390x844 与 320x700，目录、deep link、鼠标/键盘折叠、复制焦点、响应式布局和 console 均通过。
+- Fresh Paseo/Claude Fable 5 acceptance review Round 1 发现 1 Important；完整 revoke token 值域问题经 TDD 修复。Round 2 对提交 range 与修复 patch 复审为 0 Blocking、0 Important，结论通过/可合，全部验收标准达标。
+- Owner 于 2026-08-02 明确回复“接受”，完成整体验收。
+- npm 发布、Cloudflare/FC 生产部署和域名切流未在本 Epic 中执行，继续需要独立授权。
 
 ## 遗留风险
 
 - 懒删除不保证无人访问的过期对象及时释放存储空间，这是有明确升级触发器的有界简化。
 - Capability token 丢失后无法恢复；因为没有账户或数据库，服务端不提供找回能力。
 - npm 发布和生产环境部署需要独立授权，并在代码验收之后执行。
+
+## 毕业清单
+
+- 用户侧安装、默认服务、生命周期、读取、预检与独立部署契约：`README.md`、`README.zh-CN.md`。
+- 维护边界、模块 ownership、验证与打包规则：`AGENTS.md`。
+- 人类与 Agent 的 session 选择、预检、分享、读取和撤销流程：`skills/threadshare/`。
+- 可移植 producer 契约继续由 `schema/threadshare-history.v1.schema.json` 持有；本 Epic 未修改其格式。
+- 生命周期与无新增基础设施的结构性决策保留在本永久 Epic，作为后续 sweep 或新 provider adapter 的升级依据。
