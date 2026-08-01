@@ -1,4 +1,5 @@
 import { CHAT_SHARE_MAX_BYTES, ChatHistorySchema, type ChatHistory } from "./share-schema";
+import { isRevokeTokenSha256 } from "./stored-share";
 
 export const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 export const EXPIRES_IN_HEADER = "x-threadshare-expires-in";
@@ -43,7 +44,7 @@ export function historyResponseHeaders(expiresAt?: string): Record<string, strin
 }
 
 export type ParsedShareCreationOptions =
-  | { ok: true; expiresInSeconds?: number }
+  | { ok: true; expiresInSeconds?: number; revokeTokenSha256?: string }
   | { ok: false; status: 400; error: string };
 
 export function parseShareCreationOptions({
@@ -53,14 +54,25 @@ export function parseShareCreationOptions({
   expiresIn: string | null | undefined;
   revokeTokenSha256: string | null | undefined;
 }): ParsedShareCreationOptions {
-  if (revokeTokenSha256 !== null && revokeTokenSha256 !== undefined) {
+  if (
+    revokeTokenSha256 !== null &&
+    revokeTokenSha256 !== undefined &&
+    !isRevokeTokenSha256(revokeTokenSha256)
+  ) {
     return {
       ok: false,
       status: 400,
-      error: `${REVOKE_TOKEN_SHA256_HEADER} is not supported`,
+      error: `${REVOKE_TOKEN_SHA256_HEADER} must be a SHA-256 base64url digest`,
     };
   }
-  if (expiresIn === null || expiresIn === undefined) return { ok: true };
+  if (expiresIn === null || expiresIn === undefined) {
+    return {
+      ok: true,
+      ...(revokeTokenSha256 === null || revokeTokenSha256 === undefined
+        ? {}
+        : { revokeTokenSha256 }),
+    };
+  }
   if (!/^\d+$/.test(expiresIn)) {
     return {
       ok: false,
@@ -80,11 +92,22 @@ export function parseShareCreationOptions({
       error: `${EXPIRES_IN_HEADER} must be an integer from ${MIN_EXPIRES_IN_SECONDS} to ${MAX_EXPIRES_IN_SECONDS}`,
     };
   }
-  return { ok: true, expiresInSeconds };
+  return {
+    ok: true,
+    expiresInSeconds,
+    ...(revokeTokenSha256 === null || revokeTokenSha256 === undefined
+      ? {}
+      : { revokeTokenSha256 }),
+  };
 }
 
 export type ParsedShare =
-  | { ok: true; history: ChatHistory; expiresInSeconds?: number }
+  | {
+      ok: true;
+      history: ChatHistory;
+      expiresInSeconds?: number;
+      revokeTokenSha256?: string;
+    }
   | { ok: false; status: number; error: string };
 
 export function isJsonContentType(contentType: string | null | undefined): boolean {

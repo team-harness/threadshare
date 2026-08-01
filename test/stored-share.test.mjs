@@ -4,7 +4,10 @@ import {
   createStoredShare,
   decodeStoredShare,
   isShareExpired,
+  parseRevokeAuthorization,
+  revokeTokenMatches,
 } from "../src/stored-share.ts";
+import { createHash } from "node:crypto";
 
 const NOW = Date.parse("2026-08-01T10:00:00.000Z");
 
@@ -19,21 +22,26 @@ function history() {
 }
 
 test("wraps new shares while decoding canonical and legacy storage", () => {
-  const stored = createStoredShare(history(), NOW, 60);
+  const revokeToken = Buffer.alloc(32, 7).toString("base64url");
+  const revokeTokenSha256 = createHash("sha256").update(revokeToken).digest("base64url");
+  const stored = createStoredShare(history(), NOW, { expiresInSeconds: 60, revokeTokenSha256 });
   assert.deepEqual(stored, {
     format: "threadshare-object@v1",
     createdAt: "2026-08-01T10:00:00.000Z",
     expiresAt: "2026-08-01T10:01:00.000Z",
+    revokeTokenSha256,
     history: history(),
   });
 
   assert.deepEqual(decodeStoredShare(JSON.stringify(stored)), {
     history: history(),
     expiresAt: "2026-08-01T10:01:00.000Z",
+    revokeTokenSha256,
   });
   assert.deepEqual(decodeStoredShare(JSON.stringify(history())), {
     history: history(),
     expiresAt: undefined,
+    revokeTokenSha256: undefined,
   });
 
   const legacy = history();
@@ -41,7 +49,23 @@ test("wraps new shares while decoding canonical and legacy storage", () => {
   assert.deepEqual(decodeStoredShare(JSON.stringify(legacy)), {
     history: legacy,
     expiresAt: undefined,
+    revokeTokenSha256: undefined,
   });
+});
+
+test("parses bearer capabilities and compares their digests", async () => {
+  const token = Buffer.alloc(32, 11).toString("base64url");
+  const digest = createHash("sha256").update(token).digest("base64url");
+
+  assert.equal(parseRevokeAuthorization(`Bearer ${token}`), token);
+  assert.equal(parseRevokeAuthorization(`bearer ${token}`), token);
+  for (const value of [undefined, "", token, "Bearer short", `Basic ${token}`]) {
+    assert.equal(parseRevokeAuthorization(value), undefined);
+  }
+  assert.equal(await revokeTokenMatches(digest, token), true);
+  assert.equal(await revokeTokenMatches(digest, Buffer.alloc(32, 12).toString("base64url")), false);
+  assert.equal(await revokeTokenMatches(undefined, token), false);
+  assert.equal(await revokeTokenMatches(digest, undefined), false);
 });
 
 test("treats the expiration instant as expired and rejects malformed storage", () => {

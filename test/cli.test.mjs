@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
@@ -346,6 +347,170 @@ test("fails closed when the server does not confirm a requested expiration", asy
   }
 });
 
+test("shares a revocable session without sending or storing the raw capability", async () => {
+  const fixture = await createCliSession(codexCliJsonl(1));
+  let receivedDigest;
+  let receivedBody;
+  const server = http.createServer((request, response) => {
+    receivedDigest = request.headers["x-threadshare-revoke-token-sha256"];
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      receivedBody = Buffer.concat(chunks).toString("utf8");
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ id: "11111111-2222-4333-8444-555555555555", revocable: true }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [cli, "share", "codex", fixture.file, "--revoke", "--url", serviceUrl, "--json"],
+      { encoding: "utf8" },
+    );
+    const payload = JSON.parse(result.stdout);
+    assert.match(payload.revokeToken, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(
+      receivedDigest,
+      createHash("sha256").update(payload.revokeToken).digest("base64url"),
+    );
+    assert.doesNotMatch(receivedBody, new RegExp(payload.revokeToken));
+    assert.deepEqual(Object.keys(payload).sort(), ["id", "revokeToken", "url"]);
+    assert.equal(result.stdout.split("\n").length, 2);
+    assert.equal(result.stderr, "");
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("prints a one-time revoke command to stderr while keeping human stdout stable", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-revoke-human-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  let receivedDigest;
+  const server = http.createServer((request, response) => {
+    receivedDigest = request.headers["x-threadshare-revoke-token-sha256"];
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ id: "11111111-2222-4333-8444-555555555555", revocable: true }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [cli, "publish", file, "--revoke", "--url", serviceUrl],
+      { encoding: "utf8" },
+    );
+    const url = `${serviceUrl}/?id=11111111-2222-4333-8444-555555555555`;
+    assert.equal(result.stdout, `${url}\n`);
+    const match = /^Revoke: threadshare revoke '([^']+)' --token '([A-Za-z0-9_-]{43})'\n$/.exec(
+      result.stderr,
+    );
+    assert.ok(match);
+    assert.equal(match[1], url);
+    assert.equal(receivedDigest, createHash("sha256").update(match[2]).digest("base64url"));
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when the server does not confirm requested revocation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-revoke-missing-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  const server = http.createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "11111111-2222-4333-8444-555555555555" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cli, "publish", file, "--revoke", "--url", serviceUrl, "--json"],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.equal(error.stdout, "");
+        assert.match(
+          error.stderr,
+          /server did not confirm revocation; the share may have been created without revocation/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("revokes a normalized share URL with bearer authorization", async () => {
+  const token = Buffer.alloc(32, 21).toString("base64url");
+  let received;
+  const server = http.createServer((request, response) => {
+    received = { method: request.method, path: request.url, authorization: request.headers.authorization };
+    response.writeHead(204);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const id = "11111111-2222-4333-8444-555555555555";
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+  const viewerUrl = `${serviceUrl}/?id=${id}`;
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [cli, "revoke", `${viewerUrl}#message-user-1`, "--token", token, "--json"],
+      { encoding: "utf8" },
+    );
+    assert.deepEqual(received, {
+      method: "DELETE",
+      path: `/api/v1/shares/${id}`,
+      authorization: `Bearer ${token}`,
+    });
+    assert.deepEqual(JSON.parse(result.stdout), { id, url: viewerUrl, revoked: true });
+    assert.equal(result.stdout.split("\n").length, 2);
+    assert.equal(result.stderr, "");
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test("rejects unsafe command option combinations before exporting or publishing", async () => {
   const fixture = await createCliSession(codexCliJsonl(2));
   const scenarios = [
@@ -388,6 +553,24 @@ test("rejects unsafe command option combinations before exporting or publishing"
     {
       args: ["share", "codex", fixture.file, "--expires", "60s"],
       expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
+    },
+    {
+      args: [
+        "revoke",
+        "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555&token=secret",
+        "--token",
+        Buffer.alloc(32, 1).toString("base64url"),
+      ],
+      expected: /valid Threadshare viewer or API URL/,
+    },
+    {
+      args: [
+        "revoke",
+        "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555",
+        "--token",
+        "short",
+      ],
+      expected: /--token must be a 256-bit base64url capability/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--format", "json"],
@@ -653,6 +836,8 @@ test("exports Codex reasoning summaries and custom tool activity", () => {
 
 test("redacts common credentials embedded in visible text", () => {
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+  const revokeToken = Buffer.alloc(32, 31).toString("base64url");
+  const jsonRevokeToken = Buffer.alloc(32, 32).toString("base64url");
   const history = exportClaudeJsonl(
     JSON.stringify({
       type: "user",
@@ -660,7 +845,7 @@ test("redacts common credentials embedded in visible text", () => {
       timestamp: "2026-07-30T00:00:01.000Z",
       message: {
         role: "user",
-        content: `token: "two words" ${jwt} postgres://alice:database-password@db.invalid/app Basic dTpw Bearer abc12345 Bearer AbCdEfGhIjKlMnOp sk-secret-key ghp_1234567890\nBasic authentication by a ghostwriter near a skyscraper. Bearer authentication is standardized. Explain bearer authorization headers.\nAuthorization: Bearer authentication\nAuthorization: Token auth-scheme-secret\nBearer a1b2c3\nBearer middleware validates requests.\nBearer ABCDEFGHIJKLMNOP expires tomorrow.\nThe Bearer middleware validates HTTP requests.\n- Bearer middleware validates HTTP requests.\nBearer authentication.\nAuthorization: Signature keyId="client",algorithm="hmac",signature="opaque-signature-secret"\nauth=inline-auth-secret status=ok\nBearer a1b2c3.`,
+        content: `token: "two words" ${jwt} postgres://alice:database-password@db.invalid/app Basic dTpw Bearer abc12345 Bearer AbCdEfGhIjKlMnOp sk-secret-key ghp_1234567890\nthreadshare revoke 'https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555' --token '${revokeToken}'\n{"revokeToken":"${jsonRevokeToken}"}\nBasic authentication by a ghostwriter near a skyscraper. Bearer authentication is standardized. Explain bearer authorization headers.\nAuthorization: Bearer authentication\nAuthorization: Token auth-scheme-secret\nBearer a1b2c3\nBearer middleware validates requests.\nBearer ABCDEFGHIJKLMNOP expires tomorrow.\nThe Bearer middleware validates HTTP requests.\n- Bearer middleware validates HTTP requests.\nBearer authentication.\nAuthorization: Signature keyId="client",algorithm="hmac",signature="opaque-signature-secret"\nauth=inline-auth-secret status=ok\nBearer a1b2c3.`,
       },
     }),
     { exportedAt: "2026-07-30T01:00:00.000Z" },
@@ -767,4 +952,5 @@ test("redacts common credentials embedded in visible text", () => {
     exported,
     /plural-secrets-output|plural-passwords-output|plural-tokens-output|plural-api-keys-output|plural-auths-output|claude-credentials-output|claude-cookies-output/,
   );
+  assert.doesNotMatch(exported, new RegExp(`${revokeToken}|${jsonRevokeToken}`));
 });

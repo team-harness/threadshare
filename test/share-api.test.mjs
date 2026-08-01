@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
@@ -51,7 +52,8 @@ test("normalizes UUID object keys", () => {
   );
 });
 
-test("parses optional expiration metadata without changing the history body", () => {
+test("parses optional lifecycle metadata without changing the history body", () => {
+  const revokeTokenSha256 = createHash("sha256").update("test capability").digest("base64url");
   assert.deepEqual(
     shareApi.parseShareCreationOptions({ expiresIn: undefined, revokeTokenSha256: undefined }),
     { ok: true },
@@ -75,12 +77,26 @@ test("parses optional expiration metadata without changing the history body", ()
   assert.deepEqual(
     shareApi.parseShareCreationOptions({
       expiresIn: undefined,
-      revokeTokenSha256: "not-enabled-yet",
+      revokeTokenSha256,
     }),
+    { ok: true, revokeTokenSha256 },
+  );
+  for (const value of ["", "short", `${"x".repeat(42)}=`, "x".repeat(43), "x".repeat(44)]) {
+    assert.deepEqual(
+      shareApi.parseShareCreationOptions({ expiresIn: undefined, revokeTokenSha256: value }),
+      {
+        ok: false,
+        status: 400,
+        error: "x-threadshare-revoke-token-sha256 must be a SHA-256 base64url digest",
+      },
+    );
+  }
+  assert.deepEqual(
+    shareApi.parseShareCreationOptions({ expiresIn: "60", revokeTokenSha256 }),
     {
-      ok: false,
-      status: 400,
-      error: "x-threadshare-revoke-token-sha256 is not supported",
+      ok: true,
+      expiresInSeconds: 60,
+      revokeTokenSha256,
     },
   );
   assert.equal(

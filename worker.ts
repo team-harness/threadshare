@@ -6,7 +6,13 @@ import {
   SHARE_CORS_HEADERS,
 } from "./src/share-api";
 import { isShareId, shareKey } from "./src/share-schema";
-import { createStoredShare, decodeStoredShare, isShareExpired } from "./src/stored-share";
+import {
+  createStoredShare,
+  decodeStoredShare,
+  isShareExpired,
+  parseRevokeAuthorization,
+  revokeTokenMatches,
+} from "./src/stored-share";
 
 interface R2StoredObject {
   body: ReadableStream<Uint8Array> | null;
@@ -31,16 +37,29 @@ interface WorkerOptions {
   now?: () => number;
 }
 
+function apiJsonResponse(method: string, status: number, payload: object): Response {
+  return method === "DELETE"
+    ? jsonResponse(status, payload, { "cache-control": "no-store" })
+    : jsonResponse(status, payload);
+}
+
 async function createShare(request: Request, env: Env, now: () => number): Promise<Response> {
   const parsed = await parseShareRequest(request);
   if (!parsed.ok) return jsonResponse(parsed.status, { error: parsed.error });
 
   const id = crypto.randomUUID();
-  const stored = createStoredShare(parsed.history, now(), parsed.expiresInSeconds);
+  const stored = createStoredShare(parsed.history, now(), {
+    expiresInSeconds: parsed.expiresInSeconds,
+    revokeTokenSha256: parsed.revokeTokenSha256,
+  });
   await env.THREADSHARE_BUCKET.put(shareKey(id), JSON.stringify(stored), {
     httpMetadata: { contentType: JSON_CONTENT_TYPE },
   });
-  return jsonResponse(201, { id, ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}) });
+  return jsonResponse(201, {
+    id,
+    ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}),
+    ...(stored.revokeTokenSha256 ? { revocable: true } : {}),
+  });
 }
 
 async function readShare(id: string, env: Env, now: () => number): Promise<Response> {
@@ -63,6 +82,26 @@ async function readShare(id: string, env: Env, now: () => number): Promise<Respo
   });
 }
 
+function revokeNotFoundResponse(): Response {
+  return apiJsonResponse("DELETE", 404, { error: "Shared history was not found" });
+}
+
+async function revokeShare(id: string, authorization: string | null, env: Env): Promise<Response> {
+  if (!isShareId(id)) return revokeNotFoundResponse();
+
+  const key = shareKey(id);
+  const object = await env.THREADSHARE_BUCKET.get(key);
+  if (!object?.body) return revokeNotFoundResponse();
+  const stored = decodeStoredShare(await new Response(object.body).text());
+  const token = parseRevokeAuthorization(authorization);
+  if (!(await revokeTokenMatches(stored.revokeTokenSha256, token))) {
+    return revokeNotFoundResponse();
+  }
+
+  await env.THREADSHARE_BUCKET.delete(key);
+  return new Response(null, { status: 204 });
+}
+
 export function createWorker({ now = Date.now }: WorkerOptions = {}) {
   return {
     async fetch(request, env): Promise<Response> {
@@ -75,19 +114,22 @@ export function createWorker({ now = Date.now }: WorkerOptions = {}) {
             return new Response(null, { status: 204, headers: SHARE_CORS_HEADERS });
           }
           if (request.method === "POST") return await createShare(request, env, now);
-          return jsonResponse(405, { error: "Method not allowed" });
+          return apiJsonResponse(request.method, 405, { error: "Method not allowed" });
         }
 
         const match = /^\/api\/v1\/shares\/([^/]+)$/.exec(url.pathname);
         if (match) {
           if (request.method === "GET") return await readShare(match[1], env, now);
-          return jsonResponse(405, { error: "Method not allowed" });
+          if (request.method === "DELETE") {
+            return await revokeShare(match[1], request.headers.get("authorization"), env);
+          }
+          return apiJsonResponse(request.method, 405, { error: "Method not allowed" });
         }
 
-        return jsonResponse(404, { error: "Not found" });
+        return apiJsonResponse(request.method, 404, { error: "Not found" });
       } catch (error) {
         console.error("Threadshare API request failed", error);
-        return jsonResponse(500, { error: "Unable to process shared history" });
+        return apiJsonResponse(request.method, 500, { error: "Unable to process shared history" });
       }
     },
   } satisfies ExportedHandler<Env>;

@@ -11,7 +11,13 @@ import {
   SHARE_CORS_HEADERS,
 } from "../src/share-api";
 import { CHAT_SHARE_MAX_BYTES, isShareId, shareKey } from "../src/share-schema";
-import { createStoredShare, decodeStoredShare, isShareExpired } from "../src/stored-share";
+import {
+  createStoredShare,
+  decodeStoredShare,
+  isShareExpired,
+  parseRevokeAuthorization,
+  revokeTokenMatches,
+} from "../src/stored-share";
 import staticAssets from "./static-assets";
 
 type Environment = Record<string, string | undefined>;
@@ -45,7 +51,7 @@ function json(statusCode: number, payload: object, cors = true): FcResponse {
   return {
     statusCode,
     headers: {
-      ...(cors ? SHARE_CORS_HEADERS : {}),
+      ...(cors ? SHARE_CORS_HEADERS : { "cache-control": "no-store" }),
       "content-type": JSON_CONTENT_TYPE,
     },
     body: JSON.stringify(payload),
@@ -137,11 +143,8 @@ async function loadHistory(
   now: () => number,
   logger: Pick<Console, "error">,
 ): Promise<FcResponse> {
-  const request = ossRequest(environment, "GET", shareKey(id));
-  const response = await fetchImpl(request.url, { headers: request.headers });
-  if (response.status === 404) return json(404, { error: "Shared history was not found" });
-  if (!response.ok) throw new Error(`OSS read failed with ${response.status}`);
-  const stored = decodeStoredShare(await response.text());
+  const stored = await loadStoredShare(id, environment, fetchImpl);
+  if (!stored) return json(404, { error: "Shared history was not found" });
   if (isShareExpired(stored.expiresAt, now())) {
     try {
       await deleteHistory(id, environment, fetchImpl);
@@ -157,6 +160,18 @@ async function loadHistory(
   };
 }
 
+async function loadStoredShare(
+  id: string,
+  environment: Environment,
+  fetchImpl: typeof fetch,
+): Promise<ReturnType<typeof decodeStoredShare> | undefined> {
+  const request = ossRequest(environment, "GET", shareKey(id));
+  const response = await fetchImpl(request.url, { headers: request.headers });
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`OSS read failed with ${response.status}`);
+  return decodeStoredShare(await response.text());
+}
+
 async function deleteHistory(
   id: string,
   environment: Environment,
@@ -167,6 +182,23 @@ async function deleteHistory(
   if (!response.ok && response.status !== 404) {
     throw new Error(`OSS delete failed with ${response.status}`);
   }
+}
+
+async function revokeHistory(
+  id: string,
+  authorization: string | undefined,
+  environment: Environment,
+  fetchImpl: typeof fetch,
+): Promise<FcResponse> {
+  if (!isShareId(id)) return json(404, { error: "Shared history was not found" }, false);
+  const stored = await loadStoredShare(id, environment, fetchImpl);
+  if (!stored) return json(404, { error: "Shared history was not found" }, false);
+  const token = parseRevokeAuthorization(authorization);
+  if (!(await revokeTokenMatches(stored.revokeTokenSha256, token))) {
+    return json(404, { error: "Shared history was not found" }, false);
+  }
+  await deleteHistory(id, environment, fetchImpl);
+  return { statusCode: 204, headers: {} };
 }
 
 function staticResponse(path: string, method: string, assets: StaticAssets): FcResponse {
@@ -200,7 +232,9 @@ export function createHandler({
         if (method === "OPTIONS") {
           return { statusCode: 204, headers: SHARE_CORS_HEADERS };
         }
-        if (method !== "POST") return json(405, { error: "Method not allowed" });
+        if (method !== "POST") {
+          return json(405, { error: "Method not allowed" }, method !== "DELETE");
+        }
 
         const contentType = header(event, "content-type");
         if (!isJsonContentType(contentType)) {
@@ -227,23 +261,42 @@ export function createHandler({
         const parsed = parseShareBody(contentType, eventBody(event));
         if (!parsed.ok) return json(parsed.status, { error: parsed.error });
         const id = randomUUID();
-        const stored = createStoredShare(parsed.history, now(), creationOptions.expiresInSeconds);
+        const stored = createStoredShare(parsed.history, now(), {
+          expiresInSeconds: creationOptions.expiresInSeconds,
+          revokeTokenSha256: creationOptions.revokeTokenSha256,
+        });
         await saveHistory(JSON.stringify(stored), id, environment, fetchImpl);
-        return json(201, { id, ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}) });
+        return json(201, {
+          id,
+          ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}),
+          ...(stored.revokeTokenSha256 ? { revocable: true } : {}),
+        });
       }
 
       const match = /^\/api\/v1\/shares\/([^/]+)$/.exec(path);
       if (match) {
-        if (method !== "GET") return json(405, { error: "Method not allowed" });
-        if (!isShareId(match[1])) return json(404, { error: "Shared history was not found" });
-        return await loadHistory(match[1], environment, fetchImpl, now, logger);
+        if (method === "GET") {
+          if (!isShareId(match[1])) return json(404, { error: "Shared history was not found" });
+          return await loadHistory(match[1], environment, fetchImpl, now, logger);
+        }
+        if (method === "DELETE") {
+          return await revokeHistory(
+            match[1],
+            header(event, "authorization"),
+            environment,
+            fetchImpl,
+          );
+        }
+        return json(405, { error: "Method not allowed" }, method !== "DELETE");
       }
 
-      if (path.startsWith("/api/")) return json(404, { error: "Not found" });
+      if (path.startsWith("/api/")) {
+        return json(404, { error: "Not found" }, method !== "DELETE");
+      }
       return staticResponse(path, method, assets);
     } catch (error) {
       logger.error("Threadshare API request failed", error);
-      return json(500, { error: "Unable to process shared history" });
+      return json(500, { error: "Unable to process shared history" }, method !== "DELETE");
     }
   };
 }

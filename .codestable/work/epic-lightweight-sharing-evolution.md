@@ -2,8 +2,8 @@
 epic: ../epics/lightweight-sharing-evolution.md
 phase: executing
 approved_revision: 0f8f1b78ca6747eac74057e928c9c8986e96dbc3d0887870ae86b40dfe19dc37
-current_item: ITEM-2
-next_action: implement capability revocation for ITEM-2
+current_item: ITEM-3
+next_action: implement agent-native share reading for ITEM-3
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -13,7 +13,7 @@ remote_publish: final
 ## 子项进度
 
 - [x] ITEM-1
-- [ ] ITEM-2
+- [x] ITEM-2
 - [ ] ITEM-3
 - [ ] ITEM-4
 - [ ] ITEM-5
@@ -21,6 +21,7 @@ remote_publish: final
 
 ## 临时决策与证据
 
+- ITEM-1 milestone commit：`933aab0`（`feat: add optional share expiration`），仅本地提交，未推送。
 - 2026-08-01：仓库 `main` 与 `origin/main` 一致，设计前工作区干净。
 - 2026-08-01：codebase-memory 项目 `Users-wyattfang-work-threadshare` 状态为 ready，共 445 nodes / 965 edges。
 - 2026-08-01：基线 `npm test` 通过：CLI 69 tests、API 11 tests、FC 7 tests，Cloudflare/FC build 同步通过。
@@ -49,3 +50,9 @@ remote_publish: final
 - ITEM-1 round 2 首次运行：agent `ba488d61-55e9-46b6-beda-ec24514a3cd1`，turn `e0a37a5b-cbeb-46cc-889a-badd7224e1b0`；因 `MAX_TURNS_EXCEEDED` 终止且无报告，不计审查轮次，已销毁。
 - ITEM-1 reviewer round 2：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `8e9ee8d6-6112-4797-a5db-7bcda953c7db`，turn `2d1fa908-18fc-4e9f-8e15-2d70592daaf0`，result message `d3456aac-6893-42bb-9826-a355d173d02b`，状态 completed，已销毁 reviewer。
 - ITEM-1 round 2 findings：0 Blocking、0 Important、2 Minor，结论可创建里程碑提交。Minor 均为批准契约：非 JSON 实际分享 stdout 继续只输出 URL；成功 GET 明确不返回存储 ETag。
+- 2026-08-01 ITEM-2 TDD：先观察 capability 摘要存储、DELETE 鉴权、CLI `--revoke` / `revoke`、URL 规范化与凭据脱敏的新增测试失败，随后实现转绿。
+- 2026-08-01 ITEM-2 自查：CLI 仅在本机生成并输出一次性 token，POST 与存储只包含 SHA-256 base64url 摘要；旧服务未返回 `revocable: true` 时严格失败；CF/FC 均按固定键读取、常量时间比较、删除的顺序处理，错误/缺失 capability、旧对象与不存在对象统一 404，正确 capability 可撤销已过期对象；所有 DELETE 响应均不进入 CORS 契约；Viewer/API URL 规范化保持 origin 并拒绝凭据、额外 query 与双斜线路径。
+- 2026-08-01 ITEM-2 候选验证：`npm test` 通过（CLI 75 tests、API/Worker 25 tests、FC 14 tests），Cloudflare 与 FC build 均通过；待冻结 staged diff 后执行 fresh Claude/Fable 5 独立审查。
+- ITEM-2 review round 1 target：staged diff SHA-256 `451c6f1badb2f55663ce28dec035d40c0bef97b218cf9033bbf8d46821af4ffb`，基线 `933aab0`。
+- ITEM-2 reviewer round 1：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `604c9b2c-9a4e-4820-8c8d-3030a4aa57f5`，turn `4bcf68ab-322b-4061-96c7-c39a5f94b1ab`，result message `d84a38b1-565a-4b03-ab5e-c4bf50d4b5fa`，状态 completed，已销毁 reviewer。
+- ITEM-2 round 1 findings：0 Blocking、0 Important、4 Minor，结论可创建里程碑提交。Minor 为缺失凭据时可提前短路存储读取、补充不存在对象重复撤销测试、两个 256-bit base64url 正则的维护性重复，以及 ITEM-3 需明确 fragment 合法性；均不影响批准契约，前三项保持当前清晰行为，fragment 语义在 ITEM-3 实现时一并对齐。

@@ -1,9 +1,13 @@
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const test = require("node:test");
 
 const { createHandler } = require("./dist/index.cjs");
 
 const NOW = Date.parse("2026-08-01T10:00:00.000Z");
+const REVOKE_TOKEN = Buffer.alloc(32, 17).toString("base64url");
+const WRONG_REVOKE_TOKEN = Buffer.alloc(32, 18).toString("base64url");
+const REVOKE_DIGEST = createHash("sha256").update(REVOKE_TOKEN).digest("base64url");
 
 const environment = {
   THREADSHARE_OSS_ACCESS_KEY_ID: "test-key",
@@ -144,6 +148,119 @@ test("stores expiration metadata and lazily deletes at the boundary", async () =
   assert.equal(requests.at(-1).init.method, "DELETE");
 });
 
+test("stores only a revoke digest and deletes with the matching bearer capability", async () => {
+  const { handler, objects, requests } = createTestHandler({ now: () => NOW });
+  const created = await handler({
+    rawPath: "/api/v1/shares",
+    httpMethod: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-threadshare-revoke-token-sha256": REVOKE_DIGEST,
+    },
+    body: JSON.stringify(history()),
+  });
+
+  assert.equal(created.statusCode, 201);
+  const payload = JSON.parse(created.body);
+  assert.equal(payload.revocable, true);
+  const key = `shares/${payload.id}.json`;
+  const raw = objects.get(key);
+  assert.equal(JSON.parse(raw).revokeTokenSha256, REVOKE_DIGEST);
+  assert.doesNotMatch(raw, new RegExp(REVOKE_TOKEN));
+
+  const wrong = await handler({
+    rawPath: `/api/v1/shares/${payload.id}`,
+    httpMethod: "DELETE",
+    headers: { authorization: `Bearer ${WRONG_REVOKE_TOKEN}` },
+  });
+  assert.equal(wrong.statusCode, 404);
+  assert.equal(wrong.headers["access-control-allow-origin"], undefined);
+  assert.equal(objects.has(key), true);
+  assert.equal(requests.at(-1).init.method, undefined);
+
+  const revoked = await handler({
+    rawPath: `/api/v1/shares/${payload.id}`,
+    httpMethod: "DELETE",
+    headers: { authorization: `Bearer ${REVOKE_TOKEN}` },
+  });
+  assert.equal(revoked.statusCode, 204);
+  assert.equal(revoked.headers["access-control-allow-origin"], undefined);
+  assert.equal(objects.has(key), false);
+  assert.deepEqual(requests.slice(-2).map((request) => request.init.method), [undefined, "DELETE"]);
+});
+
+test("hides missing capabilities and lets a valid capability revoke an expired share", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const key = `shares/${id}.json`;
+  const { handler, objects } = createTestHandler({ now: () => NOW });
+  objects.set(
+    key,
+    JSON.stringify({
+      format: "threadshare-object@v1",
+      createdAt: "2026-08-01T09:59:00.000Z",
+      expiresAt: "2026-08-01T10:00:00.000Z",
+      revokeTokenSha256: REVOKE_DIGEST,
+      history: history(),
+    }),
+  );
+
+  for (const authorization of [undefined, "Bearer short"]) {
+    const response = await handler({
+      rawPath: `/api/v1/shares/${id}`,
+      httpMethod: "DELETE",
+      ...(authorization ? { headers: { authorization } } : {}),
+    });
+    assert.equal(response.statusCode, 404);
+    assert.deepEqual(JSON.parse(response.body), { error: "Shared history was not found" });
+    assert.equal(objects.has(key), true);
+  }
+
+  const revoked = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "DELETE",
+    headers: { authorization: `Bearer ${REVOKE_TOKEN}` },
+  });
+  assert.equal(revoked.statusCode, 204);
+  assert.equal(objects.has(key), false);
+
+  objects.set(key, JSON.stringify(history()));
+  const oldObject = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "DELETE",
+    headers: { authorization: `Bearer ${REVOKE_TOKEN}` },
+  });
+  assert.equal(oldObject.statusCode, 404);
+  assert.equal(objects.has(key), true);
+});
+
+test("keeps DELETE storage failures outside the browser CORS contract", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const errors = [];
+  const raw = JSON.stringify({
+    format: "threadshare-object@v1",
+    createdAt: "2026-08-01T10:00:00.000Z",
+    revokeTokenSha256: REVOKE_DIGEST,
+    history: history(),
+  });
+  const { handler } = createTestHandler({
+    logger: { error: (...args) => errors.push(args) },
+    fetchImpl: async (_url, init = {}) =>
+      init.method === "DELETE"
+        ? new Response(null, { status: 500 })
+        : new Response(raw, { status: 200 }),
+  });
+
+  const response = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "DELETE",
+    headers: { authorization: `Bearer ${REVOKE_TOKEN}` },
+  });
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.headers["access-control-allow-origin"], undefined);
+  assert.deepEqual(JSON.parse(response.body), { error: "Unable to process shared history" });
+  assert.equal(errors.length, 1);
+});
+
 test("keeps an expired share unavailable when OSS lazy deletion fails", async () => {
   const errors = [];
   const raw = JSON.stringify({
@@ -170,20 +287,22 @@ test("keeps an expired share unavailable when OSS lazy deletion fails", async ()
   assert.equal(errors.length, 1);
 });
 
-test("rejects invalid expiration before writing to OSS", async () => {
-  const { handler, requests } = createTestHandler();
-  const response = await handler({
-    rawPath: "/api/v1/shares",
-    httpMethod: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-threadshare-expires-in": "31536001",
-    },
-    body: JSON.stringify(history()),
-  });
+test("rejects invalid lifecycle headers before writing to OSS", async () => {
+  for (const headers of [
+    { "x-threadshare-expires-in": "31536001" },
+    { "x-threadshare-revoke-token-sha256": "not-a-digest" },
+  ]) {
+    const { handler, requests } = createTestHandler();
+    const response = await handler({
+      rawPath: "/api/v1/shares",
+      httpMethod: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(history()),
+    });
 
-  assert.equal(response.statusCode, 400);
-  assert.equal(requests.length, 0);
+    assert.equal(response.statusCode, 400);
+    assert.equal(requests.length, 0);
+  }
 });
 
 test("matches the canonical RFC 3339 timestamp contract", async () => {

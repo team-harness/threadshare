@@ -206,7 +206,11 @@ export function redactSecrets(value) {
       "$1[REDACTED]",
     )
     .replace(
-      /((?:"|')?(?:api[_-]?keys?|access[_-]?key(?:s|[_-]?(?:ids?|secrets?))?|secret[_-]?access[_-]?keys?|access[_-]?tokens?|refresh[_-]?tokens?|session[_-]?tokens?|auths?|authentications?|authorizations?|cookies?|credentials?|client[_-]?secrets?|passwords?|private[_-]?keys?|secrets?|tokens?)(?:"|')?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+|[^\s,;]+)/gi,
+      /((?:"|')?(?:api[_-]?keys?|access[_-]?key(?:s|[_-]?(?:ids?|secrets?))?|secret[_-]?access[_-]?keys?|access[_-]?tokens?|refresh[_-]?tokens?|session[_-]?tokens?|revoke[_-]?tokens?|auths?|authentications?|authorizations?|cookies?|credentials?|client[_-]?secrets?|passwords?|private[_-]?keys?|secrets?|tokens?)(?:"|')?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+|[^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /((?:^|\s)--(?:revoke-)?token(?:=|\s+))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi,
       "$1[REDACTED]",
     )
     .replace(/\b(Basic)\s+([A-Za-z0-9+/]+={0,2})/gi, (match, scheme, token) => {

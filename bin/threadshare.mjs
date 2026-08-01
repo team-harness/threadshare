@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
@@ -18,11 +19,12 @@ import {
   MAX_SESSION_PAGE_SIZE,
   listSessions,
 } from "../src/session-listing.mjs";
+import { parseShareReference } from "../src/share-url.mjs";
 
 const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
-const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start"]);
+const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start", "revoke"]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 const historySchema = JSON.parse(
   readFileSync(new URL("../schema/threadshare-history.v1.schema.json", import.meta.url), "utf8"),
@@ -36,8 +38,9 @@ function usage() {
   threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
   threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
   threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-  threadshare publish <history.json|-> [--expires <duration>] [--url <service-url>] [--json]
-  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--expires <duration>] [--url <service-url>] [--json]
+  threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+  threadshare revoke <share-url> --token <token> [--json]
   threadshare validate <history.json|->
 
 Range: omit --from and --before for the full visible snapshot; empty values are rejected.
@@ -163,6 +166,25 @@ function serviceUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 
+function createRevokeCapability() {
+  const token = randomBytes(32).toString("base64url");
+  return {
+    token,
+    digest: createHash("sha256").update(token).digest("base64url"),
+  };
+}
+
+function validateRevokeToken(token) {
+  if (!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(token ?? "")) {
+    throw new Error("--token must be a 256-bit base64url capability");
+  }
+  return token;
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 async function readInput(file) {
   if (file !== "-") return readFile(file, "utf8");
   process.stdin.setEncoding("utf8");
@@ -188,10 +210,14 @@ function validateHistory(history) {
   return history;
 }
 
-async function publish(history, url, { expiresInSeconds } = {}) {
+async function publish(history, url, { expiresInSeconds, revoke = false } = {}) {
   const headers = { "content-type": "application/json" };
   if (expiresInSeconds !== undefined) {
     headers["x-threadshare-expires-in"] = String(expiresInSeconds);
+  }
+  const revokeCapability = revoke ? createRevokeCapability() : undefined;
+  if (revokeCapability) {
+    headers["x-threadshare-revoke-token-sha256"] = revokeCapability.digest;
   }
   const response = await fetch(`${serviceUrl(url)}/api/v1/shares`, {
     method: "POST",
@@ -208,11 +234,43 @@ async function publish(history, url, { expiresInSeconds } = {}) {
       "Threadshare server did not confirm the requested expiration; the share may have been created without expiration",
     );
   }
+  if (revokeCapability && payload.revocable !== true) {
+    throw new Error(
+      "Threadshare server did not confirm revocation; the share may have been created without revocation",
+    );
+  }
   return {
     id: payload.id,
     url: `${serviceUrl(url)}/?id=${encodeURIComponent(payload.id)}`,
     ...(expiresAt === undefined ? {} : { expiresAt }),
+    ...(revokeCapability === undefined ? {} : { revokeToken: revokeCapability.token }),
   };
+}
+
+function writePublishResult(result, json) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  process.stdout.write(`${result.url}\n`);
+  if (result.revokeToken) {
+    process.stderr.write(
+      `Revoke: threadshare revoke ${shellQuote(result.url)} --token ${shellQuote(result.revokeToken)}\n`,
+    );
+  }
+}
+
+async function revokeShare(reference, token) {
+  const response = await fetch(reference.apiUrl, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+    redirect: "error",
+  });
+  if (response.status !== 204) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error || `Threadshare revoke failed with HTTP ${response.status}`);
+  }
+  return { id: reference.id, url: reference.url, revoked: true };
 }
 
 async function exportProviderSession(provider, session) {
@@ -343,14 +401,20 @@ async function main() {
     return;
   }
   if (command === "publish") {
-    validateCommandShape(command, positionals, options, 2, new Set(["expires", "json", "url"]));
+    validateCommandShape(
+      command,
+      positionals,
+      options,
+      2,
+      new Set(["expires", "json", "revoke", "url"]),
+    );
     const expiresInSeconds = parseExpiresDuration(options.expires);
     const result = await publish(
       validateHistory(JSON.parse(await readInput(positionals[1]))),
       options.url,
-      { expiresInSeconds },
+      { expiresInSeconds, revoke: options.revoke === true },
     );
-    process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
+    writePublishResult(result, options.json === true);
     return;
   }
   if (command === "share") {
@@ -358,7 +422,7 @@ async function main() {
       command,
       positionals,
       options,
-      new Set(["before", "expires", "from", "json", "pick-start", "url"]),
+      new Set(["before", "expires", "from", "json", "pick-start", "revoke", "url"]),
     );
     if (options["pick-start"] && (options.from || options.before)) {
       throw new Error("--pick-start cannot be combined with --from or --before");
@@ -368,8 +432,19 @@ async function main() {
     const exported = validateHistory(await exportProviderSession(provider, session));
     const from = options["pick-start"] ? await pickStartMessage(exported) : options.from;
     const history = rangedHistory(exported, { ...options, from });
-    const result = await publish(history, options.url, { expiresInSeconds });
-    process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
+    const result = await publish(history, options.url, {
+      expiresInSeconds,
+      revoke: options.revoke === true,
+    });
+    writePublishResult(result, options.json === true);
+    return;
+  }
+  if (command === "revoke") {
+    validateCommandShape(command, positionals, options, 2, new Set(["json", "token"]));
+    const reference = parseShareReference(positionals[1]);
+    const token = validateRevokeToken(options.token);
+    const result = await revokeShare(reference, token);
+    process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `Revoked ${result.url}\n`);
     return;
   }
   throw new Error(usage());
