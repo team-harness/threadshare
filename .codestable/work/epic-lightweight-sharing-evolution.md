@@ -3,7 +3,7 @@ epic: ../epics/lightweight-sharing-evolution.md
 phase: acceptance
 approved_revision: 1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb
 current_item: acceptance
-next_action: run integration verification and a fresh acceptance review
+next_action: await owner final acceptance
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -91,3 +91,14 @@ remote_publish: final
 - ITEM-6 review round 2 target：staged diff SHA-256 `d96aa3b7b35a5b4e595130b50bcae3491cc56667ecb12fa91d4dab9bd2a53b91`，基线 `55c59f8`。
 - ITEM-6 reviewer round 2：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `87a820e7-915c-42d0-bd74-27097aa3ab80`，native session `3a6480a6-8fad-447e-8eaf-e1dae1ce34ed`，状态 completed，无回退，已归档。
 - ITEM-6 round 2 findings：0 Blocking、0 Important、2 Nit，结论可合；Round 1 Important 与三个 Nit 均闭环。剩余 Nit 为既有外部 Skill 校验脚本路径可复现性说明，以及中文 API 摘要未重复英文块中的 `Bearer` 一词；正文已明确 Authorization 语义，均不移动已通过候选。
+- ITEM-6 milestone commit：`177db32`（`docs: document sharing lifecycle`），仅本地提交，待 Epic final publish。
+- 2026-08-02 acceptance integration verification：批准 Epic SHA-256 仍为 `1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb`；`npm test` 通过（CLI 85、Viewer 2、API/Worker 25、FC 14），独立 Cloudflare build、Skill quick validation 与 16 文件 pack dry run 通过。
+- Acceptance review round 1 target：immutable range `7016ebc20bdac4e804b99afb4b8c50334d395db4..177db3226dc21ab1dac8cf77bccfcf5b0ba7948d`，binary diff SHA-256 `9ec282ed5e36a944109e6c44cb5c9d80453024c3702f0bfb89bdbc7725e0ffe6`，批准 Epic SHA-256 `1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb`。
+- Acceptance reviewer round 1：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `624f2c8d-25e2-4539-88b1-43e03816c35b`，native session `18153556-e178-4969-af8e-58859594992a`，状态 completed，无回退，已归档。
+- Acceptance round 1 findings：0 Blocking、1 Important、5 Nit，结论有条件可合。Important 为合法 256-bit revoke token 以 `--` 开头时被通用参数解析器误判为新选项，导致 CLI 自己打印的 revoke 命令不可用；其余 Epic 整体验收标准均达标。
+- 2026-08-02 acceptance issue TDD：新增固定 32-byte token 的真实 CLI + HTTP DELETE 回归测试，修复前稳定失败为 `Missing value for --token`；随后仅为 `--token` 的 opaque value 放行 `--` 前缀，保留完整随机值域与后续 256-bit 正则校验，定向测试转绿，CLI 全套增至 86 tests 且严格参数场景无回归。
+- 2026-08-02 acceptance fix verification：`npm test` 通过（CLI 86、Viewer 2、API/Worker 25、FC 14），独立 Cloudflare build、Skill quick validation 与 16 文件 pack dry run 通过；实际修复后 `0.4.0` tarball 已安装到独立临时 prefix，安装包包含 opaque token 解析修复且 `threadshare --help` 正常。
+- Acceptance review round 2 target：上述 immutable range + staged patch SHA-256 `d2671c470bca93213f75c0f2c78a6549a35c0675428c503f7560b12a8bd8081a`，无 unstaged diff，批准 Epic SHA-256 不变。
+- Acceptance reviewer round 2：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `667d3c19-8f66-4ceb-8da3-7118756d1eac`，native session `cebe6198-f22c-4274-b82b-40f59da5246f`，状态 completed，无回退，已归档。
+- Acceptance round 2 findings：0 Blocking、0 Important、2 Nit，结论通过/可合，Round 1 Important 根因闭环，Epic 全部整体验收标准达标。两个 Nit 为重复或漏填 token 时错误分类/文案差异，均仍在网络前严格失败，不影响验收。
+- Acceptance fix commit：`50c202c`（`fix: accept all revoke capability tokens`），仅本地提交，待 Epic final publish。
