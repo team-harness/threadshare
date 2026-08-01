@@ -513,6 +513,40 @@ test("revokes a normalized share URL with bearer authorization", async () => {
   }
 });
 
+test("revokes with a valid capability that starts with an option prefix", async () => {
+  const tokenBytes = Buffer.alloc(32);
+  tokenBytes[0] = 0xfb;
+  tokenBytes[1] = 0xe0;
+  const token = tokenBytes.toString("base64url");
+  assert.match(token, /^--/);
+
+  let authorization;
+  const server = http.createServer((request, response) => {
+    authorization = request.headers.authorization;
+    response.writeHead(204);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const id = "11111111-2222-4333-8444-555555555555";
+  const viewerUrl = `http://127.0.0.1:${address.port}/?id=${id}`;
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [cli, "revoke", viewerUrl, "--token", token, "--json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(authorization, `Bearer ${token}`);
+    assert.deepEqual(JSON.parse(result.stdout), { id, url: viewerUrl, revoked: true });
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test("reads Viewer and API URLs as JSON or Markdown without following redirects", async () => {
   const id = "11111111-2222-4333-8444-555555555555";
   const redirectId = "22222222-3333-4444-8555-666666666666";

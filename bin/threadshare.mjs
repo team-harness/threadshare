@@ -31,6 +31,7 @@ const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
 const BOOLEAN_OPTIONS = new Set(["dry-run", "help", "json", "pick-start", "report", "revoke"]);
+const OPAQUE_VALUE_OPTIONS = new Set(["token"]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 function usage() {
   return `Usage:
@@ -111,7 +112,9 @@ function parseArgs(args) {
       continue;
     }
     const next = args[++index];
-    if (!next || next.startsWith("--")) throw new Error(`Missing value for --${key}`);
+    if (!next || (next.startsWith("--") && !OPAQUE_VALUE_OPTIONS.has(key))) {
+      throw new Error(`Missing value for --${key}`);
+    }
     options[key] = next;
   }
   return { positionals, options };
