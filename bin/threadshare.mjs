@@ -23,6 +23,7 @@ const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
 const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start"]);
+const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 const historySchema = JSON.parse(
   readFileSync(new URL("../schema/threadshare-history.v1.schema.json", import.meta.url), "utf8"),
 );
@@ -35,12 +36,23 @@ function usage() {
   threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
   threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
   threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-  threadshare publish <history.json|-> [--url <service-url>] [--json]
-  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--url <service-url>] [--json]
+  threadshare publish <history.json|-> [--expires <duration>] [--url <service-url>] [--json]
+  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--expires <duration>] [--url <service-url>] [--json]
   threadshare validate <history.json|->
 
 Range: omit --from and --before for the full visible snapshot; empty values are rejected.
 Default service: ${DEFAULT_THREADSHARE_URL}`;
+}
+
+function parseExpiresDuration(value) {
+  if (value === undefined) return undefined;
+  const match = /^([1-9]\d*)([mhd])$/.exec(value);
+  const multipliers = { m: 60, h: 60 * 60, d: 24 * 60 * 60 };
+  const seconds = match ? Number(match[1]) * multipliers[match[2]] : Number.NaN;
+  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > MAX_EXPIRES_IN_SECONDS) {
+    throw new Error("--expires must be a duration from 1m to 365d using m, h, or d");
+  }
+  return seconds;
 }
 
 function providerLabel(provider) {
@@ -176,17 +188,31 @@ function validateHistory(history) {
   return history;
 }
 
-async function publish(history, url) {
+async function publish(history, url, { expiresInSeconds } = {}) {
+  const headers = { "content-type": "application/json" };
+  if (expiresInSeconds !== undefined) {
+    headers["x-threadshare-expires-in"] = String(expiresInSeconds);
+  }
   const response = await fetch(`${serviceUrl(url)}/api/v1/shares`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify(history),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload?.id) {
     throw new Error(payload?.error || `Threadshare upload failed with HTTP ${response.status}`);
   }
-  return { id: payload.id, url: `${serviceUrl(url)}/?id=${encodeURIComponent(payload.id)}` };
+  const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : undefined;
+  if (expiresInSeconds !== undefined && expiresAt === undefined) {
+    throw new Error(
+      "Threadshare server did not confirm the requested expiration; the share may have been created without expiration",
+    );
+  }
+  return {
+    id: payload.id,
+    url: `${serviceUrl(url)}/?id=${encodeURIComponent(payload.id)}`,
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+  };
 }
 
 async function exportProviderSession(provider, session) {
@@ -317,10 +343,12 @@ async function main() {
     return;
   }
   if (command === "publish") {
-    validateCommandShape(command, positionals, options, 2, new Set(["json", "url"]));
+    validateCommandShape(command, positionals, options, 2, new Set(["expires", "json", "url"]));
+    const expiresInSeconds = parseExpiresDuration(options.expires);
     const result = await publish(
       validateHistory(JSON.parse(await readInput(positionals[1]))),
       options.url,
+      { expiresInSeconds },
     );
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
     return;
@@ -330,16 +358,17 @@ async function main() {
       command,
       positionals,
       options,
-      new Set(["before", "from", "json", "pick-start", "url"]),
+      new Set(["before", "expires", "from", "json", "pick-start", "url"]),
     );
     if (options["pick-start"] && (options.from || options.before)) {
       throw new Error("--pick-start cannot be combined with --from or --before");
     }
     if (options["pick-start"]) requireInteractiveTerminal();
+    const expiresInSeconds = parseExpiresDuration(options.expires);
     const exported = validateHistory(await exportProviderSession(provider, session));
     const from = options["pick-start"] ? await pickStartMessage(exported) : options.from;
     const history = rangedHistory(exported, { ...options, from });
-    const result = await publish(history, options.url);
+    const result = await publish(history, options.url, { expiresInSeconds });
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `${result.url}\n`);
     return;
   }

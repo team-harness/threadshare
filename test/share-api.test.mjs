@@ -51,6 +51,44 @@ test("normalizes UUID object keys", () => {
   );
 });
 
+test("parses optional expiration metadata without changing the history body", () => {
+  assert.deepEqual(
+    shareApi.parseShareCreationOptions({ expiresIn: undefined, revokeTokenSha256: undefined }),
+    { ok: true },
+  );
+  for (const value of ["60", "31536000"]) {
+    assert.deepEqual(
+      shareApi.parseShareCreationOptions({ expiresIn: value, revokeTokenSha256: undefined }),
+      { ok: true, expiresInSeconds: Number(value) },
+    );
+  }
+  for (const value of ["", "59", "31536001", "60.0", "1e3", "forever"]) {
+    assert.deepEqual(
+      shareApi.parseShareCreationOptions({ expiresIn: value, revokeTokenSha256: undefined }),
+      {
+        ok: false,
+        status: 400,
+        error: "x-threadshare-expires-in must be an integer from 60 to 31536000",
+      },
+    );
+  }
+  assert.deepEqual(
+    shareApi.parseShareCreationOptions({
+      expiresIn: undefined,
+      revokeTokenSha256: "not-enabled-yet",
+    }),
+    {
+      ok: false,
+      status: 400,
+      error: "x-threadshare-revoke-token-sha256 is not supported",
+    },
+  );
+  assert.equal(
+    shareApi.SHARE_CORS_HEADERS["access-control-allow-headers"],
+    "content-type, x-threadshare-expires-in, x-threadshare-revoke-token-sha256",
+  );
+});
+
 test("stops reading a request once it crosses 5 MiB", async () => {
   assert.equal(typeof shareApi.parseShareRequest, "function");
   let pulls = 0;

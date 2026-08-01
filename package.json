@@ -51,7 +51,7 @@
     "dev:cloudflare": "npm run build:cloudflare && wrangler dev --local --config wrangler.jsonc",
     "test:fc": "npm run build:fc && node --test fc/handler.test.cjs",
     "test:cli": "node --test test/cli.test.mjs test/history-selection.test.mjs test/paseo-session-bridge.test.mjs test/session-listing.test.mjs",
-    "test:api": "node --import tsx --test test/share-api.test.mjs test/worker.test.mjs",
+    "test:api": "node --import tsx --test test/share-api.test.mjs test/stored-share.test.mjs test/worker.test.mjs",
     "test": "npm run test:cli && npm run test:api && npm run test:fc"
   },
   "dependencies": {

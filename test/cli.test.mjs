@@ -264,6 +264,88 @@ test("publishes only the selected range and keeps share JSON output stable", asy
   }
 });
 
+test("publishes a strict duration and reports the server-confirmed expiration", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-expires-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  let receivedExpiresIn;
+  const expiresAt = "2026-08-08T10:00:00.000Z";
+  const server = http.createServer((request, response) => {
+    receivedExpiresIn = request.headers["x-threadshare-expires-in"];
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ id: "11111111-2222-4333-8444-555555555555", expiresAt }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [cli, "publish", file, "--expires", "7d", "--url", serviceUrl, "--json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(receivedExpiresIn, "604800");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      id: "11111111-2222-4333-8444-555555555555",
+      url: `${serviceUrl}/?id=11111111-2222-4333-8444-555555555555`,
+      expiresAt,
+    });
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when the server does not confirm a requested expiration", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-expires-missing-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  const server = http.createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "11111111-2222-4333-8444-555555555555" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cli, "publish", file, "--expires", "1h", "--url", serviceUrl, "--json"],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.equal(error.stdout, "");
+        assert.match(
+          error.stderr,
+          /server did not confirm the requested expiration; the share may have been created without expiration/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects unsafe command option combinations before exporting or publishing", async () => {
   const fixture = await createCliSession(codexCliJsonl(2));
   const scenarios = [
@@ -294,6 +376,18 @@ test("rejects unsafe command option combinations before exporting or publishing"
     {
       args: ["share", "codex", fixture.file, "--from", ""],
       expected: /Missing value for --from/,
+    },
+    {
+      args: ["share", "codex", fixture.file, "--expires", "0m"],
+      expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
+    },
+    {
+      args: ["share", "codex", fixture.file, "--expires", "366d"],
+      expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
+    },
+    {
+      args: ["share", "codex", fixture.file, "--expires", "60s"],
+      expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--format", "json"],

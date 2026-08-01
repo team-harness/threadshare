@@ -3,6 +3,8 @@ const test = require("node:test");
 
 const { createHandler } = require("./dist/index.cjs");
 
+const NOW = Date.parse("2026-08-01T10:00:00.000Z");
+
 const environment = {
   THREADSHARE_OSS_ACCESS_KEY_ID: "test-key",
   THREADSHARE_OSS_ACCESS_KEY_SECRET: "test-secret",
@@ -20,6 +22,10 @@ function createTestHandler(options = {}) {
       objects.set(key, init.body);
       return new Response(null, { status: 200 });
     }
+    if (init.method === "DELETE") {
+      objects.delete(key);
+      return new Response(null, { status: 204 });
+    }
     const value = objects.get(key);
     return value === undefined
       ? new Response(null, { status: 404 })
@@ -31,6 +37,7 @@ function createTestHandler(options = {}) {
       environment,
       fetchImpl,
       logger: options.logger,
+      now: options.now,
       assets: {
         "/index.html": {
           body: Buffer.from("<main>Threadshare</main>").toString("base64"),
@@ -54,7 +61,7 @@ function history() {
 }
 
 test("writes a validated history to the generated OSS key and reads it back", async () => {
-  const { handler, objects, requests } = createTestHandler();
+  const { handler, objects, requests } = createTestHandler({ now: () => NOW });
   const created = await handler({
     rawPath: "/api/v1/shares",
     httpMethod: "POST",
@@ -65,7 +72,11 @@ test("writes a validated history to the generated OSS key and reads it back", as
   assert.equal(created.statusCode, 201);
   const { id } = JSON.parse(created.body);
   assert.match(id, /^[0-9a-f-]{36}$/i);
-  assert.equal(objects.get(`shares/${id}.json`), JSON.stringify(history()));
+  assert.deepEqual(JSON.parse(objects.get(`shares/${id}.json`)), {
+    format: "threadshare-object@v1",
+    createdAt: "2026-08-01T10:00:00.000Z",
+    history: history(),
+  });
   assert.equal(requests[0].init.headers["content-type"], "application/json; charset=utf-8");
 
   const loaded = await handler({
@@ -73,7 +84,106 @@ test("writes a validated history to the generated OSS key and reads it back", as
     httpMethod: "GET",
   });
   assert.equal(loaded.statusCode, 200);
+  assert.deepEqual(loaded.headers, {
+    "cache-control": "private, no-store",
+    "content-type": "application/json; charset=utf-8",
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers": "x-threadshare-expires-at",
+  });
   assert.deepEqual(JSON.parse(loaded.body.toString("utf8")), history());
+});
+
+test("reads an old bare history object without lifecycle metadata", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const { handler, objects } = createTestHandler({ now: () => NOW });
+  objects.set(`shares/${id}.json`, JSON.stringify(history()));
+
+  const loaded = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "GET",
+  });
+
+  assert.equal(loaded.statusCode, 200);
+  assert.equal(loaded.headers["x-threadshare-expires-at"], undefined);
+  assert.deepEqual(JSON.parse(loaded.body.toString("utf8")), history());
+});
+
+test("stores expiration metadata and lazily deletes at the boundary", async () => {
+  let currentTime = NOW;
+  const { handler, objects, requests } = createTestHandler({ now: () => currentTime });
+  const created = await handler({
+    rawPath: "/api/v1/shares",
+    httpMethod: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-threadshare-expires-in": "60",
+    },
+    body: JSON.stringify(history()),
+  });
+
+  assert.equal(created.statusCode, 201);
+  const { id, expiresAt } = JSON.parse(created.body);
+  assert.equal(expiresAt, "2026-08-01T10:01:00.000Z");
+  assert.equal(JSON.parse(objects.get(`shares/${id}.json`)).expiresAt, expiresAt);
+
+  const readable = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "GET",
+  });
+  assert.equal(readable.statusCode, 200);
+  assert.equal(readable.headers["x-threadshare-expires-at"], expiresAt);
+
+  currentTime += 60_000;
+  const expired = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "GET",
+  });
+  assert.equal(expired.statusCode, 404);
+  assert.deepEqual(JSON.parse(expired.body), { error: "Shared history was not found" });
+  assert.equal(objects.has(`shares/${id}.json`), false);
+  assert.equal(requests.at(-1).init.method, "DELETE");
+});
+
+test("keeps an expired share unavailable when OSS lazy deletion fails", async () => {
+  const errors = [];
+  const raw = JSON.stringify({
+    format: "threadshare-object@v1",
+    createdAt: "2026-08-01T09:59:00.000Z",
+    expiresAt: "2026-08-01T10:00:00.000Z",
+    history: history(),
+  });
+  const { handler } = createTestHandler({
+    now: () => NOW,
+    logger: { error: (...args) => errors.push(args) },
+    fetchImpl: async (_url, init = {}) =>
+      init.method === "DELETE"
+        ? new Response(null, { status: 500 })
+        : new Response(raw, { status: 200 }),
+  });
+
+  const response = await handler({
+    rawPath: "/api/v1/shares/a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0",
+    httpMethod: "GET",
+  });
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(JSON.parse(response.body), { error: "Shared history was not found" });
+  assert.equal(errors.length, 1);
+});
+
+test("rejects invalid expiration before writing to OSS", async () => {
+  const { handler, requests } = createTestHandler();
+  const response = await handler({
+    rawPath: "/api/v1/shares",
+    httpMethod: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-threadshare-expires-in": "31536001",
+    },
+    body: JSON.stringify(history()),
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(requests.length, 0);
 });
 
 test("matches the canonical RFC 3339 timestamp contract", async () => {
@@ -150,7 +260,7 @@ test("logs storage failures while returning a stable JSON error", async () => {
 });
 
 test("accepts the legacy Paseo v1 shape during migration", async () => {
-  const { handler, objects } = createTestHandler();
+  const { handler, objects } = createTestHandler({ now: () => NOW });
   const legacyHistory = history();
   delete legacyHistory.format;
 
@@ -163,7 +273,11 @@ test("accepts the legacy Paseo v1 shape during migration", async () => {
 
   assert.equal(created.statusCode, 201);
   const { id } = JSON.parse(created.body);
-  assert.equal(objects.get(`shares/${id}.json`), JSON.stringify(legacyHistory));
+  assert.deepEqual(JSON.parse(objects.get(`shares/${id}.json`)), {
+    format: "threadshare-object@v1",
+    createdAt: "2026-08-01T10:00:00.000Z",
+    history: legacyHistory,
+  });
 });
 
 test("rejects an arbitrary upload before it reaches OSS", async () => {
