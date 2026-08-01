@@ -1,8 +1,5 @@
 #!/usr/bin/env node
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -19,6 +16,11 @@ import {
   MAX_SESSION_PAGE_SIZE,
   listSessions,
 } from "../src/session-listing.mjs";
+import {
+  formatHistoryAsMarkdown,
+  readSharedHistory,
+  validateHistory,
+} from "../src/share-read.mjs";
 import { parseShareReference } from "../src/share-url.mjs";
 
 const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
@@ -26,13 +28,6 @@ const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
 const BOOLEAN_OPTIONS = new Set(["help", "json", "pick-start", "revoke"]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
-const historySchema = JSON.parse(
-  readFileSync(new URL("../schema/threadshare-history.v1.schema.json", import.meta.url), "utf8"),
-);
-const ajv = new Ajv2020({ allErrors: true, strict: false });
-addFormats(ajv);
-const validateCanonicalHistory = ajv.compile(historySchema);
-
 function usage() {
   return `Usage:
   threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
@@ -40,6 +35,7 @@ function usage() {
   threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
   threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
   threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
+  threadshare read <share-url> --format <json|markdown>
   threadshare revoke <share-url> --token <token> [--json]
   threadshare validate <history.json|->
 
@@ -199,15 +195,6 @@ async function writeOutput(file, value) {
     return;
   }
   await writeFile(file, value);
-}
-
-function validateHistory(history) {
-  if (!validateCanonicalHistory(history)) {
-    const issue = validateCanonicalHistory.errors?.[0];
-    const detail = issue ? `: ${issue.instancePath || "/"} ${issue.message}` : "";
-    throw new Error(`Input is not a valid threadshare-history@v1 document${detail}`);
-  }
-  return history;
 }
 
 async function publish(history, url, { expiresInSeconds, revoke = false } = {}) {
@@ -445,6 +432,19 @@ async function main() {
     const token = validateRevokeToken(options.token);
     const result = await revokeShare(reference, token);
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `Revoked ${result.url}\n`);
+    return;
+  }
+  if (command === "read") {
+    validateCommandShape(command, positionals, options, 2, new Set(["format"]));
+    if (options.format !== "json" && options.format !== "markdown") {
+      throw new Error("read requires --format json or markdown");
+    }
+    const history = await readSharedHistory(parseShareReference(positionals[1]));
+    process.stdout.write(
+      options.format === "json"
+        ? `${JSON.stringify(history)}\n`
+        : formatHistoryAsMarkdown(history),
+    );
     return;
   }
   throw new Error(usage());

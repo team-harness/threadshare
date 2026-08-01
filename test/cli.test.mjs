@@ -82,6 +82,7 @@ test("prints CLI help with either help spelling", () => {
     assert.match(result.stdout, /threadshare share <codex\|claude\|paseo>/);
     assert.match(result.stdout, /threadshare sessions <codex\|claude>/);
     assert.match(result.stdout, /threadshare messages <codex\|claude\|paseo>/);
+    assert.match(result.stdout, /threadshare read <share-url> --format <json\|markdown>/);
     assert.match(result.stdout, /--from <user-message-id\|last-user>/);
     assert.match(result.stdout, /--pick-start/);
     assert.match(result.stdout, /omit --from and --before for the full visible snapshot/);
@@ -511,6 +512,90 @@ test("revokes a normalized share URL with bearer authorization", async () => {
   }
 });
 
+test("reads Viewer and API URLs as JSON or Markdown without following redirects", async () => {
+  const id = "11111111-2222-4333-8444-555555555555";
+  const redirectId = "22222222-3333-4444-8555-666666666666";
+  const targetId = "33333333-4444-4555-8666-777777777777";
+  const history = canonicalHistory();
+  history.entries = [
+    {
+      id: "read-user",
+      createdAt: "2026-07-30T00:00:01.000Z",
+      kind: "message",
+      role: "user",
+      markdown: "Read this request",
+    },
+    {
+      id: "read-activity",
+      createdAt: "2026-07-30T00:00:02.000Z",
+      kind: "activity",
+      message: "Read activity",
+      level: "success",
+    },
+  ];
+  const paths = [];
+  let redirectTargetHits = 0;
+  const server = http.createServer((request, response) => {
+    paths.push(request.url);
+    if (request.url === `/api/v1/shares/${redirectId}`) {
+      response.writeHead(302, { location: `/api/v1/shares/${targetId}` });
+      response.end();
+      return;
+    }
+    if (request.url === `/api/v1/shares/${targetId}`) redirectTargetHits += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(history));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const json = await execFileAsync(
+      process.execPath,
+      [cli, "read", `${serviceUrl}/?id=${id}#message-read-user`, "--format", "json"],
+      { encoding: "utf8" },
+    );
+    assert.deepEqual(JSON.parse(json.stdout), history);
+    assert.equal(json.stdout.split("\n").length, 2);
+    assert.equal(json.stderr, "");
+
+    const markdown = await execFileAsync(
+      process.execPath,
+      [cli, "read", `${serviceUrl}/api/v1/shares/${id}`, "--format", "markdown"],
+      { encoding: "utf8" },
+    );
+    assert.match(markdown.stdout, /# CLI test/);
+    assert.ok(markdown.stdout.indexOf("Read this request") < markdown.stdout.indexOf("Read activity"));
+    assert.equal(markdown.stderr, "");
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cli, "read", `${serviceUrl}/?id=${redirectId}`, "--format", "json"],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.equal(error.stdout, "");
+        assert.match(error.stderr, /read request failed/i);
+        return true;
+      },
+    );
+    assert.equal(redirectTargetHits, 0);
+    assert.deepEqual(paths, [
+      `/api/v1/shares/${id}`,
+      `/api/v1/shares/${id}`,
+      `/api/v1/shares/${redirectId}`,
+    ]);
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test("rejects unsafe command option combinations before exporting or publishing", async () => {
   const fixture = await createCliSession(codexCliJsonl(2));
   const scenarios = [
@@ -571,6 +656,28 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "short",
       ],
       expected: /--token must be a 256-bit base64url capability/,
+    },
+    {
+      args: ["read", "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555"],
+      expected: /read requires --format json or markdown/,
+    },
+    {
+      args: [
+        "read",
+        "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555",
+        "--format",
+        "yaml",
+      ],
+      expected: /read requires --format json or markdown/,
+    },
+    {
+      args: [
+        "read",
+        "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555#token=secret",
+        "--format",
+        "json",
+      ],
+      expected: /valid Threadshare viewer or API URL/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--format", "json"],

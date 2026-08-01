@@ -2,8 +2,8 @@
 epic: ../epics/lightweight-sharing-evolution.md
 phase: executing
 approved_revision: 0f8f1b78ca6747eac74057e928c9c8986e96dbc3d0887870ae86b40dfe19dc37
-current_item: ITEM-3
-next_action: implement agent-native share reading for ITEM-3
+current_item: ITEM-4
+next_action: implement local publish preflight for ITEM-4
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -14,7 +14,7 @@ remote_publish: final
 
 - [x] ITEM-1
 - [x] ITEM-2
-- [ ] ITEM-3
+- [x] ITEM-3
 - [ ] ITEM-4
 - [ ] ITEM-5
 - [ ] ITEM-6
@@ -56,3 +56,13 @@ remote_publish: final
 - ITEM-2 review round 1 target：staged diff SHA-256 `451c6f1badb2f55663ce28dec035d40c0bef97b218cf9033bbf8d46821af4ffb`，基线 `933aab0`。
 - ITEM-2 reviewer round 1：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `604c9b2c-9a4e-4820-8c8d-3030a4aa57f5`，turn `4bcf68ab-322b-4061-96c7-c39a5f94b1ab`，result message `d84a38b1-565a-4b03-ab5e-c4bf50d4b5fa`，状态 completed，已销毁 reviewer。
 - ITEM-2 round 1 findings：0 Blocking、0 Important、4 Minor，结论可创建里程碑提交。Minor 为缺失凭据时可提前短路存储读取、补充不存在对象重复撤销测试、两个 256-bit base64url 正则的维护性重复，以及 ITEM-3 需明确 fragment 合法性；均不影响批准契约，前三项保持当前清晰行为，fragment 语义在 ITEM-3 实现时一并对齐。
+- ITEM-2 milestone commit：`db7c2cd`（`feat: add capability revocation`），仅本地提交，未推送。
+- 2026-08-01 ITEM-3 TDD：先观察 `read` 命令、共享读取模块、帮助与严格参数测试失败，随后实现转绿；补充恰好 5 MiB 的临界成功用例。
+- 2026-08-01 ITEM-3 自查：Viewer/API URL 均归一到同 origin 固定 UUID API 路由，只忽略非空 `#message-*` fragment；远端 GET 禁止 redirect，并在 `content-length` 与实际读取流两处执行 5 MiB 上限；响应重新验证为 canonical history，legacy Paseo 给出重新发布提示且不被接受；JSON 输出保持完整对象，Markdown 按原顺序覆盖 message、tool、thought、todo、activity 与 compaction 的全部可见字段，链接和图片不做过滤。
+- 2026-08-01 ITEM-3 候选验证：`npm test` 通过（CLI 80 tests、API/Worker 25 tests、FC 14 tests），Cloudflare 与 FC build 均通过；新增读取模块单测覆盖两种格式、全部 entry kind、声明/流式超限、恰好 5 MiB、404、redirect、legacy、非法 JSON 与非 history 响应。
+- ITEM-3 review round 1 target：staged diff SHA-256 `0757253d77d0a88d58f5fc067b7c9f88d9eefdc2940c564ac5af5d83b43c193a`，基线 `db7c2cd`。
+- ITEM-3 reviewer round 1：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `8e5ac5f3-a06a-494a-aaf2-1027c829ea34`，turn `6f84d528-7f22-489f-a5e9-59c4e481e83b`，result message `12151cc1-77e7-42d9-8162-e90939d68839`，状态 completed，已销毁 reviewer。
+- ITEM-3 round 1 findings：0 Blocking、0 Important、3 Minor。已修复共享 validator 让非 `read` 命令也出现 read 专用 legacy 文案的提示回归，并补测试锁定；5 MiB 常量双定义与 legacy 错误分类启发式均不改变接受/拒绝边界，保持当前 CLI/TypeScript 运行时边界清晰的实现。
+- ITEM-3 review round 2 target：staged diff SHA-256 `154755497ef4b088b8d841e90a4a4fa73256ed45f2e584b907896ea59e26dc40`，基线 `db7c2cd`。
+- ITEM-3 reviewer round 2：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `32ae3f9a-2d9d-42f8-92ce-2e22b7c04cce`，turn `096092b2-066c-4a27-84ba-b815c189f642`，result message `01d4cdfd-be0f-42f9-a3b8-35c3c2b13f12`，状态 completed，已销毁 reviewer。
+- ITEM-3 round 2 findings：0 Blocking、0 Important、3 Minor，结论可创建里程碑提交。Minor 为导出的 Markdown formatter 依赖调用方先验证、自由字符串可能影响 Markdown 外观，以及被忽略的 message fragment 可含控制字符；当前 CLI 始终先严格验证、JSON 提供无损替代、fragment 不进入请求，均不改变批准契约。

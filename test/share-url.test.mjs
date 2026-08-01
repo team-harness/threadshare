@@ -34,6 +34,9 @@ test("rejects arbitrary URLs, credentials, and capability data in URLs", () => {
     `https://threadshare.example/api/v1/shares/${ID}/extra`,
     `https://threadshare.example//attacker.example/?id=${ID}`,
     `https://threadshare.example//attacker.example/api/v1/shares/${ID}`,
+    `https://threadshare.example/?id=${ID}#token=secret`,
+    `https://threadshare.example/?id=${ID}#message-`,
+    `https://threadshare.example/?id=${ID}#message-%E0%A4%A`,
   ]) {
     assert.throws(() => parseShareReference(value), /valid Threadshare viewer or API URL/);
   }

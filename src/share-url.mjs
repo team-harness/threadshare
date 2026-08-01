@@ -2,6 +2,16 @@ const SHARE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INVALID_SHARE_URL = "Share URL must be a valid Threadshare viewer or API URL";
 
+function hasValidMessageFragment(hash) {
+  if (hash === "") return true;
+  try {
+    const fragment = decodeURIComponent(hash.slice(1));
+    return fragment.startsWith("message-") && fragment.length > "message-".length;
+  } catch {
+    return false;
+  }
+}
+
 function normalizedReference(origin, basePath, id) {
   const normalizedId = id.toLowerCase();
   if (
@@ -28,7 +38,8 @@ export function parseShareReference(value) {
   if (
     (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
     parsed.username !== "" ||
-    parsed.password !== ""
+    parsed.password !== "" ||
+    !hasValidMessageFragment(parsed.hash)
   ) {
     throw new Error(INVALID_SHARE_URL);
   }
