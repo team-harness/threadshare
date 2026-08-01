@@ -1,9 +1,9 @@
 ---
 epic: ../epics/lightweight-sharing-evolution.md
 phase: executing
-approved_revision: 0f8f1b78ca6747eac74057e928c9c8986e96dbc3d0887870ae86b40dfe19dc37
-current_item: ITEM-5
-next_action: implement long-conversation Viewer navigation for ITEM-5
+approved_revision: 1cf85037bb3cb3dfda6bbcd9d676cf4d9f449d4839c76441fb64e96e977b94fb
+current_item: ITEM-6
+next_action: synchronize documentation and run final delivery checks for ITEM-6
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -16,7 +16,7 @@ remote_publish: final
 - [x] ITEM-2
 - [x] ITEM-3
 - [x] ITEM-4
-- [ ] ITEM-5
+- [x] ITEM-5
 - [ ] ITEM-6
 
 ## 临时决策与证据
@@ -73,3 +73,11 @@ remote_publish: final
 - ITEM-4 review round 1 target：staged diff SHA-256 `26c8b26ff84b79b8d05d1016c3889565c709fb8174d853806b724d1f3fb97e82`，基线 `2bc44db`。
 - ITEM-4 reviewer round 1：fresh `cs-agent-mcp` managed `claude`，显式模型 `claude-fable-5`；agent `ab0dc86e-c5dc-4139-93a1-6e3162df28c9`，turn `a3560130-88d2-4dfc-815c-671f318836bf`，result message `b3c6ac4b-ba32-423a-ab44-9c2b08287fb6`，状态 completed，已销毁 reviewer。
 - ITEM-4 round 1 findings：0 Blocking、0 Important、4 Minor，结论可创建里程碑提交。AGENTS 的实际发布/dry-run JSON 限定在 ITEM-6 同步；`[REDACTED]` 常量重复、病态递归深度与用户正文同名字面量造成的近似计数均不影响当前 exporter 数据、隐私或 `valid` 结果，保持现状。
+- 2026-08-02 ITEM-5 owner feedback：搜索与类型过滤属于低频能力且持续占据 Viewer 空间，明确从范围移除；同时移除匹配计数和全局展开控件。保留 user turn 目录、现有消息锚点、工具与 thought 逐项折叠，并将 Agent source JSON 引导压缩为单行。
+- 2026-08-02 ITEM-5 候选验证：`npm test` 通过（CLI 85 tests、Viewer state 2 tests、API/Worker 25 tests、FC 14 tests），Cloudflare 与 FC build 均通过；真实浏览器覆盖 1440×1000、390×844 和 320×700，确认无搜索/过滤 DOM、320px 无横向溢出、Agent 引导为 30px 单行、手机目录及 deep link 正常、thought 鼠标与键盘折叠正常，console/error 均为空。
+- ITEM-5 review round 1 target：staged diff SHA-256 `63a31ceaee070863531e06a97a26a66149e38cea06b0c51bcde7b430d598633d`，基线 `815a0af`。
+- ITEM-5 reviewer round 1：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `28d8cb32-9617-4697-93c4-d90a82e42e2b`，native session `f40e7ae4-0953-4fa8-831a-e4edef032cff`，状态 completed，无回退。
+- ITEM-5 round 1 findings：0 Blocking、1 Important、3 Nit，结论有条件可合。Important 为复制消息锚点时复用导航聚焦导致焦点离开复制按钮；已拆分为复制只滚动高亮、目录/deep link 才聚焦。同步修复 Agent JSON 链接 focus-visible、移除不可达 image token 分支，并明确 thought 默认折叠；移动端 `Turns 0` 已直接表达空状态，保持当前紧凑行为。
+- ITEM-5 review round 2 target：staged diff SHA-256 `de0d94dd227e65c1e87b4dec6409fa2483c32e1832d686ad3284c54f54751ecd`，基线 `815a0af`。
+- ITEM-5 reviewer round 2：Paseo agent-scoped fresh `claude` reviewer，显式模型 `claude-fable-5`、thinking `ultracode`、只读 plan mode；agent `96b9109a-24a3-443e-80b1-0162fdf1cace`，native session `705c1591-3d5d-40cf-acfd-88a409ea9f6c`，状态 completed，无回退。
+- ITEM-5 round 2 findings：0 Blocking、0 Important、4 Nit，结论可合；Round 1 Important 已闭环。Nit 为不影响目标浏览器的 `matchMedia` 可选链疑问、目录导航不进入浏览器历史/不放行修饰键、公开锚点前缀双写及未来 DOM 冒烟测试建议，均不改变当前批准契约，保持已审查候选不再移动。

@@ -1,4 +1,5 @@
 import markdownit from "markdown-it";
+import { createTurnDirectory } from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
 const MESSAGE_ANCHOR_PREFIX = "message-";
@@ -24,24 +25,31 @@ function currentMessageAnchorId() {
   }
 }
 
-function focusCurrentMessageAnchor() {
-  const anchorId = currentMessageAnchorId();
-  if (!anchorId) return;
+function focusMessageAnchor(anchorId, { moveFocus = true } = {}) {
   const target = document.getElementById(anchorId);
-  if (!target) return;
+  if (!target) return false;
 
   document.querySelector(".entry.is-anchor-target")?.classList.remove("is-anchor-target");
   target.classList.remove("is-anchor-target");
   void target.offsetWidth;
   target.classList.add("is-anchor-target");
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (moveFocus) target.focus({ preventScroll: true });
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+  return true;
+}
+
+function focusCurrentMessageAnchor() {
+  const anchorId = currentMessageAnchorId();
+  if (!anchorId) return;
+  focusMessageAnchor(anchorId);
 }
 
 async function copyMessageAnchor(anchorId, button) {
   const url = new URL(window.location.href);
   url.hash = encodeURIComponent(anchorId);
   window.history.replaceState(null, "", url);
-  focusCurrentMessageAnchor();
+  focusMessageAnchor(anchorId, { moveFocus: false });
 
   try {
     await navigator.clipboard.writeText(url.toString());
@@ -94,13 +102,13 @@ async function copyHistorySourceLink(sourceUrl, link) {
   try {
     await navigator.clipboard.writeText(sourceUrl);
     link.classList.add("copied");
-    link.textContent = "Source JSON link copied";
+    link.textContent = "JSON link copied";
     window.setTimeout(() => {
       link.classList.remove("copied");
-      link.textContent = "Copy source JSON link";
+      link.textContent = "Copy JSON link";
     }, 1600);
   } catch {
-    link.textContent = "Unable to copy source JSON link";
+    link.textContent = "Copy failed";
   }
 }
 
@@ -323,16 +331,24 @@ function renderRecord(entry) {
   heading.append(element("strong", "", recordLabel(entry)));
   const status = entry.status || entry.level;
   if (status) heading.append(element("span", "status", status));
-  if (entry.kind === "tool") {
-    const toggle = element("button", "tool-toggle");
+  if (entry.kind === "tool" || entry.kind === "thought") {
+    const toggle = element(
+      "button",
+      entry.kind === "tool" ? "record-toggle tool-toggle" : "record-toggle thought-toggle",
+    );
     toggle.type = "button";
-    toggle.append(heading, element("span", "tool-caret"));
+    toggle.append(heading, element("span", "record-caret"));
 
-    const data = {};
-    if (entry.input !== undefined) data.input = entry.input;
-    if (entry.output !== undefined) data.output = entry.output;
-    if (entry.error !== undefined) data.error = entry.error;
-    const detail = element("pre", "", JSON.stringify(data, null, 2));
+    let detail;
+    if (entry.kind === "tool") {
+      const data = {};
+      if (entry.input !== undefined) data.input = entry.input;
+      if (entry.output !== undefined) data.output = entry.output;
+      if (entry.error !== undefined) data.error = entry.error;
+      detail = element("pre", "", JSON.stringify(data, null, 2));
+    } else {
+      detail = element("p", "thought-detail", entry.text);
+    }
     detail.hidden = true;
 
     const setExpanded = (expanded) => {
@@ -352,7 +368,6 @@ function renderRecord(entry) {
   } else {
     record.append(heading);
   }
-  if (entry.kind === "thought") record.append(element("p", "", entry.text));
   if (entry.kind === "activity") record.append(element("p", "", entry.message));
   if (entry.kind === "todo") {
     const list = element("ul", "todo-list");
@@ -374,12 +389,14 @@ function toolGroupStatus(entries) {
 function renderToolGroup(entries) {
   const hasFailedTool = entries.some((entry) => entry.status === "failed");
   const group = element("section", `entry record tool-group${hasFailedTool ? " error" : ""}`);
-  const toggle = element("button", "tool-group-toggle");
+  const toggle = element("button", "record-toggle tool-group-toggle");
   toggle.type = "button";
   const heading = element("div", "record-heading");
-  heading.append(element("strong", "tool-group-label", `${entries.length} tool calls`));
-  heading.append(element("span", "status", toolGroupStatus(entries)));
-  toggle.append(heading, element("span", "tool-caret"));
+  heading.append(
+    element("strong", "tool-group-label", `${entries.length} tool calls`),
+    element("span", "status", toolGroupStatus(entries)),
+  );
+  toggle.append(heading, element("span", "record-caret"));
 
   const list = element("div", "tool-group-list");
   list.hidden = true;
@@ -403,11 +420,10 @@ function renderAgentReviewHint(id) {
   const sourceUrl = new URL(shareApiUrl(id), window.location.origin).toString();
   const hint = element("aside", "agent-review-hint");
   hint.setAttribute("aria-label", "Conversation source JSON");
-  hint.append(element("strong", "", "Reviewing this conversation with an AI agent?"));
-  hint.append(element("p", "", "Ask it to load and read the complete source JSON directly."));
-  const sourceLink = element("a", "agent-review-link", "Copy source JSON link");
+  hint.append(element("span", "agent-review-label", "AI agent review:"));
+  const sourceLink = element("a", "agent-review-link", "Copy JSON link");
   sourceLink.href = sourceUrl;
-  sourceLink.title = "Copy source JSON link";
+  sourceLink.title = "Copy complete source JSON link";
   sourceLink.setAttribute("data-history-json-url", sourceUrl);
   sourceLink.addEventListener("click", (event) => {
     event.preventDefault();
@@ -415,6 +431,97 @@ function renderAgentReviewHint(id) {
   });
   hint.append(sourceLink);
   return hint;
+}
+
+function renderMessage(entry) {
+  const article = element("article", `entry message ${entry.role}`);
+  if (entry.role === "user") {
+    article.id = messageAnchorId(entry);
+    article.tabIndex = -1;
+  }
+  const bubble = element("div", "bubble");
+  const entryMeta = element(
+    "div",
+    "entry-meta",
+    `${entry.role === "user" ? "You" : "Assistant"} · ${formatTime(entry.createdAt)}`,
+  );
+  if (entry.role === "user") {
+    const anchorButton = element("button", "anchor-button");
+    anchorButton.type = "button";
+    anchorButton.setAttribute("aria-label", "Copy link to this message");
+    anchorButton.addEventListener("click", () => {
+      void copyMessageAnchor(article.id, anchorButton);
+    });
+    entryMeta.append(anchorButton);
+  } else if (entry.role === "assistant") {
+    const copyButton = element("button", "copy-button");
+    copyButton.type = "button";
+    copyButton.setAttribute("aria-label", "Copy assistant markdown");
+    copyButton.title = "Copy assistant markdown";
+    copyButton.append(copyIcon());
+    copyButton.addEventListener("click", () => {
+      void copyAssistantMarkdown(entry.markdown, copyButton);
+    });
+    entryMeta.append(copyButton);
+  }
+  bubble.append(entryMeta, renderMarkdown(entry.markdown));
+  article.append(bubble);
+  return article;
+}
+
+function renderTurnDirectory(turns, onNavigate) {
+  const directory = element("nav", "turn-directory");
+  directory.setAttribute("aria-label", "Conversation turns");
+
+  const heading = element("div", "turn-directory-heading");
+  heading.append(
+    element("h2", "", "Turns"),
+    element("span", "turn-count", String(turns.length)),
+  );
+
+  const toggle = element("button", "turn-directory-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-controls", "turn-directory-list");
+  toggle.append(
+    element("span", "", "Turns"),
+    element("span", "turn-count", String(turns.length)),
+    element("span", "turn-directory-caret"),
+  );
+
+  const list = element("ol", "turn-list");
+  list.id = "turn-directory-list";
+  for (const turn of turns) {
+    const item = element("li", "turn-item");
+    const link = element("a", "turn-link");
+    link.href = `#${encodeURIComponent(turn.anchorId)}`;
+    link.append(
+      element("span", "turn-number", String(turn.number).padStart(2, "0")),
+      element("span", "turn-preview", turn.preview),
+    );
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const url = new URL(window.location.href);
+      url.hash = encodeURIComponent(turn.anchorId);
+      window.history.replaceState(null, "", url);
+      directory.classList.remove("is-open");
+      toggle.setAttribute("aria-expanded", "false");
+      onNavigate(turn.anchorId);
+    });
+    item.append(link);
+    list.append(item);
+  }
+  if (turns.length === 0) list.append(element("li", "turn-list-empty", "No user turns"));
+
+  toggle.disabled = turns.length === 0;
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") !== "true";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    directory.classList.toggle("is-open", expanded);
+  });
+
+  directory.append(heading, toggle, list);
+  return directory;
 }
 
 function renderHistory(history, id) {
@@ -434,6 +541,7 @@ function renderHistory(history, id) {
   conversation.append(conversationMeta);
   conversation.append(renderAgentReviewHint(id));
 
+  const transcript = element("div", "transcript");
   for (let index = 0; index < history.entries.length; index += 1) {
     const entry = history.entries[index];
     if (entry.kind === "tool") {
@@ -442,47 +550,22 @@ function renderHistory(history, id) {
         index += 1;
         entries.push(history.entries[index]);
       }
-      conversation.append(entries.length === 1 ? renderRecord(entry) : renderToolGroup(entries));
+      transcript.append(entries.length === 1 ? renderRecord(entry) : renderToolGroup(entries));
       continue;
     }
     if (entry.kind === "message") {
-      const article = element("article", `entry message ${entry.role}`);
-      if (entry.role === "user") article.id = messageAnchorId(entry);
-      const bubble = element("div", "bubble");
-      const entryMeta = element(
-        "div",
-        "entry-meta",
-        `${entry.role === "user" ? "You" : "Assistant"} · ${formatTime(entry.createdAt)}`,
-      );
-      if (entry.role === "user") {
-        const anchorButton = element("button", "anchor-button");
-        anchorButton.type = "button";
-        anchorButton.setAttribute("aria-label", "Copy link to this message");
-        anchorButton.addEventListener("click", () => {
-          void copyMessageAnchor(article.id, anchorButton);
-        });
-        entryMeta.append(anchorButton);
-      } else if (entry.role === "assistant") {
-        const copyButton = element("button", "copy-button");
-        copyButton.type = "button";
-        copyButton.setAttribute("aria-label", "Copy assistant markdown");
-        copyButton.title = "Copy assistant markdown";
-        copyButton.append(copyIcon());
-        copyButton.addEventListener("click", () => {
-          void copyAssistantMarkdown(entry.markdown, copyButton);
-        });
-        entryMeta.append(copyButton);
-      }
-      bubble.append(entryMeta);
-      bubble.append(renderMarkdown(entry.markdown));
-      article.append(bubble);
-      conversation.append(article);
+      transcript.append(renderMessage(entry));
     } else {
-      conversation.append(renderRecord(entry));
+      transcript.append(renderRecord(entry));
     }
   }
+  transcript.append(renderSharePrompt());
 
-  conversation.append(renderSharePrompt());
+  const directory = renderTurnDirectory(createTurnDirectory(history.entries), focusMessageAnchor);
+  const layout = element("div", "viewer-layout");
+  layout.append(directory, transcript);
+  conversation.append(layout);
+
   focusCurrentMessageAnchor();
 }
 

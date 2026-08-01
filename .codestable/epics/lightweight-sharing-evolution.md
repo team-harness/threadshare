@@ -18,7 +18,7 @@ Threadshare 已提供 Codex、Claude Code 与 Paseo 会话导出、匿名只读�
 
 ## 范围
 
-- Viewer 长会话导航：内容搜索、用户 turn 目录、消息类型过滤、工具与思考折叠。
+- Viewer 长会话导航：用户 turn 目录，以及工具与思考折叠。
 - Agent 原生读取：`threadshare read <share-url> --format <json|markdown>`。
 - 本地发布预检：`threadshare share ... --dry-run [--report]`。
 - 每条分享可选过期，默认仍永久有效；到期后立即拒绝读取并懒删除对象。
@@ -47,7 +47,7 @@ Threadshare 已提供 Codex、Claude Code 与 Paseo 会话导出、匿名只读�
 - 旧的裸 history 对象与新的内部对象包装都可读取；CF 与 FC 对创建、读取、过期、撤销和错误返回有对等测试。
 - 实际发布路径的 `--json` 分享输出仍是单行 JSON，至少包含 `id` 和 `url`；新增字段只能是向后兼容的可选字段。dry run JSON 必含 `dryRun: true` 和 `valid`，且不得伪造 `id` 或 `url`。
 - `read`、预检、过期和撤销均有 CLI 自动化测试，错误输入严格失败且不会退化成上传、全量分享或任意 URL 操作。
-- Viewer 在手机与桌面宽度下可搜索、导航和过滤长会话，既有消息锚点、复制、安全渲染与只读语义不回归。
+- Viewer 在手机与桌面宽度下可通过 user turn 目录导航长会话，既有消息锚点、复制、安全渲染与只读语义不回归。
 - `npm test`、Cloudflare build、FC tests、Skill quick validation 和 `npm pack --dry-run --json` 均通过；打包内容仍只包含 CLI、协议、Skill、README 和许可证所需文件。
 
 ## 子项契约
@@ -113,14 +113,12 @@ Threadshare 已提供 Codex、Claude Code 与 Paseo 会话导出、匿名只读�
 - 依赖：无
 - 归属：纯 Viewer 状态和 DOM 渲染，不改变 API 或 history schema。
 - 设计要点：
-  - 增加不区分大小写的纯文本搜索，并清楚展示匹配数量与空结果状态。
   - 从 user message 生成可扫描的 turn 目录，使用现有 `#message-<entry-id>` 锚点；长文本只作转义后的短预览。
-  - 使用可访问的二元过滤控件切换 Messages、Tools、Thinking 和 Other；Other 包含 todo、activity 与 compaction。
-  - 工具详情继续默认折叠，thought 增加折叠；提供作用于当前可见结果的展开/折叠命令。
+  - 工具详情与 thought 均默认折叠并支持逐项展开；折叠控件保持键盘可用并明确暴露展开状态。
   - 桌面布局允许目录与会话并列，手机布局将目录收为紧凑控件；所有控制具有稳定尺寸、键盘焦点和无重叠的响应式布局。
-  - 搜索和过滤只改变本地可见性，不修改 history、不改变分享 URL，也不弱化 Markdown/链接安全处理。
-  - 点击 turn 目录项或处理 `#message-<entry-id>` deep link 时，Viewer 自动启用 Messages，并只清除会隐藏该目标的搜索条件；其他类型过滤保持不变，然后聚焦目标。
-- 验收要点：搜索、过滤组合、被隐藏目标的 turn/deep-link 恢复、折叠、空结果、键盘可用性，以及桌面和手机视觉检查均通过；既有复制与 deep link 测试不回归。
+  - Agent 读取引导保持为一行紧凑入口，继续复制完整 source JSON URL，不改变公开读取契约。
+  - 点击 turn 目录项或处理 `#message-<entry-id>` deep link 时直接聚焦目标，不修改 history 或分享 URL，也不弱化 Markdown/链接安全处理。
+- 验收要点：turn 目录、deep link、工具与 thought 折叠、键盘可用性，以及桌面和手机视觉检查均通过；既有复制与 deep link 行为不回归。
 
 ### ITEM-6：集成、文档与交付检查
 
