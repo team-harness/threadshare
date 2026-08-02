@@ -282,6 +282,7 @@ function agentResponse(
   { history, expiresAt }: { history?: unknown; expiresAt?: string } = {},
 ): FcResponse {
   const headers = Object.fromEntries(agentTranscriptHeaders({ expiresAt }).entries());
+  headers["content-disposition"] = "inline";
   if (status === 405) headers.allow = "GET, HEAD";
   const body = status === 200 ? formatAgentTranscript(history) : agentProblemBody(status);
   return { statusCode: status, headers, ...(method === "HEAD" ? {} : { body }) };
@@ -341,6 +342,7 @@ function staticResponse(
     ? "no-store"
     : "public, max-age=31536000, immutable";
   headers["content-type"] = asset.contentType;
+  headers["content-disposition"] = "inline";
   if (viewerDocument) {
     headers.vary = mergeVary(headers.vary);
     const id = searchParams.get("id");

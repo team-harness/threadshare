@@ -419,6 +419,7 @@ test("serves the viewer from the same FC origin", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["content-type"], "text/html; charset=utf-8");
+  assert.equal(response.headers["content-disposition"], "inline");
   assert.equal(response.body.toString("utf8"), "<main>Threadshare</main>");
 });
 
@@ -458,6 +459,7 @@ test("negotiates the Agent transcript across FC query and list-valued Accept sha
     const response = await handler({ httpMethod: "GET", ...event });
     assert.equal(response.statusCode, 200);
     assert.equal(response.headers["content-type"], "text/markdown; charset=utf-8");
+    assert.equal(response.headers["content-disposition"], "inline");
     assert.equal(response.headers["cache-control"], "private, no-store");
     assert.equal(response.headers.vary, "Accept");
     assert.equal(response.headers["x-threadshare-format"], "agent-transcript@v1");
@@ -519,6 +521,7 @@ test("serves no-store Viewer HTML with alternate discovery and explicit 405 resp
   });
   assert.equal(html.statusCode, 200);
   assert.equal(html.headers["cache-control"], "no-store");
+  assert.equal(html.headers["content-disposition"], "inline");
   assert.equal(html.headers.vary, "Origin, Accept");
   assert.equal(
     html.headers.link,
