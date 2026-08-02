@@ -22,6 +22,7 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "schema/threadshare-history.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
+  "src/agent-transcript.mjs",
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
   "src/paseo-session-bridge.mjs",

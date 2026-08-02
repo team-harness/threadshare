@@ -49,9 +49,22 @@ export function parseShareReference(value) {
     return normalizedReference(parsed.origin, apiMatch[1], apiMatch[2]);
   }
 
-  if (parsed.pathname.endsWith("/") && parsed.searchParams.size === 1) {
-    const id = parsed.searchParams.get("id");
-    if (id && SHARE_ID_PATTERN.test(id)) {
+  if (parsed.pathname.endsWith("/")) {
+    const ids = parsed.searchParams.getAll("id");
+    const formats = parsed.searchParams.getAll("format");
+    const allowedKeys = [...parsed.searchParams.keys()].every(
+      (key) => key === "id" || key === "format",
+    );
+    const validFormat = formats.length === 0 || (formats.length === 1 && formats[0] === "agent");
+    const id = ids[0];
+    if (
+      allowedKeys &&
+      ids.length === 1 &&
+      validFormat &&
+      parsed.searchParams.size === 1 + formats.length &&
+      id &&
+      SHARE_ID_PATTERN.test(id)
+    ) {
       return normalizedReference(parsed.origin, parsed.pathname.slice(0, -1), id);
     }
   }

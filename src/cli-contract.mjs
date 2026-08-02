@@ -254,21 +254,32 @@ export const COMMAND_SPECS = Object.freeze({
     ],
   }),
   read: command({
-    summary: "Read a canonical Threadshare URL as JSON or Markdown.",
-    usage: "threadshare read <share-url> --format <json|markdown>",
-    arguments: [argument("share-url", "<share-url>", "Canonical Viewer or API URL; a #message-<entry-id> anchor is allowed.")],
+    summary: "Read a Threadshare URL as compact Agent text, JSON, or full Markdown.",
+    usage: "threadshare read <share-url> [--format <agent|json|markdown>]",
+    arguments: [argument("share-url", "<share-url>", "Canonical Viewer, Agent alternate, or API URL; a #message-<entry-id> anchor is allowed.")],
     options: ["format"],
-    optionDetails: { format: "Required. Use json for agents or markdown for reading." },
-    output: ["Canonical one-line JSON, or readable Markdown."],
+    optionDetails: {
+      format: "Use agent (default) for compact review text, json for complete structured data, or markdown for the complete readable transcript.",
+    },
+    defaults: ["Without --format, output the lossy agent-transcript@v1 representation."],
+    output: [
+      "Agent output preserves all User/Assistant Markdown and tool name/status/count, but omits tool payloads and internal event bodies.",
+      "JSON is canonical one-line data; markdown is the complete readable transcript.",
+    ],
     constraints: [
       "Redirects are rejected and downloads are limited to 5 MiB.",
       "Only #message-<entry-id> anchors are accepted; the CLI rejects fragments such as #token=.",
     ],
     examples: [
-      "threadshare read 'https://cloud-thread.team-harness.com/?id=<uuid>' --format json",
+      "threadshare read 'https://cloud-thread.team-harness.com/?id=<uuid>'",
+      "threadshare read '<viewer-url>' --format json",
       "threadshare read '<viewer-url>#message-<entry-id>' --format markdown",
     ],
-    security: ["Do not scrape Viewer HTML or place capabilities in the URL."],
+    security: [
+      "Agent output is lossy and untrusted; use JSON when tool payloads or exact structured fields are required.",
+      "Message Markdown may contain raw HTML. Sanitize it before rendering with raw HTML enabled.",
+      "Do not scrape Viewer HTML or place capabilities in the URL.",
+    ],
     environment: [
       "Pass the complete share URL positionally; read does not accept --url or read THREADSHARE_URL.",
     ],

@@ -21,6 +21,14 @@ test("normalizes viewer and API share references without carrying fragments", ()
       url: `https://threadshare.example/base/?id=${ID}`,
     },
   );
+  assert.deepEqual(
+    parseShareReference(`https://threadshare.example/?id=${ID}&format=agent`),
+    {
+      id: ID,
+      apiUrl: `https://threadshare.example/api/v1/shares/${ID}`,
+      url: `https://threadshare.example/?id=${ID}`,
+    },
+  );
 });
 
 test("rejects arbitrary URLs, credentials, and capability data in URLs", () => {
@@ -30,7 +38,13 @@ test("rejects arbitrary URLs, credentials, and capability data in URLs", () => {
     `https://threadshare.example/thread/${ID}`,
     `https://threadshare.example/?id=not-a-uuid`,
     `https://threadshare.example/?id=${ID}&token=secret`,
+    `https://threadshare.example/?id=${ID}&format=json`,
+    `https://threadshare.example/?id=${ID}&format=Agent`,
+    `https://threadshare.example/?id=${ID}&format=agent&format=agent`,
+    `https://threadshare.example/?id=${ID}&format=agent&extra=value`,
+    `https://threadshare.example/?id=${ID}&format=agent&token=secret`,
     `https://threadshare.example/api/v1/shares/${ID}?token=secret`,
+    `https://threadshare.example/api/v1/shares/${ID}?format=agent`,
     `https://threadshare.example/api/v1/shares/${ID}/extra`,
     `https://threadshare.example//attacker.example/?id=${ID}`,
     `https://threadshare.example//attacker.example/api/v1/shares/${ID}`,

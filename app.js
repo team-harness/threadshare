@@ -1,4 +1,5 @@
 import markdownit from "markdown-it";
+import { agentAlternatePath, canonicalViewerPath } from "./src/agent-transcript.mjs";
 import { createTurnDirectory } from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
@@ -98,14 +99,14 @@ async function copyCommand(command, button) {
   }
 }
 
-async function copyHistorySourceLink(sourceUrl, link) {
+async function copyReviewLink(reviewUrl, link) {
   try {
-    await navigator.clipboard.writeText(sourceUrl);
+    await navigator.clipboard.writeText(reviewUrl);
     link.classList.add("copied");
-    link.textContent = "JSON link copied";
+    link.textContent = "Review link copied";
     window.setTimeout(() => {
       link.classList.remove("copied");
-      link.textContent = "Copy JSON link";
+      link.textContent = "Copy review link";
     }, 1600);
   } catch {
     link.textContent = "Copy failed";
@@ -224,6 +225,11 @@ function isHistoryId(value) {
 
 function shareApiUrl(id) {
   return `/api/v1/shares/${encodeURIComponent(id)}`;
+}
+
+function updateAgentAlternate(id) {
+  const alternate = document.querySelector("#agent-transcript-alternate");
+  if (alternate) alternate.href = agentAlternatePath(id.toLowerCase());
 }
 
 function renderLoadingState() {
@@ -417,19 +423,19 @@ function renderToolGroup(entries) {
 }
 
 function renderAgentReviewHint(id) {
-  const sourceUrl = new URL(shareApiUrl(id), window.location.origin).toString();
+  const reviewUrl = new URL(canonicalViewerPath(id.toLowerCase()), window.location.origin).toString();
   const hint = element("aside", "agent-review-hint");
-  hint.setAttribute("aria-label", "Conversation source JSON");
+  hint.setAttribute("aria-label", "Conversation review link");
   hint.append(element("span", "agent-review-label", "AI agent review:"));
-  const sourceLink = element("a", "agent-review-link", "Copy JSON link");
-  sourceLink.href = sourceUrl;
-  sourceLink.title = "Copy complete source JSON link";
-  sourceLink.setAttribute("data-history-json-url", sourceUrl);
-  sourceLink.addEventListener("click", (event) => {
+  const reviewLink = element("a", "agent-review-link", "Copy review link");
+  reviewLink.href = reviewUrl;
+  reviewLink.title = "Copy the canonical Viewer review link";
+  reviewLink.setAttribute("data-review-url", reviewUrl);
+  reviewLink.addEventListener("click", (event) => {
     event.preventDefault();
-    void copyHistorySourceLink(sourceUrl, sourceLink);
+    void copyReviewLink(reviewUrl, reviewLink);
   });
-  hint.append(sourceLink);
+  hint.append(reviewLink);
   return hint;
 }
 
@@ -580,6 +586,7 @@ async function loadHistory() {
     conversation.replaceChildren(element("div", "error-state", "This share link is invalid."));
     return;
   }
+  updateAgentAlternate(id);
   renderLoadingState();
   await waitForNextPaint();
   try {

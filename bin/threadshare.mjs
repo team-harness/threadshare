@@ -32,6 +32,7 @@ import {
   readSharedHistory,
   validateHistory,
 } from "../src/share-read.mjs";
+import { formatAgentTranscript } from "../src/agent-transcript.mjs";
 import {
   createPreflightResult,
   formatPreflightResult,
@@ -854,18 +855,28 @@ async function main() {
   }
   if (command === "read") {
     validateCommandInvocation(command, positionals, options);
-    if (options.format !== "json" && options.format !== "markdown") {
+    if (
+      options.format !== undefined &&
+      options.format !== "agent" &&
+      options.format !== "json" &&
+      options.format !== "markdown"
+    ) {
       throw cliDiagnostic(
-        options.format === undefined ? "TS_USAGE_OPTION_DEPENDENCY" : "TS_USAGE_INVALID_VALUE",
-        "read requires --format json or markdown.",
-        { command, next: "Use --format json for agents or --format markdown for reading." },
+        "TS_USAGE_INVALID_VALUE",
+        "read format must be agent, json, or markdown.",
+        {
+          command,
+          next: "Omit --format or use agent for compact review text, json for complete data, or markdown for the complete readable transcript.",
+        },
       );
     }
     const history = await readShare(parseReference(positionals[1], command));
     process.stdout.write(
       options.format === "json"
         ? `${JSON.stringify(history)}\n`
-        : formatHistoryAsMarkdown(history),
+        : options.format === "markdown"
+          ? formatHistoryAsMarkdown(history)
+          : formatAgentTranscript(history),
     );
     return;
   }

@@ -77,14 +77,25 @@ threadshare revoke <viewer-url> --token <revoke-token> --json
 
 ### 让 Agent 读取分享
 
-Agent 需要完整规范会话时，应使用 CLI，而不是抓取 Viewer 页面：
+把普通 Viewer URL 直接交给人或 Agent 即可。浏览器默认获得 HTML Viewer；明确偏好
+`text/markdown` 的客户端会从同一个 URL 获得紧凑、有损的审阅文本。CLI 默认在本地生成该表示，
+不依赖服务端是否已经支持协商：
 
 ```bash
+threadshare read '<viewer-or-api-url>'
+threadshare read '<viewer-or-api-url>' --format agent
 threadshare read '<viewer-or-api-url>' --format json
 threadshare read '<viewer-url>#message-<entry-id>' --format markdown
 ```
 
-`read` 接受规范的 Viewer 和 API URL，会忽略合法的消息锚点、拒绝重定向、执行 5 MiB 上限并重新校验 `threadshare-history@v1`。Viewer 继续面向人类阅读，提供用户 turn 目录以及默认折叠的工具和 thought 详情；单行 Agent 引导复制的是同一个 source JSON URL。
+Agent transcript 保留全部 User/Assistant Markdown，只汇总 tool 的名称、状态和相邻次数；tool 的
+input/output/error 以及 thought、todo、activity、compaction 正文都不会输出。需要完整字段时使用
+`--format json`，需要现有完整可读文本时使用 `--format markdown`。消息 Markdown 仍是不可信内容；
+启用 raw HTML 渲染前必须再做清洗。
+
+`read` 接受规范 Viewer、`format=agent` alternate 和 API URL，会忽略合法消息锚点、拒绝重定向、
+执行 canonical JSON 的 5 MiB 上限并重新校验 `threadshare-history@v1`。Viewer 的 Agent 审阅操作复制
+同一个 canonical Viewer URL，而不是另一条 API 链接。
 
 ### 从某条用户消息开始分享
 
@@ -147,7 +158,7 @@ threadshare <command> --help
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
 - `export`：只生成规范 JSON，不上传。
 - `publish`：上传已有的 `threadshare-history@v1` 文档。`share` 和 `publish` 都支持 `--expires` 与 `--revoke`。
-- `read`：不跟随重定向，下载并校验规范分享，再输出 JSON 或 Markdown。
+- `read`：默认输出紧凑的 `agent-transcript@v1`；`--format json` 返回规范数据，`--format markdown` 返回完整可读文本。
 - `revoke`：删除启用 capability 的分享；原始 token 只通过 Bearer authorization 发送。
 - `validate`：在本地校验协议文档。
 

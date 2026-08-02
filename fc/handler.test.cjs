@@ -42,7 +42,7 @@ function createTestHandler(options = {}) {
       fetchImpl,
       logger: options.logger,
       now: options.now,
-      assets: {
+      assets: options.assets ?? {
         "/index.html": {
           body: Buffer.from("<main>Threadshare</main>").toString("base64"),
           contentType: "text/html; charset=utf-8",
@@ -420,4 +420,192 @@ test("serves the viewer from the same FC origin", async () => {
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["content-type"], "text/html; charset=utf-8");
   assert.equal(response.body.toString("utf8"), "<main>Threadshare</main>");
+});
+
+test("negotiates the Agent transcript across FC query and list-valued Accept shapes", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const shared = history();
+  shared.entries.push({
+    id: "message-1",
+    createdAt: "2026-08-01T09:59:00.000Z",
+    kind: "message",
+    role: "user",
+    markdown: "Review this.",
+  });
+  const { handler, objects, requests } = createTestHandler({ now: () => NOW });
+  objects.set(
+    `shares/${id}.json`,
+    JSON.stringify({
+      format: "threadshare-object@v1",
+      createdAt: "2026-08-01T10:00:00.000Z",
+      expiresAt: "2026-08-01T10:01:00.000Z",
+      history: shared,
+    }),
+  );
+  const events = [
+    { rawPath: "/", rawQueryString: `id=${id}&format=agent` },
+    { rawPath: "/", queryParameters: { id, format: "agent" } },
+    { rawPath: "/", queries: { id: [id, "ignored"], format: ["agent"] } },
+    { rawPath: `/?id=${id}&format=agent` },
+    {
+      rawPath: "/",
+      queryParameters: { id },
+      headers: { Accept: ["text/html;q=0.7"], accept: ["text/markdown;q=0.8"] },
+    },
+  ];
+  let expectedBody;
+  for (const event of events) {
+    const response = await handler({ httpMethod: "GET", ...event });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["content-type"], "text/markdown; charset=utf-8");
+    assert.equal(response.headers["cache-control"], "private, no-store");
+    assert.equal(response.headers.vary, "Accept");
+    assert.equal(response.headers["x-threadshare-format"], "agent-transcript@v1");
+    assert.equal(response.headers["x-threadshare-expires-at"], "2026-08-01T10:01:00.000Z");
+    const body = response.body.toString("utf8");
+    assert.match(body, /^# Threadshare Agent Transcript v1$/m);
+    assert.match(body, /^> Review this\.$/m);
+    expectedBody ??= body;
+    assert.equal(body, expectedBody);
+  }
+  assert.equal(requests.length, events.length);
+
+  const ignoredLowerPriority = await handler({
+    rawPath: `/?id=${id}&format=agent`,
+    rawQueryString: "",
+    queryParameters: { id, format: "agent" },
+    httpMethod: "GET",
+    headers: { accept: "text/markdown" },
+  });
+  assert.equal(ignoredLowerPriority.statusCode, 404);
+  assert.match(ignoredLowerPriority.body, /Shared conversation was not found/);
+  assert.equal(requests.length, events.length);
+
+  const head = await handler({
+    rawPath: "/index.html",
+    rawQueryString: `id=${id}&format=agent`,
+    httpMethod: "HEAD",
+  });
+  assert.equal(head.statusCode, 200);
+  assert.equal(head.body, undefined);
+
+  const canonical = await handler({
+    rawPath: `/api/v1/shares/${id}`,
+    httpMethod: "GET",
+    headers: { accept: "text/markdown" },
+  });
+  assert.deepEqual(JSON.parse(canonical.body.toString("utf8")), shared);
+  assert.equal(canonical.headers["content-type"], "application/json; charset=utf-8");
+  assert.equal(canonical.headers.vary, undefined);
+  assert.equal(canonical.headers["x-threadshare-format"], undefined);
+});
+
+test("serves no-store Viewer HTML with alternate discovery and explicit 405 responses", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const { handler, requests } = createTestHandler({
+    assets: {
+      "/index.html": {
+        body: Buffer.from("<main>Threadshare</main>").toString("base64"),
+        contentType: "text/html; charset=utf-8",
+        headers: { Vary: "Origin", Link: '</existing>; rel="preload"' },
+      },
+    },
+  });
+  const html = await handler({
+    rawPath: "/",
+    rawQueryString: `id=${id}`,
+    httpMethod: "GET",
+    headers: { accept: "text/html" },
+  });
+  assert.equal(html.statusCode, 200);
+  assert.equal(html.headers["cache-control"], "no-store");
+  assert.equal(html.headers.vary, "Origin, Accept");
+  assert.equal(
+    html.headers.link,
+    `</existing>; rel="preload", </?id=${id}&format=agent>; rel="alternate"; type="text/markdown"`,
+  );
+  assert.equal(html.headers.Vary, undefined);
+  assert.equal(html.headers.Link, undefined);
+  assert.equal(requests.length, 0);
+
+  const agentMethod = await handler({
+    rawPath: "/",
+    rawQueryString: "format=agent",
+    httpMethod: "POST",
+  });
+  assert.equal(agentMethod.statusCode, 405);
+  assert.equal(agentMethod.headers.allow, "GET, HEAD");
+  assert.equal(agentMethod.headers.vary, "Accept");
+  assert.match(agentMethod.body, /Error: Method not allowed\./);
+
+  const htmlMethod = await handler({ rawPath: "/", httpMethod: "POST" });
+  assert.equal(htmlMethod.statusCode, 405);
+  assert.equal(htmlMethod.headers.allow, "GET, HEAD");
+  assert.equal(htmlMethod.headers["cache-control"], "no-store");
+  assert.equal(htmlMethod.headers.vary, "Accept");
+  assert.equal(htmlMethod.headers["access-control-allow-origin"], undefined);
+  assert.deepEqual(JSON.parse(htmlMethod.body), { error: "Method not allowed" });
+});
+
+test("returns stable Agent 404 and 500 problems without leaking storage details", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const missing = createTestHandler();
+  const missingResponse = await missing.handler({
+    rawPath: "/",
+    rawQueryString: `id=${id}&format=agent`,
+    httpMethod: "GET",
+  });
+  assert.equal(missingResponse.statusCode, 404);
+  assert.equal(missingResponse.headers["x-threadshare-format"], "agent-transcript@v1");
+  assert.match(missingResponse.body, /Shared conversation was not found/);
+
+  const errors = [];
+  const failed = createTestHandler({
+    logger: { error: (...args) => errors.push(args) },
+    fetchImpl: async () => new Response("private OSS failure", { status: 500 }),
+  });
+  const failedResponse = await failed.handler({
+    rawPath: "/",
+    rawQueryString: `id=${id}&format=agent`,
+    httpMethod: "GET",
+  });
+  assert.equal(failedResponse.statusCode, 500);
+  assert.match(failedResponse.body, /Unable to load shared conversation/);
+  assert.doesNotMatch(failedResponse.body, /private OSS failure/);
+  assert.equal(errors.length, 1);
+});
+
+test("keeps legacy and expiration behavior on the FC Agent Viewer path", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const legacy = history();
+  delete legacy.format;
+  const legacyFixture = createTestHandler({ now: () => NOW });
+  legacyFixture.objects.set(`shares/${id}.json`, JSON.stringify(legacy));
+  const legacyResponse = await legacyFixture.handler({
+    rawPath: "/",
+    rawQueryString: `id=${id}&format=agent`,
+    httpMethod: "GET",
+  });
+  assert.equal(legacyResponse.statusCode, 200);
+  assert.match(legacyResponse.body, /^# Threadshare Agent Transcript v1$/m);
+
+  const expiredFixture = createTestHandler({ now: () => NOW });
+  expiredFixture.objects.set(
+    `shares/${id}.json`,
+    JSON.stringify({
+      format: "threadshare-object@v1",
+      createdAt: "2026-08-01T09:59:00.000Z",
+      expiresAt: "2026-08-01T10:00:00.000Z",
+      history: history(),
+    }),
+  );
+  const expiredResponse = await expiredFixture.handler({
+    rawPath: "/",
+    rawQueryString: `id=${id}&format=agent`,
+    httpMethod: "GET",
+  });
+  assert.equal(expiredResponse.statusCode, 404);
+  assert.match(expiredResponse.body, /Shared conversation was not found/);
+  assert.equal(expiredFixture.objects.size, 0);
+  assert.equal(expiredFixture.requests.at(-1).init.method, "DELETE");
 });

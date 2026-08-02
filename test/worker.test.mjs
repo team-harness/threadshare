@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import worker, { createWorker } from "../worker.ts";
+import {
+  agentAlternateLink,
+  agentProblemBody,
+  formatAgentTranscript,
+} from "../src/agent-transcript.mjs";
 import { createStoredShare } from "../src/stored-share.ts";
 
 const NOW = Date.parse("2026-08-01T10:00:00.000Z");
@@ -19,9 +24,9 @@ function history() {
   };
 }
 
-function environment(bucket) {
+function environment(bucket, assetFetch = () => new Response("asset")) {
   return {
-    ASSETS: { fetch: () => new Response("asset") },
+    ASSETS: { fetch: assetFetch },
     THREADSHARE_BUCKET: bucket,
   };
 }
@@ -454,4 +459,235 @@ test("converts late R2 body stream failures into JSON errors", async () => {
   } finally {
     console.error = originalError;
   }
+});
+
+test("negotiates compact Markdown on Viewer documents while preserving HTML and canonical JSON", async () => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  const shared = history();
+  shared.entries.push({
+    id: "message-1",
+    createdAt: "2026-08-01T09:59:00.000Z",
+    kind: "message",
+    role: "user",
+    markdown: "Review this.",
+  });
+  const raw = JSON.stringify(createStoredShare(shared, NOW, { expiresInSeconds: 60 }));
+  let reads = 0;
+  let assetReads = 0;
+  const assetUrls = [];
+  const env = environment(
+    {
+      async put() {},
+      async get() {
+        reads += 1;
+        return { body: new Response(raw).body };
+      },
+      async delete() {},
+    },
+    (request) => {
+      assetReads += 1;
+      assetUrls.push(request.url);
+      return new Response("<main>Viewer</main>", {
+        headers: {
+          "cache-control": "public, max-age=60",
+          link: '</styles.css>; rel="preload"',
+          vary: "Origin",
+        },
+      });
+    },
+  );
+  const testWorker = createWorker({ now: () => NOW });
+
+  const browser = await testWorker.fetch(
+    new Request(`https://threadshare.invalid/?id=${id}`, {
+      headers: { accept: "text/html,application/xhtml+xml" },
+    }),
+    env,
+  );
+  assert.equal(await browser.text(), "<main>Viewer</main>");
+  assert.equal(browser.headers.get("cache-control"), "no-store");
+  assert.equal(browser.headers.get("vary"), "Origin, Accept");
+  assert.equal(
+    browser.headers.get("link"),
+    `</styles.css>; rel="preload", ${agentAlternateLink(id)}`,
+  );
+  assert.equal(reads, 0);
+  assert.equal(assetReads, 1);
+
+  const indexBrowser = await testWorker.fetch(
+    new Request(`https://threadshare.invalid/index.html?id=${id}`, {
+      headers: { accept: "text/html" },
+    }),
+    env,
+  );
+  assert.equal(indexBrowser.status, 200);
+  assert.equal(await indexBrowser.text(), "<main>Viewer</main>");
+  assert.equal(new URL(assetUrls[1]).pathname, "/");
+  assert.equal(new URL(assetUrls[1]).search, `?id=${id}`);
+
+  const markdown = await testWorker.fetch(
+    new Request(`https://threadshare.invalid/?id=${id}`, {
+      headers: { accept: "text/markdown" },
+    }),
+    env,
+  );
+  assert.equal(markdown.status, 200);
+  assert.equal(await markdown.text(), formatAgentTranscript(shared));
+  assert.equal(markdown.headers.get("content-type"), "text/markdown; charset=utf-8");
+  assert.equal(markdown.headers.get("x-threadshare-format"), "agent-transcript@v1");
+  assert.equal(markdown.headers.get("x-threadshare-expires-at"), "2026-08-01T10:01:00.000Z");
+  assert.equal(markdown.headers.get("vary"), "Accept");
+
+  const explicitHead = await testWorker.fetch(
+    new Request(`https://threadshare.invalid/index.html?id=${id}&format=agent`, {
+      method: "HEAD",
+      headers: { accept: "text/html" },
+    }),
+    env,
+  );
+  assert.equal(explicitHead.status, 200);
+  assert.equal(await explicitHead.text(), "");
+  assert.equal(explicitHead.headers.get("x-threadshare-format"), "agent-transcript@v1");
+
+  const canonical = await testWorker.fetch(
+    new Request(`https://threadshare.invalid/api/v1/shares/${id}`, {
+      headers: { accept: "text/markdown" },
+    }),
+    env,
+  );
+  assert.deepEqual(await canonical.json(), shared);
+  assert.equal(canonical.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(canonical.headers.get("vary"), null);
+  assert.equal(canonical.headers.get("x-threadshare-format"), null);
+  assert.equal(reads, 3);
+  assert.equal(assetReads, 2);
+});
+
+test("returns private Agent problems and explicit Viewer method errors", async () => {
+  let reads = 0;
+  const env = environment({
+    async put() {},
+    async get() {
+      reads += 1;
+      return null;
+    },
+    async delete() {},
+  });
+  const testWorker = createWorker({ now: () => NOW });
+
+  const invalid = await testWorker.fetch(
+    new Request("https://threadshare.invalid/?id=not-a-uuid&format=agent"),
+    env,
+  );
+  assert.equal(invalid.status, 404);
+  assert.equal(await invalid.text(), agentProblemBody(404));
+  assert.equal(invalid.headers.get("x-threadshare-format"), "agent-transcript@v1");
+  assert.equal(reads, 0);
+
+  const missing = await testWorker.fetch(
+    new Request(
+      "https://threadshare.invalid/?id=a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0&format=agent",
+    ),
+    env,
+  );
+  assert.equal(missing.status, 404);
+  assert.equal(await missing.text(), agentProblemBody(404));
+  assert.equal(reads, 1);
+
+  const agentMethod = await testWorker.fetch(
+    new Request("https://threadshare.invalid/?format=agent", { method: "POST" }),
+    env,
+  );
+  assert.equal(agentMethod.status, 405);
+  assert.equal(agentMethod.headers.get("allow"), "GET, HEAD");
+  assert.equal(agentMethod.headers.get("cache-control"), "private, no-store");
+  assert.equal(agentMethod.headers.get("vary"), "Accept");
+  assert.equal(await agentMethod.text(), agentProblemBody(405));
+
+  const browserMethod = await testWorker.fetch(
+    new Request("https://threadshare.invalid/", {
+      method: "POST",
+      headers: { accept: "text/html" },
+    }),
+    env,
+  );
+  assert.equal(browserMethod.status, 405);
+  assert.equal(browserMethod.headers.get("allow"), "GET, HEAD");
+  assert.equal(browserMethod.headers.get("cache-control"), "no-store");
+  assert.equal(browserMethod.headers.get("vary"), "Accept");
+  assert.equal(browserMethod.headers.get("access-control-allow-origin"), null);
+  assert.deepEqual(await browserMethod.json(), { error: "Method not allowed" });
+});
+
+test("keeps wildcard Vary and omits alternate links for invalid Viewer IDs", async () => {
+  const env = environment(
+    { async put() {}, async get() { return null; }, async delete() {} },
+    () => new Response("asset", { headers: { vary: "*" } }),
+  );
+  const response = await createWorker().fetch(
+    new Request("https://threadshare.invalid/?id=invalid"),
+    env,
+  );
+  assert.equal(response.headers.get("vary"), "*");
+  assert.equal(response.headers.get("link"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+});
+
+test("keeps legacy, expiration, and decode behavior on the Agent Viewer path", async (t) => {
+  const id = "a4f2927b-7079-4a1e-ae5d-6b80c43c7ba0";
+  await t.test("renders migration-only legacy history", async () => {
+    const legacy = history();
+    delete legacy.format;
+    const response = await createWorker({ now: () => NOW }).fetch(
+      new Request(`https://threadshare.invalid/?id=${id}&format=agent`),
+      environment({
+        async put() {},
+        async get() { return { body: new Response(JSON.stringify(legacy)).body }; },
+        async delete() {},
+      }),
+    );
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /^# Threadshare Agent Transcript v1$/m);
+  });
+
+  await t.test("hides and lazily deletes expired history", async () => {
+    const objects = new Map([
+      [
+        `shares/${id}.json`,
+        JSON.stringify(createStoredShare(history(), NOW - 60_000, { expiresInSeconds: 60 })),
+      ],
+    ]);
+    const response = await createWorker({ now: () => NOW }).fetch(
+      new Request(`https://threadshare.invalid/?id=${id}&format=agent`),
+      environment({
+        async put() {},
+        async get(key) { return { body: new Response(objects.get(key)).body }; },
+        async delete(key) { objects.delete(key); },
+      }),
+    );
+    assert.equal(response.status, 404);
+    assert.equal(await response.text(), agentProblemBody(404));
+    assert.equal(objects.size, 0);
+  });
+
+  await t.test("turns invalid stored data into a stable problem", async () => {
+    const originalError = console.error;
+    const errors = [];
+    console.error = (...args) => errors.push(args);
+    try {
+      const response = await createWorker({ now: () => NOW }).fetch(
+        new Request(`https://threadshare.invalid/?id=${id}&format=agent`),
+        environment({
+          async put() {},
+          async get() { return { body: new Response("private invalid object").body }; },
+          async delete() {},
+        }),
+      );
+      assert.equal(response.status, 500);
+      assert.equal(await response.text(), agentProblemBody(500));
+      assert.equal(errors.length, 1);
+    } finally {
+      console.error = originalError;
+    }
+  });
 });

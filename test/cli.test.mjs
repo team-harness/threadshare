@@ -979,7 +979,7 @@ test("returns a stable diagnostic when a revoke request fails", async () => {
   }
 });
 
-test("reads Viewer and API URLs as JSON or Markdown without following redirects", async () => {
+test("reads Viewer and API URLs as compact Agent text, JSON, or full Markdown without redirects", async () => {
   const id = "11111111-2222-4333-8444-555555555555";
   const redirectId = "22222222-3333-4444-8555-666666666666";
   const targetId = "33333333-4444-4555-8666-777777777777";
@@ -1037,6 +1037,26 @@ test("reads Viewer and API URLs as JSON or Markdown without following redirects"
     assert.ok(markdown.stdout.indexOf("Read this request") < markdown.stdout.indexOf("Read activity"));
     assert.equal(markdown.stderr, "");
 
+    const agent = await execFileAsync(
+      process.execPath,
+      [cli, "read", `${serviceUrl}/?id=${id}`],
+      { encoding: "utf8" },
+    );
+    assert.match(agent.stdout, /^# Threadshare Agent Transcript v1$/m);
+    assert.match(agent.stdout, /^## User$/m);
+    assert.match(agent.stdout, /^> Read this request$/m);
+    assert.match(agent.stdout, /omitted 1 internal entry/);
+    assert.doesNotMatch(agent.stdout, /Read activity/);
+    assert.equal(agent.stderr, "");
+
+    const explicitAgent = await execFileAsync(
+      process.execPath,
+      [cli, "read", `${serviceUrl}/?id=${id}&format=agent`, "--format", "agent"],
+      { encoding: "utf8" },
+    );
+    assert.equal(explicitAgent.stdout, agent.stdout);
+    assert.equal(explicitAgent.stderr, "");
+
     await assert.rejects(
       execFileAsync(
         process.execPath,
@@ -1051,6 +1071,8 @@ test("reads Viewer and API URLs as JSON or Markdown without following redirects"
     );
     assert.equal(redirectTargetHits, 0);
     assert.deepEqual(paths, [
+      `/api/v1/shares/${id}`,
+      `/api/v1/shares/${id}`,
       `/api/v1/shares/${id}`,
       `/api/v1/shares/${id}`,
       `/api/v1/shares/${redirectId}`,
@@ -1295,11 +1317,6 @@ test("rejects unsafe command option combinations before exporting or publishing"
       expected: /The revoke capability must be a 256-bit base64url value/,
     },
     {
-      args: ["read", "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555"],
-      code: "TS_USAGE_OPTION_DEPENDENCY",
-      expected: /read requires --format json or markdown/,
-    },
-    {
       args: [
         "read",
         "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555",
@@ -1307,7 +1324,7 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "yaml",
       ],
       code: "TS_USAGE_INVALID_VALUE",
-      expected: /read requires --format json or markdown/,
+      expected: /read format must be agent, json, or markdown/,
     },
     {
       args: [

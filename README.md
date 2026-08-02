@@ -77,14 +77,25 @@ The server confirms an expiration as `expiresAt`. With `--revoke`, human output 
 
 ### Read a Share with an Agent
 
-Use the CLI instead of scraping the Viewer when an agent needs the complete canonical conversation:
+Share the normal Viewer URL with people or agents. Browsers receive the HTML Viewer; clients that explicitly
+prefer `text/markdown` receive a compact, lossy review transcript from the same URL. The CLI produces that
+representation by default without depending on server-side negotiation:
 
 ```bash
+threadshare read '<viewer-or-api-url>'
+threadshare read '<viewer-or-api-url>' --format agent
 threadshare read '<viewer-or-api-url>' --format json
 threadshare read '<viewer-url>#message-<entry-id>' --format markdown
 ```
 
-`read` accepts canonical Viewer and API URLs, ignores a valid message anchor, refuses redirects, enforces the 5 MiB limit, and validates `threadshare-history@v1` again. The Viewer remains optimized for people with a user-turn directory and collapsed tool/thought details; its single-line agent prompt copies the same source JSON URL.
+The Agent transcript preserves every User/Assistant Markdown message and summarizes tool name, status, and
+adjacent count. It omits tool input/output/error and thought, todo, activity, and compaction bodies. Use
+`--format json` when those complete fields are required, or `--format markdown` for the existing full readable
+transcript. Message Markdown remains untrusted; sanitize it before rendering with raw HTML enabled.
+
+`read` accepts canonical Viewer, `format=agent` alternate, and API URLs, ignores a valid message anchor, refuses
+redirects, enforces the 5 MiB canonical JSON limit, and validates `threadshare-history@v1` again. The Viewer's
+agent review action copies the same canonical Viewer URL, not a separate API link.
 
 ### Share From A User Message
 
@@ -147,7 +158,7 @@ Regular failures exit 1 with empty stdout and print a stable error code plus `Pr
 - `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
 - `export` creates canonical JSON without uploading it.
 - `publish` uploads an existing `threadshare-history@v1` document. `share` and `publish` accept `--expires` and `--revoke`.
-- `read` downloads and validates a canonical share as JSON or Markdown without following redirects.
+- `read` defaults to compact `agent-transcript@v1`; `--format json` returns canonical data and `--format markdown` returns the complete readable transcript.
 - `revoke` deletes a capability-enabled share. The raw token is sent only as Bearer authorization.
 - `validate` checks a protocol document locally.
 

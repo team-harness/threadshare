@@ -18,10 +18,21 @@ import {
   parseRevokeAuthorization,
   revokeTokenMatches,
 } from "../src/stored-share";
+import {
+  agentAlternateLink,
+  agentProblemBody,
+  agentTranscriptHeaders,
+  formatAgentTranscript,
+  mergeVary,
+  selectAgentTranscript,
+} from "../src/agent-transcript.mjs";
 import staticAssets from "./static-assets";
 
 type Environment = Record<string, string | undefined>;
-type StaticAssets = Record<string, { body: string; contentType: string }>;
+type StaticAssets = Record<
+  string,
+  { body: string; contentType: string; headers?: Record<string, string> }
+>;
 
 interface FcEvent {
   body?: string;
@@ -29,7 +40,10 @@ interface FcEvent {
   httpMethod?: string;
   isBase64Encoded?: boolean;
   path?: string;
+  queries?: Record<string, unknown>;
+  queryParameters?: Record<string, unknown>;
   rawPath?: string;
+  rawQueryString?: string;
   requestContext?: { http?: { method?: string; path?: string } };
 }
 
@@ -65,12 +79,60 @@ function header(event: FcEvent, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function acceptHeader(event: FcEvent): string | undefined {
+  const values = [];
+  for (const [name, value] of Object.entries(event.headers ?? {})) {
+    if (name.toLowerCase() !== "accept") continue;
+    if (typeof value === "string") values.push(value);
+    else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === "string") values.push(item);
+    }
+  }
+  return values.length === 0 ? undefined : values.join(",");
+}
+
 function eventMethod(event: FcEvent): string {
   return event.httpMethod ?? event.requestContext?.http?.method ?? "GET";
 }
 
-function eventPath(event: FcEvent): string {
-  return event.rawPath ?? event.path ?? event.requestContext?.http?.path ?? "/";
+function queryFromMap(value: Record<string, unknown>): URLSearchParams {
+  const search = new URLSearchParams();
+  for (const [name, raw] of Object.entries(value)) {
+    const selected =
+      typeof raw === "string"
+        ? raw
+        : Array.isArray(raw)
+          ? raw.find((item) => typeof item === "string")
+          : undefined;
+    if (typeof selected === "string") search.append(name, selected);
+  }
+  return search;
+}
+
+function eventLocation(event: FcEvent): { path: string; searchParams: URLSearchParams } {
+  const selectedPath = event.rawPath ?? event.path ?? event.requestContext?.http?.path ?? "/";
+  const queryIndex = selectedPath.indexOf("?");
+  const path = (queryIndex === -1 ? selectedPath : selectedPath.slice(0, queryIndex)) || "/";
+  const pathQuery = queryIndex === -1 ? "" : selectedPath.slice(queryIndex + 1);
+  let searchParams;
+  if (typeof event.rawQueryString === "string") {
+    searchParams = new URLSearchParams(event.rawQueryString);
+  } else if (
+    event.queryParameters !== null &&
+    typeof event.queryParameters === "object" &&
+    !Array.isArray(event.queryParameters)
+  ) {
+    searchParams = queryFromMap(event.queryParameters);
+  } else if (
+    event.queries !== null &&
+    typeof event.queries === "object" &&
+    !Array.isArray(event.queries)
+  ) {
+    searchParams = queryFromMap(event.queries);
+  } else {
+    searchParams = new URLSearchParams(pathQuery);
+  }
+  return { path, searchParams };
 }
 
 function eventBody(event: FcEvent): string {
@@ -143,21 +205,34 @@ async function loadHistory(
   now: () => number,
   logger: Pick<Console, "error">,
 ): Promise<FcResponse> {
-  const stored = await loadStoredShare(id, environment, fetchImpl);
+  const stored = await loadAvailableShare(id, environment, fetchImpl, now, logger);
   if (!stored) return json(404, { error: "Shared history was not found" });
+  return {
+    statusCode: 200,
+    headers: historyResponseHeaders(stored.expiresAt),
+    body: Buffer.from(JSON.stringify(stored.history)),
+  };
+}
+
+async function loadAvailableShare(
+  id: string,
+  environment: Environment,
+  fetchImpl: typeof fetch,
+  now: () => number,
+  logger: Pick<Console, "error">,
+) {
+  if (!isShareId(id)) return undefined;
+  const stored = await loadStoredShare(id, environment, fetchImpl);
+  if (!stored) return undefined;
   if (isShareExpired(stored.expiresAt, now())) {
     try {
       await deleteHistory(id, environment, fetchImpl);
     } catch (error) {
       logger.error("Threadshare expired share deletion failed", error);
     }
-    return json(404, { error: "Shared history was not found" });
+    return undefined;
   }
-  return {
-    statusCode: 200,
-    headers: historyResponseHeaders(stored.expiresAt),
-    body: Buffer.from(JSON.stringify(stored.history)),
-  };
+  return stored;
 }
 
 async function loadStoredShare(
@@ -201,18 +276,82 @@ async function revokeHistory(
   return { statusCode: 204, headers: {} };
 }
 
-function staticResponse(path: string, method: string, assets: StaticAssets): FcResponse {
+function agentResponse(
+  method: string,
+  status: 200 | 404 | 405 | 500,
+  { history, expiresAt }: { history?: unknown; expiresAt?: string } = {},
+): FcResponse {
+  const headers = Object.fromEntries(agentTranscriptHeaders({ expiresAt }).entries());
+  if (status === 405) headers.allow = "GET, HEAD";
+  const body = status === 200 ? formatAgentTranscript(history) : agentProblemBody(status);
+  return { statusCode: status, headers, ...(method === "HEAD" ? {} : { body }) };
+}
+
+async function readAgentShare(
+  method: string,
+  searchParams: URLSearchParams,
+  environment: Environment,
+  fetchImpl: typeof fetch,
+  now: () => number,
+  logger: Pick<Console, "error">,
+): Promise<FcResponse> {
+  const id = searchParams.get("id");
+  if (!id || !isShareId(id)) return agentResponse(method, 404);
+  const stored = await loadAvailableShare(id, environment, fetchImpl, now, logger);
+  return stored ? agentResponse(method, 200, stored) : agentResponse(method, 404);
+}
+
+function viewerMethodNotAllowed(): FcResponse {
+  return {
+    statusCode: 405,
+    headers: {
+      allow: "GET, HEAD",
+      "cache-control": "no-store",
+      "content-type": JSON_CONTENT_TYPE,
+      vary: "Accept",
+    },
+    body: JSON.stringify({ error: "Method not allowed" }),
+  };
+}
+
+function normalizedAssetHeaders(source: Record<string, string> | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(source ?? {})) {
+    const normalizedName = name.toLowerCase();
+    headers[normalizedName] = headers[normalizedName]
+      ? `${headers[normalizedName]}, ${value}`
+      : value;
+  }
+  return headers;
+}
+
+function staticResponse(
+  path: string,
+  method: string,
+  assets: StaticAssets,
+  searchParams = new URLSearchParams(),
+): FcResponse {
   if (method !== "GET" && method !== "HEAD")
     return json(405, { error: "Method not allowed" }, false);
   const asset = assets[path === "/" ? "/index.html" : path];
   if (!asset) return json(404, { error: "Not found" }, false);
+  const viewerDocument = path === "/" || path === "/index.html";
+  const headers = normalizedAssetHeaders(asset.headers);
+  headers["cache-control"] = viewerDocument
+    ? "no-store"
+    : "public, max-age=31536000, immutable";
+  headers["content-type"] = asset.contentType;
+  if (viewerDocument) {
+    headers.vary = mergeVary(headers.vary);
+    const id = searchParams.get("id");
+    if (id && isShareId(id)) {
+      const alternate = agentAlternateLink(id.toLowerCase());
+      headers.link = headers.link ? `${headers.link}, ${alternate}` : alternate;
+    }
+  }
   return {
     statusCode: 200,
-    headers: {
-      "cache-control":
-        path === "/" || path === "/index.html" ? "no-store" : "public, max-age=31536000, immutable",
-      "content-type": asset.contentType,
-    },
+    headers,
     body: method === "HEAD" ? undefined : Buffer.from(asset.body, "base64"),
   };
 }
@@ -226,7 +365,10 @@ export function createHandler({
 }: HandlerOptions = {}) {
   return async function handler(event: FcEvent): Promise<FcResponse> {
     const method = eventMethod(event);
-    const path = eventPath(event);
+    const { path, searchParams } = eventLocation(event);
+    const viewerDocument = path === "/" || path === "/index.html";
+    const agentSelected =
+      viewerDocument && selectAgentTranscript(searchParams, acceptHeader(event));
     try {
       if (path === "/api/v1/shares") {
         if (method === "OPTIONS") {
@@ -293,9 +435,25 @@ export function createHandler({
       if (path.startsWith("/api/")) {
         return json(404, { error: "Not found" }, method !== "DELETE");
       }
-      return staticResponse(path, method, assets);
+      if (viewerDocument) {
+        if (method !== "GET" && method !== "HEAD") {
+          return agentSelected ? agentResponse(method, 405) : viewerMethodNotAllowed();
+        }
+        if (agentSelected) {
+          return await readAgentShare(
+            method,
+            searchParams,
+            environment,
+            fetchImpl,
+            now,
+            logger,
+          );
+        }
+      }
+      return staticResponse(path, method, assets, searchParams);
     } catch (error) {
       logger.error("Threadshare API request failed", error);
+      if (agentSelected) return agentResponse(method, 500);
       return json(500, { error: "Unable to process shared history" }, method !== "DELETE");
     }
   };
