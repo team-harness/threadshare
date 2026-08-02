@@ -4,6 +4,8 @@ status: candidate-verification
 created: 2026-08-02
 owner_confirmation: confirmed-2026-08-02
 implementation_review_round_1_target: sha256:0ea427efe034f7e23320e289fdd1a96ccd3946b4702ed0fd99b7aa8c55043f19
+online_parser_failure_run: 30729405499
+parser_fix_review_round_1_target: sha256:30e06d68db1b154b5d8dfb66b7b20759cc3154f7a2e8b92fa3578fbea1fd24da
 ---
 
 # GitHub Release 自动发布 npm
@@ -16,9 +18,9 @@ implementation_review_round_1_target: sha256:0ea427efe034f7e23320e289fdd1a96ccd3
 
 ## 现场
 
-- `main`、`origin/main` 与 npm `latest` 当前均为 `0.4.1`；GitHub Release/tag `0.4.1` 已存在，现有 tag 约定不带 `v`。
-- 仓库当前没有 `.github/workflows/`；GitHub Actions 已开启，默认 workflow 权限为只读，`gh` 当前有 `repo`/`workflow` 权限。
-- npm 包 owner 为 `dafang`，但仓库和 GitHub 当前均未保存 npm secret；Trusted Publisher 尚待配置。GitHub 仓库为 public，满足 npm provenance 的公开来源要求。
+- `main` 与 `origin/main` 当前位于自动化实现提交 `7b3981c`，package/lock 版本为 `0.4.2`；npm `latest` 仍为 `0.4.1`，GitHub Release/tag `0.4.2` 尚未创建。既有 Release/tag `0.4.1` 存在，tag 约定不带 `v`。
+- 仓库已有 `.github/workflows/publish-npm.yml`；GitHub Actions 已开启，默认 workflow 权限为只读，`gh` 当前有 `repo`/`workflow` 权限。首次推送后 GitHub 在解析 workflow 时拒绝了 job 级 `${{ runner.temp }}`，run `30729405499` 为 0 jobs，未触发任何 npm 发布。
+- npm 包 owner 为 `dafang`，仓库和 GitHub 均未保存 npm secret；Owner 已完成 Trusted Publisher、强制 2FA/禁 token 发布，并确认所有已暴露的旧 npm token 均已失效。GitHub 仓库为 public，满足 npm provenance 的公开来源要求。
 - `npm test` 覆盖 CLI、Viewer、API/Worker 与 FC；`npm run build:cloudflare`、FC tests、16 文件 npm pack 边界均已有本地证据。
 - Skill 校验目前引用本机 `skill-creator/scripts/quick_validate.py`，fresh GitHub runner 不可复现。
 - `package-lock.json` 的现有 resolved URL 来自本机 npm 镜像；发布 CI 应统一改为官方 npm registry，避免把个人镜像配置带入供应链。
@@ -79,10 +81,11 @@ implementation_review_round_1_target: sha256:0ea427efe034f7e23320e289fdd1a96ccd3
 - npm `latest`、provenance、实际 tarball 隔离安装和 CLI help。
 - 失败恢复：仅在确认 npm 目标版本尚不存在时，publish 前失败可修复 `main`、删除未发布的 Release/tag，再以同版本和新 commit 重建；publish 已成功但后置确认因 registry 暂态失败时使用 `gh run rerun <run-id>` 重放原 workflow、走同 pin 的幂等确认。若失败来自 workflow 缺陷，则保留已发布版本与 tag，修复 `main` 并 bump 下一版本，绝不覆盖、移动或复用 npm 已发布版本。concurrency 导致的 `cancelled` 不是成功：若尚无更高版本，重跑该 run；若更高版本已发布，则不得补发低版本，只记录该版本跳过并继续更高版本。
 
-### 仍待调查
+### 一次性配置
 
-- Owner 已在 npm 页面配置 Trusted Publisher：organization `team-harness`、repository `threadshare`、workflow `publish-npm.yml`、Environment 留空、Allowed actions 仅 `npm publish`；Release 前还需核对包级禁 token 发布设置并轮换已暴露 token。
-- npm Trusted Publisher 保存后是否立即可用于首次发布；以 `0.4.2` workflow 的 OIDC 发布结果为准，不用本机 token 兜底。
+- Owner 已在 npm 页面配置 Trusted Publisher：organization `team-harness`、repository `threadshare`、workflow `publish-npm.yml`、Environment 留空、Allowed actions 仅 `npm publish`。
+- Owner 已将包级 Publishing access 设置为要求 2FA 并禁止 token 发布，并确认所有已暴露的旧 npm token 均已撤销、无法继续使用；需要的替代凭据另行创建，不复用旧 token。
+- Trusted Publisher 的实际 OIDC 路径仍以 `0.4.2` workflow 首次成功发布为最终验收，不用本机 token 兜底。
 
 ## 证据
 
@@ -91,7 +94,9 @@ implementation_review_round_1_target: sha256:0ea427efe034f7e23320e289fdd1a96ccd3
 - Fresh 验证：默认工具链与 pinned Node 22.22.3/npm 12.0.2 下完整测试均通过（CLI 86、Viewer 2、API/Worker 25、release 8、FC 14）；pinned 独立 Cloudflare build 通过。空 cache `npm ci` 前后 package/lock SHA-256 不变。
 - Pack/安装：npm 12 pack 恰好 16 文件，integrity `sha512-2rnC2vIwOGj10vWh7nKKTgV67gNnNm8KfAnzPhH0FCg/trCXP3I/kt04ij6DOqgJpSlMgE2fpvebIhPOy0MIkw==`；真实 registry preflight 得出 `latest=0.4.1`、`shouldPublish=true`。临时 tarball 安装到隔离 prefix 后，包版本为 `0.4.2`，真实 `threadshare --help` 成功。
 - 独立 diff review：首轮冻结审查为 0 Blocking、5 Important，均已修复；Round 2 Opus 5 复审确认这 5 条全部闭环，新增的 workflow 守卫测试缺口也已补齐。其余为既有 5 分钟 attestation 确认窗口的运维风险：若包已写入但 run 因可见性延迟变红，必须按 runbook 重跑原 run，绝不删除 Release 或移动 tag。
-- 线上验收（待执行）：创建 GitHub Release `0.4.2` 后，要求对应 workflow 成功、npm 官方 registry 显示 `latest=0.4.2` 且有 provenance，并从官方 registry 安装到临时 prefix 运行 CLI help。
+- GitHub parser 红测：实现提交推送后，run `30729405499` 在 workflow 解析阶段以 0 jobs 失败；GitHub 精确报告第 21、86 行 `Unrecognized named-value: 'runner'`。根因是 job 级 `env` 不允许使用 `runner` context。修复把两个 job 的 cache 路径改为 setup-node 后通过 runner 环境变量 `$RUNNER_TEMP` 写入 `$GITHUB_ENV`，并增加 job 级 `env` expression context 契约测试。
+- Parser 修复 Round 1：Opus 5 只读审查为 0 Blocking、2 Important。已把 token 前置条件收敛为“所有已暴露旧 token 均已失效”，并将单一 `runner.` 黑名单升级为逐个 job `env` 表达式的允许 context 校验，覆盖大小写、方括号以及 `env`/`steps`/`job` 等同类错误；cache step 同时补上 `set -euo pipefail`。
+- 线上验收（待执行）：parser 修复复审并推送后创建 GitHub Release `0.4.2`，要求对应 workflow 成功、npm 官方 registry 显示 `latest=0.4.2` 且有 provenance，并从官方 registry 安装到临时 prefix 运行 CLI help。
 
 ## 验收
 
@@ -107,5 +112,6 @@ implementation_review_round_1_target: sha256:0ea427efe034f7e23320e289fdd1a96ccd3
 
 ## 状态与未决
 
-- 当前：设计审查与两轮实现审查的有效代码发现均已吸收；最后一项 workflow 守卫测试已补齐，等待最终冻结目标复审。
+- 当前：自动化实现已推送；GitHub parser 红测已定位且本地修复，Round 1 的 2 条 Important 已闭环，等待 Opus 5 Round 2 复审与修复提交推送。`0.4.2` Release 尚未创建，npm 未发生写入。
 - Owner 于 2026-08-02 确认推荐方案：授权实现、提交并推送 `main`；授权在浏览器配置 Trusted Publisher、禁 token 发布并轮换已暴露 token后创建稳定 Release `0.4.2`，触发不可逆 npm 发布；不授权 Cloudflare/FC 部署。
+- Owner 于 2026-08-02 确认 npm 一次性配置全部完成，可以继续创建稳定 Release `0.4.2` 并执行生产 npm 发布。

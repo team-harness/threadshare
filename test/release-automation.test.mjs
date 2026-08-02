@@ -39,6 +39,27 @@ const expectedPackageFiles = [
   "src/share-url.mjs",
 ];
 const integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const allowedJobEnvContexts = new Set([
+  "github",
+  "inputs",
+  "matrix",
+  "needs",
+  "secrets",
+  "strategy",
+  "vars",
+]);
+
+function expressionContextRoots(value) {
+  const roots = [];
+  for (const expressionMatch of value.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    for (const contextMatch of expressionMatch[1].matchAll(
+      /(?:^|[^\w.])([A-Za-z_][A-Za-z0-9_]*)\s*(?=\.|\[|\s*$)/g,
+    )) {
+      roots.push(contextMatch[1].toLowerCase());
+    }
+  }
+  return roots;
+}
 
 function packument({ latest = "0.4.1", versions = {} } = {}) {
   return {
@@ -364,6 +385,20 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
   assert.deepEqual(publish.permissions, { contents: "read", "id-token": "write" });
   assert.equal(verify.outputs.integrity, "${{ steps.release.outputs.integrity }}");
 
+  for (const invalidValue of [
+    "${{ runner.temp }}",
+    "${{ RUNNER['temp'] }}",
+    "${{ env.CACHE }}",
+    "${{ steps.pack.outputs.integrity }}",
+    "${{ job.status }}",
+  ]) {
+    assert.ok(
+      expressionContextRoots(invalidValue).some((rootContext) =>
+        !allowedJobEnvContexts.has(rootContext)
+      ),
+    );
+  }
+
   for (const job of [verify, publish]) {
     const checkout = job.steps.find((step) => step.name === "Checkout release commit");
     assert.equal(checkout.uses, "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803");
@@ -375,6 +410,20 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
     assert.equal(setupNode.with["node-version"], "22.22.3");
     assert.equal(Object.hasOwn(setupNode.with, "cache"), false);
     assert.equal(Object.hasOwn(job, "environment"), false);
+    for (const [name, value] of Object.entries(job.env)) {
+      for (const rootContext of expressionContextRoots(String(value))) {
+        assert.ok(
+          allowedJobEnvContexts.has(rootContext),
+          `job env ${name} uses unsupported context ${rootContext}`,
+        );
+      }
+    }
+    assert.equal(Object.hasOwn(job.env, "NPM_CONFIG_CACHE"), false);
+    const configureCache = job.steps.find((step) => step.name === "Configure npm cache");
+    assert.equal(
+      configureCache.run,
+      "set -euo pipefail\nprintf 'NPM_CONFIG_CACHE=%s\\n' \"$RUNNER_TEMP/threadshare-npm-cache\" >> \"$GITHUB_ENV\"\n",
+    );
   }
 
   const verifyCommands = verify.steps.map((step) => step.run ?? "").join("\n");
@@ -401,5 +450,8 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
   const confirmStep = publish.steps.find((step) => step.name === "Confirm registry release");
   assert.equal(Object.hasOwn(confirmStep, "if"), false);
   assert.match(confirmStep.run, /npm run verify:release -- confirm/);
-  assert.doesNotMatch(source, /NPM_TOKEN|NODE_AUTH_TOKEN|_authToken|secrets\./);
+  assert.doesNotMatch(
+    source,
+    /NPM_TOKEN|NODE_AUTH_TOKEN|_authToken|secrets\s*(?:\.|\[)/i,
+  );
 });
