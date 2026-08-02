@@ -22,7 +22,7 @@ Threadshare is an independent API, read-only viewer, and CLI for AI agent conver
 - `src/share-preflight.mjs` owns content-free local reports; `src/share-read.mjs` owns bounded canonical remote reads and Markdown formatting.
 - `app.js` and `src/viewer-state.mjs` own the read-only Viewer, message anchors, turn directory, and local folding behavior.
 - `bin/threadshare.mjs` is a stable automation surface. Actual share/publish `--json` output must stay a one-line object containing at least `id` and `url`; dry-run JSON must stay one-line, report `dryRun`/`valid`, and never fabricate an `id` or URL.
-- `skills/threadshare/` is the Codex and Codex Cloud workflow contract. Keep its commands aligned with the CLI and validate it with `skill-creator/scripts/quick_validate.py` after changes.
+- `skills/threadshare/` is the Codex and Codex Cloud workflow contract. Keep its commands aligned with the CLI and validate it with `npm run validate:skill` after changes.
 - `worker.ts` (Cloudflare/R2) and `fc/handler.ts` (Alibaba FC/OSS) are storage adapters. Keep behavior equivalent.
 
 ## Verification
@@ -33,10 +33,36 @@ Run the exact checks affected by a change:
 npm run test:cli
 npm run test:viewer
 npm run test:api
+npm run test:release
 npm run build:cloudflare
 npm run test:fc
+npm run validate:skill
 ```
 
-Before publishing npm, run `npm pack --dry-run --json`, confirm only CLI, protocol, Skill, README, and license files are included, then publish `@team-harness/threadshare` with public access. Verify installation in a temporary prefix; do not rely only on the source checkout.
+## npm Releases
+
+Stable npm releases are published only by `.github/workflows/publish-npm.yml` from a GitHub Release. Do not run local `npm publish`, store an npm token in GitHub, move a published tag, or create the next stable Release before the current release workflow succeeds.
+
+One-time npm package settings:
+
+- Trusted Publisher: organization `team-harness`, repository `threadshare`, workflow `publish-npm.yml`, no Environment, and allowed action `npm publish` only.
+- Publishing access: require 2FA and disallow token publishing. Trusted Publishing remains the automation path.
+
+For each stable release:
+
+1. Set the same unprefixed stable version in `package.json`, the lockfile top level, and the lockfile root package.
+2. Run the full verification above plus `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 16-file allowlist defined by `EXPECTED_PACKAGE_FILES` in `scripts/verify-release.mjs` and record its integrity.
+3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
+4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
+5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`, require it to finish successfully, then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.
+
+The workflow pins GitHub Actions, Node, and npm. Update those pins together with the release automation tests. A rerun of an already published release must use `gh run rerun <run-id>` so it retains the original event SHA and pinned toolchain.
+
+Recovery rules:
+
+- If npm does not contain the target version and the workflow failed before publish, fix `main`, then delete the unpublished release and tag with `gh release delete <version> --cleanup-tag --yes`; recreate it from the fixed commit.
+- If npm contains the target version and only registry confirmation failed transiently, get the run ID from `gh run list --workflow publish-npm.yml --limit 10`, then use `gh run rerun <run-id>`. Never delete or move its tag.
+- If npm contains the version and the workflow itself is wrong, keep that release immutable, fix `main`, and publish a new version.
+- A cancelled run is incomplete. Rerun it before any higher release. If a higher version already reached npm, never backfill the lower version.
 
 Do not commit generated deployment state, `node_modules`, storage credentials, `.void/`, `.wrangler/`, `fc/.licell/`, `fc/dist/`, or `fc/static-assets.ts`.

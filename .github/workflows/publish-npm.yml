@@ -1,0 +1,138 @@
+name: Publish npm
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: threadshare-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event.release.draft == false && github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      integrity: ${{ steps.release.outputs.integrity }}
+    env:
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/threadshare-npm-cache
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          test "$(node --version)" = "v22.22.3"
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be an unprefixed stable semver" >&2
+            exit 1
+          fi
+          test "$(git rev-parse 'HEAD^{commit}')" = "$RELEASE_SHA"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$RELEASE_SHA"
+          git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+
+      - name: Install dependencies from lockfile
+        run: npm ci
+
+      - name: Verify lockfile stayed immutable
+        run: git diff --exit-code -- package.json package-lock.json
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Build Cloudflare target independently
+        run: npm run build:cloudflare
+
+      - name: Validate bundled Skill
+        run: npm run validate:skill
+
+      - name: Prepare release
+        id: release
+        run: npm run verify:release -- prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+
+  publish:
+    needs: verify
+    if: github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/threadshare-npm-cache
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          test "$(node --version)" = "v22.22.3"
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be an unprefixed stable semver" >&2
+            exit 1
+          fi
+          test "$(git rev-parse 'HEAD^{commit}')" = "$RELEASE_SHA"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$RELEASE_SHA"
+          git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+
+      - name: Prepare release for publishing
+        id: release
+        run: npm run verify:release -- prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+
+      - name: Match verified package integrity
+        env:
+          PUBLISH_INTEGRITY: ${{ steps.release.outputs.integrity }}
+          VERIFIED_INTEGRITY: ${{ needs.verify.outputs.integrity }}
+        run: test "$PUBLISH_INTEGRITY" = "$VERIFIED_INTEGRITY"
+
+      - name: Publish package with npm Trusted Publishing
+        if: steps.release.outputs.should_publish == 'true'
+        run: npm publish --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org
+
+      - name: Confirm registry release
+        run: npm run verify:release -- confirm --tag "$RELEASE_TAG" --expected-integrity "${{ steps.release.outputs.integrity }}"
