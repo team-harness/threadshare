@@ -4,6 +4,17 @@ import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import {
+  BOOLEAN_OPTIONS,
+  COMMAND_SPECS,
+  DEFAULT_THREADSHARE_URL,
+  OPAQUE_VALUE_OPTIONS,
+  OPTION_DEFINITIONS,
+  cliDiagnostic,
+  preflightHelp,
+  renderDiagnostic,
+  validateCommandInvocation,
+} from "../src/cli-contract.mjs";
+import {
   DEFAULT_MESSAGE_PAGE_SIZE,
   MAX_MESSAGE_PAGE_SIZE,
   listStartMessagePage,
@@ -27,34 +38,24 @@ import {
 } from "../src/share-preflight.mjs";
 import { parseShareReference } from "../src/share-url.mjs";
 
-const DEFAULT_THREADSHARE_URL = "https://cloud-thread.team-harness.com";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
-const BOOLEAN_OPTIONS = new Set(["dry-run", "help", "json", "pick-start", "report", "revoke"]);
-const OPAQUE_VALUE_OPTIONS = new Set(["token"]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
-function usage() {
-  return `Usage:
-  threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
-  threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
-  threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-  threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-  threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-  threadshare read <share-url> --format <json|markdown>
-  threadshare revoke <share-url> --token <token> [--json]
-  threadshare validate <history.json|->
 
-Range: omit --from and --before for the full visible snapshot; empty values are rejected.
-Default service: ${DEFAULT_THREADSHARE_URL}`;
-}
-
-function parseExpiresDuration(value) {
+function parseExpiresDuration(value, command = "share") {
   if (value === undefined) return undefined;
   const match = /^([1-9]\d*)([mhd])$/.exec(value);
   const multipliers = { m: 60, h: 60 * 60, d: 24 * 60 * 60 };
   const seconds = match ? Number(match[1]) * multipliers[match[2]] : Number.NaN;
   if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > MAX_EXPIRES_IN_SECONDS) {
-    throw new Error("--expires must be a duration from 1m to 365d using m, h, or d");
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      "--expires must be a duration from 1m to 365d using m, h, or d.",
+      {
+        command,
+        next: `Use a positive integer such as 30m, 24h, or 7d. Run \`threadshare ${command} --help\`.`,
+      },
+    );
   }
   return seconds;
 }
@@ -99,6 +100,7 @@ function formatSessionPage(page, offset, limit) {
 function parseArgs(args) {
   const positionals = [];
   const options = Object.create(null);
+  const command = Object.hasOwn(COMMAND_SPECS, args[0]) ? args[0] : undefined;
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (!value.startsWith("--")) {
@@ -106,45 +108,66 @@ function parseArgs(args) {
       continue;
     }
     const key = value.slice(2);
-    if (Object.hasOwn(options, key)) throw new Error(`Duplicate option --${key}`);
+    if (!Object.hasOwn(OPTION_DEFINITIONS, key)) {
+      throw cliDiagnostic("TS_USAGE_UNKNOWN_OPTION", `Unknown option: --${key}.`, {
+        command,
+        next: command
+          ? `Run \`threadshare ${command} --help\` for valid options.`
+          : "Run `threadshare --help` for valid commands and options.",
+      });
+    }
+    if (Object.hasOwn(options, key)) {
+      const helpCommand = command ? `threadshare ${command} --help` : "threadshare --help";
+      throw cliDiagnostic("TS_USAGE_DUPLICATE_OPTION", `Duplicate option --${key}.`, {
+        command,
+        next: `Pass --${key} only once. Run \`${helpCommand}\` for details.`,
+      });
+    }
     if (BOOLEAN_OPTIONS.has(key)) {
       options[key] = true;
       continue;
     }
     const next = args[++index];
-    if (!next || (next.startsWith("--") && !OPAQUE_VALUE_OPTIONS.has(key))) {
-      throw new Error(`Missing value for --${key}`);
+    if (next === undefined || next === "" || (next.startsWith("--") && !OPAQUE_VALUE_OPTIONS.has(key))) {
+      const helpCommand = command ? `threadshare ${command} --help` : "threadshare --help";
+      throw cliDiagnostic("TS_USAGE_MISSING_VALUE", `A non-empty value is required for --${key}.`, {
+        command,
+        next: `Add ${OPTION_DEFINITIONS[key].placeholder}. Run \`${helpCommand}\` for details.`,
+      });
     }
     options[key] = next;
   }
   return { positionals, options };
 }
 
-function validateCommandShape(command, positionals, options, expected, allowed) {
-  if (positionals.length > expected) {
-    throw new Error(`Unexpected positional argument: ${positionals[expected]}`);
-  }
-  if (positionals.length < expected) throw new Error(usage());
-  for (const option of Object.keys(options)) {
-    if (option === "help") continue;
-    if (!allowed.has(option)) throw new Error(`--${option} is not valid for ${command}`);
-  }
-}
-
-function sessionCommand(command, positionals, options, allowed) {
-  validateCommandShape(command, positionals, options, 3, allowed);
+function sessionCommand(command, positionals, options) {
+  validateCommandInvocation(command, positionals, options);
   const [, provider, session] = positionals;
-  if (!SESSION_PROVIDERS.has(provider) || !session) throw new Error(usage());
+  if (!SESSION_PROVIDERS.has(provider)) {
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      `${command} provider must be codex, claude, or paseo.`,
+      {
+        command,
+        next: `Choose a supported provider. Run \`threadshare ${command} --help\`.`,
+      },
+    );
+  }
   return { provider, session };
 }
 
-function parsePageInteger(name, value, fallback, maximum = MAX_MESSAGE_PAGE_SIZE) {
+function parsePageInteger(name, value, fallback, maximum = MAX_MESSAGE_PAGE_SIZE, command = "messages") {
   if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) {
-    throw new Error(
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
       name === "limit"
-        ? `--limit must be an integer from 1 to ${maximum}`
-        : "--offset must be a non-negative integer",
+        ? `--limit must be an integer from 1 to ${maximum}.`
+        : "--offset must be a non-negative safe integer.",
+      {
+        command,
+        next: `Provide a valid --${name} value. Run \`threadshare ${command} --help\`.`,
+      },
     );
   }
   const parsed = Number(value);
@@ -152,19 +175,52 @@ function parsePageInteger(name, value, fallback, maximum = MAX_MESSAGE_PAGE_SIZE
     !Number.isSafeInteger(parsed) ||
     (name === "limit" && (parsed < 1 || parsed > maximum))
   ) {
-    throw new Error(
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
       name === "limit"
-        ? `--limit must be an integer from 1 to ${maximum}`
-        : "--offset must be a non-negative integer",
+        ? `--limit must be an integer from 1 to ${maximum}.`
+        : "--offset must be a non-negative safe integer.",
+      {
+        command,
+        next: `Provide a valid --${name} value. Run \`threadshare ${command} --help\`.`,
+      },
     );
   }
   return parsed;
 }
 
-function serviceUrl(value) {
-  const url = new URL(value ?? process.env.THREADSHARE_URL ?? DEFAULT_THREADSHARE_URL);
+function serviceUrl(value, command = "share") {
+  const fromEnvironment = value === undefined && process.env.THREADSHARE_URL !== undefined;
+  let url;
+  try {
+    url = new URL(value ?? process.env.THREADSHARE_URL ?? DEFAULT_THREADSHARE_URL);
+  } catch {
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      fromEnvironment
+        ? "THREADSHARE_URL must be an absolute HTTP(S) service URL."
+        : "--url must be an absolute HTTP(S) service URL.",
+      {
+        command,
+        next: fromEnvironment
+          ? "Unset or correct THREADSHARE_URL, or pass a valid --url override."
+          : `Pass a valid --url, or omit it to use ${DEFAULT_THREADSHARE_URL}.`,
+      },
+    );
+  }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("Threadshare service URL must use HTTP or HTTPS");
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      fromEnvironment
+        ? "THREADSHARE_URL must use HTTP or HTTPS."
+        : "--url must use HTTP or HTTPS.",
+      {
+        command,
+        next: fromEnvironment
+          ? "Unset or correct THREADSHARE_URL, or pass a valid --url override."
+          : `Pass a valid --url, or omit it to use ${DEFAULT_THREADSHARE_URL}.`,
+      },
+    );
   }
   return url.toString().replace(/\/$/, "");
 }
@@ -179,7 +235,14 @@ function createRevokeCapability() {
 
 function validateRevokeToken(token) {
   if (!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(token ?? "")) {
-    throw new Error("--token must be a 256-bit base64url capability");
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      "The revoke capability must be a 256-bit base64url value.",
+      {
+        command: "revoke",
+        next: "Place the original capability immediately after --token, even when it starts with --. Run `threadshare revoke --help`.",
+      },
+    );
   }
   return token;
 }
@@ -188,23 +251,73 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-async function readInput(file) {
-  if (file !== "-") return readFile(file, "utf8");
-  process.stdin.setEncoding("utf8");
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  return chunks.join("");
+async function readInput(file, command) {
+  try {
+    if (file !== "-") return await readFile(file, "utf8");
+    process.stdin.setEncoding("utf8");
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    return chunks.join("");
+  } catch {
+    throw cliDiagnostic("TS_INPUT_READ_FAILED", "Unable to read the input file.", {
+      command,
+      next: "Check that the input file exists and is readable, or use - to read from stdin.",
+    });
+  }
 }
 
-async function writeOutput(file, value) {
+async function writeOutput(file, value, command = "export") {
   if (!file || file === "-") {
     process.stdout.write(value);
     return;
   }
-  await writeFile(file, value);
+  try {
+    await writeFile(file, value);
+  } catch {
+    throw cliDiagnostic("TS_OUTPUT_WRITE_FAILED", "Unable to write the output file.", {
+      command,
+      next: "Check the output directory and permissions, or use --output - for stdout.",
+    });
+  }
 }
 
-async function publish(history, url, { expiresInSeconds, revoke = false } = {}) {
+async function readHistoryInput(file, command) {
+  const raw = await readInput(file, command);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw cliDiagnostic("TS_INPUT_INVALID_JSON", "The input file is not valid JSON.", {
+      command,
+      next: `Fix the JSON syntax, then run \`threadshare ${command} --help\` for the expected input.`,
+    });
+  }
+  try {
+    return validateHistory(parsed);
+  } catch (error) {
+    throw cliDiagnostic(
+      "TS_INPUT_SCHEMA_INVALID",
+      error instanceof Error
+        ? error.message
+        : "Input is not a valid threadshare-history@v1 document.",
+      {
+        command,
+        next: command === "publish"
+          ? "Run `threadshare validate <history-file|->` locally, fix the reported document, then retry."
+          : "Provide a canonical threadshare-history@v1 document. Run `threadshare validate --help`.",
+      },
+    );
+  }
+}
+
+function uploadOutcomeUnknown(problem, command) {
+  return cliDiagnostic("TS_PUBLISH_OUTCOME_UNKNOWN", problem, {
+    command,
+    next: "Do not publish again automatically. Ask the owner to check the service and decide whether a retry is safe.",
+  });
+}
+
+async function publish(history, url, { expiresInSeconds, revoke = false, command = "publish" } = {}) {
   const headers = { "content-type": "application/json" };
   if (expiresInSeconds !== undefined) {
     headers["x-threadshare-expires-in"] = String(expiresInSeconds);
@@ -213,29 +326,108 @@ async function publish(history, url, { expiresInSeconds, revoke = false } = {}) 
   if (revokeCapability) {
     headers["x-threadshare-revoke-token-sha256"] = revokeCapability.digest;
   }
-  const response = await fetch(`${serviceUrl(url)}/api/v1/shares`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(history),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || !payload?.id) {
-    throw new Error(payload?.error || `Threadshare upload failed with HTTP ${response.status}`);
-  }
-  const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : undefined;
-  if (expiresInSeconds !== undefined && expiresAt === undefined) {
-    throw new Error(
-      "Threadshare server did not confirm the requested expiration; the share may have been created without expiration",
+  const baseUrl = serviceUrl(url, command);
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/api/v1/shares`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(history),
+      redirect: "error",
+    });
+  } catch (error) {
+    throw uploadOutcomeUnknown(
+      `Threadshare upload outcome is unknown because the network request failed: ${error instanceof Error ? error.message : String(error)}.`,
+      command,
     );
   }
-  if (revokeCapability && payload.revocable !== true) {
-    throw new Error(
-      "Threadshare server did not confirm revocation; the share may have been created without revocation",
+  const payload = await response.json().catch(() => null);
+  const uncertainClientStatus = [408, 425, 429].includes(response.status);
+  if (response.status >= 400 && response.status < 500 && !uncertainClientStatus) {
+    throw cliDiagnostic(
+      "TS_PUBLISH_REJECTED",
+      payload?.error
+        ? `Threadshare server rejected the upload: ${payload.error}`
+        : `Threadshare server rejected the upload with HTTP ${response.status}.`,
+      {
+        command,
+        next: `Correct the rejected request, then retry. Run \`threadshare ${command} --help\`.`,
+      },
+    );
+  }
+  let createdReference;
+  if (response.ok && typeof payload?.id === "string") {
+    try {
+      createdReference = parseShareReference(
+        `${baseUrl}/?id=${encodeURIComponent(payload.id)}`,
+      );
+    } catch {
+      // A successful response without a canonical share ID cannot prove what was created.
+    }
+  }
+  if (!response.ok || !createdReference) {
+    throw uploadOutcomeUnknown(
+      `Threadshare upload outcome is unknown after HTTP ${response.status}; the response did not contain a confirmed share ID.`,
+      command,
+    );
+  }
+  const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : undefined;
+  const expirationRequested = expiresInSeconds !== undefined;
+  const expirationConfirmed = expirationRequested ? expiresAt !== undefined : expiresAt === undefined;
+  const revocationRequested = revokeCapability !== undefined;
+  const revocationConfirmed = revocationRequested
+    ? payload.revocable === true
+    : payload.revocable !== true;
+  if (!expirationConfirmed || !revocationConfirmed) {
+    const { url } = createdReference;
+    const problems = [];
+    if (expirationRequested && expiresAt === undefined) {
+      problems.push(
+        "Threadshare server did not confirm the requested expiration; the share may have been created without expiration",
+      );
+    } else if (!expirationRequested && expiresAt !== undefined) {
+      problems.push("Threadshare server returned an unexpected expiration for a permanent share request");
+    }
+    if (revocationRequested && payload.revocable !== true) {
+      problems.push(
+        "Threadshare server did not confirm revocation; the share may have been created without revocation",
+      );
+    } else if (!revocationRequested && payload.revocable === true) {
+      problems.push("Threadshare server returned unexpected revocation for a non-revocable share request");
+    }
+    const policyStatus = [
+      expirationRequested
+        ? `requested expiration was ${expirationConfirmed ? "confirmed" : "not confirmed"}`
+        : expiresAt === undefined
+          ? "expiration was not requested"
+          : "expiration was not requested but the server returned one",
+      revocationRequested
+        ? `requested revocation was ${revocationConfirmed ? "confirmed" : "not confirmed"}`
+        : payload.revocable === true
+          ? "revocation was not requested but the server returned it as enabled"
+          : "revocation was not requested",
+    ].join("; ");
+    const canRevoke = revocationRequested && revocationConfirmed;
+    throw cliDiagnostic(
+      "TS_PUBLISH_POLICY_UNCONFIRMED",
+      `${problems.join("; ")}. Policy status: ${policyStatus}.`,
+      {
+        command,
+        result: `Share was created at ${url}, but requested policy was not fully confirmed.`,
+        next: canRevoke
+          ? "Do not publish again; revoke the created share now. If revoke returns 404, report the result to the owner."
+          : "Do not publish again. Report the created URL to the owner or storage administrator for cleanup.",
+        secretLines: canRevoke
+          ? [
+            `Revoke (secret, shown once; do not log): threadshare revoke ${shellQuote(url)} --token ${shellQuote(revokeCapability.token)}`,
+          ]
+          : [],
+      },
     );
   }
   return {
-    id: payload.id,
-    url: `${serviceUrl(url)}/?id=${encodeURIComponent(payload.id)}`,
+    id: createdReference.id,
+    url: createdReference.url,
     ...(expiresAt === undefined ? {} : { expiresAt }),
     ...(revokeCapability === undefined ? {} : { revokeToken: revokeCapability.token }),
   };
@@ -255,14 +447,33 @@ function writePublishResult(result, json) {
 }
 
 async function revokeShare(reference, token) {
-  const response = await fetch(reference.apiUrl, {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${token}` },
-    redirect: "error",
-  });
+  let response;
+  try {
+    response = await fetch(reference.apiUrl, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+      redirect: "error",
+    });
+  } catch (error) {
+    throw cliDiagnostic(
+      "TS_SHARE_REVOKE_FAILED",
+      `Unable to revoke the share: ${error instanceof Error ? error.message : String(error)}.`,
+      {
+        command: "revoke",
+        next: "Check network access and the share URL. Do not put the revoke token in the URL or logs.",
+      },
+    );
+  }
   if (response.status !== 204) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.error || `Threadshare revoke failed with HTTP ${response.status}`);
+    throw cliDiagnostic(
+      "TS_SHARE_REVOKE_FAILED",
+      payload?.error || `Threadshare revoke failed with HTTP ${response.status}.`,
+      {
+        command: "revoke",
+        next: "Check the URL, expiration or prior revocation state, and the local capability. A 404 intentionally does not identify which check failed.",
+      },
+    );
   }
   return { id: reference.id, url: reference.url, revoked: true };
 }
@@ -275,16 +486,143 @@ async function exportProviderSession(provider, session) {
   return exportSession(provider, session);
 }
 
-function rangedHistory(history, options) {
-  return validateHistory(
-    selectHistoryRange(history, { from: options.from, before: options.before }),
-  );
+function sessionRecovery(provider) {
+  return provider === "paseo"
+    ? "Run `paseo ls --json`, choose the intended agent UUID, and retry with that fixed ID."
+    : `Run \`threadshare sessions ${provider} --format json\`, choose the intended session, and retry with its full ID or JSONL path.`;
+}
+
+function sessionFailureCode(provider, error, message) {
+  if (provider === "paseo") {
+    switch (error?.threadshareSessionFailureKind) {
+      case "invalid_reference":
+        return "TS_USAGE_INVALID_VALUE";
+      case "agent_not_found":
+      case "local_session_not_found":
+        return "TS_SESSION_NOT_FOUND";
+      case "agent_ambiguous":
+      case "local_session_ambiguous":
+        return "TS_SESSION_AMBIGUOUS";
+      case "provider_unavailable":
+        return "TS_PROVIDER_UNAVAILABLE";
+      default:
+        return "TS_SESSION_ACCESS_FAILED";
+    }
+  }
+  if (/^No (?:codex|claude) session matches\b/i.test(message)) {
+    return "TS_SESSION_NOT_FOUND";
+  }
+  if (/^Multiple (?:codex|claude) sessions match\b/i.test(message)) {
+    return "TS_SESSION_AMBIGUOUS";
+  }
+  return "TS_SESSION_ACCESS_FAILED";
+}
+
+function sessionFailureRecovery(provider, code, failureKind) {
+  if (provider !== "paseo") {
+    return sessionRecovery(provider);
+  }
+  if (
+    failureKind === "invalid_reference" ||
+    failureKind === "agent_not_found" ||
+    failureKind === "agent_ambiguous"
+  ) {
+    return sessionRecovery(provider);
+  }
+  if (
+    failureKind === "local_session_not_found" ||
+    failureKind === "local_session_ambiguous"
+  ) {
+    return "Run `paseo agent inspect <agent-id> --json`, then repair the missing or ambiguous local Paseo state or native session before retrying with the same agent UUID.";
+  }
+  if (code === "TS_PROVIDER_UNAVAILABLE") {
+    return "Restore the Paseo CLI or daemon, then run `paseo daemon status` and `paseo ls --json` before retrying.";
+  }
+  return "Run `paseo agent inspect <agent-id> --json`, then repair the reported provider, inspect response, local Paseo state, or native session issue before retrying with the same agent UUID.";
+}
+
+async function exportValidatedSession(provider, session, command) {
+  let history;
+  try {
+    history = await exportProviderSession(provider, session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failureKind = error?.threadshareSessionFailureKind;
+    const code = sessionFailureCode(provider, error, message);
+    throw cliDiagnostic(code, message, {
+      command,
+      next: sessionFailureRecovery(provider, code, failureKind),
+    });
+  }
+  try {
+    return validateHistory(history);
+  } catch {
+    throw cliDiagnostic(
+      "TS_SESSION_ACCESS_FAILED",
+      `The exported ${provider} session is not a valid threadshare-history@v1 document.`,
+      { command, next: sessionRecovery(provider) },
+    );
+  }
+}
+
+function parseReference(value, command) {
+  try {
+    return parseShareReference(value);
+  } catch {
+    throw cliDiagnostic(
+      "TS_SHARE_URL_INVALID",
+      "The share reference is not a valid Threadshare Viewer or API URL.",
+      {
+        command,
+        next: `Use a Viewer URL like https://host/?id=<uuid> or API URL like https://host/api/v1/shares/<uuid>. Run \`threadshare ${command} --help\`.`,
+      },
+    );
+  }
+}
+
+async function readShare(reference) {
+  try {
+    return await readSharedHistory(reference);
+  } catch (error) {
+    throw cliDiagnostic(
+      "TS_SHARE_READ_FAILED",
+      error instanceof Error ? error.message : String(error),
+      {
+        command: "read",
+        next: "Check the URL and whether the share expired or was revoked. Redirects and responses above 5 MiB are rejected.",
+      },
+    );
+  }
+}
+
+function rangedHistory(history, options, command) {
+  try {
+    return validateHistory(
+      selectHistoryRange(history, { from: options.from, before: options.before }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const boundaryFailure = /No user message matches|not a user message|not a visible user turn|before the selected boundary/i.test(message);
+    throw cliDiagnostic(
+      boundaryFailure ? "TS_RANGE_BOUNDARY_NOT_FOUND" : "TS_RANGE_INVALID",
+      message,
+      {
+        command,
+        next: `Run \`threadshare messages ${options.provider} <session> --format json\`, choose fixed user-message IDs, and retry.`,
+      },
+    );
+  }
 }
 
 function requireInteractiveTerminal() {
   if (!process.stdin.isTTY || !process.stderr.isTTY) {
-    throw new Error(
-      "--pick-start requires an interactive terminal; agents should use messages and --from/--before",
+    throw cliDiagnostic(
+      "TS_TTY_REQUIRED",
+      "--pick-start requires an interactive terminal; agents should use messages and --from/--before.",
+      {
+        command: "share",
+        next: "Run `threadshare messages <provider> <session> --format json`, ask the user to choose, then pass fixed --from/--before IDs.",
+      },
     );
   }
 }
@@ -330,115 +668,162 @@ async function pickStartMessage(history) {
 }
 
 async function main() {
-  const { positionals, options } = parseArgs(process.argv.slice(2));
-  const [command] = positionals;
-  if (!command || command === "help" || options.help) {
-    process.stdout.write(`${usage()}\n`);
+  const args = process.argv.slice(2);
+  const help = preflightHelp(args);
+  if (help !== null) {
+    process.stdout.write(`${help}\n`);
     return;
   }
+  const { positionals, options } = parseArgs(args);
+  const [command] = positionals;
+  if (!command) {
+    throw cliDiagnostic("TS_USAGE_MISSING_ARGUMENT", "Missing command.", {
+      next: "Run `threadshare --help` and choose a command.",
+    });
+  }
+  if (!Object.hasOwn(COMMAND_SPECS, command) || command === "help") {
+    throw cliDiagnostic("TS_USAGE_UNKNOWN_COMMAND", `Unknown command: ${command}.`, {
+      next: "Run `threadshare --help` and choose a listed command.",
+    });
+  }
   if (command === "validate") {
-    validateCommandShape(command, positionals, options, 2, new Set());
-    validateHistory(JSON.parse(await readInput(positionals[1])));
+    validateCommandInvocation(command, positionals, options);
+    await readHistoryInput(positionals[1], command);
     process.stdout.write("Valid threadshare-history@v1\n");
     return;
   }
   if (command === "sessions") {
-    validateCommandShape(command, positionals, options, 2, new Set(["format", "limit", "offset"]));
+    validateCommandInvocation(command, positionals, options);
     const provider = positionals[1];
-    if (!NATIVE_SESSION_PROVIDERS.has(provider)) throw new Error(usage());
+    if (!NATIVE_SESSION_PROVIDERS.has(provider)) {
+      throw cliDiagnostic(
+        "TS_USAGE_INVALID_VALUE",
+        provider === "paseo"
+          ? "sessions does not list Paseo agents."
+          : "sessions provider must be codex or claude.",
+        {
+          command,
+          next: provider === "paseo"
+            ? "Run `paseo ls --json` to list Paseo agents."
+            : "Use codex or claude. Run `threadshare sessions --help`.",
+        },
+      );
+    }
     const format = options.format ?? "text";
     if (format !== "text" && format !== "json") {
-      throw new Error("--format must be text or json");
+      throw cliDiagnostic("TS_USAGE_INVALID_VALUE", "--format must be text or json.", {
+        command,
+        next: "Use --format text for people or --format json for agents.",
+      });
     }
     const limit = parsePageInteger(
       "limit",
       options.limit,
       DEFAULT_SESSION_PAGE_SIZE,
       MAX_SESSION_PAGE_SIZE,
+      command,
     );
-    const offset = parsePageInteger("offset", options.offset, 0);
-    const result = await listSessions(provider, { limit, offset });
+    const offset = parsePageInteger("offset", options.offset, 0, MAX_MESSAGE_PAGE_SIZE, command);
+    let result;
+    try {
+      result = await listSessions(provider, { limit, offset });
+    } catch {
+      throw cliDiagnostic("TS_SESSION_ACCESS_FAILED", `Unable to list ${provider} sessions.`, {
+        command,
+        next: `Check the local ${provider} session directory and run \`threadshare sessions ${provider} --help\`.`,
+      });
+    }
     process.stdout.write(
       format === "json" ? `${JSON.stringify(result)}\n` : formatSessionPage(result, offset, limit),
     );
     return;
   }
   if (command === "messages") {
-    const { provider, session } = sessionCommand(
+    const { provider, session } = sessionCommand(command, positionals, options);
+    if (options.format !== "json") {
+      throw cliDiagnostic(
+        options.format === undefined ? "TS_USAGE_OPTION_DEPENDENCY" : "TS_USAGE_INVALID_VALUE",
+        "messages requires --format json.",
+        { command, next: "Add --format json. Run `threadshare messages --help`." },
+      );
+    }
+    const history = await exportValidatedSession(provider, session, command);
+    const limit = parsePageInteger(
+      "limit",
+      options.limit,
+      DEFAULT_MESSAGE_PAGE_SIZE,
+      MAX_MESSAGE_PAGE_SIZE,
       command,
-      positionals,
-      options,
-      new Set(["before", "format", "limit", "offset"]),
     );
-    if (options.format !== "json") throw new Error("messages requires --format json");
-    const history = validateHistory(await exportProviderSession(provider, session));
-    const result = listUserMessagePage(history, {
-      before: options.before,
-      limit: parsePageInteger("limit", options.limit, DEFAULT_MESSAGE_PAGE_SIZE),
-      offset: parsePageInteger("offset", options.offset, 0),
-    });
+    const offset = parsePageInteger(
+      "offset",
+      options.offset,
+      0,
+      MAX_MESSAGE_PAGE_SIZE,
+      command,
+    );
+    let result;
+    try {
+      result = listUserMessagePage(history, {
+        before: options.before,
+        limit,
+        offset,
+      });
+    } catch (error) {
+      throw cliDiagnostic("TS_RANGE_BOUNDARY_NOT_FOUND", error instanceof Error ? error.message : String(error), {
+        command,
+        next: `Retry without --before, or run \`threadshare messages ${provider} <session> --format json\` with a valid fixed boundary.`,
+      });
+    }
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
   if (command === "export") {
-    const { provider, session } = sessionCommand(
-      command,
-      positionals,
-      options,
-      new Set(["before", "from", "output"]),
-    );
+    const { provider, session } = sessionCommand(command, positionals, options);
     const history = rangedHistory(
-      validateHistory(await exportProviderSession(provider, session)),
-      options,
+      await exportValidatedSession(provider, session, command),
+      { ...options, provider },
+      command,
     );
-    await writeOutput(options.output, `${JSON.stringify(history, null, 2)}\n`);
+    await writeOutput(options.output, `${JSON.stringify(history, null, 2)}\n`, command);
     return;
   }
   if (command === "publish") {
-    validateCommandShape(
-      command,
-      positionals,
-      options,
-      2,
-      new Set(["expires", "json", "revoke", "url"]),
-    );
-    const expiresInSeconds = parseExpiresDuration(options.expires);
+    validateCommandInvocation(command, positionals, options);
+    const expiresInSeconds = parseExpiresDuration(options.expires, command);
     const result = await publish(
-      validateHistory(JSON.parse(await readInput(positionals[1]))),
+      await readHistoryInput(positionals[1], command),
       options.url,
-      { expiresInSeconds, revoke: options.revoke === true },
+      { command, expiresInSeconds, revoke: options.revoke === true },
     );
     writePublishResult(result, options.json === true);
     return;
   }
   if (command === "share") {
-    const { provider, session } = sessionCommand(
-      command,
-      positionals,
-      options,
-      new Set([
-        "before",
-        "dry-run",
-        "expires",
-        "from",
-        "json",
-        "pick-start",
-        "report",
-        "revoke",
-        "url",
-      ]),
-    );
+    const { provider, session } = sessionCommand(command, positionals, options);
     const dryRun = options["dry-run"] === true;
-    if (options.report && !dryRun) throw new Error("--report requires --dry-run");
+    if (options.report && !dryRun) {
+      throw cliDiagnostic("TS_USAGE_OPTION_DEPENDENCY", "--report requires --dry-run.", {
+        command,
+        next: "Add --dry-run, or remove --report. Run `threadshare share --help` for details.",
+      });
+    }
     if (options["pick-start"] && (options.from || options.before)) {
-      throw new Error("--pick-start cannot be combined with --from or --before");
+      throw cliDiagnostic(
+        "TS_USAGE_OPTION_CONFLICT",
+        "--pick-start cannot be combined with --from or --before.",
+        {
+          command,
+          next: "Use interactive --pick-start alone, or remove it and pass fixed --from/--before IDs.",
+        },
+      );
     }
     if (options["pick-start"]) requireInteractiveTerminal();
-    const expiresInSeconds = parseExpiresDuration(options.expires);
-    if (dryRun) serviceUrl(options.url);
-    const exported = validateHistory(await exportProviderSession(provider, session));
+    const expiresInSeconds = parseExpiresDuration(options.expires, command);
+    if (dryRun) serviceUrl(options.url, command);
+    const exported = await exportValidatedSession(provider, session, command);
     const from = options["pick-start"] ? await pickStartMessage(exported) : options.from;
-    const history = rangedHistory(exported, { ...options, from });
+    const history = rangedHistory(exported, { ...options, from, provider }, command);
     if (dryRun) {
       const result = createPreflightResult(history, {
         expiresInSeconds,
@@ -452,6 +837,7 @@ async function main() {
       return;
     }
     const result = await publish(history, options.url, {
+      command,
       expiresInSeconds,
       revoke: options.revoke === true,
     });
@@ -459,19 +845,23 @@ async function main() {
     return;
   }
   if (command === "revoke") {
-    validateCommandShape(command, positionals, options, 2, new Set(["json", "token"]));
-    const reference = parseShareReference(positionals[1]);
+    validateCommandInvocation(command, positionals, options);
+    const reference = parseReference(positionals[1], command);
     const token = validateRevokeToken(options.token);
     const result = await revokeShare(reference, token);
     process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `Revoked ${result.url}\n`);
     return;
   }
   if (command === "read") {
-    validateCommandShape(command, positionals, options, 2, new Set(["format"]));
+    validateCommandInvocation(command, positionals, options);
     if (options.format !== "json" && options.format !== "markdown") {
-      throw new Error("read requires --format json or markdown");
+      throw cliDiagnostic(
+        options.format === undefined ? "TS_USAGE_OPTION_DEPENDENCY" : "TS_USAGE_INVALID_VALUE",
+        "read requires --format json or markdown.",
+        { command, next: "Use --format json for agents or --format markdown for reading." },
+      );
     }
-    const history = await readSharedHistory(parseShareReference(positionals[1]));
+    const history = await readShare(parseReference(positionals[1], command));
     process.stdout.write(
       options.format === "json"
         ? `${JSON.stringify(history)}\n`
@@ -479,10 +869,12 @@ async function main() {
     );
     return;
   }
-  throw new Error(usage());
+  throw cliDiagnostic("TS_USAGE_UNKNOWN_COMMAND", `Unknown command: ${command}.`, {
+    next: "Run `threadshare --help` and choose a listed command.",
+  });
 }
 
 main().catch((error) => {
-  process.stderr.write(`threadshare: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(renderDiagnostic(error));
   process.exitCode = 1;
 });

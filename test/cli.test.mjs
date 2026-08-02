@@ -2,14 +2,23 @@ import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import test from "node:test";
+import test, { after } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import {
+  COMMAND_SPECS,
+  DIAGNOSTIC_CODES,
+  OPTION_DEFINITIONS,
+  renderCommandHelp,
+  renderDiagnostic,
+  renderRootHelp,
+  sanitizeDiagnosticProblem,
+} from "../src/cli-contract.mjs";
 import {
   exportClaudeJsonl,
   exportCodexJsonl,
@@ -21,6 +30,25 @@ import { CHAT_SHARE_MAX_BYTES } from "../src/share-read.mjs";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = path.join(root, "bin", "threadshare.mjs");
 const execFileAsync = promisify(execFile);
+const observedDiagnosticCodes = new Set();
+const focusedTestRun = [...process.execArgv, ...process.argv]
+  .some((argument) => argument.startsWith("--test-name-pattern"));
+
+function assertDiagnosticCode(result, code) {
+  assert.equal(result.status ?? result.code, 1, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, new RegExp(`^threadshare: error ${code}\\n`));
+  observedDiagnosticCodes.add(code);
+}
+
+after(() => {
+  if (focusedTestRun) return;
+  assert.deepEqual(
+    [...observedDiagnosticCodes].sort(),
+    [...DIAGNOSTIC_CODES].sort(),
+    "every stable diagnostic code must be exercised through behavior",
+  );
+});
 
 function canonicalHistory() {
   return {
@@ -74,26 +102,228 @@ async function createCliSession(raw = codexCliJsonl(13), name = "session.jsonl")
   return { directory, file };
 }
 
-test("prints CLI help with either help spelling", () => {
-  for (const argument of ["help", "--help"]) {
-    const result = spawnSync(process.execPath, [path.join(root, "bin/threadshare.mjs"), argument], {
-      encoding: "utf8",
-    });
+test("renders a self-describing root and command help contract", () => {
+  const expectedOptions = {
+    sessions: ["format", "limit", "offset"],
+    messages: ["before", "format", "limit", "offset"],
+    export: ["before", "from", "output"],
+    publish: ["expires", "json", "revoke", "url"],
+    share: [
+      "before",
+      "dry-run",
+      "expires",
+      "from",
+      "json",
+      "pick-start",
+      "report",
+      "revoke",
+      "url",
+    ],
+    read: ["format"],
+    revoke: ["json", "token"],
+    validate: [],
+    help: ["help"],
+  };
+  const expectedDiagnosticCodes = [
+    "TS_USAGE_UNKNOWN_COMMAND",
+    "TS_USAGE_MISSING_ARGUMENT",
+    "TS_USAGE_UNEXPECTED_ARGUMENT",
+    "TS_USAGE_UNKNOWN_OPTION",
+    "TS_USAGE_OPTION_NOT_ALLOWED",
+    "TS_USAGE_DUPLICATE_OPTION",
+    "TS_USAGE_MISSING_VALUE",
+    "TS_USAGE_INVALID_VALUE",
+    "TS_USAGE_OPTION_DEPENDENCY",
+    "TS_USAGE_OPTION_CONFLICT",
+    "TS_SESSION_NOT_FOUND",
+    "TS_SESSION_AMBIGUOUS",
+    "TS_SESSION_ACCESS_FAILED",
+    "TS_RANGE_INVALID",
+    "TS_RANGE_BOUNDARY_NOT_FOUND",
+    "TS_INPUT_READ_FAILED",
+    "TS_INPUT_INVALID_JSON",
+    "TS_INPUT_SCHEMA_INVALID",
+    "TS_OUTPUT_WRITE_FAILED",
+    "TS_TTY_REQUIRED",
+    "TS_PROVIDER_UNAVAILABLE",
+    "TS_SHARE_URL_INVALID",
+    "TS_SHARE_READ_FAILED",
+    "TS_SHARE_REVOKE_FAILED",
+    "TS_PUBLISH_REJECTED",
+    "TS_PUBLISH_OUTCOME_UNKNOWN",
+    "TS_PUBLISH_POLICY_UNCONFIRMED",
+    "TS_OPERATION_FAILED",
+  ];
+  assert.deepEqual(Object.keys(COMMAND_SPECS), Object.keys(expectedOptions));
+  assert.deepEqual(DIAGNOSTIC_CODES, expectedDiagnosticCodes);
+  const cliSource = readFileSync(cli, "utf8");
+  const referencedOptions = new Set(
+    [...cliSource.matchAll(/\boptions(?:\.([a-z][a-z0-9-]*)|\["([^"]+)"\])/gu)]
+      .map((match) => match[1] ?? match[2]),
+  );
+  referencedOptions.delete("provider");
+  assert.deepEqual(
+    [...referencedOptions].sort(),
+    Object.keys(OPTION_DEFINITIONS).filter((name) => name !== "help").sort(),
+    "every public option must be consumed by the CLI",
+  );
+  assert.deepEqual(
+    Object.keys(OPTION_DEFINITIONS).sort(),
+    [...new Set(Object.values(expectedOptions).flat())].sort(),
+  );
+  assert.match(renderRootHelp(), /Threadshare shares AI agent conversation threads/);
+  assert.match(renderRootHelp(), /threadshare <command> --help/);
+  assert.match(renderRootHelp(), /https:\/\/cloud-thread\.team-harness\.com/);
+  for (const [command, optionNames] of Object.entries(expectedOptions)) {
+    const spec = COMMAND_SPECS[command];
+    assert.deepEqual([...spec.options].sort(), [...optionNames].sort(), command);
+    const help = renderCommandHelp(command);
+    assert.match(help, new RegExp(`Usage:\\n  threadshare ${command}`));
+    for (const argument of spec.arguments) {
+      assert.ok(help.includes(argument.placeholder), `${command} omits ${argument.placeholder}`);
+    }
+    for (const option of optionNames) {
+      assert.ok(OPTION_DEFINITIONS[option], `${command} references unknown --${option}`);
+      assert.match(help, new RegExp(`--${option}(?:\\s|$)`));
+    }
+  }
+  assert.match(renderCommandHelp("share"), /Agents must not use --from last-user/);
+  assert.match(renderCommandHelp("share"), /canonical ID, unique ID prefix, or JSONL path/);
+  assert.match(renderCommandHelp("share"), /paseo ls --json/);
+  assert.match(renderCommandHelp("share"), /invalid dry run.*exits 1.*stdout.*JSON.*stderr.*empty/is);
+  assert.match(renderCommandHelp("sessions"), /does not list Paseo agents.*paseo ls --json/is);
+  assert.match(renderCommandHelp("publish"), /run `threadshare validate/);
+  assert.match(renderCommandHelp("publish"), /revokeToken.*human mode.*stderr/is);
+  assert.match(renderCommandHelp("share"), /revokeToken.*human mode.*stderr/is);
+  assert.match(renderCommandHelp("read"), /rejects fragments such as #token=/);
+  assert.match(renderCommandHelp("read"), /does not accept --url or read THREADSHARE_URL/);
+  assert.match(renderCommandHelp("revoke"), /does not accept --url or read THREADSHARE_URL/);
+});
+
+test("prints root help without arguments and equivalent command help offline", () => {
+  for (const args of [[], ["help"], ["--help"]]) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8" });
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /threadshare share <codex\|claude\|paseo>/);
-    assert.match(result.stdout, /threadshare sessions <codex\|claude>/);
-    assert.match(result.stdout, /threadshare messages <codex\|claude\|paseo>/);
-    assert.match(result.stdout, /threadshare read <share-url> --format <json\|markdown>/);
-    assert.match(result.stdout, /--from <user-message-id\|last-user>/);
-    assert.match(result.stdout, /--pick-start/);
+    assert.equal(result.stdout, `${renderRootHelp()}\n`);
     assert.match(result.stdout, /omit --from and --before for the full visible snapshot/);
-    assert.match(result.stdout, /https:\/\/cloud-thread\.team-harness\.com/);
     assert.equal(result.stderr, "");
+  }
+
+  for (const command of Object.keys(COMMAND_SPECS)) {
+    const direct = spawnSync(process.execPath, [cli, command, "--help"], { encoding: "utf8" });
+    const meta = spawnSync(process.execPath, [cli, "help", command], { encoding: "utf8" });
+    assert.equal(direct.status, 0, direct.stderr);
+    assert.equal(meta.status, 0, meta.stderr);
+    assert.equal(direct.stdout, `${renderCommandHelp(command)}\n`);
+    assert.equal(meta.stdout, direct.stdout);
+    assert.equal(direct.stderr, "");
+    assert.equal(meta.stderr, "");
+  }
+
+  const rescued = spawnSync(
+    process.execPath,
+    [cli, "share", "codex", "/definitely/missing.jsonl", "--bogus", "--json", "--help"],
+    { encoding: "utf8" },
+  );
+  assert.equal(rescued.status, 0);
+  assert.equal(rescued.stdout, `${renderCommandHelp("share")}\n`);
+  assert.equal(rescued.stderr, "");
+});
+
+test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
+  const token = Buffer.alloc(32, 17).toString("base64url");
+  const problem = sanitizeDiagnosticProblem(
+    `Failed at /var/tmp/private/input.json, /workspace/output.json, C:\\Users\\alice\\secret.json, \\\\server\\share\\secret.json and file:///opt/private/data.json; POST https://threadshare.example.com/api/v1/shares --token ${token}`,
+  );
+  assert.doesNotMatch(problem, /var\/tmp|workspace|Users\\alice|server\\share|opt\/private/);
+  assert.doesNotMatch(problem, new RegExp(token));
+  assert.match(problem, /\[LOCAL_PATH\]/);
+  assert.match(problem, /https:\/\/threadshare\.example\.com\/api\/v1\/shares/);
+
+  const fallback = {
+    status: 1,
+    stdout: "",
+    stderr: renderDiagnostic(new Error("Unexpected local failure")),
+  };
+  assertDiagnosticCode(fallback, "TS_OPERATION_FAILED");
+  assert.match(fallback.stderr, /Next: Run `threadshare --help`/);
+});
+
+test("returns deterministic help diagnostics that tell agents how to recover", () => {
+  const scenarios = [
+    {
+      args: ["bogus", "--help"],
+      code: "TS_USAGE_UNKNOWN_COMMAND",
+      next: /Choose one of: sessions, messages, export, publish, share, read, revoke, validate/,
+    },
+    {
+      args: ["help", "bogus"],
+      code: "TS_USAGE_UNKNOWN_COMMAND",
+      next: /threadshare --help/,
+    },
+    {
+      args: ["help", "share", "extra"],
+      code: "TS_USAGE_UNEXPECTED_ARGUMENT",
+      next: /threadshare help share/,
+    },
+    {
+      args: ["help", "--json"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
+      next: /threadshare help --help/,
+    },
+    {
+      args: ["--bogus"],
+      code: "TS_USAGE_UNKNOWN_OPTION",
+      next: /threadshare --help/,
+    },
+    {
+      args: ["--json"],
+      code: "TS_USAGE_MISSING_ARGUMENT",
+      next: /threadshare --help/,
+    },
+    {
+      args: ["sessions", "paseo"],
+      code: "TS_USAGE_INVALID_VALUE",
+      next: /paseo ls --json/,
+    },
+    {
+      args: ["sessions", "codex", "--json"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
+      next: /--format json/,
+    },
+  ];
+  for (const { args, code, next } of scenarios) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8" });
+    assertDiagnosticCode(result, code);
+    assert.match(result.stderr, /\nProblem: .+\n/);
+    assert.match(result.stderr, /\nUsage: threadshare /);
+    assert.match(result.stderr, /\nNext: .+\n$/);
+    assert.match(result.stderr, next);
   }
 });
 
-test("keeps the bundled Skill aligned with the agent pagination workflow", () => {
+test("does not expose input paths when a command fails", () => {
+  const missing = path.join(os.tmpdir(), "threadshare-private", "missing-history.json");
+  const result = spawnSync(process.execPath, [cli, "validate", missing], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assertDiagnosticCode(result, "TS_INPUT_READ_FAILED");
+  assert.match(result.stderr, /Problem: Unable to read the input file\./);
+  assert.match(result.stderr, /Usage: threadshare validate <history-file\|->/);
+  assert.match(result.stderr, /Next: Check that the input file exists and is readable/);
+  assert.doesNotMatch(result.stderr, new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(result.stderr, /threadshare-private|missing-history\.json/);
+});
+
+test("keeps docs concise and the bundled Skill aligned with the agent workflow", () => {
+  const exhaustiveUsageBlock = /```(?:text)?\r?\n(?:(?:threadshare (?:sessions|messages|export|publish|share|read|revoke|validate)[^\n]*\r?\n)){4,}/;
+  for (const fileName of ["README.md", "README.zh-CN.md"]) {
+    const document = readFileSync(path.join(root, fileName), "utf8");
+    assert.match(document, /threadshare <command> --help/);
+    assert.doesNotMatch(document, exhaustiveUsageBlock);
+  }
   const skill = readFileSync(path.join(root, "skills", "threadshare", "SKILL.md"), "utf8");
+  assert.match(skill, /Treat `threadshare <command> --help` as the canonical parameter reference/);
+  assert.match(skill, /TS_PUBLISH_OUTCOME_UNKNOWN.*TS_PUBLISH_POLICY_UNCONFIRMED/);
   assert.match(skill, /sessions <codex\|claude> --format json/);
   assert.match(skill, /Do not assume the newest result is the requested session/);
   assert.match(skill, /messages <provider> <session> --format json/);
@@ -332,12 +562,22 @@ test("fails closed when the server does not confirm a requested expiration", asy
         { encoding: "utf8" },
       ),
       (error) => {
-        assert.equal(error.code, 1);
-        assert.equal(error.stdout, "");
+        assertDiagnosticCode(error, "TS_PUBLISH_POLICY_UNCONFIRMED");
         assert.match(
           error.stderr,
           /server did not confirm the requested expiration; the share may have been created without expiration/,
         );
+        assert.match(
+          error.stderr,
+          /requested expiration was not confirmed; revocation was not requested/,
+        );
+        assert.match(
+          error.stderr,
+          new RegExp(
+            `Result: Share was created at ${serviceUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\/\\?id=11111111-2222-4333-8444-555555555555`,
+          ),
+        );
+        assert.match(error.stderr, /Next: Do not publish again/);
         return true;
       },
     );
@@ -460,12 +700,18 @@ test("fails closed when the server does not confirm requested revocation", async
         { encoding: "utf8" },
       ),
       (error) => {
-        assert.equal(error.code, 1);
-        assert.equal(error.stdout, "");
+        assertDiagnosticCode(error, "TS_PUBLISH_POLICY_UNCONFIRMED");
         assert.match(
           error.stderr,
           /server did not confirm revocation; the share may have been created without revocation/,
         );
+        assert.match(
+          error.stderr,
+          /expiration was not requested; requested revocation was not confirmed/,
+        );
+        assert.match(error.stderr, /Result: Share was created at http:\/\/127\.0\.0\.1:/);
+        assert.match(error.stderr, /Next: Do not publish again/);
+        assert.doesNotMatch(error.stderr, /--token [A-Za-z0-9_-]{43}|Revoke:/);
         return true;
       },
     );
@@ -475,6 +721,159 @@ test("fails closed when the server does not confirm requested revocation", async
     );
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("preserves a confirmed cleanup capability when another requested policy is unconfirmed", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-policy-partial-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  let receivedDigest;
+  const server = http.createServer((request, response) => {
+    receivedDigest = request.headers["x-threadshare-revoke-token-sha256"];
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ id: "11111111-2222-4333-8444-555555555555", revocable: true }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cli, "publish", file, "--expires", "1h", "--revoke", "--url", serviceUrl, "--json"],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assertDiagnosticCode(error, "TS_PUBLISH_POLICY_UNCONFIRMED");
+        assert.match(
+          error.stderr,
+          /requested expiration was not confirmed; requested revocation was confirmed/,
+        );
+        const match = /Revoke \(secret, shown once; do not log\): threadshare revoke '([^']+)' --token '([A-Za-z0-9_-]{43})'/.exec(
+          error.stderr,
+        );
+        assert.ok(match);
+        assert.equal(receivedDigest, createHash("sha256").update(match[2]).digest("base64url"));
+        assert.match(error.stderr, /Next: Do not publish again; revoke the created share now/);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("classifies rejected, uncertain, redirected, and contradictory publish responses", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-publish-errors-"));
+  const file = path.join(directory, "history.json");
+  await writeFile(file, JSON.stringify(canonicalHistory()));
+  const responses = [
+    { status: 400, body: { error: "invalid upload" } },
+    { status: 429, body: { error: "rate limited" } },
+    { status: 503, body: { error: "temporarily unavailable" } },
+    { status: 200, body: { id: "not-a-canonical-share-id" } },
+    {
+      status: 201,
+      body: {
+        id: "11111111-2222-4333-8444-555555555555",
+        expiresAt: "2026-08-08T10:00:00.000Z",
+      },
+    },
+    { status: 307, location: "/redirect-target" },
+  ];
+  let responseIndex = 0;
+  let redirectTargetHits = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === "/redirect-target") {
+      redirectTargetHits += 1;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "22222222-3333-4444-8555-666666666666" }));
+      return;
+    }
+    const planned = responses[responseIndex++];
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(planned.status, {
+        ...(planned.body ? { "content-type": "application/json" } : {}),
+        ...(planned.location ? { location: planned.location } : {}),
+      });
+      response.end(planned.body ? JSON.stringify(planned.body) : undefined);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const serviceUrl = `http://127.0.0.1:${address.port}`;
+  const expectedCodes = [
+    "TS_PUBLISH_REJECTED",
+    "TS_PUBLISH_OUTCOME_UNKNOWN",
+    "TS_PUBLISH_OUTCOME_UNKNOWN",
+    "TS_PUBLISH_OUTCOME_UNKNOWN",
+    "TS_PUBLISH_POLICY_UNCONFIRMED",
+    "TS_PUBLISH_OUTCOME_UNKNOWN",
+  ];
+
+  try {
+    for (const expectedCode of expectedCodes) {
+      await assert.rejects(
+        execFileAsync(
+          process.execPath,
+          [cli, "publish", file, "--url", serviceUrl, "--json"],
+          { encoding: "utf8" },
+        ),
+        (error) => {
+          assertDiagnosticCode(error, expectedCode);
+          if (expectedCode === "TS_PUBLISH_REJECTED") {
+            assert.match(error.stderr, /Correct the rejected request, then retry/);
+          } else if (expectedCode === "TS_PUBLISH_OUTCOME_UNKNOWN") {
+            assert.match(error.stderr, /Do not publish again automatically/);
+          } else {
+            assert.match(error.stderr, /unexpected expiration/);
+            assert.match(error.stderr, /Result: Share was created at/);
+          }
+          return true;
+        },
+      );
+    }
+    assert.equal(responseIndex, responses.length);
+    assert.equal(redirectTargetHits, 0);
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("diagnoses an invalid THREADSHARE_URL without exposing its value", () => {
+  const environmentValue = "ftp://credential-user-9f31:private-token@example.invalid/private-path";
+  const result = spawnSync(
+    process.execPath,
+    [cli, "share", "codex", "/not/read.jsonl", "--dry-run"],
+    {
+      encoding: "utf8",
+      env: { ...process.env, THREADSHARE_URL: environmentValue },
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /^threadshare: error TS_USAGE_INVALID_VALUE\n/);
+  assert.match(result.stderr, /Problem: THREADSHARE_URL must use HTTP or HTTPS\./);
+  assert.match(result.stderr, /Next: Unset or correct THREADSHARE_URL/);
+  assert.doesNotMatch(
+    result.stderr,
+    /credential-user-9f31|private-token|private-path|example\.invalid/,
+  );
 });
 
 test("revokes a normalized share URL with bearer authorization", async () => {
@@ -547,6 +946,39 @@ test("revokes with a valid capability that starts with an option prefix", async 
   }
 });
 
+test("returns a stable diagnostic when a revoke request fails", async () => {
+  const token = Buffer.alloc(32, 23).toString("base64url");
+  const server = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const viewerUrl = `http://127.0.0.1:${address.port}/?id=11111111-2222-4333-8444-555555555555`;
+
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cli, "revoke", viewerUrl, "--token", token, "--json"],
+        { encoding: "utf8" },
+      ),
+      (error) => {
+        assertDiagnosticCode(error, "TS_SHARE_REVOKE_FAILED");
+        assert.match(error.stderr, /404 intentionally does not identify which check failed/);
+        assert.doesNotMatch(error.stderr, new RegExp(token));
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
 test("reads Viewer and API URLs as JSON or Markdown without following redirects", async () => {
   const id = "11111111-2222-4333-8444-555555555555";
   const redirectId = "22222222-3333-4444-8555-666666666666";
@@ -612,8 +1044,7 @@ test("reads Viewer and API URLs as JSON or Markdown without following redirects"
         { encoding: "utf8" },
       ),
       (error) => {
-        assert.equal(error.code, 1);
-        assert.equal(error.stdout, "");
+        assertDiagnosticCode(error, "TS_SHARE_READ_FAILED");
         assert.match(error.stderr, /read request failed/i);
         return true;
       },
@@ -795,42 +1226,52 @@ test("rejects unsafe command option combinations before exporting or publishing"
   const scenarios = [
     {
       args: ["messages", "codex", fixture.file],
+      code: "TS_USAGE_OPTION_DEPENDENCY",
       expected: /messages requires --format json/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--json"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
       expected: /--json is not valid for messages/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--url", "https://example.invalid"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
       expected: /--url is not valid for messages/,
     },
     {
       args: ["share", "codex", fixture.file, "--limit", "1"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
       expected: /--limit is not valid for share/,
     },
     {
       args: ["share", "codex", fixture.file, "--form", "cli-user-1"],
-      expected: /--form is not valid for share/,
+      code: "TS_USAGE_UNKNOWN_OPTION",
+      expected: /Unknown option: --form/,
     },
     {
       args: ["share", "codex", fixture.file, "--from"],
-      expected: /Missing value for --from/,
+      code: "TS_USAGE_MISSING_VALUE",
+      expected: /A non-empty value is required for --from/,
     },
     {
       args: ["share", "codex", fixture.file, "--from", ""],
-      expected: /Missing value for --from/,
+      code: "TS_USAGE_MISSING_VALUE",
+      expected: /A non-empty value is required for --from/,
     },
     {
       args: ["share", "codex", fixture.file, "--expires", "0m"],
+      code: "TS_USAGE_INVALID_VALUE",
       expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
     },
     {
       args: ["share", "codex", fixture.file, "--expires", "366d"],
+      code: "TS_USAGE_INVALID_VALUE",
       expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
     },
     {
       args: ["share", "codex", fixture.file, "--expires", "60s"],
+      code: "TS_USAGE_INVALID_VALUE",
       expected: /--expires must be a duration from 1m to 365d using m, h, or d/,
     },
     {
@@ -840,7 +1281,8 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "--token",
         Buffer.alloc(32, 1).toString("base64url"),
       ],
-      expected: /valid Threadshare viewer or API URL/,
+      code: "TS_SHARE_URL_INVALID",
+      expected: /valid Threadshare Viewer or API URL/,
     },
     {
       args: [
@@ -849,10 +1291,12 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "--token",
         "short",
       ],
-      expected: /--token must be a 256-bit base64url capability/,
+      code: "TS_USAGE_INVALID_VALUE",
+      expected: /The revoke capability must be a 256-bit base64url value/,
     },
     {
       args: ["read", "https://threadshare.invalid/?id=11111111-2222-4333-8444-555555555555"],
+      code: "TS_USAGE_OPTION_DEPENDENCY",
       expected: /read requires --format json or markdown/,
     },
     {
@@ -862,6 +1306,7 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "--format",
         "yaml",
       ],
+      code: "TS_USAGE_INVALID_VALUE",
       expected: /read requires --format json or markdown/,
     },
     {
@@ -871,43 +1316,135 @@ test("rejects unsafe command option combinations before exporting or publishing"
         "--format",
         "json",
       ],
-      expected: /valid Threadshare viewer or API URL/,
+      code: "TS_SHARE_URL_INVALID",
+      expected: /valid Threadshare Viewer or API URL/,
     },
     {
       args: ["share", "codex", fixture.file, "--report"],
+      code: "TS_USAGE_OPTION_DEPENDENCY",
       expected: /--report requires --dry-run/,
     },
     {
+      args: ["share", "codex", fixture.file, "--pick-start", "--from", "cli-user-1"],
+      code: "TS_USAGE_OPTION_CONFLICT",
+      expected: /--pick-start cannot be combined with --from or --before/,
+    },
+    {
       args: ["publish", fixture.file, "--dry-run"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
       expected: /--dry-run is not valid for publish/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--format", "json"],
+      code: "TS_USAGE_DUPLICATE_OPTION",
       expected: /Duplicate option --format/,
     },
     {
       args: ["messages", "codex", fixture.file, "extra", "--format", "json"],
+      code: "TS_USAGE_UNEXPECTED_ARGUMENT",
       expected: /Unexpected positional argument/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--limit", "0"],
+      code: "TS_USAGE_INVALID_VALUE",
       expected: /--limit must be an integer from 1 to 50/,
     },
     {
       args: ["messages", "codex", fixture.file, "--format", "json", "--offset", "-1"],
-      expected: /--offset must be a non-negative integer/,
+      code: "TS_USAGE_INVALID_VALUE",
+      expected: /--offset must be a non-negative safe integer/,
     },
   ];
 
   try {
     for (const scenario of scenarios) {
       const result = spawnSync(process.execPath, [cli, ...scenario.args], { encoding: "utf8" });
-      assert.equal(result.status, 1, `${scenario.args.join(" ")}\n${result.stderr}`);
-      assert.equal(result.stdout, "");
+      assertDiagnosticCode(result, scenario.code);
       assert.match(result.stderr, scenario.expected);
     }
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps session, range, output, and provider diagnostic classifications stable", async () => {
+  const sandbox = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-diagnostic-codes-"));
+  const codexHome = path.join(sandbox, "codex-home");
+  const sessions = path.join(codexHome, "sessions");
+  const validSession = path.join(sandbox, "valid.jsonl");
+  const missingSessionFile = path.join(sandbox, "missing.jsonl");
+  const environment = { ...process.env, CODEX_HOME: codexHome };
+
+  try {
+    await mkdir(sessions, { recursive: true });
+    await writeFile(validSession, codexCliJsonl(2));
+
+    const notFound = spawnSync(process.execPath, [cli, "export", "codex", "missing-id"], {
+      encoding: "utf8",
+      env: environment,
+    });
+    assertDiagnosticCode(notFound, "TS_SESSION_NOT_FOUND");
+
+    await writeFile(path.join(sessions, "rollout-shared-prefix-a.jsonl"), "");
+    await writeFile(path.join(sessions, "rollout-shared-prefix-b.jsonl"), "");
+    const ambiguous = spawnSync(
+      process.execPath,
+      [cli, "export", "codex", "shared-prefix"],
+      { encoding: "utf8", env: environment },
+    );
+    assertDiagnosticCode(ambiguous, "TS_SESSION_AMBIGUOUS");
+
+    const inaccessible = spawnSync(
+      process.execPath,
+      [cli, "export", "codex", missingSessionFile],
+      { encoding: "utf8", env: environment },
+    );
+    assertDiagnosticCode(inaccessible, "TS_SESSION_ACCESS_FAILED");
+    assert.doesNotMatch(inaccessible.stderr, /threadshare-cli-diagnostic-codes|missing\.jsonl/);
+
+    const missingBoundary = spawnSync(
+      process.execPath,
+      [cli, "export", "codex", validSession, "--from", "missing-user"],
+      { encoding: "utf8", env: environment },
+    );
+    assertDiagnosticCode(missingBoundary, "TS_RANGE_BOUNDARY_NOT_FOUND");
+
+    const invalidRange = spawnSync(
+      process.execPath,
+      [
+        cli,
+        "export",
+        "codex",
+        validSession,
+        "--from",
+        "cli-user-2",
+        "--before",
+        "cli-user-1",
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    assertDiagnosticCode(invalidRange, "TS_RANGE_INVALID");
+
+    const outputFailure = spawnSync(
+      process.execPath,
+      [cli, "export", "codex", validSession, "--output", sandbox],
+      { encoding: "utf8", env: environment },
+    );
+    assertDiagnosticCode(outputFailure, "TS_OUTPUT_WRITE_FAILED");
+
+    const fakeBin = path.join(sandbox, "bin");
+    const fakePaseo = path.join(fakeBin, "paseo");
+    await mkdir(fakeBin);
+    await writeFile(fakePaseo, "#!/bin/sh\nprintf '%s\\n' 'daemon unavailable' >&2\nexit 1\n");
+    await chmod(fakePaseo, 0o755);
+    const providerUnavailable = spawnSync(
+      process.execPath,
+      [cli, "export", "paseo", "11111111-2222-4333-8444-555555555555"],
+      { encoding: "utf8", env: { ...process.env, PATH: fakeBin } },
+    );
+    assertDiagnosticCode(providerUnavailable, "TS_PROVIDER_UNAVAILABLE");
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 
@@ -919,8 +1456,7 @@ test("rejects interactive selection outside a TTY without publishing", async () 
       [cli, "share", "codex", fixture.file, "--pick-start"],
       { encoding: "utf8" },
     );
-    assert.equal(result.status, 1);
-    assert.equal(result.stdout, "");
+    assertDiagnosticCode(result, "TS_TTY_REQUIRED");
     assert.match(result.stderr, /--pick-start requires an interactive terminal/);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
@@ -939,6 +1475,15 @@ test("validates a canonical history from stdin", () => {
   assert.equal(result.stderr, "");
 });
 
+test("rejects invalid JSON from stdin with a stable diagnostic", () => {
+  const result = spawnSync(process.execPath, [cli, "validate", "-"], {
+    encoding: "utf8",
+    input: "{not-json",
+  });
+  assertDiagnosticCode(result, "TS_INPUT_INVALID_JSON");
+  assert.match(result.stderr, /Fix the JSON syntax/);
+});
+
 test("rejects a malformed canonical history from stdin", () => {
   const invalid = {
     format: "threadshare-history@v1",
@@ -953,9 +1498,11 @@ test("rejects a malformed canonical history from stdin", () => {
     { encoding: "utf8", input: JSON.stringify(invalid) },
   );
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /Input is not a valid threadshare-history@v1 document/);
-  assert.equal(result.stdout, "");
+  assertDiagnosticCode(result, "TS_INPUT_SCHEMA_INVALID");
+  assert.match(
+    result.stderr,
+    /Input is not a valid threadshare-history@v1 document at document root: must have required property 'exportedAt'/,
+  );
 });
 
 test("finds Codex Cloud sessions below CODEX_HOME", async () => {

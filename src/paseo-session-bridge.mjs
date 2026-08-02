@@ -10,6 +10,38 @@ const UUID_PATTERN =
 const UUID_SHAPE = "00000000-0000-0000-0000-000000000000";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
+const PASEO_FAILURE_KINDS = Object.freeze({
+  ACCESS_FAILED: "access_failed",
+  AGENT_AMBIGUOUS: "agent_ambiguous",
+  AGENT_NOT_FOUND: "agent_not_found",
+  INVALID_REFERENCE: "invalid_reference",
+  LOCAL_SESSION_AMBIGUOUS: "local_session_ambiguous",
+  LOCAL_SESSION_NOT_FOUND: "local_session_not_found",
+  PROVIDER_UNAVAILABLE: "provider_unavailable",
+});
+
+function paseoFailure(kind, message) {
+  const error = new Error(message);
+  error.threadshareSessionFailureKind = kind;
+  return error;
+}
+
+function paseoFailureKind(error) {
+  return error instanceof Error &&
+    typeof error.threadshareSessionFailureKind === "string"
+    ? error.threadshareSessionFailureKind
+    : undefined;
+}
+
+function inspectFailureKind(message) {
+  if (/\bAgent not found\b|\bNo (?:Paseo )?agent\b.*\bfound\b/i.test(message)) {
+    return PASEO_FAILURE_KINDS.AGENT_NOT_FOUND;
+  }
+  if (/\bambiguous\b|\bMultiple\b.*\bagents?\b.*\bfound\b/i.test(message)) {
+    return PASEO_FAILURE_KINDS.AGENT_AMBIGUOUS;
+  }
+  return PASEO_FAILURE_KINDS.ACCESS_FAILED;
+}
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -126,6 +158,7 @@ function runPaseo(args, options = {}) {
   const command = options.paseoCommand ?? "paseo";
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBuffer = options.maxBuffer ?? DEFAULT_MAX_BUFFER;
+  const isAgentInspect = args[0] === "agent" && args[1] === "inspect";
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -144,22 +177,45 @@ function runPaseo(args, options = {}) {
           return;
         }
         if (error.code === "ENOENT") {
-          reject(new Error("Paseo CLI was not found on PATH"));
+          reject(
+            paseoFailure(
+              PASEO_FAILURE_KINDS.PROVIDER_UNAVAILABLE,
+              "Paseo CLI was not found on PATH",
+            ),
+          );
           return;
         }
         if (error.killed || error.signal === "SIGTERM") {
-          reject(new Error(`Paseo CLI timed out after ${timeout} ms`));
+          reject(
+            paseoFailure(
+              PASEO_FAILURE_KINDS.PROVIDER_UNAVAILABLE,
+              `Paseo CLI timed out after ${timeout} ms`,
+            ),
+          );
           return;
         }
         if (
           error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ||
           error.message.includes("maxBuffer")
         ) {
-          reject(new Error(`Paseo CLI output exceeded ${maxBuffer} bytes`));
+          reject(
+            paseoFailure(
+              PASEO_FAILURE_KINDS.PROVIDER_UNAVAILABLE,
+              `Paseo CLI output exceeded ${maxBuffer} bytes`,
+            ),
+          );
           return;
         }
         const detail = stderrMessage(stderr);
-        reject(new Error(detail ? `Paseo CLI failed: ${detail}` : "Paseo CLI failed"));
+        const message = detail ? `Paseo CLI failed: ${detail}` : "Paseo CLI failed";
+        reject(
+          paseoFailure(
+            isAgentInspect
+              ? inspectFailureKind(detail ?? "")
+              : PASEO_FAILURE_KINDS.PROVIDER_UNAVAILABLE,
+            message,
+          ),
+        );
       },
     );
   });
@@ -315,11 +371,23 @@ function parseState(raw, agent) {
 
 export async function exportPaseoSession(agentReference, options = {}) {
   if (!isUuidPrefix(agentReference)) {
-    throw new Error("Paseo agent reference must be a UUID or UUID prefix");
+    throw paseoFailure(
+      PASEO_FAILURE_KINDS.INVALID_REFERENCE,
+      "Paseo agent reference must be a UUID or UUID prefix",
+    );
   }
 
-  const statusStdout = await runPaseo(["daemon", "status", "--json"], options);
-  const daemon = parseDaemonStatus(statusStdout);
+  let daemon;
+  try {
+    const statusStdout = await runPaseo(["daemon", "status", "--json"], options);
+    daemon = parseDaemonStatus(statusStdout);
+  } catch (error) {
+    if (paseoFailureKind(error)) throw error;
+    throw paseoFailure(
+      PASEO_FAILURE_KINDS.PROVIDER_UNAVAILABLE,
+      error instanceof Error ? error.message : "Paseo daemon status failed",
+    );
+  }
   let inspectStdout;
   try {
     inspectStdout = await runPaseo(
@@ -327,13 +395,19 @@ export async function exportPaseoSession(agentReference, options = {}) {
       options,
     );
   } catch (error) {
-    throw addVersions(error, daemon.versions, "Paseo agent inspect failed");
+    throw paseoFailure(
+      paseoFailureKind(error) ?? PASEO_FAILURE_KINDS.ACCESS_FAILED,
+      addVersions(error, daemon.versions, "Paseo agent inspect failed").message,
+    );
   }
   let agent;
   try {
     agent = parseAgentInspect(inspectStdout, daemon.versions, agentReference);
   } catch (error) {
-    throw addVersions(error, daemon.versions, "Paseo agent inspect failed");
+    throw paseoFailure(
+      PASEO_FAILURE_KINDS.ACCESS_FAILED,
+      addVersions(error, daemon.versions, "Paseo agent inspect failed").message,
+    );
   }
 
   let nativeSessionId;
@@ -343,14 +417,23 @@ export async function exportPaseoSession(agentReference, options = {}) {
       agent.id,
     );
     if (matches.length === 0) {
-      throw new Error("No Paseo state file found for inspected agent");
+      throw paseoFailure(
+        PASEO_FAILURE_KINDS.LOCAL_SESSION_NOT_FOUND,
+        "No Paseo state file found for inspected agent",
+      );
     }
     if (matches.length > 1) {
-      throw new Error("Multiple Paseo state files found for inspected agent");
+      throw paseoFailure(
+        PASEO_FAILURE_KINDS.LOCAL_SESSION_AMBIGUOUS,
+        "Multiple Paseo state files found for inspected agent",
+      );
     }
     nativeSessionId = parseState(await readStateFile(root, matches[0]), agent);
   } catch (error) {
-    throw stateFailure(error, daemon.versions);
+    throw paseoFailure(
+      paseoFailureKind(error) ?? PASEO_FAILURE_KINDS.ACCESS_FAILED,
+      stateFailure(error, daemon.versions).message,
+    );
   }
 
   let history;
@@ -360,7 +443,8 @@ export async function exportPaseoSession(agentReference, options = {}) {
     });
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(`No ${agent.provider} session matches`)) {
-      throw new Error(
+      throw paseoFailure(
+        PASEO_FAILURE_KINDS.LOCAL_SESSION_NOT_FOUND,
         `No native ${agent.provider} session found for Paseo agent (${daemon.versions})`,
       );
     }
@@ -368,22 +452,28 @@ export async function exportPaseoSession(agentReference, options = {}) {
       error instanceof Error &&
       error.message.startsWith(`Multiple ${agent.provider} sessions match`)
     ) {
-      throw new Error(
+      throw paseoFailure(
+        PASEO_FAILURE_KINDS.LOCAL_SESSION_AMBIGUOUS,
         `Multiple native ${agent.provider} sessions found for Paseo agent (${daemon.versions})`,
       );
     }
     if (error && typeof error === "object" && "code" in error) {
-      throw new Error(
+      throw paseoFailure(
+        PASEO_FAILURE_KINDS.ACCESS_FAILED,
         `Unable to read native ${agent.provider} session for Paseo agent (${daemon.versions})`,
       );
     }
-    throw error;
+    throw paseoFailure(
+      PASEO_FAILURE_KINDS.ACCESS_FAILED,
+      addVersions(error, daemon.versions, "Unable to export native session").message,
+    );
   }
   if (
     typeof history.conversation?.id !== "string" ||
     history.conversation.id.toLowerCase() !== nativeSessionId.toLowerCase()
   ) {
-    throw new Error(
+    throw paseoFailure(
+      PASEO_FAILURE_KINDS.ACCESS_FAILED,
       `Native ${agent.provider} session ID does not match Paseo state (${daemon.versions})`,
     );
   }

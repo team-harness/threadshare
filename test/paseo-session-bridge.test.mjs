@@ -43,6 +43,10 @@ if (args[0] === "daemon" && args[1] === "status" && args[2] === "--json") {
 if (response.delayMs) {
   await new Promise((resolve) => setTimeout(resolve, response.delayMs));
 }
+if (response.signal) {
+  process.kill(process.pid, response.signal);
+  await new Promise(() => {});
+}
 if (response.stderr) process.stderr.write(response.stderr);
 if (response.exitCode) {
   process.exitCode = response.exitCode;
@@ -228,6 +232,12 @@ function runCli(fixture, args) {
     env: fixture.env,
     timeout: 5_000,
   });
+}
+
+function assertCliDiagnostic(result, code) {
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, new RegExp(`^threadshare: error ${code}\n`));
 }
 
 test("exports a Codex-backed Paseo agent by unique prefix", async () => {
@@ -490,9 +500,9 @@ test("rejects malformed Paseo agent references before invoking Paseo", async () 
   const fixture = await createPaseoFixture();
   try {
     const result = runCli(fixture, ["export", "paseo", "../../agent.json"]);
-    assert.equal(result.status, 1);
-    assert.equal(result.stdout, "");
+    assertCliDiagnostic(result, "TS_USAGE_INVALID_VALUE");
     assert.match(result.stderr, /Paseo agent reference must be a UUID or UUID prefix/);
+    assert.match(result.stderr, /paseo ls --json/);
   } finally {
     await fixture.cleanup();
   }
@@ -506,6 +516,24 @@ test("maps Paseo CLI absence, timeout, and structured errors", async (t) => {
       }),
       /Paseo CLI was not found/,
     );
+
+    const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-no-paseo-cli-"));
+    const emptyBin = path.join(directory, "bin");
+    try {
+      await mkdir(emptyBin);
+      const result = spawnSync(
+        process.execPath,
+        [cli, "export", "paseo", DEFAULT_AGENT_ID],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: emptyBin },
+        },
+      );
+      assertCliDiagnostic(result, "TS_PROVIDER_UNAVAILABLE");
+      assert.match(result.stderr, /Restore the Paseo CLI or daemon/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   await t.test("timeout", async () => {
@@ -524,23 +552,82 @@ test("maps Paseo CLI absence, timeout, and structured errors", async (t) => {
     } finally {
       await fixture.cleanup();
     }
+
+    const cliFixture = await createPaseoFixture({
+      statusResponse: { signal: "SIGTERM" },
+    });
+    try {
+      const result = runCli(cliFixture, ["export", "paseo", cliFixture.agentRef]);
+      assertCliDiagnostic(result, "TS_PROVIDER_UNAVAILABLE");
+      assert.match(result.stderr, /Paseo CLI timed out/);
+    } finally {
+      await cliFixture.cleanup();
+    }
   });
 
   await t.test("structured stderr", async () => {
+    // Preserve the wrappers emitted by Paseo 0.2.5 so contract drift fails this test.
     const fixture = await createPaseoFixture({
       inspectResponse: {
         exitCode: 1,
         stderr: JSON.stringify({
-          error: { code: "INSPECT_FAILED", message: "Agent not found: fixture-prefix" },
+          error: {
+            code: "INSPECT_FAILED",
+            message: "Failed to inspect agent: Agent not found: fixture-prefix",
+          },
         }),
       },
     });
     try {
       const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-      assert.equal(result.status, 1);
-      assert.equal(result.stdout, "");
-      assert.match(result.stderr, /Agent not found: fixture-prefix/);
+      assertCliDiagnostic(result, "TS_SESSION_NOT_FOUND");
+      assert.match(result.stderr, /Failed to inspect agent: Agent not found: fixture-prefix/);
       assert.doesNotMatch(result.stderr, /INSPECT_FAILED/);
+      assert.match(result.stderr, /paseo ls --json/);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  await t.test("structured ambiguous agent", async () => {
+    const fixture = await createPaseoFixture({
+      inspectResponse: {
+        exitCode: 1,
+        stderr: JSON.stringify({
+          error: {
+            code: "INSPECT_FAILED",
+            message: 'Failed to inspect agent: Agent identifier "f" is ambiguous (2 matches)',
+          },
+        }),
+      },
+    });
+    try {
+      const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
+      assertCliDiagnostic(result, "TS_SESSION_AMBIGUOUS");
+      assert.match(result.stderr, /Agent identifier "f" is ambiguous/);
+      assert.match(result.stderr, /paseo ls --json/);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  await t.test("other structured inspect failure", async () => {
+    const fixture = await createPaseoFixture({
+      inspectResponse: {
+        exitCode: 1,
+        stderr: JSON.stringify({
+          error: {
+            code: "INSPECT_FAILED",
+            message: "Failed to inspect agent: Agent is archived",
+          },
+        }),
+      },
+    });
+    try {
+      const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
+      assertCliDiagnostic(result, "TS_SESSION_ACCESS_FAILED");
+      assert.match(result.stderr, /paseo agent inspect <agent-id> --json/);
+      assert.doesNotMatch(result.stderr, /Restore the Paseo CLI or daemon/);
     } finally {
       await fixture.cleanup();
     }
@@ -562,6 +649,17 @@ test("maps Paseo CLI absence, timeout, and structured errors", async (t) => {
     } finally {
       await fixture.cleanup();
     }
+
+    const cliFixture = await createPaseoFixture({
+      statusResponse: { body: "x".repeat(1024 * 1024 + 1) },
+    });
+    try {
+      const result = runCli(cliFixture, ["export", "paseo", cliFixture.agentRef]);
+      assertCliDiagnostic(result, "TS_PROVIDER_UNAVAILABLE");
+      assert.match(result.stderr, /Paseo CLI output exceeded 1048576 bytes/);
+    } finally {
+      await cliFixture.cleanup();
+    }
   });
 });
 
@@ -571,26 +669,31 @@ test("fails closed on malformed Paseo status and inspect responses", async (t) =
       name: "invalid status JSON",
       options: { statusResponse: { body: "{" } },
       expected: /daemon status returned invalid JSON/,
+      code: "TS_PROVIDER_UNAVAILABLE",
     },
     {
       name: "unreachable daemon",
       options: { statusOverrides: { connectedDaemon: "unreachable" } },
       expected: /daemon is not reachable.*0\.2\.4-test/,
+      code: "TS_PROVIDER_UNAVAILABLE",
     },
     {
       name: "relative daemon home",
       options: { statusOverrides: { home: "relative/paseo-home" } },
       expected: /daemon status returned an invalid home/,
+      code: "TS_PROVIDER_UNAVAILABLE",
     },
     {
       name: "invalid inspect JSON",
       options: { inspectResponse: { body: "not json" } },
       expected: /agent inspect returned invalid JSON/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "non-UUID inspected ID",
       options: { inspectOverrides: { Id: "f74b2222" } },
       expected: /agent inspect returned an invalid Id/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "inspected ID does not match requested prefix",
@@ -598,21 +701,25 @@ test("fails closed on malformed Paseo status and inspect responses", async (t) =
         inspectOverrides: { Id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
       },
       expected: /inspected agent ID does not match the requested reference/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "wrong status type",
       options: { inspectOverrides: { Status: 1 } },
       expected: /agent inspect returned an invalid Status/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "wrong name type",
       options: { name: 1 },
       expected: /agent inspect returned an invalid Name/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "unsupported provider",
       options: { provider: "deepseek" },
       expected: /does not support Paseo provider deepseek/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
   ];
 
@@ -621,9 +728,12 @@ test("fails closed on malformed Paseo status and inspect responses", async (t) =
       const fixture = await createPaseoFixture(scenario.options);
       try {
         const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-        assert.equal(result.status, 1, result.stderr);
-        assert.equal(result.stdout, "");
+        assertCliDiagnostic(result, scenario.code);
         assert.match(result.stderr, scenario.expected);
+        if (scenario.name === "unsupported provider") {
+          assert.match(result.stderr, /paseo agent inspect <agent-id> --json/);
+          assert.doesNotMatch(result.stderr, /restore Paseo access/i);
+        }
       } finally {
         await fixture.cleanup();
       }
@@ -637,6 +747,7 @@ test("fails closed on malformed or inconsistent Paseo state", async (t) => {
       name: "invalid JSON",
       options: { stateRaw: "{" },
       expected: /state file contains invalid JSON/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "agent ID mismatch",
@@ -644,16 +755,19 @@ test("fails closed on malformed or inconsistent Paseo state", async (t) => {
         stateOverrides: { id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
       },
       expected: /state agent ID does not match/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "provider mismatch",
       options: { stateOverrides: { provider: "claude" } },
       expected: /state provider does not match/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "missing handle",
       options: { nativeHandle: "", runtimeSessionId: "" },
       expected: /does not contain a native session ID/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "path-shaped native handle",
@@ -662,11 +776,13 @@ test("fails closed on malformed or inconsistent Paseo state", async (t) => {
         runtimeSessionId: DEFAULT_CODEX_SESSION_ID,
       },
       expected: /native session ID must be a complete UUID/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
     {
       name: "wrong persistence type",
       options: { stateOverrides: { persistence: "invalid" } },
       expected: /state persistence must be an object/,
+      code: "TS_SESSION_ACCESS_FAILED",
     },
   ];
 
@@ -675,9 +791,12 @@ test("fails closed on malformed or inconsistent Paseo state", async (t) => {
       const fixture = await createPaseoFixture(scenario.options);
       try {
         const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-        assert.equal(result.status, 1, result.stderr);
-        assert.equal(result.stdout, "");
+        assertCliDiagnostic(result, scenario.code);
         assert.match(result.stderr, scenario.expected);
+        assert.match(
+          result.stderr,
+          /repair the reported provider, inspect response, local Paseo state, or native session issue/,
+        );
       } finally {
         await fixture.cleanup();
       }
@@ -687,13 +806,29 @@ test("fails closed on malformed or inconsistent Paseo state", async (t) => {
 
 test("requires one regular Paseo state file and ignores symlinks", async (t) => {
   const scenarios = [
-    { name: "missing", stateMode: "missing", expected: /No Paseo state file found/ },
-    { name: "multiple", stateMode: "multiple", expected: /Multiple Paseo state files found/ },
-    { name: "file symlink", stateMode: "file-symlink", expected: /No Paseo state file found/ },
+    {
+      name: "missing",
+      stateMode: "missing",
+      expected: /No Paseo state file found/,
+      code: "TS_SESSION_NOT_FOUND",
+    },
+    {
+      name: "multiple",
+      stateMode: "multiple",
+      expected: /Multiple Paseo state files found/,
+      code: "TS_SESSION_AMBIGUOUS",
+    },
+    {
+      name: "file symlink",
+      stateMode: "file-symlink",
+      expected: /No Paseo state file found/,
+      code: "TS_SESSION_NOT_FOUND",
+    },
     {
       name: "directory symlink",
       stateMode: "directory-symlink",
       expected: /No Paseo state file found/,
+      code: "TS_SESSION_NOT_FOUND",
     },
   ];
 
@@ -702,9 +837,9 @@ test("requires one regular Paseo state file and ignores symlinks", async (t) => 
       const fixture = await createPaseoFixture({ stateMode: scenario.stateMode });
       try {
         const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-        assert.equal(result.status, 1, result.stderr);
-        assert.equal(result.stdout, "");
+        assertCliDiagnostic(result, scenario.code);
         assert.match(result.stderr, scenario.expected);
+        assert.match(result.stderr, /repair the missing or ambiguous local Paseo state/);
       } finally {
         await fixture.cleanup();
       }
@@ -716,9 +851,9 @@ test("reports a missing native Codex session without exposing state paths", asyn
   const fixture = await createPaseoFixture({ nativeFile: false });
   try {
     const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-    assert.equal(result.status, 1);
-    assert.equal(result.stdout, "");
+    assertCliDiagnostic(result, "TS_SESSION_NOT_FOUND");
     assert.match(result.stderr, /No native codex session found/);
+    assert.match(result.stderr, /repair the missing or ambiguous local Paseo state/);
     assert.doesNotMatch(result.stderr, new RegExp(fixture.directory));
   } finally {
     await fixture.cleanup();
@@ -732,8 +867,7 @@ test("rejects a native transcript whose embedded session ID does not match", asy
   });
   try {
     const result = runCli(fixture, ["export", "paseo", fixture.agentRef]);
-    assert.equal(result.status, 1);
-    assert.equal(result.stdout, "");
+    assertCliDiagnostic(result, "TS_SESSION_ACCESS_FAILED");
     assert.match(result.stderr, /Native codex session ID does not match Paseo state/);
     assert.doesNotMatch(result.stderr, new RegExp(fixture.nativeSessionId));
     assert.doesNotMatch(result.stderr, new RegExp(otherSessionId));

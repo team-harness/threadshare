@@ -19,9 +19,10 @@ Threadshare is an independent API, read-only viewer, and CLI for AI agent conver
 - `src/share-schema.ts` and `src/share-api.ts` own the portable format and HTTP validation.
 - `src/stored-share.ts` owns the internal lifecycle wrapper, expiration checks, capability parsing, hashing, and constant-time digest comparison.
 - `src/session-export.mjs` owns Codex and Claude local JSONL conversion. It must export only visible conversation content, never raw system prompts, credentials, or provider settings.
+- `src/cli-contract.mjs` owns the canonical command/option specifications, root and command help, stable diagnostic codes, and diagnostic sanitization. README and Skill may document workflows, but must send parameter discovery to `threadshare <command> --help` instead of copying the complete option reference.
 - `src/share-preflight.mjs` owns content-free local reports; `src/share-read.mjs` owns bounded canonical remote reads and Markdown formatting.
 - `app.js` and `src/viewer-state.mjs` own the read-only Viewer, message anchors, turn directory, and local folding behavior.
-- `bin/threadshare.mjs` is a stable automation surface. Actual share/publish `--json` output must stay a one-line object containing at least `id` and `url`; dry-run JSON must stay one-line, report `dryRun`/`valid`, and never fabricate an `id` or URL.
+- `bin/threadshare.mjs` is a stable automation surface. Actual share/publish `--json` success output must stay a one-line object containing at least `id` and `url`. Regular failures exit 1 with empty stdout and a stable code plus `Problem`, `Usage`, and `Next` on stderr. An invalid `share --dry-run --json` is the sole failure-JSON exception: it stays one-line, reports `dryRun`/`valid`, and never fabricates an `id` or URL. If a share was created but lifecycle policy was not confirmed, stderr may include its URL as `Result`; expose a one-time revoke command only when the service confirmed revocation.
 - `skills/threadshare/` is the Codex and Codex Cloud workflow contract. Keep its commands aligned with the CLI and validate it with `npm run validate:skill` after changes.
 - `worker.ts` (Cloudflare/R2) and `fc/handler.ts` (Alibaba FC/OSS) are storage adapters. Keep behavior equivalent.
 
@@ -51,7 +52,7 @@ One-time npm package settings:
 For each stable release:
 
 1. Set the same unprefixed stable version in `package.json`, the lockfile top level, and the lockfile root package.
-2. Run the full verification above plus `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 16-file allowlist defined by `EXPECTED_PACKAGE_FILES` in `scripts/verify-release.mjs` and record its integrity.
+2. Run the full verification above plus `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 17-file allowlist defined by `EXPECTED_PACKAGE_FILES` in `scripts/verify-release.mjs` and record its integrity.
 3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
 4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
 5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`, require it to finish successfully, then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.

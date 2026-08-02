@@ -1,6 +1,6 @@
 {
   "name": "@team-harness/threadshare",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Self-hostable API, viewer, and CLI for sharing AI agent conversation threads",
   "keywords": [
     "ai-agent",
@@ -28,6 +28,7 @@
     "README.zh-CN.md",
     "schema/",
     "skills/",
+    "src/cli-contract.mjs",
     "src/history-selection.mjs",
     "src/paseo-session-bridge.mjs",
     "src/session-export.mjs",

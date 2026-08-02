@@ -26,10 +26,21 @@ function looksLikeLegacyPaseoHistory(value) {
   );
 }
 
+function validationLocation(instancePath) {
+  if (!instancePath) return "document root";
+  const segments = instancePath
+    .slice(1)
+    .split("/")
+    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"));
+  return `field ${segments.join(".")}`;
+}
+
 export function validateHistory(history) {
   if (validateCanonicalHistory(history)) return history;
   const issue = validateCanonicalHistory.errors?.[0];
-  const detail = issue ? `: ${issue.instancePath || "/"} ${issue.message}` : "";
+  const detail = issue
+    ? ` at ${validationLocation(issue.instancePath)}: ${issue.message}`
+    : "";
   throw new Error(`Input is not a valid threadshare-history@v1 document${detail}`);
 }
 

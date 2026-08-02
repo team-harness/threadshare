@@ -133,16 +133,14 @@ export THREADSHARE_URL=https://threadshare.example.com
 
 ## CLI 命令
 
-```text
-threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
-threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
-threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-threadshare read <share-url> --format <json|markdown>
-threadshare revoke <share-url> --token <token> [--json]
-threadshare validate <history.json|->
+CLI help 是参数的唯一规范来源，其中逐项说明所有位置参数与 option 的默认值、约束、输出、Agent 注意事项、安全边界和修复建议：
+
+```bash
+threadshare --help
+threadshare <command> --help
 ```
+
+普通失败会以 exit 1 退出、保持 stdout 为空，并在 stderr 输出稳定错误 code 以及 `Problem`、`Usage`、`Next`。唯一的既有例外是无效的 `share --dry-run --json`：它会把单行 `valid:false` 结果写入 stdout。如果上传可能已经创建分享、但无法确认请求的生命周期策略，诊断会提供 `Result` URL；不要自动重试该发布。
 
 - `share`：一步完成原生会话导出与发布。`--dry-run` 会在网络访问前停止，`--report` 只能与 `--dry-run` 一起使用。
 - `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。

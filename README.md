@@ -133,16 +133,14 @@ export THREADSHARE_URL=https://threadshare.example.com
 
 ## CLI Reference
 
-```text
-threadshare sessions <codex|claude> [--format <text|json>] [--offset <n>] [--limit <n>]
-threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [--before <user-message-id>] [--offset <n>] [--limit <n>]
-threadshare export <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--output <file|->]
-threadshare publish <history.json|-> [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-threadshare share <codex|claude|paseo> <session-id|file|agent-id> [--from <user-message-id|last-user>] [--before <user-message-id>] [--pick-start] [--dry-run [--report]] [--expires <duration>] [--revoke] [--url <service-url>] [--json]
-threadshare read <share-url> --format <json|markdown>
-threadshare revoke <share-url> --token <token> [--json]
-threadshare validate <history.json|->
+The CLI help is the canonical parameter reference. It describes every argument and option, including defaults, constraints, output, agent notes, security boundaries, and recovery guidance:
+
+```bash
+threadshare --help
+threadshare <command> --help
 ```
+
+Regular failures exit 1 with empty stdout and print a stable error code plus `Problem`, `Usage`, and `Next` on stderr. The deliberate exception is an invalid `share --dry-run --json`, which returns its one-line `valid:false` result on stdout. When an upload may have created a share but cannot confirm the requested lifecycle, the diagnostic includes a `Result` URL; do not retry that publish automatically.
 
 - `share` exports and publishes a native session in one step. `--dry-run` stops before network access; `--report` is valid only with `--dry-run`.
 - `sessions` lists canonical native Codex or Claude sessions without uploading. Text is for people; `--format json` is the stable automation surface. The default and maximum page sizes are 10 and 50.

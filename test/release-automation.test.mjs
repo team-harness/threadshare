@@ -29,6 +29,7 @@ const expectedPackageFiles = [
   "schema/threadshare-history.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
+  "src/cli-contract.mjs",
   "src/history-selection.mjs",
   "src/paseo-session-bridge.mjs",
   "src/session-export.mjs",
@@ -95,7 +96,7 @@ test("validates stable release metadata and numeric semver ordering", () => {
   );
 });
 
-test("locks npm pack to the exact sixteen public files", () => {
+test("locks npm pack to the exact seventeen public files", () => {
   assert.deepEqual(EXPECTED_PACKAGE_FILES, expectedPackageFiles);
   const packed = {
     name: "@team-harness/threadshare",

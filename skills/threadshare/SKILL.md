@@ -7,6 +7,8 @@ description: Find, preflight, share, read, expire, or revoke Codex, Codex Cloud,
 
 Use the `threadshare` CLI to export visible conversation content and publish it as a read-only link. The CLI defaults to `https://cloud-thread.team-harness.com`.
 
+Treat `threadshare <command> --help` as the canonical parameter reference; this Skill defines workflow and safety decisions, not a second option specification. On a regular failure, read the stable code and the `Problem`, `Usage`, and `Next` lines on stderr before changing the command. An invalid `share --dry-run --json` is the only failure that returns JSON on stdout. Never automatically retry `TS_PUBLISH_OUTCOME_UNKNOWN` or `TS_PUBLISH_POLICY_UNCONFIRMED`; preserve any `Result` URL and follow the diagnostic's cleanup guidance.
+
 ## Choose The Command
 
 - Share a Codex or Codex Cloud session: `threadshare share codex <session-id-or-jsonl-file> --json`
