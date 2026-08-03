@@ -49,3 +49,16 @@ export function createTurnDirectory(entries, options = {}) {
       preview: truncatePreview(markdownPlainText(entry.markdown) || "Empty message", previewLength),
     }));
 }
+
+export function findActiveTurnIndex(turnTops, options = {}) {
+  if (turnTops.length === 0) return -1;
+  if (options.atEnd) return turnTops.length - 1;
+
+  const activationTop = Number.isFinite(options.activationTop) ? options.activationTop : 0;
+  let activeIndex = 0;
+  for (let index = 1; index < turnTops.length; index += 1) {
+    if (turnTops[index] > activationTop) break;
+    activeIndex = index;
+  }
+  return activeIndex;
+}

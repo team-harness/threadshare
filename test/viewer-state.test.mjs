@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTurnDirectory, markdownPlainText } from "../src/viewer-state.mjs";
+import {
+  createTurnDirectory,
+  findActiveTurnIndex,
+  markdownPlainText,
+} from "../src/viewer-state.mjs";
 
 const CREATED_AT = "2026-08-01T08:00:00.000Z";
 
@@ -52,4 +56,14 @@ test("builds user-turn directory previews as short plain text", () => {
   assert.match(turns[1].preview, /<script>alert\('preview'\)<\/script>/);
   assert.ok(Array.from(turns[1].preview).length <= 72);
   assert.match(turns[1].preview, /\.\.\.$/);
+});
+
+test("selects the current turn from viewport positions", () => {
+  assert.equal(findActiveTurnIndex([], { activationTop: 180 }), -1);
+  assert.equal(findActiveTurnIndex([260, 780], { activationTop: 180 }), 0);
+  assert.equal(findActiveTurnIndex([-420, 140, 820], { activationTop: 180 }), 1);
+  assert.equal(
+    findActiveTurnIndex([-980, -360, 440], { activationTop: 180, atEnd: true }),
+    2,
+  );
 });

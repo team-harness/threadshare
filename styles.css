@@ -208,6 +208,10 @@ body {
   border-left: 2px solid transparent;
   color: #8f9993;
   text-decoration: none;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .turn-link:hover,
@@ -216,6 +220,16 @@ body {
   outline: none;
   background: #191e1c;
   color: #e2e8e4;
+}
+
+.turn-link[aria-current="location"] {
+  border-left-color: #b29a69;
+  background: #1a201d;
+  color: #e8edea;
+}
+
+.turn-link[aria-current="location"] .turn-number {
+  color: #c4aa73;
 }
 
 .turn-number {
@@ -769,6 +783,9 @@ body {
     transition: none;
   }
   .turn-directory-caret {
+    transition: none;
+  }
+  .turn-link {
     transition: none;
   }
 }

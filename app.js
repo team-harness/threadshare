@@ -1,6 +1,6 @@
 import markdownit from "markdown-it";
 import { agentAlternatePath } from "./src/agent-transcript.mjs";
-import { createTurnDirectory } from "./src/viewer-state.mjs";
+import { createTurnDirectory, findActiveTurnIndex } from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
 const MESSAGE_ANCHOR_PREFIX = "message-";
@@ -475,6 +475,46 @@ function renderMessage(entry) {
   return article;
 }
 
+function keepTurnLinkVisible(list, link) {
+  if (list.clientHeight === 0) return;
+  const listBounds = list.getBoundingClientRect();
+  const linkBounds = link.getBoundingClientRect();
+  if (linkBounds.top < listBounds.top) {
+    list.scrollTop -= listBounds.top - linkBounds.top;
+  } else if (linkBounds.bottom > listBounds.bottom) {
+    list.scrollTop += linkBounds.bottom - listBounds.bottom;
+  }
+}
+
+function trackActiveTurn(turns, setActiveTurn) {
+  const anchors = turns
+    .map((turn) => ({ anchorId: turn.anchorId, target: document.getElementById(turn.anchorId) }))
+    .filter((turn) => turn.target);
+  if (anchors.length === 0) return;
+
+  let animationFrame = 0;
+  const update = () => {
+    animationFrame = 0;
+    const activationTop = Math.min(220, Math.max(112, window.innerHeight * 0.25));
+    const atEnd =
+      window.scrollY > 0 &&
+      window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+    const activeIndex = findActiveTurnIndex(
+      anchors.map((turn) => turn.target.getBoundingClientRect().top),
+      { activationTop, atEnd },
+    );
+    setActiveTurn(anchors[activeIndex]?.anchorId);
+  };
+  const scheduleUpdate = () => {
+    if (animationFrame) return;
+    animationFrame = window.requestAnimationFrame(update);
+  };
+
+  window.addEventListener("scroll", scheduleUpdate, { passive: true });
+  window.addEventListener("resize", scheduleUpdate);
+  update();
+}
+
 function renderTurnDirectory(turns, onNavigate) {
   const directory = element("nav", "turn-directory");
   directory.setAttribute("aria-label", "Conversation turns");
@@ -497,6 +537,17 @@ function renderTurnDirectory(turns, onNavigate) {
 
   const list = element("ol", "turn-list");
   list.id = "turn-directory-list";
+  const linksByAnchorId = new Map();
+  let activeLink = null;
+  const setActiveTurn = (anchorId) => {
+    const nextLink = linksByAnchorId.get(anchorId);
+    if (!nextLink || nextLink === activeLink) return;
+    activeLink?.removeAttribute("aria-current");
+    nextLink.setAttribute("aria-current", "location");
+    activeLink = nextLink;
+    keepTurnLinkVisible(list, nextLink);
+  };
+
   for (const turn of turns) {
     const item = element("li", "turn-item");
     const link = element("a", "turn-link");
@@ -512,8 +563,10 @@ function renderTurnDirectory(turns, onNavigate) {
       window.history.replaceState(null, "", url);
       directory.classList.remove("is-open");
       toggle.setAttribute("aria-expanded", "false");
+      setActiveTurn(turn.anchorId);
       onNavigate(turn.anchorId);
     });
+    linksByAnchorId.set(turn.anchorId, link);
     item.append(link);
     list.append(item);
   }
@@ -524,10 +577,11 @@ function renderTurnDirectory(turns, onNavigate) {
     const expanded = toggle.getAttribute("aria-expanded") !== "true";
     toggle.setAttribute("aria-expanded", String(expanded));
     directory.classList.toggle("is-open", expanded);
+    if (expanded && activeLink) keepTurnLinkVisible(list, activeLink);
   });
 
   directory.append(heading, toggle, list);
-  return directory;
+  return { element: directory, setActiveTurn };
 }
 
 function renderHistory(history, id) {
@@ -567,11 +621,13 @@ function renderHistory(history, id) {
   }
   transcript.append(renderSharePrompt());
 
-  const directory = renderTurnDirectory(createTurnDirectory(history.entries), focusMessageAnchor);
+  const turns = createTurnDirectory(history.entries);
+  const directory = renderTurnDirectory(turns, focusMessageAnchor);
   const layout = element("div", "viewer-layout");
-  layout.append(directory, transcript);
+  layout.append(directory.element, transcript);
   conversation.append(layout);
 
+  trackActiveTurn(turns, directory.setActiveTurn);
   focusCurrentMessageAnchor();
 }
 
