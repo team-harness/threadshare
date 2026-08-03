@@ -1,5 +1,5 @@
 import markdownit from "markdown-it";
-import { agentAlternatePath, canonicalViewerPath } from "./src/agent-transcript.mjs";
+import { agentAlternatePath } from "./src/agent-transcript.mjs";
 import { createTurnDirectory } from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
@@ -423,7 +423,7 @@ function renderToolGroup(entries) {
 }
 
 function renderAgentReviewHint(id) {
-  const reviewUrl = new URL(canonicalViewerPath(id.toLowerCase()), window.location.origin).toString();
+  const reviewUrl = new URL(agentAlternatePath(id.toLowerCase()), window.location.origin).toString();
   const hint = element("aside", "agent-review-hint");
   hint.setAttribute("aria-label", "Conversation review link");
   hint.append(element("span", "agent-review-label", "AI agent review:"));
