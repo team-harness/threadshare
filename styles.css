@@ -796,10 +796,13 @@ body {
     gap: 18px;
   }
   .turn-directory {
-    position: static;
+    position: sticky;
+    top: 0;
+    z-index: 2;
     max-height: none;
     overflow: visible;
     border-bottom: 1px solid #29302c;
+    background: #111413;
   }
   .turn-directory-heading {
     display: none;
