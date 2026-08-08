@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createTurnDirectory,
   findActiveTurnIndex,
+  groupEntriesIntoTurns,
   markdownPlainText,
 } from "../src/viewer-state.mjs";
 
@@ -56,6 +57,51 @@ test("builds user-turn directory previews as short plain text", () => {
   assert.match(turns[1].preview, /<script>alert\('preview'\)<\/script>/);
   assert.ok(Array.from(turns[1].preview).length <= 72);
   assert.match(turns[1].preview, /\.\.\.$/);
+});
+
+test("groups each user turn around its latest assistant response", () => {
+  const grouped = groupEntriesIntoTurns([
+    { id: "intro", kind: "activity", message: "Conversation imported" },
+    { id: "user-1", kind: "message", role: "user", markdown: "First question" },
+    { id: "assistant-plan", kind: "message", role: "assistant", markdown: "Plan" },
+    { id: "tool-1", kind: "tool", name: "read_file" },
+    { id: "thought-1", kind: "thought", text: "Inspect the result" },
+    { id: "assistant-final", kind: "message", role: "assistant", markdown: "Answer" },
+    { id: "activity-1", kind: "activity", message: "Finished" },
+    { id: "user-2", kind: "message", role: "user", markdown: "Second question" },
+    { id: "tool-2", kind: "tool", name: "search" },
+    { id: "user-3", kind: "message", role: "user", markdown: "Third question" },
+    { id: "assistant-only", kind: "message", role: "assistant", markdown: "Only answer" },
+  ]);
+
+  assert.deepEqual(
+    grouped.preamble.map((entry) => entry.id),
+    ["intro"],
+  );
+  assert.equal(grouped.turns.length, 3);
+  assert.equal(grouped.turns[0].user.id, "user-1");
+  assert.equal(grouped.turns[0].assistant.id, "assistant-final");
+  assert.deepEqual(
+    grouped.turns[0].entries.map((entry) => entry.id),
+    ["assistant-plan", "tool-1", "thought-1", "assistant-final", "activity-1"],
+  );
+  assert.deepEqual(
+    grouped.turns[0].processEntries.map((entry) => entry.id),
+    ["assistant-plan", "tool-1", "thought-1", "activity-1"],
+  );
+  assert.deepEqual(grouped.turns[0].processCounts, {
+    assistantMessages: 1,
+    tools: 1,
+    thoughts: 1,
+    other: 1,
+  });
+  assert.equal(grouped.turns[1].assistant, null);
+  assert.deepEqual(
+    grouped.turns[1].processEntries.map((entry) => entry.id),
+    ["tool-2"],
+  );
+  assert.equal(grouped.turns[2].assistant.id, "assistant-only");
+  assert.deepEqual(grouped.turns[2].processEntries, []);
 });
 
 test("selects the current turn from viewport positions", () => {

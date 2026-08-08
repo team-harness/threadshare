@@ -1,6 +1,10 @@
 import markdownit from "markdown-it";
 import { agentAlternatePath } from "./src/agent-transcript.mjs";
-import { createTurnDirectory, findActiveTurnIndex } from "./src/viewer-state.mjs";
+import {
+  createTurnDirectory,
+  findActiveTurnIndex,
+  groupEntriesIntoTurns,
+} from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
 const MESSAGE_ANCHOR_PREFIX = "message-";
@@ -422,6 +426,85 @@ function renderToolGroup(entries) {
   return group;
 }
 
+function renderEntryNodes(entries) {
+  const rendered = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.kind === "tool") {
+      const toolEntries = [entry];
+      while (entries[index + 1]?.kind === "tool") {
+        index += 1;
+        toolEntries.push(entries[index]);
+      }
+      rendered.push({
+        entries: toolEntries,
+        node: toolEntries.length === 1 ? renderRecord(entry) : renderToolGroup(toolEntries),
+      });
+    } else {
+      rendered.push({
+        entries: [entry],
+        node: entry.kind === "message" ? renderMessage(entry) : renderRecord(entry),
+      });
+    }
+  }
+  return rendered;
+}
+
+function processSummary(counts) {
+  const parts = [];
+  if (counts.assistantMessages) parts.push(`${counts.assistantMessages} 条中间回复`);
+  if (counts.tools) parts.push(`${counts.tools} 次工具调用`);
+  if (counts.thoughts) parts.push(`${counts.thoughts} 段思考`);
+  if (counts.other) parts.push(`其他 ${counts.other} 项`);
+  return parts.join(" · ");
+}
+
+function renderTurn(turn, index) {
+  const section = element("section", "conversation-turn");
+  section.append(renderMessage(turn.user));
+
+  const content = element("div", "turn-content");
+  content.id = `turn-content-${index + 1}`;
+  const processNodes = [];
+  for (const rendered of renderEntryNodes(turn.entries)) {
+    const isPrimaryAssistant =
+      rendered.entries.length === 1 && rendered.entries[0] === turn.assistant;
+    if (!isPrimaryAssistant) {
+      rendered.node.hidden = true;
+      rendered.node.classList.add("turn-process-entry");
+      processNodes.push(rendered.node);
+    }
+    content.append(rendered.node);
+  }
+
+  if (processNodes.length > 0) {
+    const summary = processSummary(turn.processCounts);
+    const toggle = element("button", "turn-process-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-controls", content.id);
+    toggle.append(
+      element("span", "turn-process-label", "过程"),
+      element("span", "turn-process-summary", summary),
+      element("span", "turn-process-caret"),
+    );
+
+    const setExpanded = (expanded) => {
+      toggle.setAttribute("aria-expanded", String(expanded));
+      toggle.setAttribute("aria-label", `${expanded ? "收起" : "展开"}过程：${summary}`);
+      for (const node of processNodes) node.hidden = !expanded;
+      section.classList.toggle("is-process-expanded", expanded);
+    };
+    setExpanded(false);
+    toggle.addEventListener("click", () => {
+      setExpanded(toggle.getAttribute("aria-expanded") !== "true");
+    });
+    section.append(toggle);
+  }
+
+  section.append(content);
+  return section;
+}
+
 function renderAgentReviewHint(id) {
   const reviewUrl = new URL(agentAlternatePath(id.toLowerCase()), window.location.origin).toString();
   const hint = element("aside", "agent-review-hint");
@@ -602,22 +685,10 @@ function renderHistory(history, id) {
   conversation.append(renderAgentReviewHint(id));
 
   const transcript = element("div", "transcript");
-  for (let index = 0; index < history.entries.length; index += 1) {
-    const entry = history.entries[index];
-    if (entry.kind === "tool") {
-      const entries = [entry];
-      while (history.entries[index + 1]?.kind === "tool") {
-        index += 1;
-        entries.push(history.entries[index]);
-      }
-      transcript.append(entries.length === 1 ? renderRecord(entry) : renderToolGroup(entries));
-      continue;
-    }
-    if (entry.kind === "message") {
-      transcript.append(renderMessage(entry));
-    } else {
-      transcript.append(renderRecord(entry));
-    }
+  const grouped = groupEntriesIntoTurns(history.entries);
+  for (const rendered of renderEntryNodes(grouped.preamble)) transcript.append(rendered.node);
+  for (let index = 0; index < grouped.turns.length; index += 1) {
+    transcript.append(renderTurn(grouped.turns[index], index));
   }
   transcript.append(renderSharePrompt());
 

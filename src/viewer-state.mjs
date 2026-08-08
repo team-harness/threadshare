@@ -27,6 +27,63 @@ export function markdownPlainText(markdown) {
   return normalizedText(text);
 }
 
+function createTurn(user, entries) {
+  let assistantIndex = -1;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.kind === "message" && entry.role === "assistant") assistantIndex = index;
+  }
+
+  const processEntries = entries.filter((_, index) => index !== assistantIndex);
+  const processCounts = {
+    assistantMessages: 0,
+    tools: 0,
+    thoughts: 0,
+    other: 0,
+  };
+  for (const entry of processEntries) {
+    if (entry.kind === "message" && entry.role === "assistant") {
+      processCounts.assistantMessages += 1;
+    } else if (entry.kind === "tool") {
+      processCounts.tools += 1;
+    } else if (entry.kind === "thought") {
+      processCounts.thoughts += 1;
+    } else {
+      processCounts.other += 1;
+    }
+  }
+
+  return {
+    user,
+    entries,
+    assistant: assistantIndex === -1 ? null : entries[assistantIndex],
+    processEntries,
+    processCounts,
+  };
+}
+
+export function groupEntriesIntoTurns(entries) {
+  const preamble = [];
+  const turns = [];
+  let user = null;
+  let turnEntries = [];
+
+  for (const entry of entries) {
+    if (entry.kind === "message" && entry.role === "user") {
+      if (user) turns.push(createTurn(user, turnEntries));
+      user = entry;
+      turnEntries = [];
+    } else if (user) {
+      turnEntries.push(entry);
+    } else {
+      preamble.push(entry);
+    }
+  }
+  if (user) turns.push(createTurn(user, turnEntries));
+
+  return { preamble, turns };
+}
+
 function truncatePreview(value, limit) {
   const characters = Array.from(value);
   if (characters.length <= limit) return value;
