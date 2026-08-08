@@ -15,6 +15,13 @@ function inlineTokenText(token) {
   return "";
 }
 
+export function agentContinuationPrompt(agentUrl) {
+  return (
+    "Please read the conversation context at the link below, then continue the conversation with me from where we left off:\n\n" +
+    agentUrl
+  );
+}
+
 export function markdownPlainText(markdown) {
   const text = markdownParser
     .parse(String(markdown ?? ""), {})

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  agentContinuationPrompt,
   createTurnDirectory,
   findActiveTurnIndex,
   groupEntriesIntoTurns,
@@ -9,6 +10,17 @@ import {
 } from "../src/viewer-state.mjs";
 
 const CREATED_AT = "2026-08-01T08:00:00.000Z";
+
+test("builds a ready-to-paste prompt for continuing in an agent", () => {
+  const agentUrl =
+    "https://threadshare.example/?id=11111111-2222-4333-8444-555555555555&format=agent";
+
+  assert.equal(
+    agentContinuationPrompt(agentUrl),
+    "Please read the conversation context at the link below, then continue the conversation with me from where we left off:\n\n" +
+      agentUrl,
+  );
+});
 
 const entries = [
   {

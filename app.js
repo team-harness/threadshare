@@ -1,6 +1,7 @@
 import markdownit from "markdown-it";
 import { agentAlternatePath } from "./src/agent-transcript.mjs";
 import {
+  agentContinuationPrompt,
   createTurnDirectory,
   findActiveTurnIndex,
   groupEntriesIntoTurns,
@@ -104,14 +105,14 @@ async function copyCommand(command, button) {
   }
 }
 
-async function copyReviewLink(reviewUrl, link) {
+async function copyAgentContinuationPrompt(agentUrl, link) {
   try {
-    await navigator.clipboard.writeText(reviewUrl);
+    await navigator.clipboard.writeText(agentContinuationPrompt(agentUrl));
     link.classList.add("copied");
-    link.textContent = "Review link copied";
+    link.textContent = "Context prompt copied";
     window.setTimeout(() => {
       link.classList.remove("copied");
-      link.textContent = "Copy review link";
+      link.textContent = "Copy context prompt";
     }, 1600);
   } catch {
     link.textContent = "Copy failed";
@@ -506,20 +507,20 @@ function renderTurn(turn, index) {
   return section;
 }
 
-function renderAgentReviewHint(id) {
-  const reviewUrl = new URL(agentAlternatePath(id.toLowerCase()), window.location.origin).toString();
+function renderAgentContinuationHint(id) {
+  const agentUrl = new URL(agentAlternatePath(id.toLowerCase()), window.location.origin).toString();
   const hint = element("aside", "agent-review-hint");
-  hint.setAttribute("aria-label", "Conversation review link");
-  hint.append(element("span", "agent-review-label", "AI agent review:"));
-  const reviewLink = element("a", "agent-review-link", "Copy review link");
-  reviewLink.href = reviewUrl;
-  reviewLink.title = "Copy the canonical Viewer review link";
-  reviewLink.setAttribute("data-review-url", reviewUrl);
-  reviewLink.addEventListener("click", (event) => {
+  hint.setAttribute("aria-label", "Continue this conversation in your agent");
+  hint.append(element("span", "agent-review-label", "Continue with your agent:"));
+  const promptLink = element("a", "agent-review-link", "Copy context prompt");
+  promptLink.href = agentUrl;
+  promptLink.title = "Copy a prompt with the agent-ready conversation link";
+  promptLink.setAttribute("data-agent-url", agentUrl);
+  promptLink.addEventListener("click", (event) => {
     event.preventDefault();
-    void copyReviewLink(reviewUrl, reviewLink);
+    void copyAgentContinuationPrompt(agentUrl, promptLink);
   });
-  hint.append(reviewLink);
+  hint.append(promptLink);
   return hint;
 }
 
@@ -683,7 +684,7 @@ function renderHistory(history, id) {
     .join(" · ");
   if (details) conversationMeta.append(element("p", "", details));
   conversation.append(conversationMeta);
-  conversation.append(renderAgentReviewHint(id));
+  conversation.append(renderAgentContinuationHint(id));
 
   const transcript = element("div", "transcript");
   const grouped = groupEntriesIntoTurns(history.entries);
