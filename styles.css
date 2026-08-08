@@ -173,17 +173,11 @@ body {
   padding: 6px 0;
   border: 0;
   border-top: 1px solid #29302c;
-  background: transparent;
-  color: #87928b;
+  background: #151a18;
+  color: #cbd4ce;
   cursor: pointer;
   font: inherit;
   text-align: left;
-}
-
-.turn-process-toggle:hover,
-.turn-process-toggle:focus-visible {
-  color: #cbd4ce;
-  background: #151a18;
 }
 
 .turn-process-toggle:focus-visible {

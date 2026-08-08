@@ -4,6 +4,7 @@ import {
   createTurnDirectory,
   findActiveTurnIndex,
   groupEntriesIntoTurns,
+  turnNavigationScrollOptions,
 } from "./src/viewer-state.mjs";
 
 const conversation = document.querySelector("#conversation");
@@ -40,7 +41,7 @@ function focusMessageAnchor(anchorId, { moveFocus = true } = {}) {
   target.classList.add("is-anchor-target");
   if (moveFocus) target.focus({ preventScroll: true });
   const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+  target.scrollIntoView(turnNavigationScrollOptions(reducedMotion));
   return true;
 }
 

@@ -5,6 +5,7 @@ import {
   findActiveTurnIndex,
   groupEntriesIntoTurns,
   markdownPlainText,
+  turnNavigationScrollOptions,
 } from "../src/viewer-state.mjs";
 
 const CREATED_AT = "2026-08-01T08:00:00.000Z";
@@ -112,4 +113,15 @@ test("selects the current turn from viewport positions", () => {
     findActiveTurnIndex([-980, -360, 440], { activationTop: 180, atEnd: true }),
     2,
   );
+});
+
+test("aligns clicked turns with the active-turn activation zone", () => {
+  assert.deepEqual(turnNavigationScrollOptions(false), {
+    behavior: "smooth",
+    block: "start",
+  });
+  assert.deepEqual(turnNavigationScrollOptions(true), {
+    behavior: "auto",
+    block: "start",
+  });
 });

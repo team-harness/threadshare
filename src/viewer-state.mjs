@@ -119,3 +119,10 @@ export function findActiveTurnIndex(turnTops, options = {}) {
   }
   return activeIndex;
 }
+
+export function turnNavigationScrollOptions(reducedMotion) {
+  return {
+    behavior: reducedMotion ? "auto" : "smooth",
+    block: "start",
+  };
+}
