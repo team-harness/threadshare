@@ -26,6 +26,7 @@ const expectedPackageFiles = [
   "README.zh-CN.md",
   "bin/threadshare.mjs",
   "package.json",
+  "schema/session-facts-delta.v1.schema.json",
   "schema/threadshare-history.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
@@ -33,9 +34,12 @@ const expectedPackageFiles = [
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
   "src/paseo-session-bridge.mjs",
+  "src/provider-evidence.mjs",
   "src/session-export.mjs",
+  "src/session-facts.mjs",
   "src/session-files.mjs",
   "src/session-listing.mjs",
+  "src/session-record-reader.mjs",
   "src/share-preflight.mjs",
   "src/share-read.mjs",
   "src/share-url.mjs",
@@ -97,7 +101,7 @@ test("validates stable release metadata and numeric semver ordering", () => {
   );
 });
 
-test("locks npm pack to the exact eighteen public files", () => {
+test("locks npm pack to the exact twenty-two public files", () => {
   assert.deepEqual(EXPECTED_PACKAGE_FILES, expectedPackageFiles);
   const packed = {
     name: "@team-harness/threadshare",

@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/session-facts-delta.v1.schema.json",
+  "title": "SessionFactsDeltaV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "factSchemaVersion", "providerAdapterVersion", "privacyPolicyVersion", "originSecretEpoch", "duplicatePolicyVersion", "expectedGeneration", "targetGeneration", "mode", "deltaId", "session", "retractions", "turns", "sourceRecords", "evidenceEvents", "turnEvidence", "capabilities", "capabilityUses", "capabilityUseEvidence", "checkpoint", "diagnostics", "coverage"],
+  "properties": {
+    "format": { "const": "session-facts-delta@v1" },
+    "factSchemaVersion": { "const": 1 },
+    "providerAdapterVersion": { "$ref": "#/$defs/nonEmptyString" },
+    "privacyPolicyVersion": { "const": 1 },
+    "originSecretEpoch": { "$ref": "#/$defs/uuid" },
+    "duplicatePolicyVersion": { "const": 1 },
+    "expectedGeneration": { "$ref": "#/$defs/decimal" },
+    "targetGeneration": { "$ref": "#/$defs/decimal" },
+    "mode": { "enum": ["append", "replace-session"] },
+    "deltaId": { "$ref": "#/$defs/hex64" },
+    "session": { "$ref": "#/$defs/session" },
+    "retractions": { "$ref": "#/$defs/retractions" },
+    "turns": { "type": "array", "items": { "$ref": "#/$defs/turn" } },
+    "sourceRecords": { "type": "array", "items": { "$ref": "#/$defs/sourceRecord" } },
+    "evidenceEvents": { "type": "array", "items": { "$ref": "#/$defs/evidenceEvent" } },
+    "turnEvidence": { "type": "array", "items": { "$ref": "#/$defs/turnEvidence" } },
+    "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } },
+    "capabilityUses": { "type": "array", "items": { "$ref": "#/$defs/capabilityUse" } },
+    "capabilityUseEvidence": { "type": "array", "items": { "$ref": "#/$defs/capabilityUseEvidence" } },
+    "checkpoint": { "$ref": "#/$defs/checkpoint" },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "coverage": { "$ref": "#/$defs/coverage" }
+  },
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "capabilityName": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "nullableHex64": { "anyOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+    "nullableString": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+    "sourceOrder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recordStartOffset", "contentIndex", "eventOrdinal"],
+      "properties": {
+        "recordStartOffset": { "$ref": "#/$defs/decimal" },
+        "contentIndex": { "type": "integer", "minimum": -1 },
+        "eventOrdinal": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionKey", "provider", "sessionScope", "eligibility", "duplicatePolicyVersion"],
+      "properties": {
+        "sessionKey": { "$ref": "#/$defs/hex64" },
+        "provider": { "$ref": "#/$defs/nonEmptyString" },
+        "sessionScope": { "enum": ["main", "subagent", "unknown"] },
+        "eligibility": { "enum": ["eligible", "subagent-excluded", "unknown"] },
+        "projectKey": { "$ref": "#/$defs/nullableHex64" },
+        "observedStart": { "$ref": "#/$defs/nullableString" },
+        "observedEnd": { "$ref": "#/$defs/nullableString" },
+        "originatorVersion": { "$ref": "#/$defs/nullableString" },
+        "duplicateGroupKey": { "$ref": "#/$defs/nullableHex64" },
+        "dedupeFingerprint": { "$ref": "#/$defs/nullableHex64" },
+        "dedupeCorroborationFingerprint": { "$ref": "#/$defs/nullableHex64" },
+        "duplicateMethod": { "anyOf": [{ "enum": ["explicit-lineage", "exact-first-turn-prefix"] }, { "type": "null" }] },
+        "duplicateConfidence": { "anyOf": [{ "enum": ["strong", "weak"] }, { "type": "null" }] },
+        "dedupeClosure": { "anyOf": [{ "enum": ["hard-sealed", "observed-eof"] }, { "type": "null" }] },
+        "dedupeEvidenceEventKeys": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "duplicatePolicyVersion": { "const": 1 },
+        "factTruncation": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } }
+      }
+    },
+    "retractions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnKeys", "orphanEventKeys", "authoritativeTurnKeys"],
+      "properties": {
+        "turnKeys": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "orphanEventKeys": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "authoritativeTurnKeys": { "type": "array", "items": { "$ref": "#/$defs/hex64" } }
+      }
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnKey", "ownerSessionKey", "turnStartOffset", "problemText", "finalAnswerExcerpt", "observedTimestamp", "rawClosure", "providerVisibility", "factTruncation"],
+      "properties": {
+        "turnKey": { "$ref": "#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "#/$defs/hex64" },
+        "turnStartOffset": { "$ref": "#/$defs/decimal" },
+        "problemText": { "type": "string", "maxLength": 65536 },
+        "finalAnswerExcerpt": { "anyOf": [{ "type": "string", "maxLength": 8192 }, { "type": "null" }] },
+        "observedTimestamp": { "$ref": "#/$defs/nullableString" },
+        "rawClosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nextUserBoundary", "providerTerminal", "observedEofClosed"],
+          "properties": {
+            "nextUserBoundary": { "type": "boolean" },
+            "providerTerminal": { "anyOf": [{ "enum": ["completed", "aborted"] }, { "type": "null" }] },
+            "observedEofClosed": { "type": "boolean" }
+          }
+        },
+        "providerVisibility": { "enum": ["active", "rolled-back", "unknown"] },
+        "factTruncation": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } }
+      }
+    },
+    "sourceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRecordKey", "ownerSessionKey", "startOffset", "endOffset", "recordSha256", "providerRecordClass"],
+      "properties": {
+        "sourceRecordKey": { "$ref": "#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "#/$defs/hex64" },
+        "startOffset": { "$ref": "#/$defs/decimal" },
+        "endOffset": { "$ref": "#/$defs/decimal" },
+        "recordSha256": { "$ref": "#/$defs/hex64" },
+        "providerRecordClass": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "eventCommon": {
+      "type": "object",
+      "required": ["eventKey", "ownerSessionKey", "occurredTurnKey", "sourceRecordKey", "sourceOrder", "pointer", "originScope", "observedTimestamp", "kind"],
+      "properties": {
+        "eventKey": { "$ref": "#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "#/$defs/hex64" },
+        "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" },
+        "sourceRecordKey": { "$ref": "#/$defs/hex64" },
+        "sourceOrder": { "$ref": "#/$defs/sourceOrder" },
+        "pointer": { "$ref": "#/$defs/pointer" },
+        "originScope": { "enum": ["main", "subagent", "unknown"] },
+        "observedTimestamp": { "$ref": "#/$defs/nullableString" },
+        "kind": { "type": "string" }
+      }
+    },
+    "evidenceEvent": {
+      "oneOf": [
+        { "$ref": "#/$defs/visibleMessage" },
+        { "$ref": "#/$defs/capabilityInvocation" },
+        { "$ref": "#/$defs/capabilityResult" },
+        { "$ref": "#/$defs/skillCatalogEntry" },
+        { "$ref": "#/$defs/skillLoad" },
+        { "$ref": "#/$defs/turnLifecycle" },
+        { "$ref": "#/$defs/providerStatus" }
+      ]
+    },
+    "pointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointerKind", "contentIndex", "eventOrdinal"],
+      "properties": {
+        "pointerKind": { "$ref": "#/$defs/nonEmptyString" },
+        "contentIndex": { "type": "integer", "minimum": -1 },
+        "eventOrdinal": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "visibleMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["role"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "visible-message" }, "role": { "enum": ["user", "assistant"] } } }
+      ]
+    },
+    "capabilityInvocation": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["capabilityKey"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "capability-invocation" }, "capabilityKey": { "$ref": "#/$defs/hex64" }, "correlationDigest": { "$ref": "#/$defs/nullableHex64" }, "inputFingerprint": { "$ref": "#/$defs/nullableHex64" } } }
+      ]
+    },
+    "capabilityResult": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["providerState"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "capability-result" }, "correlationDigest": { "$ref": "#/$defs/nullableHex64" }, "providerState": { "enum": ["pending", "completed", "failed", "unknown"] }, "exitCode": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }, "outputBytes": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }, "durationMs": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] } } }
+      ]
+    },
+    "skillCatalogEntry": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["capabilityKey", "pathFingerprint"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "skill-catalog-entry" }, "capabilityKey": { "$ref": "#/$defs/hex64" }, "pathFingerprint": { "$ref": "#/$defs/hex64" } } }
+      ]
+    },
+    "skillLoad": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["capabilityKey", "strength", "evidenceSource"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "skill-load" }, "capabilityKey": { "$ref": "#/$defs/hex64" }, "strength": { "enum": ["confirmed", "inferred"] }, "evidenceSource": { "$ref": "#/$defs/nonEmptyString" } } }
+      ]
+    },
+    "turnLifecycle": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["lifecycleState"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "turn-lifecycle" }, "lifecycleState": { "enum": ["started", "completed", "aborted"] }, "providerTurnDigest": { "$ref": "#/$defs/nullableHex64" } } }
+      ]
+    },
+    "providerStatus": {
+      "allOf": [
+        { "$ref": "#/$defs/eventCommon" },
+        { "type": "object", "unevaluatedProperties": false, "required": ["statusKind", "providerState"], "properties": { "eventKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "occurredTurnKey": { "$ref": "#/$defs/nullableHex64" }, "sourceRecordKey": { "$ref": "#/$defs/hex64" }, "sourceOrder": { "$ref": "#/$defs/sourceOrder" }, "pointer": { "$ref": "#/$defs/pointer" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "observedTimestamp": { "$ref": "#/$defs/nullableString" }, "kind": { "const": "provider-status" }, "statusKind": { "enum": ["thread-rolled-back", "inline-subagent-activity", "inter-agent-communication"] }, "providerState": { "enum": ["observed", "invalid"] }, "rolledBackTurnCount": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] } } }
+      ]
+    },
+    "turnEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerSessionKey", "turnKey", "eventKey", "role"],
+      "properties": { "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "turnKey": { "$ref": "#/$defs/hex64" }, "eventKey": { "$ref": "#/$defs/hex64" }, "role": { "enum": ["boundary", "lifecycle", "result", "follow-up", "rollback", "corroboration"] } }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilityKey", "provider", "kind", "canonicalName", "identityVersion"],
+      "properties": { "capabilityKey": { "$ref": "#/$defs/hex64" }, "provider": { "$ref": "#/$defs/nonEmptyString" }, "kind": { "enum": ["tool", "skill"] }, "canonicalName": { "$ref": "#/$defs/capabilityName" }, "identityVersion": { "const": 1 } }
+    },
+    "capabilityUse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["useKey", "ownerSessionKey", "turnKey", "capabilityKey", "turnOrdinal", "exactObservedName", "originScope", "providerTerminalState", "strength"],
+      "properties": {
+        "useKey": { "$ref": "#/$defs/hex64" }, "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "turnKey": { "$ref": "#/$defs/hex64" }, "capabilityKey": { "$ref": "#/$defs/hex64" }, "turnOrdinal": { "type": "integer", "minimum": 0 }, "exactObservedName": { "$ref": "#/$defs/capabilityName" }, "originScope": { "enum": ["main", "subagent", "unknown"] }, "originFingerprint": { "$ref": "#/$defs/nullableHex64" }, "inputFingerprint": { "$ref": "#/$defs/nullableHex64" }, "providerTerminalState": { "enum": ["pending", "completed", "failed", "cancelled", "unknown"] }, "strength": { "enum": ["observed", "confirmed", "inferred"] }, "correlationDigest": { "$ref": "#/$defs/nullableHex64" }
+      }
+    },
+    "capabilityUseEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerSessionKey", "useKey", "eventKey", "role"],
+      "properties": { "ownerSessionKey": { "$ref": "#/$defs/hex64" }, "useKey": { "$ref": "#/$defs/hex64" }, "eventKey": { "$ref": "#/$defs/hex64" }, "role": { "enum": ["invocation", "result", "corroboration"] } }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completeOffset", "eofObserved", "partialTailLength", "partialTailDigest", "sourceSize", "sourceMtimeNs", "sourceSnapshotStable", "originSecretEpoch", "generation", "pendingState"],
+      "properties": { "completeOffset": { "$ref": "#/$defs/decimal" }, "eofObserved": { "type": "boolean" }, "partialTailLength": { "$ref": "#/$defs/decimal" }, "partialTailDigest": { "$ref": "#/$defs/hex64" }, "sourceSize": { "$ref": "#/$defs/decimal" }, "sourceMtimeNs": { "$ref": "#/$defs/decimal" }, "sourceSnapshotStable": { "type": "boolean" }, "originSecretEpoch": { "$ref": "#/$defs/uuid" }, "generation": { "$ref": "#/$defs/decimal" }, "pendingState": { "$ref": "#/$defs/pendingState" } }
+    },
+    "pendingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currentTurnKey", "replayFromOffset", "pendingStarted", "pendingUses", "sessionState", "catalogEntries", "seenClaudeUuids"],
+      "properties": {
+        "currentTurnKey": { "$ref": "#/$defs/nullableHex64" },
+        "replayFromOffset": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "pendingStarted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["eventKey", "recordStartOffset", "providerTurnDigest", "turnKey"],
+            "properties": {
+              "eventKey": { "$ref": "#/$defs/hex64" },
+              "recordStartOffset": { "$ref": "#/$defs/decimal" },
+              "providerTurnDigest": { "$ref": "#/$defs/nullableHex64" },
+              "turnKey": { "$ref": "#/$defs/nullableHex64" }
+            }
+          }
+        },
+        "pendingUses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["correlationDigest", "useKey", "capabilityKey"],
+            "properties": {
+              "correlationDigest": { "$ref": "#/$defs/hex64" },
+              "useKey": { "$ref": "#/$defs/nullableHex64" },
+              "capabilityKey": { "$ref": "#/$defs/nullableHex64" }
+            }
+          }
+        },
+        "sessionState": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionKey", "sessionScope", "eligibility", "originatorVersion", "projectKey", "observedStart", "observedEnd", "firstTurnKey", "secondTurnKey", "factTruncation", "dedupe"],
+          "properties": {
+            "sessionKey": { "$ref": "#/$defs/hex64" },
+            "sessionScope": { "enum": ["main", "subagent", "unknown"] },
+            "eligibility": { "enum": ["eligible", "subagent-excluded", "unknown"] },
+            "originatorVersion": { "$ref": "#/$defs/nullableString" },
+            "projectKey": { "$ref": "#/$defs/nullableHex64" },
+            "observedStart": { "$ref": "#/$defs/nullableString" },
+            "observedEnd": { "$ref": "#/$defs/nullableString" },
+            "firstTurnKey": { "$ref": "#/$defs/nullableHex64" },
+            "secondTurnKey": { "$ref": "#/$defs/nullableHex64" },
+            "factTruncation": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } },
+            "dedupe": {
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["dedupeFingerprint", "duplicateMethod", "duplicateConfidence", "dedupeClosure", "dedupeEvidenceEventKeys"],
+                  "properties": {
+                    "dedupeFingerprint": { "$ref": "#/$defs/hex64" },
+                    "duplicateMethod": { "enum": ["explicit-lineage", "exact-first-turn-prefix"] },
+                    "duplicateConfidence": { "enum": ["strong", "weak"] },
+                    "dedupeClosure": { "enum": ["hard-sealed", "observed-eof"] },
+                    "dedupeEvidenceEventKeys": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+                    "dedupeCorroborationFingerprint": { "$ref": "#/$defs/hex64" }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "catalogEntries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pathFingerprint", "capabilityKey", "canonicalName", "eventKey"],
+            "properties": {
+              "pathFingerprint": { "$ref": "#/$defs/hex64" },
+              "capabilityKey": { "$ref": "#/$defs/hex64" },
+              "canonicalName": { "$ref": "#/$defs/capabilityName" },
+              "eventKey": { "$ref": "#/$defs/hex64" }
+            }
+          }
+        },
+        "seenClaudeUuids": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["digest", "recordStartOffset"],
+            "properties": {
+              "digest": { "$ref": "#/$defs/hex64" },
+              "recordStartOffset": { "$ref": "#/$defs/decimal" }
+            }
+          }
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "count"],
+      "properties": { "code": { "$ref": "#/$defs/nonEmptyString" }, "count": { "type": "integer", "minimum": 0 }, "firstOffset": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }, "digest": { "$ref": "#/$defs/nullableHex64" } }
+    },
+    "coverage": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+  }
+}

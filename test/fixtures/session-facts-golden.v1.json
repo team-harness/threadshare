@@ -1,0 +1,329 @@
+{
+  "version": 1,
+  "hashVectors": [
+    {
+      "name": "session",
+      "domain": "session",
+      "parts": [
+        { "encoding": "utf8", "value": "codex" },
+        { "encoding": "utf8", "value": "11111111-1111-4111-8111-111111111111" }
+      ],
+      "expected": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+    },
+    {
+      "name": "capability",
+      "domain": "capability",
+      "parts": [
+        { "encoding": "utf8", "value": "codex" },
+        { "encoding": "utf8", "value": "tool" },
+        { "encoding": "utf8", "value": "Read" },
+        { "encoding": "hex", "value": "01" }
+      ],
+      "expected": "e5e4199105c623cc2d82364fc020e5accfa76de5e4a50ed0955d06a0ab74e9fc"
+    },
+    {
+      "name": "capability-nfc-upper",
+      "domain": "capability",
+      "parts": [
+        { "encoding": "utf8", "value": "codex" },
+        { "encoding": "utf8", "value": "tool" },
+        { "encoding": "nfcUtf8", "value": "Cafe\u0301Tool" },
+        { "encoding": "u8", "value": "1" }
+      ],
+      "expected": "26fcd3e01ea38bb82e840692dfd85fbc0fed493cce457cb505199b9355910b52"
+    },
+    {
+      "name": "capability-case-sensitive-lower",
+      "domain": "capability",
+      "parts": [
+        { "encoding": "utf8", "value": "codex" },
+        { "encoding": "utf8", "value": "tool" },
+        { "encoding": "nfcUtf8", "value": "cafe\u0301Tool" },
+        { "encoding": "u8", "value": "1" }
+      ],
+      "expected": "4a1dc8296310bd7e6edaa95585f64ca1a924e03c41287d61df5261169a4f09c5"
+    },
+    {
+      "name": "turn",
+      "domain": "turn",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+        },
+        { "encoding": "u64be", "value": "123456" }
+      ],
+      "expected": "68d3b14d1d40b4afc6b30ffb46b0e57533b703da7c54bef885cb09fab3cebc1a"
+    },
+    {
+      "name": "source-record",
+      "domain": "source-record",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+        },
+        { "encoding": "u64be", "value": "123400" }
+      ],
+      "expected": "8075e8169c7f08516cf572304e04ab0de7cffe781e977288750df3ded12ba8f1"
+    },
+    {
+      "name": "event-source-order",
+      "domain": "event",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+        },
+        { "encoding": "u64be", "value": "123456" },
+        { "encoding": "i32be", "value": "-1" },
+        { "encoding": "u16be", "value": "2" }
+      ],
+      "expected": "7130f1ff3af41e1725b6c33671ef61f9c3bb47c1811b928d9370e3f1c0255dec"
+    },
+    {
+      "name": "provider-correlation",
+      "domain": "provider-correlation",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+        },
+        { "encoding": "utf8", "value": "call-42" }
+      ],
+      "expected": "cacbd91fdfb8fde34d7889f238010b29acfe7708abe408811d352370f0fbb9d0"
+    },
+    {
+      "name": "capability-use-fallback-branch",
+      "domain": "capability-use",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "68d3b14d1d40b4afc6b30ffb46b0e57533b703da7c54bef885cb09fab3cebc1a"
+        },
+        {
+          "encoding": "concat",
+          "parts": [
+            { "encoding": "u8", "value": "0" },
+            {
+              "encoding": "hex",
+              "value": "7130f1ff3af41e1725b6c33671ef61f9c3bb47c1811b928d9370e3f1c0255dec"
+            }
+          ]
+        }
+      ],
+      "expected": "01c790eadecd236699b4d40e3ee8a5bcabe9b9f258d341548eee9bea4f6be455"
+    },
+    {
+      "name": "capability-use-correlation-branch",
+      "domain": "capability-use",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "68d3b14d1d40b4afc6b30ffb46b0e57533b703da7c54bef885cb09fab3cebc1a"
+        },
+        {
+          "encoding": "concat",
+          "parts": [
+            { "encoding": "u8", "value": "1" },
+            {
+              "encoding": "hex",
+              "value": "cacbd91fdfb8fde34d7889f238010b29acfe7708abe408811d352370f0fbb9d0"
+            }
+          ]
+        }
+      ],
+      "expected": "3e83252078fc56b67a657ab3bd2a5f275547f7141fe54ec4017399d0e6c09d3b"
+    },
+    {
+      "name": "delta",
+      "domain": "delta",
+      "parts": [
+        {
+          "encoding": "hex",
+          "value": "eb08db94876deefcc2497f95f2c06e31623110d48a35d3d0e60a5698e5260fc3"
+        },
+        { "encoding": "utf8", "value": "7" },
+        { "encoding": "utf8", "value": "append" },
+        { "encoding": "utf8", "value": "22222222-2222-4222-8222-222222222222" },
+        { "encoding": "utf8", "value": "1" },
+        {
+          "encoding": "hex",
+          "value": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        { "encoding": "utf8", "value": "9876543210" }
+      ],
+      "expected": "3e09286f3125e862a7b4990278f9990c2184bf022837679a9339bebb84b4b6b1"
+    }
+  ],
+  "canonicalVectors": [
+    {
+      "name": "nested-nfc",
+      "value": { "z": [3, { "b": false, "a": "e\u0301" }], "a": 1 },
+      "expected": "{\"a\":1,\"z\":[3,{\"a\":\"\u00e9\",\"b\":false}]}"
+    },
+    {
+      "name": "utf16-astral-key-order",
+      "value": { "\ufffd": 2, "\ud83d\ude00": 1 },
+      "expected": "{\"\ud83d\ude00\":1,\"\ufffd\":2}"
+    },
+    {
+      "name": "source-order-u64-decimal-and-string-escapes",
+      "value": {
+        "text": "quote:\" slash:\\ control:\b\f\n\r\t",
+        "sourceOrder": {
+          "recordStartOffset": "18446744073709551615",
+          "contentIndex": -1,
+          "eventOrdinal": 65535
+        }
+      },
+      "expected": "{\"sourceOrder\":{\"contentIndex\":-1,\"eventOrdinal\":65535,\"recordStartOffset\":\"18446744073709551615\"},\"text\":\"quote:\\\" slash:\\\\ control:\\b\\f\\n\\r\\t\"}"
+    },
+    {
+      "name": "nfc-key-and-value",
+      "value": { "e\u0301": 1, "z": "e\u0301" },
+      "expected": "{\"z\":\"\u00e9\",\"\u00e9\":1}"
+    }
+  ],
+  "canonicalRejectVectors": [
+    {
+      "name": "fact-canonical-json-rejects-floating-point",
+      "value": 0.5
+    },
+    {
+      "name": "u64-must-use-decimal-string",
+      "value": 9007199254740992
+    }
+  ],
+  "wellFormedUnicodeVectors": [
+    {
+      "name": "valid-surrogate-pair",
+      "utf16": [55357, 56832],
+      "expected": "\ud83d\ude00"
+    },
+    {
+      "name": "unpaired-high-surrogate-in-middle",
+      "utf16": [98, 97, 100, 32, 55296, 32, 116, 101, 120, 116],
+      "expected": "bad \ufffd text"
+    },
+    {
+      "name": "unpaired-high-surrogate-at-end",
+      "utf16": [101, 99, 104, 111, 32, 55296],
+      "expected": "echo \ufffd"
+    },
+    {
+      "name": "unpaired-low-surrogate",
+      "utf16": [56320, 120],
+      "expected": "\ufffdx"
+    }
+  ],
+  "digestVectors": [
+    {
+      "name": "turn-local-revision",
+      "value": {
+        "turn": {
+          "turnKey": "68d3b14d1d40b4afc6b30ffb46b0e57533b703da7c54bef885cb09fab3cebc1a",
+          "problemText": "line 1\nCafe\u0301 \\ \"",
+          "sourceOrder": "123456"
+        },
+        "events": [
+          {
+            "eventKey": "7130f1ff3af41e1725b6c33671ef61f9c3bb47c1811b928d9370e3f1c0255dec",
+            "sourceOrder": {
+              "recordStartOffset": "18446744073709551615",
+              "contentIndex": -1,
+              "eventOrdinal": 2
+            }
+          }
+        ],
+        "capabilityUses": [
+          {
+            "useKey": "01c790eadecd236699b4d40e3ee8a5bcabe9b9f258d341548eee9bea4f6be455",
+            "turnOrdinal": 0
+          }
+        ]
+      },
+      "expectedCanonical": "{\"capabilityUses\":[{\"turnOrdinal\":0,\"useKey\":\"01c790eadecd236699b4d40e3ee8a5bcabe9b9f258d341548eee9bea4f6be455\"}],\"events\":[{\"eventKey\":\"7130f1ff3af41e1725b6c33671ef61f9c3bb47c1811b928d9370e3f1c0255dec\",\"sourceOrder\":{\"contentIndex\":-1,\"eventOrdinal\":2,\"recordStartOffset\":\"18446744073709551615\"}}],\"turn\":{\"problemText\":\"line 1\\nCaf\u00e9 \\\\ \\\"\",\"sourceOrder\":\"123456\",\"turnKey\":\"68d3b14d1d40b4afc6b30ffb46b0e57533b703da7c54bef885cb09fab3cebc1a\"}}",
+      "expectedSha256": "ae5c60a3bb3b0105699ae81b1872f127de859601cd3abfed4cec13024e1a09b0"
+    }
+  ],
+  "privacy": {
+    "secretHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "originSecretEpoch": "22222222-2222-4222-8222-222222222222",
+    "vectors": [
+      {
+        "name": "valid-json-float-a",
+        "kind": "input",
+        "provider": "codex",
+        "capabilityKind": "tool",
+        "capabilityName": "Run",
+        "input": "{\"z\":1e+30,\"a\":0.5,\"m\":-0}",
+        "expected": "8ec62ca93099ed7e32c3aa0f7c9539c178eb6e928cf3cdc8a57a0ec970473e47"
+      },
+      {
+        "name": "valid-json-float-b",
+        "kind": "input",
+        "provider": "codex",
+        "capabilityKind": "tool",
+        "capabilityName": "Run",
+        "input": " { \"m\": 0, \"a\": 5e-1, \"z\": 1e30 } ",
+        "expected": "8ec62ca93099ed7e32c3aa0f7c9539c178eb6e928cf3cdc8a57a0ec970473e47"
+      },
+      {
+        "name": "valid-json-float-object",
+        "kind": "input",
+        "provider": "codex",
+        "capabilityKind": "tool",
+        "capabilityName": "Run",
+        "input": { "m": 0, "a": 0.5, "z": 1e30 },
+        "expected": "8ec62ca93099ed7e32c3aa0f7c9539c178eb6e928cf3cdc8a57a0ec970473e47"
+      },
+      {
+        "name": "invalid-json-raw-a",
+        "kind": "input",
+        "provider": "codex",
+        "capabilityKind": "tool",
+        "capabilityName": "Run",
+        "input": "{\"a\":0.5,}",
+        "expected": "f13cfd4267fd564ea553423428fa3c8de944f48f94947db0bb1cf2ee09dd996c"
+      },
+      {
+        "name": "invalid-json-raw-b",
+        "kind": "input",
+        "provider": "codex",
+        "capabilityKind": "tool",
+        "capabilityName": "Run",
+        "input": " {\"a\":0.5,}",
+        "expected": "650ff99b4bb9871c961ca3a6546e62f00126d1e1aaef11a2ad1a5010fee49bcb"
+      },
+      {
+        "name": "windows-drive-path-backslash",
+        "kind": "path",
+        "provider": "codex",
+        "path": "c:\\work\\.\\src\\tmp\\..\\file.md",
+        "expected": "f37cae5fd3098fc0c8476958f61200b12c68dffc2235ded181b12e507c92693d"
+      },
+      {
+        "name": "windows-drive-path-slash",
+        "kind": "path",
+        "provider": "codex",
+        "path": "C:/work/src/file.md",
+        "expected": "f37cae5fd3098fc0c8476958f61200b12c68dffc2235ded181b12e507c92693d"
+      },
+      {
+        "name": "posix-backslash-filename",
+        "kind": "path",
+        "provider": "codex",
+        "path": "dir\\name/file.md",
+        "expected": "ec0031695c03c41f78f5028827cdcf3d8f128ee2e7a321d7f6dd506c46fd8d42"
+      },
+      {
+        "name": "posix-slash-path",
+        "kind": "path",
+        "provider": "codex",
+        "path": "dir/name/file.md",
+        "expected": "66c6a3720b0883b99e038669803c5723c5f294ce3cad15b5d932273ee39b8a8b"
+      }
+    ]
+  }
+}

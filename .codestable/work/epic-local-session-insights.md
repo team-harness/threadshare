@@ -1,0 +1,81 @@
+---
+epic: ../epics/local-session-insights.md
+phase: executing
+approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
+current_item: ITEM-1
+next_action: finish ITEM-1 Provider Session Evidence review and milestone commit
+blocked_by: null
+item_progression: continuous
+milestone_commit: authorized
+remote_publish: final
+---
+
+## 子项进度
+
+- [ ] ITEM-1：Provider Session Evidence
+- [ ] ITEM-2：Turn Analysis 与单 Session 报告
+- [ ] ITEM-3：Rust Insights Engine 与原生交付
+- [ ] ITEM-4：事务化可恢复增量索引
+- [ ] ITEM-5：历史问题检索与证据路径
+- [ ] ITEM-6：本地 Insights Dashboard
+
+## 临时决策与证据
+
+- 2026-08-09：owner 确认产品定位为本地个人 Insights，不上传分析数据，公共分享链路保持不变。
+- 2026-08-09：owner 确认 Codex `<skill>` 与 Claude `Skill` tool call/result 是强证据，完整读取已知 `SKILL.md` 是弱证据，不建立 Skill 调用树。
+- 2026-08-09：本机基线约 3,300 个 JSONL、4.56 GiB，最大文件约 157 MiB；最大文件流式 JSON.parse 基准约 5.48 秒、90 MiB RSS，证明全量解析不得进入正常启动路径。
+- 2026-08-09：design review round 1 使用 Paseo agent `6fc7add3-316f-4656-a6c6-834c204fb013`、Claude Opus 5/max、plan mode，冻结 hash `a2a07e69ca4d2fee21ece9122ce042874496ce8c241ee81fd901e00bb1481e92`；报告 4 blocking、7 important。
+- 2026-08-09：按 findings 收缩 ITEM-5 为 Tool 证据路径，Skill 只做观察；补齐有界 fingerprint、不可变 generation 提交、open Turn/pending Tool checkpoint、精确 Codex 判据、Paseo 原生归属、localhost bootstrap、索引排除/重置、API/打包兼容和合成 Claude 失败 fixture。
+- 2026-08-09：design review round 2 冻结 hash `aeac5bc7e046321b87f1bef4f0222b009bd505532c0556a606dbb1af573b233b`；round 1 findings 全部 resolved，新报告 2 blocking、4 important。
+- 2026-08-09：按 round 2 补齐 provider 权威记录类矩阵、Codex 双重 user record 排除、hard/quiescent/open Turn、双 provider subagent coverage、Codex compaction/abort、持久化 exclusion config、generation 回收上界。
+- 2026-08-09：design review round 3 冻结 hash `70cacc9f6ec8f4e04f7906642a274640701b5d87f91eb7a76d6212f038b4a241`；无 blocking，3 important、3 suggestion 均为局部契约一致性。
+- 2026-08-09：终轮修订让 generation 与挂钟解耦，quiescent 由注入时钟派生；排除 `replacement_history` 内嵌副本；统一 hard/quiescent 检索门槛、状态字段、quiescence 配置、single-writer lock 与 temp 回收。
+- 2026-08-09：上一版 proposed Epic hash `6198d332c715f2017a4c25681f7256cde65b8cf7449a138616f79b6e0cf1b163` 已因 owner 要求补齐索引/查询算法而失效，不再作为批准候选。
+- 2026-08-09：owner 明确索引与查询算法是后续持续迭代关键，并允许 `@team-harness/threadshare` 通过预编译平台包无感内置 Rust Engine；用户只安装 Threadshare，不安装 Rust、本机编译工具链或独立数据库。
+- 2026-08-09：对 1.37 GiB、约 30% eligible session 字节做确定性分层抽样，并用最终 analyzer 复算：约 15,011 Turn、28.5 MiB 问题文本、435 万 logical token、203 万 posting、22–30 万 field-term；92.7% Turn 有 final assistant，8 KiB excerpt 当前约 21.2 MiB。
+- 2026-08-09：实测推翻旧 `2m / 20m postings` 与 `512 MiB` 门槛；当时容量暂改为 25,000 Turn / 400 万 posting / 40 万 term / 256 MiB，以及 250,000 Turn / 4,000 万 posting / 150 万 term / 1.5 GiB。该总容量后来被 Fact Model density probe 证伪并由后文 1/8 GiB 门槛取代；posting/term 门槛仍保留。
+- 2026-08-09：调研 CodeGraph 后只采纳其预编译 Rust、按文件/批次跨边界、SQLite FTS5、watcher hint + reconciliation 与 stale 提示；不采纳代码图谱数据模型、全库 LIKE/Levenshtein fallback 或自定义图存储。
+- 2026-08-09：索引候选采用 Rust sidecar + bundled SQLite/FTS5 单一事务存储，Turn 级 CAS delta 原子维护 facts/FTS/rollup/checkpoint；检索采用混合中文/英文/代码 analyzer、BM25 Top-300、IDF coverage/exact 重排和 bounded Tool 路径归纳，Tantivy 只在 250,000 Turn benchmark 越过门槛后重新评估。
+- 2026-08-09：索引/查询设计审查候选冻结为 `ffaf1d5bf89c9fc16fa16584bf5605f151a8bf5381c3a2acf94d69d3396e9cd2`；本轮只审新增 Rust Engine、事务索引、检索质量、容量预算与六平台 npm 交付，不沿用旧版通过结论。
+- 2026-08-09：索引/查询 design review round 1 使用 Paseo agent `3f190956-cc27-4e05-b6b0-fee40d099048`、Claude Opus 5/max、plan mode；报告 3 blocking、6 important、3 suggestion。实测确认 contentless + detail-column 使 BM25 恒为 0，CodeGraph 的 Rust kernel 并非 SQLite 先例，base32 FTS token/position 等价于敏感问题文本且 tombstone 默认不会立即清除。
+- 2026-08-09：按 round 1 改为 detail-full FTS 并加非零/列权重 smoke test；固定 secure-delete/automerge/deletemerge 与 pending-purge/optimize/checkpoint/VACUUM 状态机；detail-full 暂估 250,000 Turn FTS 为 290–364 MiB，要求同一 30% 样本重测。
+- 2026-08-09：Rust sidecar 保留的依据修正为 Node `>=20` 兼容、固定 SQLite 与故障隔离，并增加 Node 22 `node:sqlite` reference benchmark；六平台包改为本仓库 npm workspaces，release verifier 参数化七包 allowlist，unsigned build 可复现、签名一次、同 run artifact 发布，重跑按已发布 provenance/source SHA 恢复。
+- 2026-08-09：查询补逐 field `fts5vocab('col')` df、candidate Recall@300、development-set 消融、可版本化权重、明确 BM25 升序和无文本 filter 分支；Tool family 固定 fingerprint 枚举、medoid 接纳和 tie-break；新 CLI diagnostic、Dashboard asset exact allowlist 与 purge 状态进入契约。
+- 2026-08-09：round-2 re-review 候选冻结为 `365b93f7a59218a974f7d780ed6ca5c75f4bb3f44ff4887e9d19d31d22fc0f52`。
+- 2026-08-09：索引/查询 design review round 2 报告 2 blocking、7 important、2 suggestion。实测显示 `fts5vocab('col')` 经 temp table/CTE JOIN 会走 `INDEX 3/7` 全词典扫描，而参数化 `term IN (?, ...)` 走 `INDEX 263` seek；前者在 25 万 Turn 外推可达数十秒，必须由执行计划 smoke test 阻止。
+- 2026-08-09：round 2 同时更正 round 1 的错误假设：pinned npm 12.0.2 会静默跳过尚未发布的 registry optional dependency，不存在平台包预发布与根 lockfile 的循环；真正的问题是带 `os`/`cpu` 的 workspace member 会触发 `EBADPLATFORM`。因此平台包改为 CI 隔离 staging 生成和逐包发布，不进入根 workspace/lock member。
+- 2026-08-09：按 round 2 补齐 df term-seek 执行计划与 SQL 层禁止全 vocab scan、发布 verifier 三个重跑函数和全版本面校验；v1 不依赖未经多 segment 证明的 FTS special secure-delete，purge 以 DELETE/optimize/checkpoint/VACUUM 为事实；当时暂把 SQLite 临时副本归入 state-dir `tmp/`，round 3 实测后已修正为 VACUUM 临时库位于 active DB 同目录、只有普通 SQLite temp 受 `SQLITE_TMPDIR` 控制。mutation 等价验收统一使用相同注入时钟。
+- 2026-08-09：round-3 re-review 候选冻结为 `c803226ab3bbc7e067347b787265c4d5128c5b881f6c1e3c06fcb37e84e8a735`。
+- 2026-08-09：索引/查询 design review round 3 报告 1 blocking、5 important、3 suggestion。参数化 `term IN (?, ...)` 在 SQLite 3.50.4/3.51.0/3.51.2 全部命中 `INDEX 263`，256 term 实测比 temp JOIN 快约 130 倍；reviewer 明确批准继续使用单库 SQLite/FTS5，不引入 Tantivy 或自研 LSM。
+- 2026-08-09：round 3 进一步证明 `npm install` 对未发布 optional dependency 的静默跳过不能推广到 `npm ci`：缺失 lock entry 时 pinned npm 12.0.2 返回 EUSAGE。因此源码 `package.json`/lockfile 不再声明 Engine optional dependencies；verify job 只在隔离 staging 的发布根 manifest 中确定性注入六个 exact 依赖，保存根 tarball，平台包先发布确认后再发布同一根 artifact。
+- 2026-08-09：按 round 3 补齐 Dashboard 两次 clean-build/root integrity 等价、VACUUM 临时库实际位于 active DB 同目录、普通 SQLite temp 的 state-dir 路由、Windows current-user DACL、逐 field `ftsDocs`、capability 高频豁免、retained IDF 分母和四档 prepared statement。以上修订不改变已通过复审的索引、事务、容量或 Tool path 架构。
+- 2026-08-09：round 3 后对 staged-root 发布链路做独立只读核查，确认源码无平台依赖、release staging 注入六个 optional dependencies 的方向消除了 `npm ci` lock 循环；同时发现 npm Trusted Publisher 要求 package 先存在，因此首个稳定 Engine 版本前需要 owner 单独授权一次交互式 2FA bootstrap：六个平台包仅发布无 binary 的 `0.0.0-bootstrap.0` 到 `bootstrap` dist-tag，再逐包配置 Trusted Publisher 和禁 token 发布。该不可逆外部动作尚未执行。
+- 2026-08-09：发布 DAG 收紧为 artifact-first：verify job 生成并上传 attempt-scoped 的七个 `.tgz` 与 `release-manifest.json`，publish job 校验同一批 artifact 后直接 `npm publish <tgz> --provenance`，不得从 checkout 重新 prepare/build/sign/pack；provenance 必须验证 tarball digest、workflow、tag ref 与 source commit。ITEM-3 实现时同步更新 release verifier、workflow、自动化测试和 `AGENTS.md`。
+- 2026-08-09：三轮同目的 design review 已完成，不再追加第四轮；round-3 后的发布契约修订经独立只读核查与文档一致性检查，当前 owner-approval 候选 Epic hash 为 `4663984131b71520ed9ece4f21bb8a83d6ad184e92b610186475055d55b08bc5`。该 hash 尚未获得 owner 批准，也不表示一次性 npm bootstrap 已获授权。
+- 2026-08-09：owner 要求“补齐 Fact Model v1，再批准 Epic”，使上一候选 hash `4663984131b71520ed9ece4f21bb8a83d6ad184e92b610186475055d55b08bc5` 失效；这是新增的事实层 contract review 目的，不沿用已完成的索引/查询 review 轮次。
+- 2026-08-09：Fact Model v1 候选把 Provider Adapter 与 Insights Engine 的 seam 固定为 `SessionFactsDeltaV1`，新增 Session/Turn/Evidence Event/Turn-Evidence/Capability/Use/Use-Evidence 事实关系、domain-separated stable key、source order、多证据关联、独立 Projection version/watermark 和有界 change log。只有 fact/provider/privacy 变化重读 raw session；搜索、rollup 与未来 retry 分析从 Fact 零 raw 读取重建。
+- 2026-08-09：内部 contract pass 将 Fact 与判断彻底分开：普通文本不能直接成为测试通过、部署成功、用户 correction/confirmation 或 solved；Provider Adapter 只产出封闭 Evidence Event，Engine 计算 Turn-local revision，未来判断以版本化 Projection 表达。`SessionFactsDeltaV1` 增加 append/replace-session ownership、typed retraction、RFC 8785 canonical bytes、Node/Rust golden vectors、Source Record、privacy policy version 和 bounded projection invalidation log。
+- 2026-08-09：Fact 容量探针在 1.37 GiB 分层样本的 4,837 Turn 上实测 103.2 MiB、约 22.4 KiB/Turn；25 万 Turn 事实层外推 5.8–7.0 GiB，证明此前 1.5 GiB 总预算不可达。Epic 已禁止 Turn lifecycle 向全部 Use 扇出，要求 Source Record 去重、SQLite integer foreign key + 单份 stable BLOB unique index，并把 25,000/250,000 Turn 稳态门槛改为 1/8 GiB；事实层超过 6 GiB 时先评估 Engine 内部 packed representation，不误用 Tantivy 解决非检索存储。
+- 2026-08-09：Fact Model v1 contract-review round 1 候选冻结为 `4657a35bda89c8c07814a07a8cc8de11d7d1c79fab33b45f7200e002c1fa1df8`；review scope 只攻击事实身份/ownership、多证据、Projection 追平、隐私、容量与未来分析扩展，不重审已完成三轮的 BM25/FTS/发布设计。
+- 2026-08-09：按仓库 reviewer 编排优先级，通过 Paseo agent-scoped advisor 创建全新 reviewer `acb2fdcd-f01f-4376-a3af-4c45dcb3248d`，provider/model 为 Claude Opus 5、plan mode；当前根 agent 为 Codex，采用异构模型获得独立视角。reviewer 只读且禁止 subagent/文件修改。
+- 2026-08-09：Fact Model v1 contract-review round 1 对冻结 hash `4657a35bda89c8c07814a07a8cc8de11d7d1c79fab33b45f7200e002c1fa1df8` 完成前后 hash 一致的只读审查，结论为建议先改，报告 4 blocking、7 important、4 suggestion。blocking 分别是 Codex `task_started` 会按 source order 系统性归到前一 Turn、Tool invocation/result 缺 provider 权威记录导致不同 correlation namespace 混配、inferred Skill 依赖 session 外可变 catalog、resume/fork 副本可击穿 3-session 样本门槛。
+- 2026-08-09：按 round 1 补齐 provider 权威表与 lifecycle 状态机：Codex Tool 只取 `response_item function_call|custom_tool_call(_output)`，`event_msg:*_begin/*_end` 与 `agent_message` 只作 coverage/corroboration；`task_started` 暂存并只关联后继权威 user Turn，terminal 仅按明确 `turn_id` 或唯一 started->user->terminal 状态机配对，fixture 断言后继 started 不改写前一 hard-sealed revision。
+- 2026-08-09：Skill inferred-load catalog 冻结为同一 session 内 `skill-catalog-entry` 事实；Codex 使用 `developer:<skills_instructions>`，Claude 无 session 内 catalog snapshot 时 v1 不推断，禁止读取实时文件系统 catalog 后回填历史。catalog path 与完整结构化 read 只通过同一 privacyContext 的 keyed path fingerprint 等值关联，绝对路径和 Skill 正文不入 Fact。
+- 2026-08-09：Fact Model round-1 候选增加保守 resume/fork 去重事实：immutable lineage/shared record identity 优先，否则只用两个 hard-sealed Turn 的 exact canonical prefix；证据不足时 `duplicateGroupKey=null`，raw match 仍返回但不帮助通过 `>=3` independent-group 门槛。该两-Turn-only 规则随后由 round 2 的真实 Claude resume 证据替换；subagent `originScope`、provider rollback visibility、lowercase-hex binary contract、origin-secret epoch 和跨 Turn link 的非传递 revision/invalidation 规则一并冻结。
+- 2026-08-09：扩展边界补入 keyed input fingerprint、Tool `outputBytes` 与 provider 可无歧义给出的 `durationMs`，因此同输入 retry、重复调用/失败序列和 Tool 输出规模/耗时可只新增 Projection；Codex 权威记录中 duration 通常缺失，耗时分析必须展示低覆盖，不能把 unknown 当 0。需要参数/输出内容、完整 assistant 中间消息或 subagent 内部过程仍必须升级 Fact schema 并重解析。
+- 2026-08-09：容量 fallback 从“超过 6 GiB 再评估”收紧为可执行 contract：normalized-row Fact 越过 6 GiB 或全部稳态越过 8 GiB 时，ITEM-4 必须实现同一 SQLite/WAL 内的无压缩 `packed-facts-v1`，保持同一 logical Fact/stable key/revision/Projection；packed 仍不达容量或延迟门槛时 Epic 保持 blocked，不能丢 Fact、读取 raw fallback 或放宽预算。
+- 2026-08-09：Fact Model v1 contract-review round 2 候选冻结为 `30aa4586e064b4ebdf515df0602949d6c90e471b2f32a64c68552300b190bf7b`；复审必须逐项核对 round-1 的 4 blocking/7 important，并重点攻击 conservative dedupe、catalog/read path fingerprint、cross-Turn revision、subagent/rollback 与无压缩 packed fallback，不重审已完成的 FTS/BM25/原生发布目的。
+- 2026-08-09：Fact Model v1 contract-review round 2 对冻结 hash `30aa4586e064b4ebdf515df0602949d6c90e471b2f32a64c68552300b190bf7b` 完成前后 hash 一致的只读复审；round-1 findings 全部 resolved，新增 3 blocking、8 important、6 suggestion。blocking 是 Codex rollback 实际只有相对 `num_turns`、Claude resume 会重写 id/timestamp 导致旧 fingerprint 失效、Codex file-level subagent rollout 未在 Turn 解析前排除。
+- 2026-08-09：按 round 2 用真实 provider 形状修订 Fact Model：rollback 以 Event 前 N 个 main Turn 相对解析并建立 rollback link；Claude exact-content fingerprint 不含 timestamp，增加 one-turn weak/two-turn strong group 与原子升级；Codex `thread_source=subagent`/`source.subagent.thread_spawn` 整文件只保留 Session scope，main lineage 固定一跳 `forked_from_id ?? id`，Claude sidechain 与 agent-file skip 独立诊断。
+- 2026-08-09：同时收紧增量与隐私契约：checkpoint clean-rebuild 只比较 source-position/parser-state 语义；packed source ordinal 单调且 tombstone 不复用，物理压实只允许 session replace/rebuild；inferred Skill catalog 必须先于 read；普通 reindex 保留 origin secret/epoch，只有显式 `--regenerate-secret` 或 reset 才轮换并重建 keyed Fact/Projection。
+- 2026-08-09：Fact Model v1 contract-review round 3 最终候选冻结为 `32ea9c48b4e227714d772d4e565a9fda7ac01392eaa6e7d51dd8a4350f6ea8b9`；本轮是同一 review purpose 的第三轮上限，必须逐项核对 round-2 的 3 blocking/8 important/6 suggestion，并给出是否可进入 owner approval 的明确结论。
+- 2026-08-09：Fact Model v1 contract-review round 3 对冻结 hash `32ea9c48b4e227714d772d4e565a9fda7ac01392eaa6e7d51dd8a4350f6ea8b9` 完成前后 hash 一致的只读终审；round-2 的 17 项中 16 resolved、1 partial，新增 2 blocking、5 important、4 suggestion。blocking 是 rollback 目标由 Adapter 解析时增量路径看不到已提交历史，以及 one/two-turn fingerprint 更换 group key 会把同源副本拆组。
+- 2026-08-09：按终审结论把 rollback 相对目标解析下沉到 Engine：Adapter 只产 `occurredTurn=null` 的 status Event，Engine 从 committed Fact 重放最近 active hard-sealed Turn；N 固定 1..512，open Turn 排除、aborted Turn 可选，目标不足整体 unresolved，增量尾部与 clean rebuild 使用同一路径。
+- 2026-08-09：去重 group key 固定为 first-Turn signature，第二 Turn 只提供 corroboration、永不换组；新增不读挂钟的 `observedEofClosed` provisional 证据，解决 Claude 严格 hard-sealed 口径下 289/475（61%）主 session 无 group 的基线缺口，后续 append 可原子重算并失效 Projection。
+- 2026-08-09：终审 important/suggestion 同批闭合：main-scope 明确定义为 Session scope；open Turn 必须 additive upsert；packed source ordinal 不进入 logical digest；follow-up 明确可修改 hard-sealed revision；Session 保存低敏感 provider originator version；Claude agent-file 继续只做 skip coverage，因为缺可靠 canonical identity，Dashboard 标注跨 provider 分母差异。
+- 2026-08-09：终轮 finding 修订后运行 15 项定向契约断言、单一门槛断言、YAML/Markdown parse 与 whitespace check，全部通过；进入 owner activation gate 的候选 Epic hash 为 `9cbbe630a0c672caa67de2fda1335fae61cfbd42c6297d62c67bed042b9c568e`。按 reviewer 终局建议和三轮上限不再发起第 4 轮；owner 批准时需逐项核对上述三组定向修订。
+- 2026-08-09：owner 确认 Epic，并选择 `item_progression: continuous`、`milestone_commit: authorized`、`remote_publish: final`；永久 Epic 已激活，批准 revision 为 `46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582`，当前子项进入 ITEM-1。一次性 npm 平台包 bootstrap 仍是独立不可逆授权门槛，本次确认不包含该授权。
+- 2026-08-10：ITEM-1 实现有界 JSONL record reader、Codex/Claude Provider Adapter、`SessionFactsDeltaV1` schema 与 Node/Rust stable-key/canonical-JSON golden seam；既有同步 exporter 保持不变，npm pack allowlist 从 18 项扩为 22 项。
+- 2026-08-10：ITEM-1 staged-diff review round 1 使用同一 Paseo reviewer `8e56f6a1-4b56-4cef-ab00-c5126c31e934`，冻结 hash `4412f86f616a00101066e56d9935d3095fbfaa2d5e75d4c43c99cdbf7886e36f`；报告 2 blocking、9 important。修复 dedupe/Session Fact 增量恢复、UUID/checkpoint 上界、metadata/tail 双读、UTF-16 key 排序、golden 覆盖、内存上界、EOF 闭合、agent-file 防御、JCS input fingerprint 与缺失 fixture。
+- 2026-08-10：ITEM-1 review round 2 冻结 hash `883bb6e63174899ebb7a88e688a023ad3864dce9140565bd12e8d9323dbe63d0`；round-1 findings 全部 resolved，新报告 1 blocking、2 important。按 findings 对所有 Provider 字符串做确定性 U+FFFD 规范化并补 Node/Rust surrogate vectors；超长 Skill 名降级为有界 diagnostic；跨 checkpoint 的迟到 terminal 恢复 pending association，并用 session-scoped lifecycle Event + target Turn link 保持 clean/incremental 等价。
+- 2026-08-10：ITEM-1 round-2 修订验证通过：证据/golden 28/28、CLI 133/133、release 8/8、Rust 1/1、npm dry-run pack 精确 22 文件、双侧 diff check；进入同一 reviewer 的第三轮终审。

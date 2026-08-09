@@ -1,0 +1,13 @@
+[package]
+name = "threadshare-insights-engine"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+hex = "0.4.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = "0.10.9"
+unicode-normalization = "0.1.24"
