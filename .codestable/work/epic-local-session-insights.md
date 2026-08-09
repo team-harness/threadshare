@@ -2,8 +2,8 @@
 epic: ../epics/local-session-insights.md
 phase: executing
 approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
-current_item: ITEM-1
-next_action: finish ITEM-1 Provider Session Evidence review and milestone commit
+current_item: ITEM-4
+next_action: execute ITEM-4 transactional normalized Fact repository, recovery, and incremental indexing
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -12,9 +12,9 @@ remote_publish: final
 
 ## 子项进度
 
-- [ ] ITEM-1：Provider Session Evidence
-- [ ] ITEM-2：Turn Analysis 与单 Session 报告
-- [ ] ITEM-3：Rust Insights Engine 与原生交付
+- [x] ITEM-1：Provider Session Evidence
+- [x] ITEM-2：Turn Analysis 与单 Session 报告
+- [x] ITEM-3：Rust Insights Engine 与原生交付
 - [ ] ITEM-4：事务化可恢复增量索引
 - [ ] ITEM-5：历史问题检索与证据路径
 - [ ] ITEM-6：本地 Insights Dashboard
@@ -79,3 +79,13 @@ remote_publish: final
 - 2026-08-10：ITEM-1 staged-diff review round 1 使用同一 Paseo reviewer `8e56f6a1-4b56-4cef-ab00-c5126c31e934`，冻结 hash `4412f86f616a00101066e56d9935d3095fbfaa2d5e75d4c43c99cdbf7886e36f`；报告 2 blocking、9 important。修复 dedupe/Session Fact 增量恢复、UUID/checkpoint 上界、metadata/tail 双读、UTF-16 key 排序、golden 覆盖、内存上界、EOF 闭合、agent-file 防御、JCS input fingerprint 与缺失 fixture。
 - 2026-08-10：ITEM-1 review round 2 冻结 hash `883bb6e63174899ebb7a88e688a023ad3864dce9140565bd12e8d9323dbe63d0`；round-1 findings 全部 resolved，新报告 1 blocking、2 important。按 findings 对所有 Provider 字符串做确定性 U+FFFD 规范化并补 Node/Rust surrogate vectors；超长 Skill 名降级为有界 diagnostic；跨 checkpoint 的迟到 terminal 恢复 pending association，并用 session-scoped lifecycle Event + target Turn link 保持 clean/incremental 等价。
 - 2026-08-10：ITEM-1 round-2 修订验证通过：证据/golden 28/28、CLI 133/133、release 8/8、Rust 1/1、npm dry-run pack 精确 22 文件、双侧 diff check；进入同一 reviewer 的第三轮终审。
+- 2026-08-10：ITEM-1 review round 3 对冻结 hash `4ae233b2002b9a11d779ffdecb939177944fed813cc8b1cbe1a3d8c69b717d91` 完成前后校验一致；NB1/NI1/NI2 全部 resolved，无新增 blocking/important，结论“可合入”。精确已审 diff 以 milestone commit `783ad4d` 合入，未 push；work cursor 连续进入 ITEM-2。
+- 2026-08-10：ITEM-2 实现 `threadshare analyze <codex|claude> <session>`、`threadshare-session-analysis@v1` text/JSON 报告与 in-memory reference Engine；报告区分 hard-sealed/quiescent/open、Tool/Skill 强弱证据、同输入 retry、subagent/unknown exclusion，并默认隐藏 provider rollback 的 Turn、Use 与定位指针。
+- 2026-08-10：ITEM-2 staged-diff review round 1 使用同一 Paseo reviewer `60bdae7e-a28a-432d-9373-1f4842d4c057`，冻结 hash `671860c66ca2ea62252a5abe7e74e4e188c4e2bf9343ec7bfee3d8803f5b13cf`；报告 1 blocking、3 important。按 findings 修复 rollback 事件集合、真实 Codex `exit_code` retry 分类、text scope/diagnostics、Insights CLI diagnostic 登记，并把默认 text 渲染的 use lookup 从 `O(U^2)` 改为 Map。
+- 2026-08-10：ITEM-2 review round 2 冻结 hash `d52d7d94c61b02e0c4aae7b05fb8fc45a599bc141f6718552da7096f789a83cd`；round-1 findings 全部 resolved，仅余 1 important。按 finding 保留事实层 `followUpObserved`，并在 rollback 隐藏 next-user-boundary pointer 时显式输出 `closure.evidenceHiddenByRollback=true`，不恢复被隐藏内容。
+- 2026-08-10：ITEM-2 终审冻结 hash `e976cb56ef9e485aebd492a6331aa8133c51a5de24ae7567dafe38acf7af3a9f`；round-2 finding resolved，无新增 blocking/important，结论“可合入”。终审同时验证 Engine 独占 `duplicateGroupKey` 派生权、32-byte fingerprint 使用 binary bytes 而非 64-char UTF-8、Node/Rust duplicate-group golden vector，以及 checkpoint Capability 的同 provider 外键约束。
+- 2026-08-10：ITEM-2 最终验证通过：turn-analysis 7/7、reference Engine 11/11、evidence/analysis 34/34、CLI 152/152、release 8/8、Rust golden 1/1、Skill validation、24-file npm dry-run pack 与 diff check；精确已审 diff 以 milestone commit `1f8f2e3` 合入，未 push，work cursor 连续进入 ITEM-3。
+- 2026-08-10：ITEM-3 实现 Rust Insights Engine substrate、4 MiB framed protocol、session CAS/事务提交、持久化 SQLite/WAL、Node runtime/client、六平台 artifact-first 构建发布链路、SBOM/provenance 校验与确定性 benchmark；npm 平台包一次性 bootstrap 仍未获授权，也未执行任何 registry 写操作。
+- 2026-08-10：ITEM-3 staged-diff review 使用 Paseo reviewer `4c386900-c6ff-4da9-acf9-4121a6647c74`；首轮报告 2 blocking、5 important，修复首次平台包发布判定、CI clean-tree 零依赖入口、registry race/tarball 回补、DB/sidecar 0600 与 secure-delete、batch 内存上界、benchmark 证据口径和真实 DSSE provenance。round 2 无 blocking，新增的 canonical-domain panic 泄漏与 truncate 回归锁由 follow-up reviewer `4b9ee730-4892-4776-bce0-99261a1c2d09` 对冻结 hash `de88e4324cd4058cdf8a9a9a3ec9c90f4fc7d4b78697e1c0c9d8ea617c64d858` 复核为全部 resolved，无新 blocking/important，结论“可合入”。
+- 2026-08-10：ITEM-3 最终验证通过：Rust/Engine 41/41、CLI 152/152、release 37/37、Skill validation、Cloudflare build、29-file pinned npm 12.0.2 dry-run pack 与 diff check；pack integrity 为 `sha512-qRJiJxRb7DOTMmXnS05uJH+gJJiRdgnfruphSTxLLtcZlUo6GNWyEvLWFd9FkkKeKMOdklBVnj+spsA8QsjOPw==`。精确已审 diff 以 milestone commit `968e297` 合入，未 push。
+- 2026-08-10：在 Paseo 托管的 clean worktree 对 commit `968e297b27c906cc3a7cc74dcda885db09aa0b04` 串行运行三次 25,000 Turn benchmark，三次 `sourceWorktreeDirty=false`；Rust commit wall 中位数 17.901 秒、1,396.6 Turn/s、0.708 canonical MiB/s、warm open 9.397 ms、sidecar RSS 11.453 MiB、point lookup P95 0.387 ms。证据已写入 `docs/insights-engine-benchmark.md`，work cursor 连续进入 ITEM-4。
