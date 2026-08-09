@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import {
   EXPECTED_PACKAGE_FILES,
+  PLATFORM_PACKAGE_NAMES,
   assertPreparedIntegrity,
   compareStableVersions,
   decidePublish,
@@ -18,8 +22,24 @@ import {
   writeOutputs,
 } from "../scripts/verify-release.mjs";
 import { validateSkillDirectory } from "../scripts/validate-skill.mjs";
+import { fetchExistingInsightsEngine } from "../scripts/fetch-existing-insights-engine.mjs";
+import {
+  createBuildManifest,
+  createPlatformManifest,
+} from "../scripts/prepare-insights-release.mjs";
+import {
+  publishReleaseArtifacts,
+  validateNpmProvenance,
+  verifyRegistryAttestations,
+} from "../scripts/publish-insights-release.mjs";
+import { canonicalJson } from "../src/canonical-json.mjs";
+import {
+  INSIGHTS_ENGINE_TARGETS,
+  insightsEnginePackageName,
+} from "../src/insights-engine-targets.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const execFileAsync = promisify(execFile);
 const expectedPackageFiles = [
   "LICENSE",
   "README.md",
@@ -31,8 +51,13 @@ const expectedPackageFiles = [
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
   "src/agent-transcript.mjs",
+  "src/canonical-json.mjs",
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
+  "src/insights-engine-client.mjs",
+  "src/insights-engine-protocol.mjs",
+  "src/insights-engine-runtime.mjs",
+  "src/insights-engine-targets.mjs",
   "src/insights-reference-engine.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
@@ -103,7 +128,7 @@ test("validates stable release metadata and numeric semver ordering", () => {
   );
 });
 
-test("locks npm pack to the exact twenty-four public files", () => {
+test("locks npm pack to the exact public root files", () => {
   assert.deepEqual(EXPECTED_PACKAGE_FILES, expectedPackageFiles);
   const packed = {
     name: "@team-harness/threadshare",
@@ -143,6 +168,24 @@ test("locks npm pack to the exact twenty-four public files", () => {
         { name: "@team-harness/threadshare", version: "0.4.2" },
       ),
     /package files/,
+  );
+});
+
+test("platform packages use a separate four-file allowlist", () => {
+  const packageName = "@team-harness/threadshare-linux-x64";
+  const files = [
+    "LICENSE",
+    "bin/threadshare-insights-engine",
+    "build-manifest.json",
+    "package.json",
+  ];
+  assert.equal(PLATFORM_PACKAGE_NAMES.length, 6);
+  assert.deepEqual(
+    validatePackOutput(
+      [{ name: packageName, version: "0.4.2", integrity, entryCount: 4, files: files.map((path) => ({ path })) }],
+      { name: packageName, version: "0.4.2", kind: "platform", target: "linux-x64" },
+    ),
+    { integrity, files },
   );
 });
 
@@ -202,7 +245,73 @@ test("publishes only above the highest stable version and skips identical existi
   );
 });
 
+test("platform reruns trust immutable registry provenance instead of new signed bytes", () => {
+  const packageName = "@team-harness/threadshare-linux-x64";
+  const registryIntegrity = "sha512-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+  assert.deepEqual(
+    decidePublish({
+      packument: {
+        name: packageName,
+        "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+        versions: { "0.0.0-bootstrap.0": {} },
+      },
+      packageName,
+      version: "0.4.2",
+      integrity,
+      kind: "platform",
+    }),
+    { latest: null, shouldPublish: true },
+  );
+  const platformPackument = {
+    name: packageName,
+    "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+    versions: {
+      "0.0.0-bootstrap.0": {},
+      "0.4.2": {
+        dist: {
+          integrity: registryIntegrity,
+          attestations: {
+            url: "https://registry.npmjs.org/-/npm/v1/attestations/platform",
+            provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+          },
+        },
+      },
+    },
+  };
+  assert.deepEqual(
+    decidePublish({
+      packument: platformPackument,
+      packageName,
+      version: "0.4.2",
+      integrity,
+      kind: "platform",
+    }),
+    { latest: null, registryIntegrity, shouldPublish: false },
+  );
+  assert.doesNotThrow(() => assertPreparedIntegrity(integrity, registryIntegrity, { kind: "platform" }));
+  assert.deepEqual(
+    validatePublishedRelease({
+      packument: platformPackument,
+      packageName,
+      version: "0.4.2",
+      integrity,
+      kind: "platform",
+      sourceSha: "a".repeat(64),
+      provenance: {
+        workflow: "publish-npm.yml",
+        gitCommit: "a".repeat(64),
+        subjectIntegrity: registryIntegrity,
+      },
+    }),
+    { latest: null, registryIntegrity },
+  );
+});
+
 test("validates verifier arguments, GitHub outputs, and prepared integrity", async () => {
+  assert.deepEqual(parseArguments(["source", "--tag", "0.4.2"]), {
+    command: "source",
+    options: { tag: "0.4.2" },
+  });
   assert.deepEqual(
     parseArguments(["prepare", "--tag", "0.4.2", "--github-output", "/tmp/output"]),
     {
@@ -300,6 +409,62 @@ test("requires SLSA provenance and never treats registry signatures as attestati
   );
 });
 
+test("validates the npm DSSE subject, workflow, tag, and resolved git commit", () => {
+  const realIntegrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+  const sourceSha = "a".repeat(64);
+  const statement = {
+    _type: "https://in-toto.io/Statement/v1",
+    subject: [{ digest: { sha512: Buffer.alloc(64, 7).toString("hex") } }],
+    predicateType: "https://slsa.dev/provenance/v1",
+    predicate: {
+      buildDefinition: {
+        buildType: "https://github.com/npm/cli/gha/v2",
+        externalParameters: {
+          workflow: {
+            path: ".github/workflows/publish-npm.yml",
+            ref: "refs/tags/0.4.2",
+          },
+        },
+        resolvedDependencies: [{ digest: { gitCommit: sourceSha } }],
+      },
+    },
+  };
+  const document = {
+    attestations: [{ dsseEnvelope: { payload: Buffer.from(JSON.stringify(statement)).toString("base64url") } }],
+  };
+  assert.deepEqual(
+    validateNpmProvenance(document, { integrity: realIntegrity, sourceSha, tag: "0.4.2" }),
+    {
+      gitCommit: sourceSha,
+      subjectIntegrity: realIntegrity,
+      workflow: "publish-npm.yml",
+    },
+  );
+  const wrongCommit = structuredClone(statement);
+  wrongCommit.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit = "b".repeat(64);
+  const tampered = {
+    dsseEnvelope: { payload: Buffer.from(JSON.stringify(wrongCommit)).toString("base64url") },
+  };
+  assert.throws(
+    () => validateNpmProvenance(tampered, { integrity: realIntegrity, sourceSha, tag: "0.4.2" }),
+    /does not match/,
+  );
+  const spoofedWorkflow = structuredClone(statement);
+  spoofedWorkflow.predicate.buildDefinition.externalParameters.workflow = {
+    path: ".github/workflows/other.yml",
+    ref: "refs/tags/other",
+  };
+  spoofedWorkflow.untrustedNote =
+    ".github/workflows/publish-npm.yml refs/tags/0.4.2";
+  assert.throws(
+    () => validateNpmProvenance(
+      { dsseEnvelope: { payload: Buffer.from(JSON.stringify(spoofedWorkflow)).toString("base64url") } },
+      { integrity: realIntegrity, sourceSha, tag: "0.4.2" },
+    ),
+    /does not match/,
+  );
+});
+
 test("registry probing accepts only a successful JSON packument", async () => {
   const valid = packument();
   let requestOptions;
@@ -335,6 +500,339 @@ test("registry probing accepts only a successful JSON packument", async () => {
       /registry packument/,
     );
   }
+});
+
+test("platform registry probing accepts the bootstrap and not-yet-created states", async () => {
+  const packageName = "@team-harness/threadshare-linux-arm64";
+  const missing = await fetchPackument({
+    packageName,
+    allowMissing: true,
+    maxAttempts: 1,
+    fetchImpl: async () => new Response("missing", { status: 404 }),
+  });
+  assert.deepEqual(missing, { name: packageName, "dist-tags": {}, versions: {} });
+  const bootstrap = {
+    name: packageName,
+    "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+    versions: { "0.0.0-bootstrap.0": {} },
+  };
+  assert.deepEqual(
+    await fetchPackument({
+      packageName,
+      allowMissing: true,
+      maxAttempts: 1,
+      fetchImpl: async () => Response.json(bootstrap),
+    }),
+    bootstrap,
+  );
+});
+
+test("missing platform probe records the build path without creating package state", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-engine-probe-"));
+  const githubOutput = path.join(fixture, "github-output");
+  try {
+    await writeFile(githubOutput, "");
+    const result = await fetchExistingInsightsEngine({
+      outputDirectory: path.join(fixture, "engine"),
+      sourceSha: "a".repeat(40),
+      targetName: "linux-x64",
+      version: "0.6.1",
+      githubOutput,
+      fetchImpl: async () => new Response("missing", { status: 404 }),
+    });
+    assert.deepEqual(result, {
+      exists: false,
+      packageName: "@team-harness/threadshare-linux-x64",
+      target: "linux-x64",
+      version: "0.6.1",
+    });
+    assert.equal(await readFile(githubOutput, "utf8"), "exists=false\n");
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("platform build probe retries four transient registry failures", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-engine-retry-"));
+  let attempts = 0;
+  try {
+    const result = await fetchExistingInsightsEngine({
+      outputDirectory: path.join(fixture, "engine"),
+      sourceSha: "a".repeat(40),
+      targetName: "linux-x64",
+      version: "0.6.1",
+      fetchImpl: async () => {
+        attempts += 1;
+        return attempts < 4
+          ? new Response("unavailable", { status: 503 })
+          : new Response("missing", { status: 404 });
+      },
+      sleep: async () => {},
+    });
+    assert.equal(result.exists, false);
+    assert.equal(attempts, 4);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("publish rechecks a platform tarball when build saw 404 and publish sees 200", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-engine-publish-race-"));
+  const artifactDirectory = path.join(fixture, "artifacts");
+  const version = "0.6.1";
+  const sourceSha = "a".repeat(40);
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const sha512Integrity = (value) =>
+    `sha512-${createHash("sha512").update(value).digest("base64")}`;
+  const packages = [];
+  let publishCalls = 0;
+  try {
+    await mkdir(artifactDirectory, { recursive: true });
+    for (const target of INSIGHTS_ENGINE_TARGETS) {
+      const packageParent = path.join(fixture, `package-${target.target}`);
+      const packageDirectory = path.join(packageParent, "package");
+      const binaryName = target.platform === "win32"
+        ? "threadshare-insights-engine.exe"
+        : "threadshare-insights-engine";
+      const binaryBytes = Buffer.from(`fixture binary for ${target.target}\n`);
+      const buildManifestBytes = Buffer.from(canonicalJson(createBuildManifest({
+        target,
+        version,
+        sourceSha,
+        binaryBytes,
+        sqliteVersion: "3.53.2",
+      })));
+      await mkdir(path.join(packageDirectory, "bin"), { recursive: true });
+      await Promise.all([
+        writeFile(path.join(packageDirectory, "LICENSE"), "fixture license\n"),
+        writeFile(path.join(packageDirectory, "bin", binaryName), binaryBytes),
+        writeFile(path.join(packageDirectory, "build-manifest.json"), buildManifestBytes),
+        writeFile(
+          path.join(packageDirectory, "package.json"),
+          canonicalJson(createPlatformManifest(target, version)),
+        ),
+      ]);
+      const tarball = `${target.target}.tgz`;
+      await execFileAsync(
+        "tar",
+        ["-czf", path.join(artifactDirectory, tarball), "-C", packageParent, "package"],
+        { env: { ...process.env, COPYFILE_DISABLE: "1" } },
+      );
+      const tarballBytes = await readFile(path.join(artifactDirectory, tarball));
+      const sbom = `${target.target}.spdx.json`;
+      const sbomBytes = Buffer.from(canonicalJson({
+        documentNamespace: `https://github.com/team-harness/threadshare/sbom/${sourceSha}/${target.target}`,
+        spdxVersion: "SPDX-2.3",
+      }));
+      await writeFile(path.join(artifactDirectory, sbom), sbomBytes);
+      packages.push({
+        buildManifestDigest: sha256(buildManifestBytes),
+        integrity: sha512Integrity(tarballBytes),
+        kind: "platform",
+        packageName: insightsEnginePackageName(target.target),
+        rawSha256: sha256(tarballBytes),
+        sbom,
+        sbomSha256: sha256(sbomBytes),
+        sourceSha,
+        tarball,
+        target: target.target,
+        version,
+      });
+    }
+
+    const rootParent = path.join(fixture, "package-root");
+    const rootPackageDirectory = path.join(rootParent, "package");
+    const optionalDependencies = Object.fromEntries(
+      INSIGHTS_ENGINE_TARGETS
+        .map((target) => insightsEnginePackageName(target.target))
+        .sort()
+        .map((packageName) => [packageName, version]),
+    );
+    await mkdir(rootPackageDirectory, { recursive: true });
+    await writeFile(path.join(rootPackageDirectory, "package.json"), canonicalJson({
+      name: "@team-harness/threadshare",
+      optionalDependencies,
+      version,
+    }));
+    const rootTarball = "root.tgz";
+    await execFileAsync(
+      "tar",
+      ["-czf", path.join(artifactDirectory, rootTarball), "-C", rootParent, "package"],
+      { env: { ...process.env, COPYFILE_DISABLE: "1" } },
+    );
+    const rootTarballBytes = await readFile(path.join(artifactDirectory, rootTarball));
+    packages.push({
+      buildManifestDigest: null,
+      integrity: sha512Integrity(rootTarballBytes),
+      kind: "root",
+      packageName: "@team-harness/threadshare",
+      rawSha256: sha256(rootTarballBytes),
+      sbom: null,
+      sbomSha256: null,
+      sourceSha,
+      tarball: rootTarball,
+      target: null,
+      version,
+    });
+    const manifest = {
+      format: "threadshare-insights-release@v1",
+      packages,
+      runAttempt: "1",
+      runId: "123",
+      sourceSha,
+      version,
+    };
+    await writeFile(
+      path.join(artifactDirectory, "release-manifest.json"),
+      canonicalJson(manifest),
+    );
+
+    const platformItem = packages.find((item) => item.target === "linux-x64");
+    const buildProbe = await fetchExistingInsightsEngine({
+      outputDirectory: path.join(fixture, "engine"),
+      sourceSha,
+      targetName: platformItem.target,
+      version,
+      fetchImpl: async () => new Response("missing", { status: 404 }),
+    });
+    assert.equal(buildProbe.exists, false);
+
+    const responses = new Map();
+    const tarballUrls = new Set();
+    for (const item of packages.filter((candidate) => candidate.kind === "platform")) {
+      const tarballBytes = await readFile(path.join(artifactDirectory, item.tarball));
+      const packageUrl = `https://registry.npmjs.org/${item.packageName.replace("/", "%2f")}`;
+      const tarballUrl = `https://registry.npmjs.org/${item.target}/${version}.tgz`;
+      const attestationsUrl = `https://registry.npmjs.org/-/npm/v1/attestations/${item.target}`;
+      const statement = {
+        _type: "https://in-toto.io/Statement/v1",
+        subject: [{ digest: { sha512: createHash("sha512").update(tarballBytes).digest("hex") } }],
+        predicateType: "https://slsa.dev/provenance/v1",
+        predicate: {
+          buildDefinition: {
+            buildType: "https://github.com/npm/cli/gha/v2",
+            externalParameters: {
+              workflow: {
+                path: ".github/workflows/publish-npm.yml",
+                ref: `refs/tags/${version}`,
+              },
+            },
+            resolvedDependencies: [{ digest: { gitCommit: sourceSha } }],
+          },
+        },
+      };
+      responses.set(packageUrl, () => Response.json({
+        name: item.packageName,
+        "dist-tags": { latest: version },
+        versions: {
+          [version]: {
+            dist: {
+              attestations: {
+                provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+                url: attestationsUrl,
+              },
+              integrity: item.integrity,
+              tarball: tarballUrl,
+            },
+          },
+        },
+      }));
+      responses.set(tarballUrl, () => new Response(tarballBytes));
+      responses.set(attestationsUrl, () => Response.json({
+        attestations: [{
+          dsseEnvelope: {
+            payload: Buffer.from(JSON.stringify(statement)).toString("base64url"),
+          },
+        }],
+      }));
+      tarballUrls.add(tarballUrl);
+    }
+    const fetchedTarballs = [];
+    const outcomes = await publishReleaseArtifacts({
+      artifactDirectory,
+      version,
+      sourceSha,
+      runId: "123",
+      runAttempt: "1",
+      kind: "platform",
+      fetchImpl: async (url) => {
+        const factory = responses.get(url);
+        assert.ok(factory, `unexpected registry request: ${url}`);
+        if (tarballUrls.has(url)) fetchedTarballs.push(url);
+        return factory();
+      },
+      exec: async () => {
+        publishCalls += 1;
+      },
+      auditExec: async () => ({ stdout: "{}", stderr: "" }),
+    });
+    assert.equal(publishCalls, 0);
+    assert.equal(outcomes.length, INSIGHTS_ENGINE_TARGETS.length);
+    assert.ok(outcomes.every((outcome) => outcome.latest === version && !outcome.published));
+    assert.deepEqual(fetchedTarballs.sort(), [...tarballUrls].sort());
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("release-time modules import from a clean tree without node_modules", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-release-clean-import-"));
+  const modulePaths = [
+    "src/canonical-json.mjs",
+    "src/insights-engine-targets.mjs",
+    "src/insights-engine-protocol.mjs",
+    "src/insights-engine-runtime.mjs",
+    "src/insights-engine-client.mjs",
+    "scripts/verify-release.mjs",
+    "scripts/prepare-insights-release.mjs",
+    "scripts/package-insights-release.mjs",
+    "scripts/publish-insights-release.mjs",
+    "scripts/fetch-existing-insights-engine.mjs",
+    "scripts/generate-insights-sbom.mjs",
+    "scripts/smoke-insights-engine.mjs",
+    "scripts/smoke-installed-insights.mjs",
+  ];
+  try {
+    for (const relative of modulePaths) {
+      const destination = path.join(fixture, relative);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await copyFile(path.join(root, relative), destination);
+    }
+    for (const relative of modulePaths) {
+      await import(`${pathToFileURL(path.join(fixture, relative)).href}?clean-import`);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("published platform verification delegates cryptography to npm audit signatures", async () => {
+  const calls = [];
+  let auditDirectory;
+  await verifyRegistryAttestations({
+    packageName: "@team-harness/threadshare-linux-x64",
+    version: "0.6.1",
+    npmCommand: "pinned-npm",
+    exec: async (command, arguments_, options) => {
+      calls.push({ command, arguments_, options });
+      auditDirectory = options.cwd;
+      return { stdout: "{}", stderr: "" };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].command, "pinned-npm");
+  assert.deepEqual(calls[0].arguments_.slice(0, 3), [
+    "install",
+    "@team-harness/threadshare-linux-x64@0.6.1",
+    "--ignore-scripts",
+  ]);
+  assert.deepEqual(calls[1].arguments_.slice(0, 4), [
+    "audit",
+    "signatures",
+    "--json",
+    "--include-attestations",
+  ]);
+  await assert.rejects(readFile(path.join(auditDirectory, "package.json")), /ENOENT/);
 });
 
 test("validates the bundled Skill and rejects metadata drift", async () => {
@@ -373,7 +871,7 @@ test("validates the bundled Skill and rejects metadata drift", async () => {
   }
 });
 
-test("workflow separates unprivileged verification from the tokenless OIDC publisher", async () => {
+test("workflow builds, signs, stages, and publishes one attempt-scoped release bundle", async () => {
   const source = await readFile(path.join(root, ".github", "workflows", "publish-npm.yml"), "utf8");
   const workflow = parseYaml(source);
   assert.deepEqual(workflow.on, { release: { types: ["published"] } });
@@ -382,16 +880,43 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
     "cancel-in-progress": false,
   });
   const verify = workflow.jobs.verify;
-  const publish = workflow.jobs.publish;
+  const build = workflow.jobs["build-engine"];
+  const packageRelease = workflow.jobs["package-release"];
+  const publishPlatforms = workflow.jobs["publish-platforms"];
+  const consumerSmoke = workflow.jobs["consumer-smoke"];
+  const publishRoot = workflow.jobs["publish-root"];
   assert.match(verify.if, /release\.draft == false/);
   assert.match(verify.if, /release\.prerelease == false/);
-  assert.match(publish.if, /needs\.verify\.result == 'success'/);
-  assert.equal(publish.needs, "verify");
-  assert.equal(verify["runs-on"], "ubuntu-latest");
-  assert.equal(publish["runs-on"], "ubuntu-latest");
+  assert.equal(build.needs, "verify");
+  assert.deepEqual(packageRelease.needs, ["verify", "build-engine"]);
+  assert.equal(publishPlatforms.needs, "package-release");
+  assert.equal(consumerSmoke.needs, "publish-platforms");
+  assert.equal(publishRoot.needs, "consumer-smoke");
+  assert.equal(verify["runs-on"], "ubuntu-24.04");
+  assert.equal(packageRelease["runs-on"], "ubuntu-24.04");
+  assert.equal(publishPlatforms["runs-on"], "ubuntu-24.04");
+  assert.equal(publishRoot["runs-on"], "ubuntu-24.04");
   assert.deepEqual(verify.permissions, { contents: "read" });
-  assert.deepEqual(publish.permissions, { contents: "read", "id-token": "write" });
-  assert.equal(verify.outputs.integrity, "${{ steps.release.outputs.integrity }}");
+  assert.deepEqual(build.permissions, {
+    attestations: "write",
+    contents: "read",
+    "id-token": "write",
+  });
+  assert.deepEqual(packageRelease.permissions, build.permissions);
+  assert.deepEqual(publishPlatforms.permissions, { contents: "read", "id-token": "write" });
+  assert.deepEqual(publishRoot.permissions, publishPlatforms.permissions);
+
+  const buildTargets = build.strategy.matrix.include.map((entry) => entry.target).sort();
+  const consumerTargets = consumerSmoke.strategy.matrix.include.map((entry) => entry.target).sort();
+  assert.deepEqual(buildTargets, [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "win32-arm64",
+    "win32-x64",
+  ]);
+  assert.deepEqual(consumerTargets, buildTargets);
 
   for (const invalidValue of [
     "${{ runner.temp }}",
@@ -407,11 +932,13 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
     );
   }
 
-  for (const job of [verify, publish]) {
+  for (const job of [verify, build, packageRelease, publishPlatforms, consumerSmoke, publishRoot]) {
     const checkout = job.steps.find((step) => step.name === "Checkout release commit");
     assert.equal(checkout.uses, "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803");
     assert.equal(checkout.with.ref, "${{ github.sha }}");
-    assert.equal(checkout.with["fetch-depth"], 0);
+    if (job === verify || job === build || job === packageRelease) {
+      assert.equal(checkout.with["fetch-depth"], 0);
+    }
     assert.equal(checkout.with["persist-credentials"], false);
     const setupNode = job.steps.find((step) => step.name === "Set up Node.js");
     assert.equal(setupNode.uses, "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38");
@@ -427,39 +954,174 @@ test("workflow separates unprivileged verification from the tokenless OIDC publi
       }
     }
     assert.equal(Object.hasOwn(job.env, "NPM_CONFIG_CACHE"), false);
-    const configureCache = job.steps.find((step) => step.name === "Configure npm cache");
-    assert.equal(
-      configureCache.run,
-      "set -euo pipefail\nprintf 'NPM_CONFIG_CACHE=%s\\n' \"$RUNNER_TEMP/threadshare-npm-cache\" >> \"$GITHUB_ENV\"\n",
-    );
+    if (job === verify) {
+      const configureCache = job.steps.find((step) => step.name === "Configure npm cache");
+      assert.equal(
+        configureCache.run,
+        "set -euo pipefail\nprintf 'NPM_CONFIG_CACHE=%s\\n' \"$RUNNER_TEMP/threadshare-npm-cache\" >> \"$GITHUB_ENV\"\n",
+      );
+    }
   }
 
   const verifyCommands = verify.steps.map((step) => step.run ?? "").join("\n");
-  const publishCommands = publish.steps.map((step) => step.run ?? "").join("\n");
+  const buildCommands = build.steps.map((step) => step.run ?? "").join("\n");
+  const packageCommands = packageRelease.steps.map((step) => step.run ?? "").join("\n");
+  const platformCommands = publishPlatforms.steps.map((step) => step.run ?? "").join("\n");
+  const consumerCommands = consumerSmoke.steps.map((step) => step.run ?? "").join("\n");
+  const rootCommands = publishRoot.steps.map((step) => step.run ?? "").join("\n");
   assert.match(verifyCommands, /npm ci/);
   assert.match(verifyCommands, /npm test/);
+  assert.match(verifyCommands, /npm run test:insights-engine/);
+  assert.match(verifyCommands, /rustup toolchain install 1\.94\.1 --profile minimal --component clippy/);
   assert.match(verifyCommands, /npm run build:cloudflare/);
   assert.match(verifyCommands, /npm run validate:skill/);
-  assert.doesNotMatch(publishCommands, /npm ci|npm test|npm run build:cloudflare/);
-  assert.match(publishCommands, /test "\$PUBLISH_INTEGRITY" = "\$VERIFIED_INTEGRITY"/);
+  assert.match(verifyCommands, /verify:release -- source/);
+  assert.match(buildCommands, /fetch-existing-insights-engine\.mjs/);
+  assert.match(buildCommands, /--github-output "\$GITHUB_OUTPUT"/);
+  assert.match(buildCommands, /engine-build-a/);
+  assert.match(buildCommands, /engine-build-b/);
+  assert.match(buildCommands, /MACOSX_DEPLOYMENT_TARGET="13\.0"/);
+  assert.match(buildCommands, /codesign --force/);
+  assert.match(buildCommands, /notarytool submit/);
+  assert.match(buildCommands, /signtool\.exe/);
+  assert.match(buildCommands, /generate-insights-sbom/);
+
+  const reuseStep = build.steps.find(
+    (step) => step.name === "Reuse matching published Engine when available",
+  );
+  assert.equal(reuseStep.id, "existing");
+  assert.ok(
+    build.steps.indexOf(reuseStep) <
+      build.steps.findIndex((step) => step.name === "Install Rust build target"),
+  );
+  assert.match(reuseStep.run, /--source-sha "\$RELEASE_SHA"/);
+  assert.match(reuseStep.run, /--target "\$\{\{ matrix\.target \}\}"/);
+  assert.match(reuseStep.run, /--version "\$RELEASE_TAG"/);
+  for (const stepName of [
+    "Install Rust build target",
+    "Install musl linker",
+    "Build unsigned Engine twice",
+    "Sign and notarize macOS Engine",
+    "Sign Windows Engine",
+    "Attest signed Engine and SBOM",
+  ]) {
+    const step = build.steps.find((candidate) => candidate.name === stepName);
+    assert.match(
+      step.if,
+      /steps\.existing\.outputs\.exists != 'true'/,
+      `${stepName} must run only for a missing platform artifact`,
+    );
+  }
+  const cleanupStep = build.steps.find(
+    (step) => step.name === "Remove temporary macOS signing keychain",
+  );
+  assert.match(cleanupStep.if, /always\(\)/);
+  assert.match(cleanupStep.if, /steps\.existing\.outputs\.exists != 'true'/);
+  for (const stepName of [
+    "Generate SPDX SBOM",
+    "Smoke selected Engine and record native identity",
+    "Upload selected Engine artifact",
+  ]) {
+    const step = build.steps.find((candidate) => candidate.name === stepName);
+    assert.equal(
+      Object.hasOwn(step, "if"),
+      false,
+      `${stepName} must run for both reused and newly built artifacts`,
+    );
+  }
+  const engineUpload = build.steps.find(
+    (step) => step.name === "Upload selected Engine artifact",
+  );
+  assert.equal(engineUpload.with.path, "engine");
+  assert.equal(
+    [...packageCommands.matchAll(/prepare-insights-release\.mjs/g)].length,
+    2,
+    "the staged root must be built independently twice",
+  );
+  assert.match(packageCommands, /release-staging-a\/root/);
+  assert.match(packageCommands, /release-staging-b\/root/);
+  assert.match(packageCommands, /root-pack-a/);
+  assert.match(packageCommands, /root-pack-b/);
+  assert.match(packageCommands, /cmp "\$RUNNER_TEMP\/root-pack-a/);
+  assert.match(packageCommands, /package-insights-release\.mjs pack/);
+  assert.match(packageCommands, /package-insights-release\.mjs verify/);
+  assert.match(platformCommands, /publish-insights-release\.mjs/);
+  assert.match(platformCommands, /--kind platform/);
+  assert.match(consumerCommands, /npm install --prefix/);
+  assert.match(consumerCommands, /smoke-installed-insights/);
+  assert.match(rootCommands, /publish-insights-release\.mjs/);
+  assert.match(rootCommands, /--kind root/);
+  assert.doesNotMatch(
+    `${platformCommands}\n${rootCommands}`,
+    /cargo build|codesign|signtool|prepare-insights-release|package-insights-release\.mjs pack/,
+  );
   assert.match(source, /git merge-base --is-ancestor/);
   assert.match(source, /refs\/tags\/\$\{RELEASE_TAG\}\^\{commit\}/);
   assert.match(source, /npm install --global npm@12\.0\.2/);
   assert.match(source, /test "\$\(node --version\)" = "v22\.22\.3"/);
-  assert.match(source, /npm run verify:release -- prepare/);
-  const publishStep = publish.steps.find(
-    (step) => step.name === "Publish package with npm Trusted Publishing",
+  assert.match(source, /release-bundle-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(source, /engine-\$\{\{ matrix\.target \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(source, /actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d/);
+  assert.match(source, /actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093/);
+  const pinnedActions = new Set([
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+  ]);
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps) {
+      if (step.uses) assert.ok(pinnedActions.has(step.uses), `unapproved action pin ${step.uses}`);
+    }
+  }
+  assert.doesNotMatch(source, /npm publish(?!-insights-release)/);
+  assert.doesNotMatch(source, /NPM_TOKEN|NODE_AUTH_TOKEN|_authToken/i);
+  const signingSecrets = [...source.matchAll(/\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/g)]
+    .map((match) => match[1]);
+  assert.deepEqual([...new Set(signingSecrets)].sort(), [
+    "APPLE_APP_PASSWORD",
+    "APPLE_CERTIFICATE_P12",
+    "APPLE_CERTIFICATE_PASSWORD",
+    "APPLE_ID",
+    "APPLE_SIGNING_IDENTITY",
+    "APPLE_TEAM_ID",
+    "WINDOWS_CERTIFICATE_PASSWORD",
+    "WINDOWS_CERTIFICATE_PFX",
+  ]);
+});
+
+test("Engine CI gates all six reproducible target builds on the contract suite", async () => {
+  const source = await readFile(
+    path.join(root, ".github", "workflows", "insights-engine-ci.yml"),
+    "utf8",
   );
-  assert.equal(publishStep.if, "steps.release.outputs.should_publish == 'true'");
+  const workflow = parseYaml(source);
+  assert.deepEqual(workflow.on, { pull_request: null, push: { branches: ["main"] } });
+  assert.equal(workflow.jobs.engine.needs, "contract");
   assert.match(
-    publishStep.run,
-    /npm publish --ignore-scripts --access public --provenance --registry=https:\/\/registry\.npmjs\.org/,
+    workflow.jobs.contract.steps.map((step) => step.run ?? "").join("\n"),
+    /npm run test:insights-engine/,
   );
-  const confirmStep = publish.steps.find((step) => step.name === "Confirm registry release");
-  assert.equal(Object.hasOwn(confirmStep, "if"), false);
-  assert.match(confirmStep.run, /npm run verify:release -- confirm/);
-  assert.doesNotMatch(
-    source,
-    /NPM_TOKEN|NODE_AUTH_TOKEN|_authToken|secrets\s*(?:\.|\[)/i,
+  assert.match(
+    workflow.jobs.contract.steps.map((step) => step.run ?? "").join("\n"),
+    /rustup toolchain install 1\.94\.1 --profile minimal --component clippy/,
   );
+  assert.deepEqual(
+    workflow.jobs.engine.strategy.matrix.include.map((entry) => entry.target).sort(),
+    [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-x64",
+      "win32-arm64",
+      "win32-x64",
+    ],
+  );
+  const commands = workflow.jobs.engine.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(commands, /engine-build-a/);
+  assert.match(commands, /engine-build-b/);
+  assert.match(commands, /MACOSX_DEPLOYMENT_TARGET="13\.0"/);
+  assert.match(commands, /> "engine\/\$\{\{ matrix\.target \}\}\/version\.json"/);
+  assert.doesNotMatch(source, /secrets\s*(?:\.|\[)|npm publish/i);
 });

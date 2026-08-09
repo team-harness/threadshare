@@ -1,0 +1,251 @@
+{
+  "format": "threadshare-insights-protocol-frames@v1",
+  "protocolVersion": 1,
+  "frames": [
+    {
+      "name": "hello",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "HELLO",
+        "requestId": "1",
+        "clientVersion": "threadshare@0.6.1",
+        "maxFrameBytes": 4194304,
+        "requiredContract": {
+          "factSchemaVersion": 1,
+          "providerAdapterVersions": ["claude@1", "codex@1"],
+          "privacyPolicyVersion": 1,
+          "originSecretEpoch": "11111111-2222-4333-8444-555555555555",
+          "duplicatePolicyVersion": 1,
+          "factStorageProfile": "normalized-row-v1",
+          "storageSchemaVersion": 1,
+          "projectionVersions": [],
+          "analyzerCapabilities": [],
+          "rankerVersion": 1
+        }
+      },
+      "payloadByteLength": 473,
+      "payloadSha256": "f7dbf38284b2be607ae715db691b72ed1d5f2e985d7627bd4496666b6173f511",
+      "lengthPrefixHex": "000001d9",
+      "canonicalPayload": "{\"clientVersion\":\"threadshare@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"requiredContract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"type\":\"HELLO\"}"
+    },
+    {
+      "name": "ready",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "READY",
+        "requestId": "1",
+        "engineVersion": "threadshare-insights-engine@0.6.1",
+        "target": "aarch64-apple-darwin",
+        "maxFrameBytes": 4194304,
+        "sqliteVersion": "3.53.2",
+        "sqliteCompileOptionsDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "buildManifestDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "acceptedContract": {
+          "factSchemaVersion": 1,
+          "providerAdapterVersions": ["claude@1", "codex@1"],
+          "privacyPolicyVersion": 1,
+          "originSecretEpoch": "11111111-2222-4333-8444-555555555555",
+          "duplicatePolicyVersion": 1,
+          "factStorageProfile": "normalized-row-v1",
+          "storageSchemaVersion": 1,
+          "projectionVersions": [],
+          "analyzerCapabilities": [],
+          "rankerVersion": 1
+        }
+      },
+      "payloadByteLength": 731,
+      "payloadSha256": "6e0cb6dbeaa9d6825c3dd8a891a3620fc441d80793423e78367d74066991f195",
+      "lengthPrefixHex": "000002db",
+      "canonicalPayload": "{\"acceptedContract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"buildManifestDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"engineVersion\":\"threadshare-insights-engine@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"sqliteCompileOptionsDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sqliteVersion\":\"3.53.2\",\"target\":\"aarch64-apple-darwin\",\"type\":\"READY\"}"
+    },
+    {
+      "name": "begin-session",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "BEGIN_SESSION",
+        "requestId": "2",
+        "deltaFormat": "session-facts-delta@v1",
+        "session": {
+          "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "provider": "codex",
+          "sessionScope": "main",
+          "eligibility": "eligible",
+          "duplicatePolicyVersion": 1
+        },
+        "deltaId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mode": "append",
+        "expectedGeneration": "0",
+        "targetGeneration": "1",
+        "contract": {
+          "factSchemaVersion": 1,
+          "providerAdapterVersion": "codex@1",
+          "privacyPolicyVersion": 1,
+          "originSecretEpoch": "11111111-2222-4333-8444-555555555555",
+          "duplicatePolicyVersion": 1,
+          "factStorageProfile": "normalized-row-v1",
+          "storageSchemaVersion": 1,
+          "projectionVersions": [],
+          "analyzerCapabilities": [],
+          "rankerVersion": 1
+        },
+        "counts": {
+          "turnKeys": "1",
+          "orphanEventKeys": "0",
+          "authoritativeTurnKeys": "1",
+          "turns": "1",
+          "sourceRecords": "0",
+          "evidenceEvents": "0",
+          "turnEvidence": "0",
+          "capabilities": "0",
+          "capabilityUses": "0",
+          "capabilityUseEvidence": "0"
+        }
+      },
+      "payloadByteLength": 980,
+      "payloadSha256": "b0f0a9dcf2af774a8e048ff8b00d29a74787a895bf033b938eef7cbb0a6ea6d8",
+      "lengthPrefixHex": "000003d4",
+      "canonicalPayload": "{\"contract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersion\":\"codex@1\",\"rankerVersion\":1,\"storageSchemaVersion\":1},\"counts\":{\"authoritativeTurnKeys\":\"1\",\"capabilities\":\"0\",\"capabilityUseEvidence\":\"0\",\"capabilityUses\":\"0\",\"evidenceEvents\":\"0\",\"orphanEventKeys\":\"0\",\"sourceRecords\":\"0\",\"turnEvidence\":\"0\",\"turnKeys\":\"1\",\"turns\":\"1\"},\"deltaFormat\":\"session-facts-delta@v1\",\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"expectedGeneration\":\"0\",\"format\":\"threadshare-insights-protocol@v1\",\"mode\":\"append\",\"requestId\":\"2\",\"session\":{\"duplicatePolicyVersion\":1,\"eligibility\":\"eligible\",\"provider\":\"codex\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionScope\":\"main\"},\"targetGeneration\":\"1\",\"type\":\"BEGIN_SESSION\"}"
+    },
+    {
+      "name": "session-accepted",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SESSION_ACCEPTED",
+        "requestId": "2",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deltaId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "nextSequence": "0"
+      },
+      "payloadByteLength": 263,
+      "payloadSha256": "45b47e6a22f7bfd3f3a7abd1d3e353a65cf2ffb0ab1e8923d99207ff9904ab12",
+      "lengthPrefixHex": "00000107",
+      "canonicalPayload": "{\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"0\",\"requestId\":\"2\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"SESSION_ACCEPTED\"}"
+    },
+    {
+      "name": "retract-facts",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "RETRACT_FACTS",
+        "requestId": "2",
+        "sequence": "0",
+        "collection": "turnKeys",
+        "items": ["1111111111111111111111111111111111111111111111111111111111111111"]
+      },
+      "payloadByteLength": 200,
+      "payloadSha256": "596fe96a59f0323fdfb1e587d2c6446d0961345c17b107bd0cb216529eed2393",
+      "lengthPrefixHex": "000000c8",
+      "canonicalPayload": "{\"collection\":\"turnKeys\",\"format\":\"threadshare-insights-protocol@v1\",\"items\":[\"1111111111111111111111111111111111111111111111111111111111111111\"],\"requestId\":\"2\",\"sequence\":\"0\",\"type\":\"RETRACT_FACTS\"}"
+    },
+    {
+      "name": "upsert-facts-astral",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "UPSERT_FACTS",
+        "requestId": "2",
+        "sequence": "1",
+        "collection": "turns",
+        "items": [
+          {
+            "turnKey": "2222222222222222222222222222222222222222222222222222222222222222",
+            "problemText": "修复 😀 café"
+          }
+        ]
+      },
+      "payloadByteLength": 242,
+      "payloadSha256": "cdeb3a66695b7165526931f4c0f5bcce18cfd749f4da94bc7165a0bc2be9f154",
+      "lengthPrefixHex": "000000f2",
+      "canonicalPayload": "{\"collection\":\"turns\",\"format\":\"threadshare-insights-protocol@v1\",\"items\":[{\"problemText\":\"修复 😀 café\",\"turnKey\":\"2222222222222222222222222222222222222222222222222222222222222222\"}],\"requestId\":\"2\",\"sequence\":\"1\",\"type\":\"UPSERT_FACTS\"}"
+    },
+    {
+      "name": "batch-accepted",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "BATCH_ACCEPTED",
+        "requestId": "2",
+        "sequence": "1"
+      },
+      "payloadByteLength": 100,
+      "payloadSha256": "db438f06653ec18306a84d3b359179ba10f855744682f5b4097adce799c7bfb5",
+      "lengthPrefixHex": "00000064",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"2\",\"sequence\":\"1\",\"type\":\"BATCH_ACCEPTED\"}"
+    },
+    {
+      "name": "commit-session",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "COMMIT_SESSION",
+        "requestId": "2",
+        "nextSequence": "2",
+        "checkpoint": { "generation": "1" },
+        "diagnostics": [],
+        "coverage": { "records": 2 }
+      },
+      "payloadByteLength": 178,
+      "payloadSha256": "b811e33128ea910e6ad224d07c40153d97245aa6b2835898df8307db4c8f2362",
+      "lengthPrefixHex": "000000b2",
+      "canonicalPayload": "{\"checkpoint\":{\"generation\":\"1\"},\"coverage\":{\"records\":2},\"diagnostics\":[],\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"2\",\"requestId\":\"2\",\"type\":\"COMMIT_SESSION\"}"
+    },
+    {
+      "name": "session-committed",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SESSION_COMMITTED",
+        "requestId": "2",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deltaId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "snapshotSeq": "17",
+        "idempotent": false
+      },
+      "payloadByteLength": 283,
+      "payloadSha256": "9bc51db78a6a66e9d5161c23fd26895876eb9e9664123580010e583c77ca103f",
+      "lengthPrefixHex": "0000011b",
+      "canonicalPayload": "{\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"format\":\"threadshare-insights-protocol@v1\",\"idempotent\":false,\"requestId\":\"2\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"snapshotSeq\":\"17\",\"type\":\"SESSION_COMMITTED\"}"
+    },
+    {
+      "name": "abort-session",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "ABORT_SESSION",
+        "requestId": "2",
+        "nextSequence": "2",
+        "reason": "cancelled"
+      },
+      "payloadByteLength": 124,
+      "payloadSha256": "94432c2fd71a37e9f0708acfc8cada2133b10fe945c79e8299951f44868e7d88",
+      "lengthPrefixHex": "0000007c",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"2\",\"reason\":\"cancelled\",\"requestId\":\"2\",\"type\":\"ABORT_SESSION\"}"
+    },
+    {
+      "name": "session-aborted",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SESSION_ABORTED",
+        "requestId": "2",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deltaId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "nextSequence": "2"
+      },
+      "payloadByteLength": 262,
+      "payloadSha256": "536d64ea6de82c69d1f33ba1faee3b843376f069fb4b345900b857f6db99b790",
+      "lengthPrefixHex": "00000106",
+      "canonicalPayload": "{\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"2\",\"requestId\":\"2\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"SESSION_ABORTED\"}"
+    },
+    {
+      "name": "error",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "ERROR",
+        "requestId": "2",
+        "code": "TS_INSIGHTS_GENERATION_CONFLICT",
+        "category": "conflict",
+        "message": "generation conflict",
+        "retryable": true,
+        "fatal": false
+      },
+      "payloadByteLength": 202,
+      "payloadSha256": "107c87deaf9f139cb5206e27b74d4409b5cb9b2e4058138875501ebcabac10d7",
+      "lengthPrefixHex": "000000ca",
+      "canonicalPayload": "{\"category\":\"conflict\",\"code\":\"TS_INSIGHTS_GENERATION_CONFLICT\",\"fatal\":false,\"format\":\"threadshare-insights-protocol@v1\",\"message\":\"generation conflict\",\"requestId\":\"2\",\"retryable\":true,\"type\":\"ERROR\"}"
+    }
+  ]
+}

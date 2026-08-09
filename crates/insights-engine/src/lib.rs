@@ -3,6 +3,10 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use unicode_normalization::UnicodeNormalization;
 
+pub mod engine;
+pub mod protocol;
+pub mod storage;
+
 pub fn hash_key(domain: &str, parts: &[Vec<u8>]) -> String {
     assert!(
         !domain.is_empty() && domain.bytes().all(|byte| (0x20..=0x7e).contains(&byte)),
@@ -19,10 +23,12 @@ pub fn hash_key(domain: &str, parts: &[Vec<u8>]) -> String {
     hex::encode(hash.finalize())
 }
 
-pub fn canonical_json(value: &Value) -> String {
+const CANONICAL_JSON_DOMAIN_ERROR: &str = "value is outside the canonical JSON domain";
+
+pub fn try_canonical_json(value: &Value) -> Result<String, &'static str> {
     match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
+        Value::Null => Ok("null".to_owned()),
+        Value::Bool(value) => Ok(value.to_string()),
         Value::Number(value) => {
             const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
             let is_safe_integer = value
@@ -31,18 +37,20 @@ pub fn canonical_json(value: &Value) -> String {
                 || value
                     .as_u64()
                     .is_some_and(|number| number <= MAX_SAFE_INTEGER);
-            assert!(is_safe_integer, "canonical JSON only permits safe integers");
-            value.to_string()
+            if !is_safe_integer {
+                return Err(CANONICAL_JSON_DOMAIN_ERROR);
+            }
+            Ok(value.to_string())
         }
-        Value::String(value) => serde_json::to_string(&value.nfc().collect::<String>()).unwrap(),
-        Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+        Value::String(value) => serde_json::to_string(&value.nfc().collect::<String>())
+            .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR),
+        Value::Array(values) => {
+            let mut items = Vec::with_capacity(values.len());
+            for value in values {
+                items.push(try_canonical_json(value)?);
+            }
+            Ok(format!("[{}]", items.join(",")))
+        }
         Value::Object(values) => {
             let mut entries = values
                 .iter()
@@ -50,25 +58,22 @@ pub fn canonical_json(value: &Value) -> String {
                 .collect::<Vec<_>>();
             entries.sort_by(|left, right| compare_utf16(&left.0, &right.0));
             for pair in entries.windows(2) {
-                assert_ne!(
-                    pair[0].0, pair[1].0,
-                    "canonical JSON keys collide after NFC"
-                );
+                if pair[0].0 == pair[1].0 {
+                    return Err(CANONICAL_JSON_DOMAIN_ERROR);
+                }
             }
-            let body = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}:{}",
-                        serde_json::to_string(&key).unwrap(),
-                        canonical_json(value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{body}}}")
+            let mut body = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key = serde_json::to_string(&key).map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+                body.push(format!("{key}:{}", try_canonical_json(value)?));
+            }
+            Ok(format!("{{{}}}", body.join(",")))
         }
     }
+}
+
+pub fn canonical_json(value: &Value) -> String {
+    try_canonical_json(value).expect(CANONICAL_JSON_DOMAIN_ERROR)
 }
 
 fn compare_utf16(left: &str, right: &str) -> Ordering {
@@ -77,7 +82,7 @@ fn compare_utf16(left: &str, right: &str) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_json, hash_key};
+    use super::{canonical_json, hash_key, try_canonical_json};
     use serde::Deserialize;
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -193,7 +198,7 @@ mod tests {
         }
         for vector in fixture.canonical_reject_vectors {
             assert!(
-                std::panic::catch_unwind(|| canonical_json(&vector.value)).is_err(),
+                try_canonical_json(&vector.value).is_err(),
                 "{}",
                 vector.name
             );

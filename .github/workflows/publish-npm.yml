@@ -11,12 +11,10 @@ concurrency:
 jobs:
   verify:
     if: github.event.release.draft == false && github.event.release.prerelease == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
-    outputs:
-      integrity: ${{ steps.release.outputs.integrity }}
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       RELEASE_SHA: ${{ github.sha }}
@@ -40,13 +38,16 @@ jobs:
           set -euo pipefail
           printf 'NPM_CONFIG_CACHE=%s\n' "$RUNNER_TEMP/threadshare-npm-cache" >> "$GITHUB_ENV"
 
-      - name: Install pinned npm
+      - name: Install pinned npm and Rust
         shell: bash
         run: |
           set -euo pipefail
           npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          rustup toolchain install 1.94.1 --profile minimal --component clippy
+          rustup default 1.94.1
           test "$(node --version)" = "v22.22.3"
           test "$(npm --version)" = "12.0.2"
+          test "$(rustc --version | cut -d' ' -f2)" = "1.94.1"
 
       - name: Verify release source
         shell: bash
@@ -59,15 +60,19 @@ jobs:
           test "$(git rev-parse 'HEAD^{commit}')" = "$RELEASE_SHA"
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$RELEASE_SHA"
           git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+          npm run verify:release -- source --tag "$RELEASE_TAG"
 
       - name: Install dependencies from lockfile
         run: npm ci
 
-      - name: Verify lockfile stayed immutable
+      - name: Verify source manifests stayed immutable
         run: git diff --exit-code -- package.json package-lock.json
 
-      - name: Run full test suite
+      - name: Run public and release tests
         run: npm test
+
+      - name: Run native Engine contract tests
+        run: npm run test:insights-engine
 
       - name: Build Cloudflare target independently
         run: npm run build:cloudflare
@@ -75,16 +80,225 @@ jobs:
       - name: Validate bundled Skill
         run: npm run validate:skill
 
-      - name: Prepare release
-        id: release
-        run: npm run verify:release -- prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
-
-  publish:
+  build-engine:
     needs: verify
-    if: github.event.release.draft == false && github.event.release.prerelease == false && needs.verify.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            runner: macos-15
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,-no_uuid
+          - target: darwin-x64
+            rust_target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,-no_uuid
+          - target: linux-arm64
+            rust_target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: linux-x64
+            rust_target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: win32-arm64
+            rust_target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            binary: threadshare-insights-engine.exe
+            rustflags: -C link-arg=/Brepro
+          - target: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            binary: threadshare-insights-engine.exe
+            rustflags: -C link-arg=/Brepro
+    env:
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      SOURCE_DATE_EPOCH: "0"
+      THREADSHARE_ENGINE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned npm for provenance verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Reuse matching published Engine when available
+        id: existing
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/fetch-existing-insights-engine.mjs \
+            --output "engine/${{ matrix.target }}" \
+            --source-sha "$RELEASE_SHA" \
+            --target "${{ matrix.target }}" \
+            --version "$RELEASE_TAG" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+          test "$(rustc --version | cut -d' ' -f2)" = "1.94.1"
+
+      - name: Install Rust build target
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: rustup target add --toolchain 1.94.1 "${{ matrix.rust_target }}"
+
+      - name: Install musl linker
+        if: runner.os == 'Linux' && steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Build unsigned Engine twice
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export THREADSHARE_RELEASE_VERSION="$RELEASE_TAG"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET="13.0"
+          fi
+          export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$GITHUB_WORKSPACE=/workspace"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-a" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-b" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
+          cmp \
+            "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" \
+            "$RUNNER_TEMP/engine-build-b/${{ matrix.rust_target }}/release/${{ matrix.binary }}"
+          mkdir -p "engine/${{ matrix.target }}"
+          cp "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" "engine/${{ matrix.target }}/${{ matrix.binary }}"
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path crates/insights-engine/Cargo.toml --locked --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          node scripts/generate-insights-sbom.mjs \
+            --metadata "$RUNNER_TEMP/cargo-metadata.json" \
+            --output "engine/${{ matrix.target }}/sbom.spdx.json" \
+            --source-sha "$RELEASE_SHA" \
+            --target "${{ matrix.target }}" \
+            --version "$RELEASE_TAG" \
+            --created "$(git show -s --format=%cI "$RELEASE_SHA")"
+
+      - name: Sign and notarize macOS Engine
+        if: runner.os == 'macOS' && steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_P12"
+          KEYCHAIN="$RUNNER_TEMP/threadshare-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | /usr/bin/base64 -D > "$RUNNER_TEMP/threadshare-signing.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/threadshare-signing.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "engine/${{ matrix.target }}/${{ matrix.binary }}"
+          codesign --verify --strict --verbose=2 "engine/${{ matrix.target }}/${{ matrix.binary }}"
+          ditto -c -k --keepParent "engine/${{ matrix.target }}/${{ matrix.binary }}" "$RUNNER_TEMP/threadshare-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/threadshare-notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+
+      - name: Remove temporary macOS signing keychain
+        if: always() && runner.os == 'macOS' && steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/threadshare-signing.keychain-db" || true
+
+      - name: Sign Windows Engine
+        if: runner.os == 'Windows' && steps.existing.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:WINDOWS_CERTIFICATE_PFX) { throw "WINDOWS_CERTIFICATE_PFX is required" }
+          $pfx = Join-Path $env:RUNNER_TEMP "threadshare-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe was not found" }
+          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD "engine/${{ matrix.target }}/${{ matrix.binary }}"
+          & $signTool.FullName verify /pa /v "engine/${{ matrix.target }}/${{ matrix.binary }}"
+
+      - name: Smoke selected Engine and record native identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/smoke-insights-engine.mjs \
+            --binary "engine/${{ matrix.target }}/${{ matrix.binary }}" \
+            --target "${{ matrix.target }}" \
+            --version "$RELEASE_TAG" \
+            > "engine/${{ matrix.target }}/version.json"
+
+      - name: Attest signed Engine and SBOM
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            engine/${{ matrix.target }}/${{ matrix.binary }}
+            engine/${{ matrix.target }}/sbom.spdx.json
+
+      - name: Upload selected Engine artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: engine
+          if-no-files-found: error
+          retention-days: 7
+
+  package-release:
+    needs: [verify, build-engine]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      attestations: write
       contents: read
       id-token: write
     env:
@@ -104,45 +318,173 @@ jobs:
         with:
           node-version: "22.22.3"
 
-      - name: Configure npm cache
+      - name: Install pinned npm
         shell: bash
         run: |
           set -euo pipefail
-          printf 'NPM_CONFIG_CACHE=%s\n' "$RUNNER_TEMP/threadshare-npm-cache" >> "$GITHUB_ENV"
+          npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Download selected Engine artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: engine-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: engine
+          merge-multiple: true
+
+      - name: Prove staged root reproducibility and pack the seven packages once
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/prepare-insights-release.mjs --binaries engine --output "$RUNNER_TEMP/release-staging-a" --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG"
+          node scripts/prepare-insights-release.mjs --binaries engine --output "$RUNNER_TEMP/release-staging-b" --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG"
+          mkdir -p "$RUNNER_TEMP/root-pack-a" "$RUNNER_TEMP/root-pack-b"
+          npm pack "$RUNNER_TEMP/release-staging-a/root" --ignore-scripts --json --pack-destination "$RUNNER_TEMP/root-pack-a" > "$RUNNER_TEMP/root-pack-a.json"
+          npm pack "$RUNNER_TEMP/release-staging-b/root" --ignore-scripts --json --pack-destination "$RUNNER_TEMP/root-pack-b" > "$RUNNER_TEMP/root-pack-b.json"
+          ROOT_A="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP + '/root-pack-a.json'))[0].filename")"
+          ROOT_B="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP + '/root-pack-b.json'))[0].filename")"
+          cmp "$RUNNER_TEMP/root-pack-a/$ROOT_A" "$RUNNER_TEMP/root-pack-b/$ROOT_B"
+          node scripts/package-insights-release.mjs pack --staging "$RUNNER_TEMP/release-staging-a" --output release-artifacts --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+          node scripts/package-insights-release.mjs verify --artifacts release-artifacts --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}"
+
+      - name: Attest release bundle
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-artifacts/*
+
+      - name: Upload immutable release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-platforms:
+    needs: package-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+
+      - name: Download immutable release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts
+
+      - name: Publish and confirm platform artifacts
+        run: node scripts/publish-insights-release.mjs --artifacts release-artifacts --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --kind platform
+
+  consumer-smoke:
+    needs: publish-platforms
+    name: Consumer ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: win32-arm64
+            runner: windows-11-arm
+          - target: win32-x64
+            runner: windows-2025
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
 
       - name: Install pinned npm
         shell: bash
         run: |
           set -euo pipefail
           npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
-          test "$(node --version)" = "v22.22.3"
-          test "$(npm --version)" = "12.0.2"
 
-      - name: Verify release source
+      - name: Download immutable release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts
+
+      - name: Install staged root through real registry resolution
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Release tag must be an unprefixed stable semver" >&2
-            exit 1
-          fi
-          test "$(git rev-parse 'HEAD^{commit}')" = "$RELEASE_SHA"
-          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$RELEASE_SHA"
-          git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+          ROOT_TARBALL="$(node -e "const m=require('./release-artifacts/release-manifest.json');process.stdout.write(m.packages.find((p)=>p.kind==='root').tarball)")"
+          mkdir -p "$RUNNER_TEMP/threadshare-consumer"
+          npm install --prefix "$RUNNER_TEMP/threadshare-consumer" "./release-artifacts/$ROOT_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org
+          node scripts/smoke-installed-insights.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"
 
-      - name: Prepare release for publishing
-        id: release
-        run: npm run verify:release -- prepare --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+  publish-root:
+    needs: consumer-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Match verified package integrity
-        env:
-          PUBLISH_INTEGRITY: ${{ steps.release.outputs.integrity }}
-          VERIFIED_INTEGRITY: ${{ needs.verify.outputs.integrity }}
-        run: test "$PUBLISH_INTEGRITY" = "$VERIFIED_INTEGRITY"
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
 
-      - name: Publish package with npm Trusted Publishing
-        if: steps.release.outputs.should_publish == 'true'
-        run: npm publish --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
 
-      - name: Confirm registry release
-        run: npm run verify:release -- confirm --tag "$RELEASE_TAG" --expected-integrity "${{ steps.release.outputs.integrity }}"
+      - name: Download immutable release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts
+
+      - name: Publish and confirm root artifact last
+        run: node scripts/publish-insights-release.mjs --artifacts release-artifacts --source-sha "$RELEASE_SHA" --version "$RELEASE_TAG" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --kind root

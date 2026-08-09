@@ -7,8 +7,13 @@ import process from "node:process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
+import {
+  INSIGHTS_ENGINE_TARGETS,
+  insightsEnginePackageName,
+} from "../src/insights-engine-targets.mjs";
+
 const execFileAsync = promisify(execFile);
-const PACKAGE_NAME = "@team-harness/threadshare";
+export const PACKAGE_NAME = "@team-harness/threadshare";
 const REGISTRY_URL = "https://registry.npmjs.org";
 const SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1";
 const STABLE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -24,8 +29,13 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
   "src/agent-transcript.mjs",
+  "src/canonical-json.mjs",
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
+  "src/insights-engine-client.mjs",
+  "src/insights-engine-protocol.mjs",
+  "src/insights-engine-runtime.mjs",
+  "src/insights-engine-targets.mjs",
   "src/insights-reference-engine.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
@@ -39,6 +49,19 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/share-url.mjs",
   "src/turn-analysis.mjs",
 ]);
+
+export const PLATFORM_PACKAGE_NAMES = Object.freeze(
+  INSIGHTS_ENGINE_TARGETS.map((target) => insightsEnginePackageName(target.target)).sort(),
+);
+
+export function expectedPlatformPackageFiles(target) {
+  const match = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === target);
+  if (!match) throw new TypeError(`unknown Insights Engine target: ${target}`);
+  const binary = match.platform === "win32"
+    ? "bin/threadshare-insights-engine.exe"
+    : "bin/threadshare-insights-engine";
+  return Object.freeze(["LICENSE", binary, "build-manifest.json", "package.json"].sort());
+}
 
 function parseStableVersion(value, label = "version") {
   if (typeof value !== "string") {
@@ -80,6 +103,12 @@ export function validateReleaseMetadata({ tag, packageJson, packageLock }) {
   if (packageLock?.name !== PACKAGE_NAME || packageLock?.packages?.[""]?.name !== PACKAGE_NAME) {
     throw new Error(`package-lock.json package names must be ${PACKAGE_NAME}`);
   }
+  const sourceDocuments = [JSON.stringify(packageJson), JSON.stringify(packageLock)];
+  for (const packageName of PLATFORM_PACKAGE_NAMES) {
+    if (sourceDocuments.some((document) => document.includes(packageName))) {
+      throw new Error(`source manifests must not contain platform package ${packageName}`);
+    }
+  }
   return { name: PACKAGE_NAME, version: tag };
 }
 
@@ -110,17 +139,20 @@ export function validatePackOutput(packOutput, metadata) {
   const files = Array.isArray(packed.files)
     ? packed.files.map((entry) => entry?.path).sort()
     : [];
+  const expectedFiles = metadata.kind === "platform"
+    ? expectedPlatformPackageFiles(metadata.target)
+    : EXPECTED_PACKAGE_FILES;
   if (
-    packed.entryCount !== EXPECTED_PACKAGE_FILES.length ||
-    files.length !== EXPECTED_PACKAGE_FILES.length ||
-    files.some((file, index) => file !== EXPECTED_PACKAGE_FILES[index])
+    packed.entryCount !== expectedFiles.length ||
+    files.length !== expectedFiles.length ||
+    files.some((file, index) => file !== expectedFiles[index])
   ) {
-    throw new Error(`npm package files must exactly match the ${EXPECTED_PACKAGE_FILES.length}-file allowlist`);
+    throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };
 }
 
-function validatePackument(packument, packageName) {
+function validatePackument(packument, packageName, { allowBootstrap = false } = {}) {
   if (!packument || typeof packument !== "object" || Array.isArray(packument)) {
     throw new Error("registry packument must be a JSON object");
   }
@@ -131,11 +163,12 @@ function validatePackument(packument, packageName) {
     throw new Error("registry packument must contain dist-tags");
   }
   const latest = packument["dist-tags"].latest;
-  parseStableVersion(latest, "registry latest");
+  if (latest !== undefined) parseStableVersion(latest, "registry latest");
+  else if (!allowBootstrap) throw new Error("registry packument must contain stable latest");
   if (!packument.versions || typeof packument.versions !== "object" || Array.isArray(packument.versions)) {
     throw new Error("registry packument must contain versions");
   }
-  if (!Object.hasOwn(packument.versions, latest)) {
+  if (latest !== undefined && !Object.hasOwn(packument.versions, latest)) {
     throw new Error("registry latest must identify a published version");
   }
   return packument;
@@ -152,34 +185,46 @@ function highestStableVersion(versions) {
   return highest;
 }
 
-export function decidePublish({ packument, packageName, version, integrity }) {
-  validatePackument(packument, packageName);
+export function decidePublish({ packument, packageName, version, integrity, kind = "root" }) {
+  validatePackument(packument, packageName, { allowBootstrap: kind === "platform" });
   parseStableVersion(version, "release version");
   requireIntegrity(integrity, "expected integrity");
   const latest = packument["dist-tags"].latest;
   const existing = packument.versions[version];
   if (existing !== undefined) {
     const registryIntegrity = existing?.dist?.integrity;
-    if (registryIntegrity !== integrity) {
+    requireIntegrity(registryIntegrity, "published package integrity");
+    if (kind === "root" && registryIntegrity !== integrity) {
       throw new Error(`Published ${packageName}@${version} integrity differs from this release`);
     }
-    return { latest, shouldPublish: false };
+    return kind === "root"
+      ? { latest, shouldPublish: false }
+      : { latest: latest ?? null, registryIntegrity, shouldPublish: false };
   }
   const highest = highestStableVersion(packument.versions);
-  if (highest === undefined || compareStableVersions(version, highest) <= 0) {
-    throw new Error(`Release ${version} must be newer than highest published stable ${highest ?? "<none>"}`);
+  if (highest !== undefined && compareStableVersions(version, highest) <= 0) {
+    throw new Error(`Release ${version} must be newer than highest published stable ${highest}`);
   }
-  return { latest, shouldPublish: true };
+  return { latest: latest ?? null, shouldPublish: true };
 }
 
-export function validatePublishedRelease({ packument, packageName, version, integrity }) {
-  validatePackument(packument, packageName);
+export function validatePublishedRelease({
+  packument,
+  packageName,
+  version,
+  integrity,
+  kind = "root",
+  provenance,
+  sourceSha,
+}) {
+  validatePackument(packument, packageName, { allowBootstrap: kind === "platform" });
   parseStableVersion(version, "release version");
   requireIntegrity(integrity, "expected integrity");
   const published = packument.versions[version];
-  if (!published || published?.dist?.integrity !== integrity) {
+  if (!published || (kind === "root" && published?.dist?.integrity !== integrity)) {
     throw new Error(`Published ${packageName}@${version} is missing or has unexpected integrity`);
   }
+  requireIntegrity(published?.dist?.integrity, "published package integrity");
   const attestations = published.dist.attestations;
   if (
     typeof attestations?.url !== "string" ||
@@ -189,10 +234,22 @@ export function validatePublishedRelease({ packument, packageName, version, inte
     throw new Error(`Published ${packageName}@${version} does not expose SLSA provenance`);
   }
   const latest = packument["dist-tags"].latest;
-  if (compareStableVersions(latest, version) < 0) {
+  if (kind === "root" && compareStableVersions(latest, version) < 0) {
     throw new Error(`Registry latest ${latest} is older than published release ${version}`);
   }
-  return { latest };
+  if (kind === "platform") {
+    if (
+      !provenance ||
+      provenance.workflow !== "publish-npm.yml" ||
+      provenance.gitCommit !== sourceSha ||
+      provenance.subjectIntegrity !== published.dist.integrity
+    ) {
+      throw new Error(`Published ${packageName}@${version} provenance does not match this release`);
+    }
+  }
+  return kind === "root"
+    ? { latest }
+    : { latest: latest ?? null, registryIntegrity: published.dist.integrity };
 }
 
 function registryPackageUrl(packageName) {
@@ -212,6 +269,7 @@ export async function fetchPackument({
   maxAttempts = 4,
   sleep = defaultSleep,
   retryDelay = (attempt) => 1_000 * 2 ** attempt,
+  allowMissing = false,
 } = {}) {
   if (typeof fetchImpl !== "function" || !Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error("registry packument probe configuration is invalid");
@@ -224,6 +282,9 @@ export async function fetchPackument({
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
       });
+      if (allowMissing && response.status === 404) {
+        return { name: packageName, "dist-tags": {}, versions: {} };
+      }
       if (response.status !== 200) {
         throw new Error(`registry packument returned HTTP ${response.status}`);
       }
@@ -233,7 +294,7 @@ export async function fetchPackument({
       } catch (error) {
         throw new Error(`registry packument returned invalid JSON: ${error.message}`);
       }
-      return validatePackument(document, packageName);
+      return validatePackument(document, packageName, { allowBootstrap: allowMissing });
     } catch (error) {
       lastError = error;
       if (attempt + 1 < maxAttempts) {
@@ -279,8 +340,8 @@ async function inspectPackage(metadata, cwd) {
 
 export function parseArguments(argv) {
   const [command, ...tokens] = argv;
-  if (!new Set(["prepare", "confirm"]).has(command)) {
-    throw new Error("Usage: node scripts/verify-release.mjs <prepare|confirm> --tag <version> [options]");
+  if (!new Set(["source", "prepare", "confirm"]).has(command)) {
+    throw new Error("Usage: node scripts/verify-release.mjs <source|prepare|confirm> --tag <version> [options]");
   }
   const options = {};
   for (let index = 0; index < tokens.length; index += 2) {
@@ -338,9 +399,10 @@ async function confirmWithRetry({ packageName, version, integrity }) {
   throw new Error(`Published release confirmation failed: ${lastError.message}`);
 }
 
-export function assertPreparedIntegrity(actualIntegrity, expectedIntegrity) {
+export function assertPreparedIntegrity(actualIntegrity, expectedIntegrity, { kind = "root" } = {}) {
+  requireIntegrity(actualIntegrity, "actual integrity");
   requireIntegrity(expectedIntegrity, "expected integrity");
-  if (actualIntegrity !== expectedIntegrity) {
+  if (kind === "root" && actualIntegrity !== expectedIntegrity) {
     throw new Error("npm pack integrity changed between prepare and confirm");
   }
 }
@@ -350,6 +412,11 @@ async function main() {
   const cwd = process.cwd();
   const metadata = await releaseMetadata(options.tag, cwd);
   const packed = await inspectPackage(metadata, cwd);
+
+  if (command === "source") {
+    process.stdout.write(`${JSON.stringify({ phase: "source", ...metadata, integrity: packed.integrity })}\n`);
+    return;
+  }
 
   if (command === "prepare") {
     const packument = await fetchPackument({ packageName: metadata.name });

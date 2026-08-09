@@ -1,0 +1,174 @@
+name: Insights Engine CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: insights-engine-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2 --ignore-scripts --registry=https://registry.npmjs.org
+          rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
+          rustup default 1.94.1
+          test "$(npm --version)" = "12.0.2"
+          test "$(rustc --version | cut -d' ' -f2)" = "1.94.1"
+
+      - name: Install dependencies from lockfile
+        run: npm ci
+
+      - name: Run Engine contract suite
+        run: npm run test:insights-engine
+
+      - name: Run 500-Turn Engine benchmark smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/insights-engine-benchmark-smoke.json"
+          node scripts/benchmark-insights-engine.mjs \
+            --engine crates/insights-engine/target/debug/threadshare-insights-engine \
+            --turns 500 \
+            --turns-per-session 50 \
+            --queries 25 \
+            --warmup 5 \
+            --json \
+            > "$report"
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const report = JSON.parse(readFileSync(process.argv[1], "utf8"));
+            if (report.rustSidecar.backfill.turnsPerSecond < 50) {
+              throw new Error(`Engine benchmark regressed to ${report.rustSidecar.backfill.turnsPerSecond} Turn/s`);
+            }
+          ' "$report"
+
+  engine:
+    needs: contract
+    name: Engine ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            runner: macos-15
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,-no_uuid
+          - target: darwin-x64
+            rust_target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,-no_uuid
+          - target: linux-arm64
+            rust_target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: linux-x64
+            rust_target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            binary: threadshare-insights-engine
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: win32-arm64
+            rust_target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            binary: threadshare-insights-engine.exe
+            rustflags: -C link-arg=/Brepro
+          - target: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            binary: threadshare-insights-engine.exe
+            rustflags: -C link-arg=/Brepro
+    env:
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      SOURCE_DATE_EPOCH: "0"
+      THREADSHARE_ENGINE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.1 --profile minimal --target "${{ matrix.rust_target }}"
+          rustup default 1.94.1
+          test "$(rustc --version | cut -d' ' -f2)" = "1.94.1"
+
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Build release Engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          export THREADSHARE_RELEASE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET="13.0"
+          fi
+          export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$GITHUB_WORKSPACE=/workspace"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-a" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-b" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
+          cmp \
+            "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" \
+            "$RUNNER_TEMP/engine-build-b/${{ matrix.rust_target }}/release/${{ matrix.binary }}"
+          mkdir -p "engine/${{ matrix.target }}"
+          cp "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" "engine/${{ matrix.target }}/${{ matrix.binary }}"
+
+      - name: Smoke bundled SQLite and protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/smoke-insights-engine.mjs \
+            --binary "engine/${{ matrix.target }}/${{ matrix.binary }}" \
+            --target "${{ matrix.target }}" \
+            --version "$(node -p "require('./package.json').version")" \
+            > "engine/${{ matrix.target }}/version.json"
+
+      - name: Upload unsigned Engine
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine-${{ matrix.target }}
+          path: engine/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
