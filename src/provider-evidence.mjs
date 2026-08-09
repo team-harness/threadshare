@@ -201,6 +201,8 @@ function eventState(payload) {
   if (payload?.error != null || payload?.is_error === true || payload?.status === "failed") {
     return "failed";
   }
+  const exitCode = validDecimal(payload?.exit_code ?? payload?.exitCode);
+  if (exitCode !== null) return exitCode === "0" ? "completed" : "failed";
   if (payload?.status === "completed" || payload?.status === "success" || payload?.is_error === false) {
     return "completed";
   }

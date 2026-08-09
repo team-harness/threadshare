@@ -132,6 +132,36 @@ export const COMMAND_SPECS = Object.freeze({
     ],
     security: ["Session previews are redacted and truncated; full transcript content is not listed."],
   }),
+  analyze: command({
+    summary: "Analyze one local Codex or Claude session without uploading it.",
+    usage: "threadshare analyze <codex|claude> <session-id|file> [options]",
+    arguments: [
+      argument("provider", "<codex|claude>", "Native session provider to analyze."),
+      argument(
+        "session",
+        "<session-id|file>",
+        "Canonical ID, unique ID prefix, or JSONL path.",
+      ),
+    ],
+    options: ["format"],
+    optionDetails: {
+      format: "Use text (default) for people or json for agents.",
+    },
+    defaults: ["--format text", "Rolled-back Turns are excluded from the text view."],
+    output: [
+      "text: Turn closure, final answers, and bounded Tool/Skill evidence.",
+      "json: one-line threadshare-session-analysis@v1 report.",
+    ],
+    constraints: ["Threadshare analyzes only native Codex and Claude sessions."],
+    examples: [
+      "threadshare analyze codex <session-id>",
+      "threadshare analyze claude <session-id> --format json",
+    ],
+    agentNotes: ["Use JSON when another agent will inspect or extend the analysis."],
+    security: [
+      "Analysis stays local and omits source paths, Tool arguments and output, Skill bodies, system prompts, and thinking.",
+    ],
+  }),
   messages: command({
     summary: "List user-message IDs that can bound a partial export or share.",
     usage: "threadshare messages <codex|claude|paseo> <session-id|file|agent-id> --format json [options]",
@@ -362,6 +392,11 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   "TS_PUBLISH_REJECTED",
   "TS_PUBLISH_OUTCOME_UNKNOWN",
   "TS_PUBLISH_POLICY_UNCONFIRMED",
+  "TS_QUERY_TOO_LONG",
+  "TS_QUERY_TOO_BROAD",
+  "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+  "TS_INSIGHTS_ENGINE_INVALID",
+  "TS_INSIGHTS_PURGE_PENDING",
   "TS_OPERATION_FAILED",
 ]);
 
@@ -453,6 +488,11 @@ function redactAdditionalPaths(value) {
     .replace(/(^|[\s([{"'`=,:;])\/(?!\/)[^\s"'`<>,;)]*/gu, "$1[LOCAL_PATH]");
 }
 
+export function sanitizeLocalText(value, maximum = 4000) {
+  const precleaned = createMessagePreview(value, maximum);
+  return createMessagePreview(redactAdditionalPaths(precleaned), maximum);
+}
+
 export function sanitizeDiagnosticProblem(value) {
   const precleaned = createMessagePreview(value, 4000);
   return createMessagePreview(redactAdditionalPaths(precleaned), 400);
@@ -529,7 +569,7 @@ export function preflightHelp(args) {
 }
 
 function optionNotAllowedNext(commandName, optionName) {
-  if (optionName === "json" && ["sessions", "messages", "read"].includes(commandName)) {
+  if (optionName === "json" && ["sessions", "analyze", "messages", "read"].includes(commandName)) {
     return `Use --format json instead. Run \`threadshare ${commandName} --help\`.`;
   }
   if (optionName === "format" && ["publish", "share", "revoke"].includes(commandName)) {

@@ -155,6 +155,7 @@ Regular failures exit 1 with empty stdout and print a stable error code plus `Pr
 
 - `share` exports and publishes a native session in one step. `--dry-run` stops before network access; `--report` is valid only with `--dry-run`.
 - `sessions` lists canonical native Codex or Claude sessions without uploading. Text is for people; `--format json` is the stable automation surface. The default and maximum page sizes are 10 and 50.
+- `analyze` builds a local single-session Turn, Tool, Skill, retry, and rollback evidence report without uploading or calling an external model. Text is for people; `--format json` returns `threadshare-session-analysis@v1` for agents.
 - `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
 - `export` creates canonical JSON without uploading it.
 - `publish` uploads an existing `threadshare-history@v1` document. `share` and `publish` accept `--expires` and `--revoke`.
@@ -196,7 +197,7 @@ By default, a share has no expiration and no revoke capability. `--expires` adds
 
 The exporter includes visible user messages, assistant text, thoughts, and tool activity. It skips hidden, metadata, and sidechain records, and it excludes raw system prompts and provider configuration. Native logs sometimes encode agent-injected orchestration context as `role: "user"`; Threadshare treats known wrappers of that kind as hidden in both full and ranged exports.
 
-The local `sessions` command does not publish transcripts. It reads file metadata and scans at most the first 1 MiB of each session on the requested page to obtain a best-effort summary. Preview text uses the same credential redaction as sharing; project and branch remain local identification metadata.
+The local `sessions` and `analyze` commands do not publish transcripts. `sessions` reads file metadata and scans at most the first 1 MiB of each session on the requested page to obtain a best-effort summary. `analyze` reads the selected native session locally and omits source paths, Tool arguments and output, Skill bodies, system prompts, and thinking from its report. Preview text uses the same credential redaction as sharing; project and branch remain local identification metadata.
 
 For a ranged share, Threadshare first associates tool results with their calls and then reconstructs each tool's state at the exclusive boundary. A result written after `--before` is not included, even when its call occurred earlier.
 

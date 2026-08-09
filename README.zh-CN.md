@@ -155,6 +155,7 @@ threadshare <command> --help
 
 - `share`：一步完成原生会话导出与发布。`--dry-run` 会在网络访问前停止，`--report` 只能与 `--dry-run` 一起使用。
 - `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。
+- `analyze`：在本机生成单个 session 的 Turn、Tool、Skill、retry 与 rollback 证据报告，不上传内容，也不调用外部模型。文本格式供人阅读；`--format json` 返回供 Agent 使用的 `threadshare-session-analysis@v1`。
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
 - `export`：只生成规范 JSON，不上传。
 - `publish`：上传已有的 `threadshare-history@v1` 文档。`share` 和 `publish` 都支持 `--expires` 与 `--revoke`。
@@ -196,7 +197,7 @@ Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接�
 
 导出器会保留可见的用户消息、Assistant 文本、思考和工具活动；跳过隐藏记录、元记录与 sidechain 记录；不导出原始 system prompt 和 provider 配置。原生日志有时会把 Agent 注入的编排上下文记录为 `role: "user"`，Threadshare 会把这类已知 wrapper 视为隐藏内容，并从全量与范围导出中排除。
 
-本机 `sessions` 命令不会发布会话正文。它先读取文件元数据，再对请求页中的每个 session 最多扫描开头 1 MiB，以生成 best-effort 摘要。预览文本使用与分享相同的凭据脱敏规则；项目与分支仅作为本地识别信息。
+本机 `sessions` 和 `analyze` 命令都不会发布会话正文。`sessions` 先读取文件元数据，再对请求页中的每个 session 最多扫描开头 1 MiB，以生成 best-effort 摘要。`analyze` 只在本机读取选定的原生 session，并从报告中排除源文件路径、Tool 参数与输出、Skill 正文、system prompt 和 thinking。预览文本使用与分享相同的凭据脱敏规则；项目与分支仅作为本地识别信息。
 
 范围分享会先关联工具调用与结果，再重建工具在排他边界时的状态。即使工具调用发生在 `--before` 之前，边界之后才写入的结果也不会进入分享。
 

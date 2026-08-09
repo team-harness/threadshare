@@ -157,6 +157,22 @@ function sessionCommand(command, positionals, options) {
   return { provider, session };
 }
 
+function nativeSessionCommand(command, positionals, options) {
+  validateCommandInvocation(command, positionals, options);
+  const [, provider, session] = positionals;
+  if (!NATIVE_SESSION_PROVIDERS.has(provider)) {
+    throw cliDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      `${command} provider must be codex or claude.`,
+      {
+        command,
+        next: `Choose a native provider. Run \`threadshare ${command} --help\`.`,
+      },
+    );
+  }
+  return { provider, session };
+}
+
 function parsePageInteger(name, value, fallback, maximum = MAX_MESSAGE_PAGE_SIZE, command = "messages") {
   if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) {
@@ -494,6 +510,9 @@ function sessionRecovery(provider) {
 }
 
 function sessionFailureCode(provider, error, message) {
+  if (error?.threadshareSessionFailureKind === "analysis_engine") {
+    return "TS_OPERATION_FAILED";
+  }
   if (provider === "paseo") {
     switch (error?.threadshareSessionFailureKind) {
       case "invalid_reference":
@@ -520,6 +539,9 @@ function sessionFailureCode(provider, error, message) {
 }
 
 function sessionFailureRecovery(provider, code, failureKind) {
+  if (code === "TS_OPERATION_FAILED" && failureKind === "analysis_engine") {
+    return "Retry once; if analysis still fails, update Threadshare and run `threadshare analyze --help` before reporting the stable error code.";
+  }
   if (provider !== "paseo") {
     return sessionRecovery(provider);
   }
@@ -737,6 +759,45 @@ async function main() {
     process.stdout.write(
       format === "json" ? `${JSON.stringify(result)}\n` : formatSessionPage(result, offset, limit),
     );
+    return;
+  }
+  if (command === "analyze") {
+    const { provider, session } = nativeSessionCommand(command, positionals, options);
+    const format = options.format ?? "text";
+    if (format !== "text" && format !== "json") {
+      throw cliDiagnostic("TS_USAGE_INVALID_VALUE", "--format must be text or json.", {
+        command,
+        next: "Use --format text for people or --format json for agents.",
+      });
+    }
+    let report;
+    let formatReport;
+    try {
+      const {
+        analyzeSession,
+        formatSessionAnalysisJson,
+        formatSessionAnalysisText,
+      } = await import("../src/turn-analysis.mjs");
+      report = await analyzeSession(provider, session);
+      formatReport = format === "json"
+        ? formatSessionAnalysisJson
+        : formatSessionAnalysisText;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = sessionFailureCode(provider, error, message);
+      const problem = code === "TS_OPERATION_FAILED"
+        ? "Unable to complete local session analysis."
+        : `Unable to analyze the requested ${provider} session.`;
+      throw cliDiagnostic(code, problem, {
+        command,
+        next: sessionFailureRecovery(
+          provider,
+          code,
+          error?.threadshareSessionFailureKind,
+        ),
+      });
+    }
+    process.stdout.write(formatReport(report));
     return;
   }
   if (command === "messages") {

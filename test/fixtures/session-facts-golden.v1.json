@@ -94,6 +94,18 @@
       "expected": "cacbd91fdfb8fde34d7889f238010b29acfe7708abe408811d352370f0fbb9d0"
     },
     {
+      "name": "duplicate-group",
+      "domain": "duplicate-group",
+      "parts": [
+        { "encoding": "utf8", "value": "codex" },
+        {
+          "encoding": "hex",
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "expected": "49f2c09d499e6890b816010a35dd10b6fc566f8788e1194192b3a7b499ddc73f"
+    },
+    {
       "name": "capability-use-fallback-branch",
       "domain": "capability-use",
       "parts": [

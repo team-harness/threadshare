@@ -54,7 +54,7 @@ One-time npm package settings:
 For each stable release:
 
 1. Set the same unprefixed stable version in `package.json`, the lockfile top level, and the lockfile root package.
-2. Run the full verification above plus `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 22-file allowlist defined by `EXPECTED_PACKAGE_FILES` in `scripts/verify-release.mjs` and record its integrity.
+2. Run the full verification above plus `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 24-file allowlist defined by `EXPECTED_PACKAGE_FILES` in `scripts/verify-release.mjs` and record its integrity.
 3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
 4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
 5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`, require it to finish successfully, then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.

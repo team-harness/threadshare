@@ -11,6 +11,7 @@ import test, { after } from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
+  cliDiagnostic,
   COMMAND_SPECS,
   DIAGNOSTIC_CODES,
   OPTION_DEFINITIONS,
@@ -105,6 +106,7 @@ async function createCliSession(raw = codexCliJsonl(13), name = "session.jsonl")
 test("renders a self-describing root and command help contract", () => {
   const expectedOptions = {
     sessions: ["format", "limit", "offset"],
+    analyze: ["format"],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
     publish: ["expires", "json", "revoke", "url"],
@@ -152,6 +154,11 @@ test("renders a self-describing root and command help contract", () => {
     "TS_PUBLISH_REJECTED",
     "TS_PUBLISH_OUTCOME_UNKNOWN",
     "TS_PUBLISH_POLICY_UNCONFIRMED",
+    "TS_QUERY_TOO_LONG",
+    "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+    "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_PURGE_PENDING",
     "TS_OPERATION_FAILED",
   ];
   assert.deepEqual(Object.keys(COMMAND_SPECS), Object.keys(expectedOptions));
@@ -247,6 +254,23 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
   };
   assertDiagnosticCode(fallback, "TS_OPERATION_FAILED");
   assert.match(fallback.stderr, /Next: Run `threadshare --help`/);
+
+  for (const code of [
+    "TS_QUERY_TOO_LONG",
+    "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+    "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_PURGE_PENDING",
+  ]) {
+    const reserved = {
+      status: 1,
+      stdout: "",
+      stderr: renderDiagnostic(cliDiagnostic(code, "Reserved Insights diagnostic", {
+        command: "analyze",
+      })),
+    };
+    assertDiagnosticCode(reserved, code);
+  }
 });
 
 test("returns deterministic help diagnostics that tell agents how to recover", () => {
@@ -254,7 +278,7 @@ test("returns deterministic help diagnostics that tell agents how to recover", (
     {
       args: ["bogus", "--help"],
       code: "TS_USAGE_UNKNOWN_COMMAND",
-      next: /Choose one of: sessions, messages, export, publish, share, read, revoke, validate/,
+      next: /Choose one of: sessions, analyze, messages, export, publish, share, read, revoke, validate/,
     },
     {
       args: ["help", "bogus"],
@@ -315,7 +339,7 @@ test("does not expose input paths when a command fails", () => {
 });
 
 test("keeps docs concise and the bundled Skill aligned with the agent workflow", () => {
-  const exhaustiveUsageBlock = /```(?:text)?\r?\n(?:(?:threadshare (?:sessions|messages|export|publish|share|read|revoke|validate)[^\n]*\r?\n)){4,}/;
+  const exhaustiveUsageBlock = /```(?:text)?\r?\n(?:(?:threadshare (?:sessions|analyze|messages|export|publish|share|read|revoke|validate)[^\n]*\r?\n)){4,}/;
   for (const fileName of ["README.md", "README.zh-CN.md"]) {
     const document = readFileSync(path.join(root, fileName), "utf8");
     assert.match(document, /threadshare <command> --help/);
@@ -325,6 +349,8 @@ test("keeps docs concise and the bundled Skill aligned with the agent workflow",
   assert.match(skill, /Treat `threadshare <command> --help` as the canonical parameter reference/);
   assert.match(skill, /TS_PUBLISH_OUTCOME_UNKNOWN.*TS_PUBLISH_POLICY_UNCONFIRMED/);
   assert.match(skill, /sessions <codex\|claude> --format json/);
+  assert.match(skill, /analyze <codex\|claude> <session> --format json/);
+  assert.match(skill, /local-only, calls no external model/);
   assert.match(skill, /Do not assume the newest result is the requested session/);
   assert.match(skill, /messages <provider> <session> --format json/);
   assert.match(skill, /--before <original-boundary-id> --offset <next-offset>/);
@@ -377,6 +403,73 @@ test("lists ten user-message candidates and loads an older page as one-line JSON
     );
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("analyzes a native session as a human summary or one-line JSON", async () => {
+  const fixture = await createCliSession(codexCliJsonl(2), "analysis.jsonl");
+  const claudeId = "11111111-2222-4333-8444-555555555555";
+  const claude = await createCliSession(
+    [
+      JSON.stringify({
+        type: "user",
+        uuid: "claude-analysis-user",
+        sessionId: claudeId,
+        timestamp: "2026-07-31T00:00:01.000Z",
+        message: { role: "user", content: "Claude request" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        uuid: "claude-analysis-assistant",
+        sessionId: claudeId,
+        timestamp: "2026-07-31T00:00:02.000Z",
+        message: { role: "assistant", content: "Claude answer" },
+      }),
+    ].join("\n") + "\n",
+    `${claudeId}.jsonl`,
+  );
+  try {
+    const textResult = spawnSync(
+      process.execPath,
+      [cli, "analyze", "codex", fixture.file],
+      { encoding: "utf8" },
+    );
+    assert.equal(textResult.status, 0, textResult.stderr);
+    assert.equal(textResult.stderr, "");
+    assert.match(textResult.stdout, /^Session codex [a-f0-9]{64}\n/);
+    assert.match(textResult.stdout, /01 \[hard-sealed\] User: CLI request 1/);
+    assert.match(textResult.stdout, /Assistant: CLI answer 1/);
+
+    const jsonResult = spawnSync(
+      process.execPath,
+      [cli, "analyze", "codex", fixture.file, "--format", "json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(jsonResult.status, 0, jsonResult.stderr);
+    assert.equal(jsonResult.stderr, "");
+    assert.equal(jsonResult.stdout.split("\n").length, 2);
+    const report = JSON.parse(jsonResult.stdout);
+    assert.equal(report.format, "threadshare-session-analysis@v1");
+    assert.equal(report.session.provider, "codex");
+    assert.equal(report.turns.length, 2);
+    assert.equal(report.turns[0].problemText, "CLI request 1");
+    assert.equal(report.turns[0].finalAnswerExcerpt, "CLI answer 1");
+    assert.doesNotMatch(jsonResult.stdout, /sourceLocator|inputFingerprint|originFingerprint/);
+    assert.doesNotMatch(jsonResult.stdout, new RegExp(fixture.directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const claudeResult = spawnSync(
+      process.execPath,
+      [cli, "analyze", "claude", claude.file, "--format", "json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(claudeResult.status, 0, claudeResult.stderr);
+    const claudeReport = JSON.parse(claudeResult.stdout);
+    assert.equal(claudeReport.session.provider, "claude");
+    assert.equal(claudeReport.turns[0].problemText, "Claude request");
+    assert.equal(claudeReport.turns[0].finalAnswerExcerpt, "Claude answer");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+    await rm(claude.directory, { recursive: true, force: true });
   }
 });
 
@@ -1246,6 +1339,21 @@ test("returns a machine-readable invalid dry run for an oversized export", async
 test("rejects unsafe command option combinations before exporting or publishing", async () => {
   const fixture = await createCliSession(codexCliJsonl(2));
   const scenarios = [
+    {
+      args: ["analyze", "paseo", fixture.file],
+      code: "TS_USAGE_INVALID_VALUE",
+      expected: /analyze provider must be codex or claude/,
+    },
+    {
+      args: ["analyze", "codex", fixture.file, "--format", "yaml"],
+      code: "TS_USAGE_INVALID_VALUE",
+      expected: /--format must be text or json/,
+    },
+    {
+      args: ["analyze", "codex", fixture.file, "--json"],
+      code: "TS_USAGE_OPTION_NOT_ALLOWED",
+      expected: /--json is not valid for analyze/,
+    },
     {
       args: ["messages", "codex", fixture.file],
       code: "TS_USAGE_OPTION_DEPENDENCY",

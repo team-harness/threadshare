@@ -26,6 +26,7 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/agent-transcript.mjs",
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
+  "src/insights-reference-engine.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
   "src/session-export.mjs",
@@ -36,6 +37,7 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/share-preflight.mjs",
   "src/share-read.mjs",
   "src/share-url.mjs",
+  "src/turn-analysis.mjs",
 ]);
 
 function parseStableVersion(value, label = "version") {

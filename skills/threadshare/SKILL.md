@@ -1,6 +1,6 @@
 ---
 name: threadshare
-description: Find, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI. Use when a user asks to list, find, publish, export, validate, or share an agent conversation; requests a link to the current session; or needs agent-readable thread JSON or Markdown.
+description: Find, analyze, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI. Use when a user asks to list, inspect, analyze, publish, export, validate, or share an agent conversation; requests a link to the current session; or needs agent-readable thread JSON or Markdown.
 ---
 
 # Threadshare
@@ -15,6 +15,7 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 - Share a Claude Code session: `threadshare share claude <session-id-or-jsonl-file> --json`
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
 - List local native sessions: `threadshare sessions <codex|claude> --format json`
+- Analyze one local native session without uploading: `threadshare analyze <codex|claude> <session> --format json`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
 - Preflight without uploading: `threadshare share <provider> <session-or-agent> --dry-run --report --json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
@@ -30,6 +31,10 @@ npx --yes @team-harness/threadshare@latest <command> ...
 ```
 
 Override the shared service only when requested, using `--url <service-url>` or `THREADSHARE_URL`.
+
+## Analyze A Local Session
+
+Use `analyze` when the user wants Turn closure, Tool/Skill usage, retry evidence, or rollback visibility for one native Codex or Claude session. It is local-only, calls no external model, and does not upload the session. Prefer `--format json` for agent inspection; use the default text view for a person. Treat completed, exit 0, or a single validation as observed evidence only, never as proof that the problem was solved or the Tool was effective.
 
 ## Choose A Start Turn
 

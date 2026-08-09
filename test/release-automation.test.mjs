@@ -33,6 +33,7 @@ const expectedPackageFiles = [
   "src/agent-transcript.mjs",
   "src/cli-contract.mjs",
   "src/history-selection.mjs",
+  "src/insights-reference-engine.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
   "src/session-export.mjs",
@@ -43,6 +44,7 @@ const expectedPackageFiles = [
   "src/share-preflight.mjs",
   "src/share-read.mjs",
   "src/share-url.mjs",
+  "src/turn-analysis.mjs",
 ];
 const integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const allowedJobEnvContexts = new Set([
@@ -101,7 +103,7 @@ test("validates stable release metadata and numeric semver ordering", () => {
   );
 });
 
-test("locks npm pack to the exact twenty-two public files", () => {
+test("locks npm pack to the exact twenty-four public files", () => {
   assert.deepEqual(EXPECTED_PACKAGE_FILES, expectedPackageFiles);
   const packed = {
     name: "@team-harness/threadshare",
