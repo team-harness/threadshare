@@ -2,8 +2,8 @@
 epic: ../epics/local-session-insights.md
 phase: executing
 approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
-current_item: ITEM-5
-next_action: independently review and commit the 100-query equivalence gate before regenerating formal evidence
+current_item: ITEM-6
+next_action: implement the local Insights Dashboard from the reviewed ITEM-5 query and evidence substrate
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -16,7 +16,7 @@ remote_publish: final
 - [x] ITEM-2：Turn Analysis 与单 Session 报告
 - [x] ITEM-3：Rust Insights Engine 与原生交付
 - [x] ITEM-4：事务化可恢复增量索引
-- [ ] ITEM-5：历史问题检索与证据路径
+- [x] ITEM-5：历史问题检索与证据路径
 - [ ] ITEM-6：本地 Insights Dashboard
 
 ## 临时决策与证据
@@ -102,3 +102,7 @@ remote_publish: final
 - 2026-08-10：正式证据终审冻结 hash `149d084a0b55b1d9ad88a881337a668c72d4df07fd0481233fd7b85bb0fd3ca4`，Paseo reviewer 交付异常后按仓库编排回退到本机 agent-scoped reviewer；确认 Epic 第 313 行要求的 100 个确定性查询尚未在 mutation 增量 snapshot 与同源 clean rebuild 之间比较 candidate keys、稳定排序和 Tool path 分组。该项为 blocking，ITEM-5 暂不完成，现有 aggregate 报告保留为待重新生成的预证据。
 - 2026-08-10：25,000 Turn 正式 capacity runner 已加入同钟、`pathLimit=10` 的 100-query 增量库与同源 clean rebuild 对照，packager 对 query 数、时钟与 candidate/result/Tool-family 三类摘要 fail-closed。600 Turn 冒烟由此发现 FTS 同分时用 SQLite `rowid` 排序会随摄入历史漂移，现改为 stable `turn_key` 并用逆序摄入回归锁定；修复后真实双库 100/100 全等。验证通过 Rust 全套、Insights Node 150、CLI 157、release 43；旧 aggregate 报告已移出仓库，必须从新 checkpoint clean commit 全量重跑。
 - 2026-08-11：等价 gate 终审确认上一轮 blocking resolved，并在正式重跑前收紧三项口径：100 条查询均由 topic + session-0 unique term 构成且互不重复；增量与 clean 两侧必须 100/100 有结果并产出非空 Tool family，禁止空跑全等；real-sidecar fixture 显式补 lifecycle 事实后断言 `hard-sealed`，另保留无 lifecycle 的 `open` Turn 可搜索但不进入 Tool path 的对照测试。
+- 2026-08-11：Paseo reviewer `3a45e434-d03d-4495-b78b-750df90bc2aa` 对冻结 hash `4de8afb3599c3a4a143571a835d676368fac8da000ba862bec8048ab53669237` 确认 I1/I2/I3 全部 resolved；唯一前置为执行真实 sidecar 测试，随后完整通过 Insights Node 151/151、CLI 157/157、release 43/43，800 Turn 双库冒烟约 39 秒。exact reviewed candidate 以 `502bb7883b5495a4b86c37d4ad3b02b30eb22a57` 提交，未 push。
+- 2026-08-11：从 Paseo 托管的 clean worktree 和 commit `502bb7883b5495a4b86c37d4ad3b02b30eb22a57` 重新生成 ITEM-5 acceptance。25,000 Turn 两组查询 P95/P99 为 46.083/55.640 ms 与 47.981/54.190 ms，mutation 增量与 clean rebuild 的 100/100 distinct query 在 candidate/order/Tool-family 三轴逐项相等；250,000 Turn 为 96.163/143.705 ms 与 101.341/140.916 ms，sidecar peak 55,001,088 bytes、detail-full FTS 165,277,696 bytes、派生状态 2,777,273,980 bytes，全部 query/capacity/startup/mutation gate 通过。
+- 2026-08-11：冻结 evaluation set 得到 Recall@300 0.925、Top-20 Recall 0.925、NDCG@10 0.790453；25,000 distractor + 60 gold 的 25,060 Turn 集得到 Recall@300 0.90，60/60 query 达到 300 candidate 上限。真实本机 population 为 3,438 文件、8,921,877,547 bytes，固定分层样本选 1,046 文件、2,672,071,531 bytes（29.950%）、3,721 Turn，detail-full FTS 外推 250,000 Turn 为 386,098,361 bytes，低于 400 MiB 重开门槛。
+- 2026-08-11：最新测试数据已整理到 `docs/benchmarks/local-session-insights/2026-08-10-item-5/evidence/`：只提交 6 份去标识 aggregate acceptance JSON 与 1 份 manifest，总计约 104 KiB；不提交 raw session、prompt/answer、路径、session/Turn/source/project 标识、SQLite、WAL 或多 GiB 临时 corpus。manifest SHA-256 为 `1fcfd226624d02d1a1a6c3df774cb9846221e1a16c98f1b7a2288f9ec81e83d3`，旧 `404f3d0` 预证据被本次 clean-run 结果取代，work cursor 连续进入 ITEM-6。

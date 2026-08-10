@@ -1,0 +1,536 @@
+{
+  "format": "threadshare-insights-query-benchmark@v1",
+  "measuredScope": "item-5-rust-search-and-tool-path-query",
+  "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+  "sourceWorktreeDirty": false,
+  "benchmarkScriptSha256": "dbb96101316a50bf54b768778a0d506b3999c395f186af491a597883433a1805",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 6.15869140625,
+        "fiveMinutes": 6.224609375,
+        "fifteenMinutes": 6.41455078125,
+        "oneMinutePerLogicalCpu": 0.615869140625
+      },
+      "atReport": {
+        "oneMinute": 6.42431640625,
+        "fiveMinutes": 6.78125,
+        "fifteenMinutes": 6.63671875,
+        "oneMinutePerLogicalCpu": 0.642431640625
+      }
+    }
+  },
+  "corpus": {
+    "corpusVersion": 4,
+    "seed": "threadshare-insights-query-25k-v1",
+    "identityDigest": "d4d8418149689b2f7ef7889232cf58936a1c18ea162a8ee45ae50e108e6b215f",
+    "contentDigest": "13cdf5a1a02745cdd18cffa0aac9fba6679f7f544444e009d03390087cd855be",
+    "turns": 25000,
+    "sessions": 250,
+    "turnsPerSession": 100,
+    "density": {
+      "sourceRecordsPerTurn": 9,
+      "evidenceEventsPerTurn": 9,
+      "turnEvidencePerTurn": 3,
+      "capabilityUsesPerTurn": 3,
+      "capabilityUseEvidencePerTurn": 6,
+      "capabilitiesPerProvider": 12,
+      "naturalTermsPerTurn": 135,
+      "uniqueNaturalTermsPerTurn": 6,
+      "problemTextCharacters": 1600,
+      "finalAnswerCharacters": 1100
+    },
+    "canonicalBytes": 433493225,
+    "maxSessionCanonicalBytes": 1734246,
+    "boundedMemoryModel": "one generated SessionFactsDeltaV1 plus one protocol batch"
+  },
+  "query": {
+    "queryShape": "deterministic low-frequency topic term over the capacity corpus; no raw-session reads",
+    "stageAttribution": "analyze, df seek, combined posting/filter, rerank, and Tool-path timings are reported from the Engine; posting and filter are not falsely separated",
+    "groups": [
+      {
+        "pathLimit": 0,
+        "queryCount": 1000,
+        "warmupCount": 100,
+        "resultCount": 20000,
+        "emptyResultCount": 0,
+        "insufficientSampleCount": 1000,
+        "evidencePathFamilyCount": 0,
+        "resultDigest": "e140c8a30866f36bf990d779592aa31f0a3070905fe1ceee53ae0cdf8f0f28b4",
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 1000,
+          "total": 39010.73354800015,
+          "p50": 37.42399999999907,
+          "p95": 46.08324999999604,
+          "p99": 55.640041999999085,
+          "max": 121.51625000000058
+        },
+        "diagnosticStages": {
+          "analyze": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 8034,
+            "p50": 6,
+            "p95": 21,
+            "p99": 25,
+            "max": 36
+          },
+          "documentFrequencySeek": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 151530,
+            "p50": 127,
+            "p95": 273,
+            "p99": 344,
+            "max": 3917
+          },
+          "postingAndFilterCombined": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 5216557,
+            "p50": 4838,
+            "p95": 7071,
+            "p99": 10640,
+            "max": 23127,
+            "attribution": "combined FTS posting traversal and SQL filter intersection; the Engine diagnostic does not expose a defensible split"
+          },
+          "rerank": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 30775680,
+            "p50": 29636,
+            "p95": 36169,
+            "p99": 42449,
+            "max": 96924
+          },
+          "toolPath": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 1504,
+            "p50": 1,
+            "p95": 2,
+            "p99": 3,
+            "max": 12
+          }
+        }
+      },
+      {
+        "pathLimit": 10,
+        "queryCount": 1000,
+        "warmupCount": 100,
+        "resultCount": 20000,
+        "emptyResultCount": 0,
+        "insufficientSampleCount": 0,
+        "evidencePathFamilyCount": 2000,
+        "resultDigest": "2b9df12b4dc287877986daf9226c6da365263a0b79978aa16b8be1566de3f79c",
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 1000,
+          "total": 41856.84579300039,
+          "p50": 40.604209000011906,
+          "p95": 47.98091700000805,
+          "p99": 54.18987500001094,
+          "max": 177.16374999997788
+        },
+        "diagnosticStages": {
+          "analyze": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 10006,
+            "p50": 8,
+            "p95": 21,
+            "p99": 27,
+            "max": 47
+          },
+          "documentFrequencySeek": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 147099,
+            "p50": 127,
+            "p95": 277,
+            "p99": 322,
+            "max": 571
+          },
+          "postingAndFilterCombined": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 5099153,
+            "p50": 4818,
+            "p95": 6429,
+            "p99": 8634,
+            "max": 60074,
+            "attribution": "combined FTS posting traversal and SQL filter intersection; the Engine diagnostic does not expose a defensible split"
+          },
+          "rerank": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 30450830,
+            "p50": 29633,
+            "p95": 34774,
+            "p99": 39678,
+            "max": 150600
+          },
+          "toolPath": {
+            "unit": "microseconds",
+            "count": 1000,
+            "total": 2697985,
+            "p50": 2578,
+            "p95": 3162,
+            "p99": 4932,
+            "max": 16000
+          }
+        }
+      }
+    ],
+    "rss": {
+      "samplingMode": "darwin-500ms",
+      "peakSampled": true,
+      "sidecarPeakBytes": 56328192,
+      "nodeHarnessPeakBytes": 147963904,
+      "combinedPeakBytes": 204292096
+    },
+    "storage": {
+      "measurementPhase": "post-vacuum capacity audit",
+      "detailFullFtsBytes": 23482368,
+      "derivedStateBytes": 284132966,
+      "observedDerivedStatePeakBytes": 294962790,
+      "databasePageBytes": 282398720
+    },
+    "gates": {
+      "budget": {
+        "name": "current-25k",
+        "maximumTurns": 25000,
+        "p95Ms": 100,
+        "p99Ms": 250,
+        "sidecarRssBytes": 100663296,
+        "detailFullFtsBytes": 419430400,
+        "derivedStateBytes": 1073741824
+      },
+      "latency": [
+        {
+          "pathLimit": 0,
+          "queryCount": 1000,
+          "p95Ms": 46.08324999999604,
+          "p99Ms": 55.640041999999085,
+          "p95WithinLimit": true,
+          "p99WithinLimit": true
+        },
+        {
+          "pathLimit": 10,
+          "queryCount": 1000,
+          "p95Ms": 47.98091700000805,
+          "p99Ms": 54.18987500001094,
+          "p95WithinLimit": true,
+          "p99WithinLimit": true
+        }
+      ],
+      "acceptanceCorpusExact": true,
+      "queryCountAtLeast1000": true,
+      "warmupCountAtLeast100": true,
+      "allQueriesReturnedResults": true,
+      "toolPathWorkloadComplete": true,
+      "allLatencyWithinLimit": true,
+      "sidecarRssWithinLimit": true,
+      "detailFullFtsWithinLimit": true,
+      "derivedStateWithinLimit": true,
+      "allMeasuredQueryGatesPassed": true
+    }
+  },
+  "backfillContext": {
+    "engine": "rust-sidecar",
+    "engineVersion": "0.6.1",
+    "target": "darwin-arm64",
+    "sqliteVersion": "3.53.2",
+    "wallMs": 106754.242709,
+    "engineTurnsPerSecond": 284.85220497740266
+  },
+  "engineIdentity": {
+    "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+    "engineVersion": "0.6.1",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "darwin-arm64",
+    "binarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+  },
+  "formalEvidenceContext": {
+    "startup": {
+      "emptyDatabase": {
+        "readyMs": 6.614541000000003
+      },
+      "populatedDatabase": {
+        "readyMs": 6.250124999991385,
+        "statusReadMs": 723.2251669999969,
+        "readyAndStatusMs": 727.8922499999753,
+        "status": {
+          "changeLog": {
+            "maxPayloadBytes": "67108864",
+            "maxRows": "1000000",
+            "payloadBytes": "9341",
+            "rows": "113",
+            "state": "within-cap"
+          },
+          "factStorageProfile": "normalized-row-v1",
+          "format": "threadshare-insights-protocol@v1",
+          "integrity": {
+            "fts": "ok",
+            "quickCheck": "ok"
+          },
+          "projections": [
+            {
+              "baseSnapshotSeq": "0",
+              "errorDigest": null,
+              "inputFactSchemaVersion": 1,
+              "name": "turn-search",
+              "rootKind": "turn",
+              "status": "active",
+              "version": 2,
+              "watermark": "250"
+            },
+            {
+              "baseSnapshotSeq": "0",
+              "errorDigest": null,
+              "inputFactSchemaVersion": 1,
+              "name": "turn-summary",
+              "rootKind": "turn",
+              "status": "active",
+              "version": 1,
+              "watermark": "250"
+            }
+          ],
+          "purge": {
+            "pendingFacts": "0",
+            "pendingMaintenance": "0",
+            "purged": "0",
+            "state": "idle"
+          },
+          "requestId": "2",
+          "snapshotAgeMs": "90375",
+          "snapshotPending": false,
+          "snapshotSeq": "250",
+          "storage": {
+            "databaseBytes": "293228544",
+            "recentDiagnostic": null,
+            "walBytes": "12392",
+            "walPressureAction": "none"
+          },
+          "type": "ENGINE_STATUS"
+        },
+        "sampleCount": 3,
+        "samples": [
+          {
+            "readyMs": 6.250124999991385,
+            "statusReadMs": 930.2157080000034,
+            "readyAndStatusMs": 936.4658329999947
+          },
+          {
+            "readyMs": 4.667082999978447,
+            "statusReadMs": 723.2251669999969,
+            "readyAndStatusMs": 727.8922499999753
+          },
+          {
+            "readyMs": 6.2939579999947455,
+            "statusReadMs": 713.6586249999818,
+            "readyAndStatusMs": 719.9525829999766
+          }
+        ],
+        "gate": {
+          "limitMs": 500,
+          "medianReadyUnder500Ms": true
+        }
+      }
+    },
+    "mutations": {
+      "format": "threadshare-insights-capacity-mutation-trace@v1",
+      "corpus": {
+        "turns": 25000,
+        "sessions": 250,
+        "seed": "threadshare-insights-query-25k-v1"
+      },
+      "steps": [
+        {
+          "kind": "replace-session",
+          "wallMs": 453.55616599999485,
+          "outcome": {
+            "committed": true,
+            "snapshotSeq": "251"
+          }
+        },
+        {
+          "kind": "delete-source",
+          "wallMs": 36.81766699999571,
+          "outcome": {
+            "removed": true
+          }
+        },
+        {
+          "kind": "exclude-source",
+          "wallMs": 2.541124999988824,
+          "outcome": {
+            "excluded": true,
+            "purgeState": "pending-purge"
+          }
+        },
+        {
+          "kind": "purge-maintenance",
+          "wallMs": 1685.66075000001,
+          "outcome": {
+            "processedSessions": "1",
+            "purgedSessions": "1",
+            "state": "purged"
+          }
+        }
+      ],
+      "finalState": {
+        "remainingSessions": 248,
+        "remainingTurns": 24800,
+        "remainingFtsDocuments": 24800,
+        "remainingRollups": 24800,
+        "replacementFtsDocuments": 1,
+        "fieldStats": {
+          "capability": 24800,
+          "code": 0,
+          "natural": 24800
+        },
+        "changeLogRows": 113,
+        "replacementGeneration": "0000000000000002",
+        "purgedState": "purged",
+        "integrity": [
+          "ok"
+        ],
+        "foreignKeyViolations": 0
+      },
+      "verified": {
+        "replace": true,
+        "delete": true,
+        "purge": true,
+        "expectedRemainingFacts": true,
+        "projectionCleanup": true,
+        "replacementSearchable": true,
+        "boundedChangeLog": true,
+        "integrity": true
+      },
+      "queryEquivalence": {
+        "count": 100,
+        "pathLimit": 10,
+        "clockIdentity": {
+          "incremental": "98dcc27d704a9b9624dad2c10066b47e81f98168e7453638f4bedf26228c0dc1",
+          "cleanRebuild": "98dcc27d704a9b9624dad2c10066b47e81f98168e7453638f4bedf26228c0dc1",
+          "equal": true
+        },
+        "coverage": {
+          "distinctQueryCount": {
+            "incremental": 100,
+            "cleanRebuild": 100,
+            "equal": true
+          },
+          "resultQueryCount": {
+            "incremental": 100,
+            "cleanRebuild": 100,
+            "equal": true
+          },
+          "toolPathFamilyQueryCount": {
+            "incremental": 100,
+            "cleanRebuild": 100,
+            "equal": true
+          }
+        },
+        "digests": {
+          "candidateTurnKeys": {
+            "incremental": "41b153be77dddd768bb164f74053c47e88ab794845dbbd809931e4274248da9d",
+            "cleanRebuild": "41b153be77dddd768bb164f74053c47e88ab794845dbbd809931e4274248da9d",
+            "equal": true
+          },
+          "resultTurnOrder": {
+            "incremental": "550e2f7cd8eb3c62dd2fb94d5503c0f02a0ba339ae7b39ebb281dc223db860b0",
+            "cleanRebuild": "550e2f7cd8eb3c62dd2fb94d5503c0f02a0ba339ae7b39ebb281dc223db860b0",
+            "equal": true
+          },
+          "toolPathFamilies": {
+            "incremental": "94555556be418e0f36a7dde75de10157f215831c2967902bf1fcdf2ea3b58b27",
+            "cleanRebuild": "94555556be418e0f36a7dde75de10157f215831c2967902bf1fcdf2ea3b58b27",
+            "equal": true
+          }
+        },
+        "allQueriesExercised": true,
+        "allEqual": true
+      }
+    },
+    "capacityGates": {
+      "normalizedFactLimitBytes": 6442450944,
+      "steadyStateLimitBytes": 8589934592,
+      "normalizedFactExceeded": false,
+      "steadyStateExceeded": false,
+      "packedFactsRequired": false,
+      "decision": "normalized-row-v1-within-capacity-gates",
+      "storageClassificationComplete": true,
+      "dbstatMatchesPageBytes": true,
+      "engineRssWithinLimit": true,
+      "ftsDensityMatchesCorpus": true,
+      "ftsBackendWithinLimit": true,
+      "allMeasuredCapacityGatesPassed": true,
+      "populatedWarmOpenUnder500Ms": true
+    }
+  },
+  "formalEvidenceGates": {
+    "queryGatesPassed": true,
+    "capacityGatesPassed": true,
+    "populatedStartupPassed": true,
+    "mutationTracePassed": true,
+    "allFormalEvidenceGatesPassed": true
+  },
+  "gates": {
+    "budget": {
+      "name": "current-25k",
+      "maximumTurns": 25000,
+      "p95Ms": 100,
+      "p99Ms": 250,
+      "sidecarRssBytes": 100663296,
+      "detailFullFtsBytes": 419430400,
+      "derivedStateBytes": 1073741824
+    },
+    "latency": [
+      {
+        "pathLimit": 0,
+        "queryCount": 1000,
+        "p95Ms": 46.08324999999604,
+        "p99Ms": 55.640041999999085,
+        "p95WithinLimit": true,
+        "p99WithinLimit": true
+      },
+      {
+        "pathLimit": 10,
+        "queryCount": 1000,
+        "p95Ms": 47.98091700000805,
+        "p99Ms": 54.18987500001094,
+        "p95WithinLimit": true,
+        "p99WithinLimit": true
+      }
+    ],
+    "acceptanceCorpusExact": true,
+    "queryCountAtLeast1000": true,
+    "warmupCountAtLeast100": true,
+    "allQueriesReturnedResults": true,
+    "toolPathWorkloadComplete": true,
+    "allLatencyWithinLimit": true,
+    "sidecarRssWithinLimit": true,
+    "detailFullFtsWithinLimit": true,
+    "derivedStateWithinLimit": true,
+    "allMeasuredQueryGatesPassed": true
+  },
+  "notMeasured": [
+    "quality Recall/NDCG and ranker ablations use the frozen query evaluation fixture",
+    "30% real-session detail-full capacity is recorded separately as aggregate-only evidence",
+    "posting traversal and SQL filter intersection remain one honestly labelled Engine timing"
+  ]
+}

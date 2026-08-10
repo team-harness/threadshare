@@ -1,0 +1,261 @@
+{
+  "format": "threadshare-insights-query-ablation-report@v1",
+  "fixtureVersion": 2,
+  "judgmentPolicy": {
+    "version": "threadshare-query-judgments@v2",
+    "recallMinRelevance": 2,
+    "unjudgedResults": "reject"
+  },
+  "qrelDigest": "16b1d360903a51197d78e45e4973df26aa60fec149f0cdf49a469accaeb60b5f",
+  "dataset": "review-development",
+  "provenance": "review-derived-deidentified-development",
+  "source": "pre-item5-independent-design-and-contract-review-findings",
+  "split": "development",
+  "queryCount": 30,
+  "baseline": {
+    "name": "production",
+    "metrics": {
+      "candidateRecallAt300": 0.95,
+      "top20Recall": 0.95,
+      "ndcgAt10": 0.8065332293323226,
+      "grade3HitAt20": 0.9666666666666667,
+      "grade1ContextualCoverageAt20": 0.13793103448275862
+    },
+    "byLanguage": {
+      "en": {
+        "queryCount": 10,
+        "metrics": {
+          "candidateRecallAt300": 0.85,
+          "top20Recall": 0.85,
+          "ndcgAt10": 0.6192050146881998,
+          "grade3HitAt20": 0.9,
+          "grade1ContextualCoverageAt20": 0.2222222222222222
+        }
+      },
+      "mixed-code": {
+        "queryCount": 10,
+        "metrics": {
+          "candidateRecallAt300": 1,
+          "top20Recall": 1,
+          "ndcgAt10": 0.9238716942323354,
+          "grade3HitAt20": 1,
+          "grade1ContextualCoverageAt20": 0.1
+        }
+      },
+      "zh": {
+        "queryCount": 10,
+        "metrics": {
+          "candidateRecallAt300": 1,
+          "top20Recall": 1,
+          "ndcgAt10": 0.8765229790764344,
+          "grade3HitAt20": 1,
+          "grade1ContextualCoverageAt20": 0.1
+        }
+      }
+    }
+  },
+  "variants": [
+    {
+      "name": "without-bm25-rank",
+      "removedComponents": [
+        "bm25-rank"
+      ],
+      "metrics": {
+        "candidateRecallAt300": 0.95,
+        "top20Recall": 0.95,
+        "ndcgAt10": 0.8020869366087571,
+        "grade3HitAt20": 0.9666666666666667,
+        "grade1ContextualCoverageAt20": 0.13793103448275862
+      },
+      "deltaFromBaseline": {
+        "candidateRecallAt300": 0,
+        "top20Recall": 0,
+        "ndcgAt10": -0.004446292723565559,
+        "grade3HitAt20": 0,
+        "grade1ContextualCoverageAt20": 0
+      },
+      "byLanguage": {
+        "en": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 0.85,
+            "top20Recall": 0.85,
+            "ndcgAt10": 0.6043833919972493,
+            "grade3HitAt20": 0.9,
+            "grade1ContextualCoverageAt20": 0.2222222222222222
+          }
+        },
+        "mixed-code": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.9238716942323354,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        },
+        "zh": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.8780057235966876,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        }
+      }
+    },
+    {
+      "name": "without-exact-substring",
+      "removedComponents": [
+        "exact-substring"
+      ],
+      "metrics": {
+        "candidateRecallAt300": 0.95,
+        "top20Recall": 0.95,
+        "ndcgAt10": 0.8065332293323226,
+        "grade3HitAt20": 0.9666666666666667,
+        "grade1ContextualCoverageAt20": 0.13793103448275862
+      },
+      "deltaFromBaseline": {
+        "candidateRecallAt300": 0,
+        "top20Recall": 0,
+        "ndcgAt10": 0,
+        "grade3HitAt20": 0,
+        "grade1ContextualCoverageAt20": 0
+      },
+      "byLanguage": {
+        "en": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 0.85,
+            "top20Recall": 0.85,
+            "ndcgAt10": 0.6192050146881998,
+            "grade3HitAt20": 0.9,
+            "grade1ContextualCoverageAt20": 0.2222222222222222
+          }
+        },
+        "mixed-code": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.9238716942323354,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        },
+        "zh": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.8765229790764344,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        }
+      }
+    },
+    {
+      "name": "without-idf-coverage",
+      "removedComponents": [
+        "idf-coverage"
+      ],
+      "metrics": {
+        "candidateRecallAt300": 0.95,
+        "top20Recall": 0.95,
+        "ndcgAt10": 0.8065332293323226,
+        "grade3HitAt20": 0.9666666666666667,
+        "grade1ContextualCoverageAt20": 0.13793103448275862
+      },
+      "deltaFromBaseline": {
+        "candidateRecallAt300": 0,
+        "top20Recall": 0,
+        "ndcgAt10": 0,
+        "grade3HitAt20": 0,
+        "grade1ContextualCoverageAt20": 0
+      },
+      "byLanguage": {
+        "en": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 0.85,
+            "top20Recall": 0.85,
+            "ndcgAt10": 0.6192050146881998,
+            "grade3HitAt20": 0.9,
+            "grade1ContextualCoverageAt20": 0.2222222222222222
+          }
+        },
+        "mixed-code": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.9238716942323354,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        },
+        "zh": {
+          "queryCount": 10,
+          "metrics": {
+            "candidateRecallAt300": 1,
+            "top20Recall": 1,
+            "ndcgAt10": 0.8765229790764344,
+            "grade3HitAt20": 1,
+            "grade1ContextualCoverageAt20": 0.1
+          }
+        }
+      }
+    }
+  ],
+  "execution": {
+    "format": "threadshare-insights-query-quality-run@v1",
+    "backend": "rust-sidecar",
+    "requestType": "SEARCH_TURNS",
+    "candidateSource": "production-search-trace",
+    "sourceDocumentCount": 30,
+    "indexedTurnCount": 30,
+    "expectedIndexedTurnCount": 30,
+    "queryCount": 30,
+    "corpusDigest": "3a1755c132271141ec26854b6dba47a488f50a4b831c59dcd7d379bfb9fa4d9e",
+    "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+    "sourceWorktreeDirty": false,
+    "runnerScriptSha256": "730a1af7b625be8d58d4d8dd2941a90e78ce325f44fa2d32e0581f578523c575",
+    "fixtureJsonSha256": "b0f8c620d5159540d6d56134593e0c28eb2b252a97cea66d275a4424a215f762",
+    "engine": {
+      "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+      "engineVersion": "0.6.1",
+      "format": "threadshare-insights-engine-version@v1",
+      "protocolVersion": 1,
+      "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+      "sqliteVersion": "3.53.2",
+      "target": "darwin-arm64",
+      "binarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+    },
+    "snapshot": {
+      "analyzerVersion": 1,
+      "projectionVersion": 2,
+      "rankerVersion": 1,
+      "snapshotSeq": "1"
+    },
+    "candidateCounts": {
+      "minimum": 1,
+      "maximum": 10,
+      "total": 135
+    },
+    "publicResultCounts": {
+      "minimum": 1,
+      "maximum": 10,
+      "total": 135
+    },
+    "temporaryStatePersisted": false,
+    "candidateScale": null,
+    "ablationScope": "fixed-production-candidates-rerank-only",
+    "candidateGenerationRerunPerVariant": false,
+    "developmentSetKind": "review-derived-deidentified-disjoint"
+  }
+}

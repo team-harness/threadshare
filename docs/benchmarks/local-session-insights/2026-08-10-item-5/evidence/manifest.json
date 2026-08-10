@@ -1,0 +1,120 @@
+{
+  "format": "threadshare-insights-item5-evidence-manifest@v1",
+  "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+  "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
+  "fixtureSha256": "e9663b7f6dea10f54b14a725a3135a756ee4a570d4eae7b7c3192222d058f211",
+  "acceptanceQrelSha256": "5d45b38259b63c009a0554edbd01cfeb87580fd9ada0d0110488ce8b09ee31fd",
+  "developmentQrelSha256": "16b1d360903a51197d78e45e4973df26aa60fec149f0cdf49a469accaeb60b5f",
+  "thresholds": {
+    "candidateRecallAt300": 0.9,
+    "top20Recall": 0.85,
+    "ndcgAt10": 0.75
+  },
+  "formalConfiguration": {
+    "capacity": {
+      "turns": [
+        25000,
+        250000
+      ],
+      "turnsPerSession": 100,
+      "queriesPerPathMode": 1000,
+      "warmupsPerPathMode": 100,
+      "pathLimits": [
+        0,
+        10
+      ],
+      "seeds": {
+        "25000": "threadshare-insights-query-25k-v1",
+        "250000": "threadshare-insights-query-250k-v1"
+      }
+    },
+    "mutationQueryEquivalence": {
+      "turns": 25000,
+      "queries": 100,
+      "pathLimit": 10,
+      "comparison": [
+        "candidateTurnKeys",
+        "resultTurnOrder",
+        "toolPathFamilies"
+      ]
+    },
+    "candidate": {
+      "distractorTurns": 25000,
+      "goldTurns": 60,
+      "seed": "threadshare-item5-candidate-scale-v1"
+    },
+    "realSample": {
+      "fraction": 0.3,
+      "seed": "threadshare-insights-real-sample-v1"
+    }
+  },
+  "engineIdentity": {
+    "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+    "engineVersion": "0.6.1",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "darwin-arm64",
+    "binarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+  },
+  "engineBinary": {
+    "bytes": 5372896,
+    "sha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+  },
+  "scripts": {
+    "scripts/benchmark-insights-engine.mjs": {
+      "bytes": 118465,
+      "sha256": "dbb96101316a50bf54b768778a0d506b3999c395f186af491a597883433a1805"
+    },
+    "scripts/benchmark-insights-real-sample.mjs": {
+      "bytes": 39574,
+      "sha256": "04fbef885e357af078423517cd433dea371f9bec25f886484c919df21715c9e6"
+    },
+    "scripts/insights-query-evaluation.mjs": {
+      "bytes": 28805,
+      "sha256": "5f61d683a6a8c6cf8c54a369a9c066ecd0ca24c2ab8e2903496982bcf7d916ea"
+    },
+    "scripts/package-insights-benchmark-evidence.mjs": {
+      "bytes": 25032,
+      "sha256": "79431e675b43cc28a2b0b2cdbcbd124428f70088a9229d9b4b7b7483abe3d8ab"
+    },
+    "scripts/run-insights-query-quality.mjs": {
+      "bytes": 26369,
+      "sha256": "730a1af7b625be8d58d4d8dd2941a90e78ce325f44fa2d32e0581f578523c575"
+    }
+  },
+  "artifacts": {
+    "ablation.acceptance.json": {
+      "bytes": 7788,
+      "sha256": "6a76255940c5a769493c6ae22fb6626ca4e50659b146b1ef27f9a8bf80254570"
+    },
+    "candidate-25k.acceptance.json": {
+      "bytes": 14419,
+      "sha256": "97b2f60b031931653a07a9012051756fe505c75d5697c6dac48e67b9929e630d"
+    },
+    "capacity-25k-query.acceptance.json": {
+      "bytes": 16522,
+      "sha256": "78c99ef787d045a287476fbcfc8457e7d3f77a4804ff2851d9fa8ba1fd5c4f16"
+    },
+    "capacity-250k-query.acceptance.json": {
+      "bytes": 14918,
+      "sha256": "511053bf61d59a4985651b20e54225af58b5c4a2a133e665588f522a5fb7c582"
+    },
+    "quality.acceptance.json": {
+      "bytes": 25953,
+      "sha256": "a8a3478ae08afbfb0973804c8433e6d9ae2ff4eaae7ab4e5dfa4b40f6952f82c"
+    },
+    "real-sample-30pct.acceptance.json": {
+      "bytes": 11290,
+      "sha256": "7c3712ca00e863abf9982013dfcf06cc1f9fd038e4984d430aa59abe204d948c"
+    }
+  },
+  "privacy": {
+    "aggregateOnly": true,
+    "rawSessionsIncluded": false,
+    "temporaryDatabasesIncluded": false,
+    "sourcePathsIncluded": false,
+    "sessionIdentifiersIncluded": false
+  }
+}

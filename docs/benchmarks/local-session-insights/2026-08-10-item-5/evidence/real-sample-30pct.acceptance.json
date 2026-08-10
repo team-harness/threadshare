@@ -1,0 +1,368 @@
+{
+  "format": "threadshare-insights-real-sample-benchmark@v1",
+  "measuredScope": "item-5-real-provider-session-detail-full-capacity",
+  "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+  "sourceWorktreeDirty": false,
+  "hashes": {
+    "benchmarkScriptSha256": "04fbef885e357af078423517cd433dea371f9bec25f886484c919df21715c9e6",
+    "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
+    "engineBinarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616",
+    "populationDigest": "4f48801eff59e010b9097aff3cca112e69505c15ec1b5afe788a95506d7eeff9",
+    "selectionDigest": "df7befb400e21b385c7ef786b9d15ec35663ca919b263543095d01d26c5c3191",
+    "selectedSnapshotContentDigest": "e9776f7d5bd9564788e6ffd24a196fd0c12cd18971053b90bd3dafb347aeb35b"
+  },
+  "environment": {
+    "platform": "darwin",
+    "release": "25.5.0",
+    "architecture": "arm64",
+    "nodeVersion": "v22.22.2",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368
+  },
+  "engine": {
+    "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+    "engineVersion": "0.6.1",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "darwin-arm64"
+  },
+  "sampling": {
+    "strategy": "provider-and-fixed-file-size-strata-seeded-nearest-byte-prefix",
+    "populationScope": "canonical discovered files after provider/session exclusions; project exclusions are applied before commit",
+    "fraction": 0.3,
+    "seed": "threadshare-insights-real-sample-v1",
+    "canonicalDiscoveredFiles": 3438,
+    "canonicalDiscoveredBytes": 8921877547,
+    "excludedBeforeSamplingFiles": 0,
+    "excludedBeforeSamplingBytes": 0,
+    "configuredExclusionCounts": {
+      "providers": 0,
+      "projects": 0,
+      "sessions": 0
+    },
+    "populationFiles": 3438,
+    "populationBytes": 8921877547,
+    "selectedFiles": 1046,
+    "selectedBytes": 2672071531,
+    "fileFraction": 0.30424665503199533,
+    "byteFraction": 0.2994965484477524,
+    "byteFractionAcceptance": {
+      "target": 0.3,
+      "minimum": 0.25,
+      "maximum": 0.35,
+      "withinAcceptanceRange": true
+    },
+    "strata": [
+      {
+        "provider": "claude",
+        "sizeStratum": "1-mib-to-16-mib",
+        "populationFiles": 48,
+        "populationBytes": 101174911,
+        "selectedFiles": 13,
+        "selectedBytes": 29403025,
+        "fileFraction": 0.2708333333333333,
+        "byteFraction": 0.29061577331162664,
+        "targetBytes": 30352473.299999997,
+        "undershootBytes": 29403025,
+        "overshootBytes": 33587696,
+        "boundaryFileBytes": 4184671,
+        "absoluteErrorBytes": 949448.299999997,
+        "decision": "undershoot"
+      },
+      {
+        "provider": "claude",
+        "sizeStratum": "16-mib-and-over",
+        "populationFiles": 1,
+        "populationBytes": 31129129,
+        "selectedFiles": 1,
+        "selectedBytes": 31129129,
+        "fileFraction": 1,
+        "byteFraction": 1,
+        "targetBytes": 9338738.7,
+        "undershootBytes": 0,
+        "overshootBytes": 31129129,
+        "boundaryFileBytes": 31129129,
+        "absoluteErrorBytes": 21790390.3,
+        "decision": "at-least-one"
+      },
+      {
+        "provider": "claude",
+        "sizeStratum": "64-kib-to-1-mib",
+        "populationFiles": 292,
+        "populationBytes": 131408270,
+        "selectedFiles": 93,
+        "selectedBytes": 39673995,
+        "fileFraction": 0.3184931506849315,
+        "byteFraction": 0.3019139891271683,
+        "targetBytes": 39422481,
+        "undershootBytes": 38927223,
+        "overshootBytes": 39673995,
+        "boundaryFileBytes": 746772,
+        "absoluteErrorBytes": 251514,
+        "decision": "overshoot"
+      },
+      {
+        "provider": "claude",
+        "sizeStratum": "under-64-kib",
+        "populationFiles": 113,
+        "populationBytes": 2841807,
+        "selectedFiles": 30,
+        "selectedBytes": 854565,
+        "fileFraction": 0.26548672566371684,
+        "byteFraction": 0.3007118358143252,
+        "targetBytes": 852542.1,
+        "undershootBytes": 821450,
+        "overshootBytes": 854565,
+        "boundaryFileBytes": 33115,
+        "absoluteErrorBytes": 2022.9000000000233,
+        "decision": "overshoot"
+      },
+      {
+        "provider": "codex",
+        "sizeStratum": "1-mib-to-16-mib",
+        "populationFiles": 374,
+        "populationBytes": 1619498951,
+        "selectedFiles": 111,
+        "selectedBytes": 486224888,
+        "fileFraction": 0.2967914438502674,
+        "byteFraction": 0.3002316782605931,
+        "targetBytes": 485849685.29999995,
+        "undershootBytes": 477281056,
+        "overshootBytes": 486224888,
+        "boundaryFileBytes": 8943832,
+        "absoluteErrorBytes": 375202.7000000477,
+        "decision": "overshoot"
+      },
+      {
+        "provider": "codex",
+        "sizeStratum": "16-mib-and-over",
+        "populationFiles": 98,
+        "populationBytes": 6324186318,
+        "selectedFiles": 35,
+        "selectedBytes": 1871301381,
+        "fileFraction": 0.35714285714285715,
+        "byteFraction": 0.2958959915007362,
+        "targetBytes": 1897255895.3999999,
+        "undershootBytes": 1871301381,
+        "overshootBytes": 2051453680,
+        "boundaryFileBytes": 180152299,
+        "absoluteErrorBytes": 25954514.399999857,
+        "decision": "undershoot"
+      },
+      {
+        "provider": "codex",
+        "sizeStratum": "64-kib-to-1-mib",
+        "populationFiles": 2134,
+        "populationBytes": 692211790,
+        "selectedFiles": 651,
+        "selectedBytes": 207684022,
+        "fileFraction": 0.30506091846298033,
+        "byteFraction": 0.30002959354390657,
+        "targetBytes": 207663537,
+        "undershootBytes": 207574221,
+        "overshootBytes": 207684022,
+        "boundaryFileBytes": 109801,
+        "absoluteErrorBytes": 20485,
+        "decision": "overshoot"
+      },
+      {
+        "provider": "codex",
+        "sizeStratum": "under-64-kib",
+        "populationFiles": 378,
+        "populationBytes": 19426371,
+        "selectedFiles": 112,
+        "selectedBytes": 5800526,
+        "fileFraction": 0.2962962962962963,
+        "byteFraction": 0.2985903028414314,
+        "targetBytes": 5827911.3,
+        "undershootBytes": 5800526,
+        "overshootBytes": 5864356,
+        "boundaryFileBytes": 63830,
+        "absoluteErrorBytes": 27385.299999999814,
+        "decision": "undershoot"
+      }
+    ]
+  },
+  "materialization": {
+    "immutableSnapshots": true,
+    "copyOnWriteClones": 0,
+    "byteCopies": 1046
+  },
+  "indexing": {
+    "wallMs": 122609.49133300001,
+    "planned": 1046,
+    "committed": 1046,
+    "excluded": 0,
+    "unchanged": 0,
+    "missing": 0,
+    "failed": 0
+  },
+  "facts": {
+    "sessions": 1046,
+    "sessionGroups": [
+      {
+        "scope": "main",
+        "eligibility": "eligible",
+        "count": 899
+      },
+      {
+        "scope": "subagent",
+        "eligibility": "subagent-excluded",
+        "count": 147
+      }
+    ],
+    "turns": 3721,
+    "turnVisibility": {
+      "active": 3721,
+      "rolled-back": 0
+    },
+    "sourceRecords": 239877,
+    "evidenceEvents": 239887,
+    "capabilities": 129,
+    "capabilityUses": 99874,
+    "sourceCheckpoints": 1046,
+    "indexedSourceBytes": "2672071531"
+  },
+  "dedupe": {
+    "definitions": "strong uses explicit lineage or two eligible main sessions sharing one non-null corroboration fingerprint; provisional is an overlapping closure axis",
+    "overall": {
+      "rawSessions": 1046,
+      "eligibleMainSessions": 899,
+      "independentGroups": 889,
+      "strongGroups": 761,
+      "weakGroups": 128,
+      "observedEofProvisionalGroups": 83,
+      "unknownSessions": 8
+    },
+    "byProvider": {
+      "claude": {
+        "rawSessions": 137,
+        "eligibleMainSessions": 137,
+        "independentGroups": 128,
+        "strongGroups": 0,
+        "weakGroups": 128,
+        "observedEofProvisionalGroups": 83,
+        "unknownSessions": 8
+      },
+      "codex": {
+        "rawSessions": 909,
+        "eligibleMainSessions": 762,
+        "independentGroups": 761,
+        "strongGroups": 761,
+        "weakGroups": 0,
+        "observedEofProvisionalGroups": 0,
+        "unknownSessions": 0
+      }
+    }
+  },
+  "fts": {
+    "detail": "full",
+    "documents": 3721,
+    "fieldTerms": 127893,
+    "postings": 652707,
+    "occurrences": 1291355,
+    "byField": [
+      {
+        "field": "capability",
+        "fieldTerms": 250,
+        "postings": 19208,
+        "occurrences": 19730
+      },
+      {
+        "field": "code",
+        "fieldTerms": 27818,
+        "postings": 157407,
+        "occurrences": 406684
+      },
+      {
+        "field": "natural",
+        "fieldTerms": 99825,
+        "postings": 476092,
+        "occurrences": 864941
+      }
+    ],
+    "analyzer": {
+      "projectionName": "turn-search",
+      "projectionVersion": 2,
+      "analyzerVersion": "threadshare-fixed-v1",
+      "analyzerCapability": "mixed-cjk-code@1",
+      "codecVersion": "threadshare-term-v1"
+    },
+    "detailFullBytes": 5746688,
+    "projectedAt250000TurnsBytes": 386098361,
+    "projectionBasisDocuments": 3721,
+    "projectionMethod": "linear-by-live-turn-document",
+    "backendReevaluationLimitBytes": 419430400,
+    "backendReevaluationRequired": false
+  },
+  "caps": {
+    "analyzer": {
+      "documents": 3721,
+      "tokenTruncated": 59,
+      "distinctTruncated": 8,
+      "capabilityTruncated": 0,
+      "inputTokens": 1596046,
+      "retainedTokens": 1271625,
+      "inputDistinctFieldTerms": 688047,
+      "retainedDistinctFieldTerms": 633499
+    },
+    "sessionFactTruncationRows": 0,
+    "affectedSessions": 0,
+    "turnFactTruncationRows": 125,
+    "affectedTurns": 124
+  },
+  "diagnostics": {
+    "populationDiscovery": [
+      {
+        "code": "unnamed-subagent-file-skipped",
+        "count": 33
+      }
+    ],
+    "index": [],
+    "facts": {
+      "factDiagnosticRows": 1853,
+      "factDiagnosticOccurrences": "190805",
+      "distinctFactDiagnosticCodes": 7,
+      "coverageRows": 6016,
+      "coverageOccurrences": "281568",
+      "distinctCoverageKeys": 45
+    }
+  },
+  "storage": {
+    "sqliteVersion": "3.51.2",
+    "preMaintenanceBytes": 199065600,
+    "postMaintenanceBytes": 191369216,
+    "maintenanceMs": 1354.175292,
+    "databasePageBytes": 191369216,
+    "dbstatBytes": 191369216,
+    "integrityCheck": [
+      "ok"
+    ],
+    "ftsIntegrityCheck": "ok",
+    "foreignKeyViolations": 0
+  },
+  "gates": {
+    "frozenThirtyPercentFraction": true,
+    "overallByteFractionWithinRange": true,
+    "indexComplete": true,
+    "detailFullSchema": true,
+    "analyzerIdentityMatches": true,
+    "detailFullFtsWithinLimit": true,
+    "engineIdentityAllowed": true,
+    "ftsIntegrityCheckPassed": true,
+    "dedupeCountsConsistent": true,
+    "storageConsistent": true,
+    "allMeasuredGatesPassed": true
+  },
+  "privacy": {
+    "sourcePathsIncluded": false,
+    "sessionIdentifiersIncluded": false,
+    "promptOrAnswerTextIncluded": false,
+    "rawSessionsIncluded": false,
+    "temporaryDatabaseIncluded": false,
+    "temporaryStatePersisted": false
+  }
+}

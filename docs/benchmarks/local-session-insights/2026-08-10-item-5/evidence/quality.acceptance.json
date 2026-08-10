@@ -1,0 +1,956 @@
+{
+  "format": "threadshare-insights-query-quality-report@v1",
+  "fixtureVersion": 2,
+  "judgmentPolicy": {
+    "version": "threadshare-query-judgments@v2",
+    "recallMinRelevance": 2,
+    "unjudgedResults": "reject"
+  },
+  "qrelDigest": "5d45b38259b63c009a0554edbd01cfeb87580fd9ada0d0110488ce8b09ee31fd",
+  "dataset": "real-acceptance",
+  "provenance": "real-derived-deidentified",
+  "source": "current-conversation-user-prompts",
+  "split": "evaluation",
+  "queryCount": 60,
+  "metrics": {
+    "candidateRecallAt300": 0.925,
+    "top20Recall": 0.925,
+    "ndcgAt10": 0.7904532728403235,
+    "grade3HitAt20": 1,
+    "grade1ContextualCoverageAt20": 0.45
+  },
+  "byLanguage": {
+    "en": {
+      "queryCount": 20,
+      "metrics": {
+        "candidateRecallAt300": 0.925,
+        "top20Recall": 0.925,
+        "ndcgAt10": 0.6913235455945161,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5384615384615384
+      }
+    },
+    "mixed-code": {
+      "queryCount": 20,
+      "metrics": {
+        "candidateRecallAt300": 0.9,
+        "top20Recall": 0.9,
+        "ndcgAt10": 0.7750218088530593,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.3589743589743589
+      }
+    },
+    "zh": {
+      "queryCount": 20,
+      "metrics": {
+        "candidateRecallAt300": 0.95,
+        "top20Recall": 0.95,
+        "ndcgAt10": 0.9050144640733959,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.4523809523809524
+      }
+    }
+  },
+  "gates": {
+    "candidateRecallAt300": {
+      "actual": 0.925,
+      "threshold": 0.9,
+      "passed": true
+    },
+    "top20Recall": {
+      "actual": 0.925,
+      "threshold": 0.85,
+      "passed": true
+    },
+    "ndcgAt10": {
+      "actual": 0.7904532728403235,
+      "threshold": 0.75,
+      "passed": true
+    }
+  },
+  "queries": [
+    {
+      "queryId": "real-q-001",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8679068258449056,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.3333333333333333,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 3
+      }
+    },
+    {
+      "queryId": "real-q-002",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8609101556836468,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-003",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-004",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-005",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-006",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-007",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-008",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.938506417451168,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-009",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-010",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-011",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9324441894571632,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-012",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.7871546029909718,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-013",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.7125794632086186,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-014",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9721212198129313,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-015",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9509006704111879,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-016",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-017",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-018",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-019",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9084880857554961,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-020",
+      "language": "zh",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-021",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8760038393495232,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 3
+      }
+    },
+    {
+      "queryId": "real-q-022",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9019058773828681,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-023",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5787641110093001,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-024",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5787641110093001,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-025",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5897053367440438,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-026",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.6309297535714575,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-027",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-028",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.4742639899716522,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-029",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9073218002554915,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-030",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5388668879616774,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-031",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.616806456952252,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-032",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.6271448173568673,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-033",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.44080173567844044,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-034",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9049495058460971,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-035",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8609101556836468,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-036",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5787641110093001,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-037",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-038",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.6198839993030103,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 2,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-039",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.7871546029909718,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-040",
+      "language": "en",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.3962104071014631,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-041",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8979486469077705,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.6666666666666666,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 3
+      }
+    },
+    {
+      "queryId": "real-q-042",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.6046674149214804,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-043",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5787641110093001,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-044",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-045",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-046",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-047",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.6201044046528216,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-048",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.938506417451168,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0.5,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-049",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.7871546029909718,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-050",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8935773014954859,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-051",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9324441894571632,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-052",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8935773014954859,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-053",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.3755844005060784,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 1,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-054",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5437373103864823,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-055",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.5431738323726484,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 2
+      }
+    },
+    {
+      "queryId": "real-q-056",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.9173194127129571,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-057",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 1,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 1,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-058",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 1,
+        "top20Recall": 1,
+        "ndcgAt10": 0.8146656240744838,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 2,
+        "grade1DocumentCount": 1
+      }
+    },
+    {
+      "queryId": "real-q-059",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.4966392596877323,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": null,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 0
+      }
+    },
+    {
+      "queryId": "real-q-060",
+      "language": "mixed-code",
+      "metrics": {
+        "candidateRecallAt300": 0.5,
+        "top20Recall": 0.5,
+        "ndcgAt10": 0.7452525342261976,
+        "grade3HitAt20": 1,
+        "grade1ContextualCoverageAt20": 0,
+        "recallTargetDocumentCount": 2,
+        "grade3DocumentCount": 1,
+        "grade1DocumentCount": 1
+      }
+    }
+  ],
+  "execution": {
+    "format": "threadshare-insights-query-quality-run@v1",
+    "backend": "rust-sidecar",
+    "requestType": "SEARCH_TURNS",
+    "candidateSource": "production-search-trace",
+    "sourceDocumentCount": 60,
+    "indexedTurnCount": 60,
+    "expectedIndexedTurnCount": 60,
+    "queryCount": 60,
+    "corpusDigest": "e4943fe0340619dadb1ef78969f12d2542a9d401247e5fb32be18c8cf72b82a9",
+    "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+    "sourceWorktreeDirty": false,
+    "runnerScriptSha256": "730a1af7b625be8d58d4d8dd2941a90e78ce325f44fa2d32e0581f578523c575",
+    "fixtureJsonSha256": "b0f8c620d5159540d6d56134593e0c28eb2b252a97cea66d275a4424a215f762",
+    "engine": {
+      "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+      "engineVersion": "0.6.1",
+      "format": "threadshare-insights-engine-version@v1",
+      "protocolVersion": 1,
+      "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+      "sqliteVersion": "3.53.2",
+      "target": "darwin-arm64",
+      "binarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+    },
+    "snapshot": {
+      "analyzerVersion": 1,
+      "projectionVersion": 2,
+      "rankerVersion": 1,
+      "snapshotSeq": "1"
+    },
+    "candidateCounts": {
+      "minimum": 2,
+      "maximum": 21,
+      "total": 535
+    },
+    "publicResultCounts": {
+      "minimum": 2,
+      "maximum": 21,
+      "total": 535
+    },
+    "temporaryStatePersisted": false,
+    "candidateScale": null
+  }
+}

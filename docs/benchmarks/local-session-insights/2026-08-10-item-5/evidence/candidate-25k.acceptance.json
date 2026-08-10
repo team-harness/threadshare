@@ -1,0 +1,574 @@
+{
+  "format": "threadshare-insights-candidate-recall-scale@v1",
+  "fixtureVersion": 2,
+  "judgmentPolicy": {
+    "version": "threadshare-query-judgments@v2",
+    "recallMinRelevance": 2,
+    "unjudgedResults": "reject"
+  },
+  "qrelDigest": "5d45b38259b63c009a0554edbd01cfeb87580fd9ada0d0110488ce8b09ee31fd",
+  "queryCount": 60,
+  "indexedTurnCount": 25060,
+  "distractorTurnCount": 25000,
+  "candidateRecallAt300": 0.9,
+  "candidateCounts": {
+    "minimum": 300,
+    "maximum": 300,
+    "total": 18000
+  },
+  "candidateLimitReachedQueryCount": 60,
+  "gates": {
+    "candidateRecallAt300": {
+      "actual": 0.9,
+      "threshold": 0.9,
+      "passed": true
+    },
+    "candidateLimitReached": {
+      "actual": 60,
+      "threshold": 1,
+      "passed": true
+    },
+    "indexedTurnCount": {
+      "actual": 25060,
+      "expected": 25060,
+      "passed": true
+    },
+    "distractorTurnCount": {
+      "actual": 25000,
+      "expected": 25000,
+      "passed": true
+    }
+  },
+  "allGatesPassed": true,
+  "queries": [
+    {
+      "queryId": "real-q-001",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-002",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-003",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-004",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-005",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-006",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-007",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-008",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-009",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-010",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-011",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-012",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-013",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-014",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-015",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-016",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-017",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 0,
+      "candidateRecallAt300": 0
+    },
+    {
+      "queryId": "real-q-018",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-019",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-020",
+      "language": "zh",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-021",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-022",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-023",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-024",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-025",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-026",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-027",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-028",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-029",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-030",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-031",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-032",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-033",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-034",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-035",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-036",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-037",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-038",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-039",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-040",
+      "language": "en",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-041",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-042",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-043",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-044",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-045",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-046",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-047",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-048",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-049",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-050",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-051",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-052",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-053",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-054",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-055",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-056",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-057",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 1,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-058",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 2,
+      "candidateRecallAt300": 1
+    },
+    {
+      "queryId": "real-q-059",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 1,
+      "candidateRecallAt300": 0.5
+    },
+    {
+      "queryId": "real-q-060",
+      "language": "mixed-code",
+      "candidateCount": 300,
+      "recallTargetCount": 2,
+      "recallTargetHits": 0,
+      "candidateRecallAt300": 0
+    }
+  ],
+  "execution": {
+    "format": "threadshare-insights-query-quality-run@v1",
+    "backend": "rust-sidecar",
+    "requestType": "SEARCH_TURNS",
+    "candidateSource": "production-search-trace",
+    "sourceDocumentCount": 60,
+    "indexedTurnCount": 25060,
+    "expectedIndexedTurnCount": 25060,
+    "queryCount": 60,
+    "corpusDigest": "e4943fe0340619dadb1ef78969f12d2542a9d401247e5fb32be18c8cf72b82a9",
+    "sourceRevision": "502bb7883b5495a4b86c37d4ad3b02b30eb22a57",
+    "sourceWorktreeDirty": false,
+    "runnerScriptSha256": "730a1af7b625be8d58d4d8dd2941a90e78ce325f44fa2d32e0581f578523c575",
+    "fixtureJsonSha256": "b0f8c620d5159540d6d56134593e0c28eb2b252a97cea66d275a4424a215f762",
+    "engine": {
+      "buildManifestDigest": "c1f2b5a30b27ab719a7896172a588f6721bc442bb262c11336d5bc1fc0f2001a",
+      "engineVersion": "0.6.1",
+      "format": "threadshare-insights-engine-version@v1",
+      "protocolVersion": 1,
+      "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+      "sqliteVersion": "3.53.2",
+      "target": "darwin-arm64",
+      "binarySha256": "47c787aebff14656be77e69e0823529de28d29f2d79d7f1cc46133aa5a21a616"
+    },
+    "snapshot": {
+      "analyzerVersion": 1,
+      "projectionVersion": 2,
+      "rankerVersion": 1,
+      "snapshotSeq": "251"
+    },
+    "candidateCounts": {
+      "minimum": 300,
+      "maximum": 300,
+      "total": 18000
+    },
+    "publicResultCounts": {
+      "minimum": 60,
+      "maximum": 60,
+      "total": 3600
+    },
+    "temporaryStatePersisted": false,
+    "candidateScale": {
+      "turnCount": 25000,
+      "sessionCount": 250,
+      "seed": "threadshare-item5-candidate-scale-v1",
+      "submittedDeltaDigest": "7a51ed7b27cca204978e37891f564cea619a0efd3e82c23efd75e3f5e86742aa",
+      "construction": "each distractor contains one production scoring term selected before insertion; gold query and document text remain frozen"
+    }
+  }
+}
