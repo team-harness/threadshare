@@ -233,8 +233,8 @@ test("the required Engine contract binds the current Fact identity versions", ()
     duplicatePolicyVersion: 1,
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
+    projectionVersions: ["turn-search@2", "turn-summary@1"],
+    analyzerCapabilities: ["mixed-cjk-code@1"],
     rankerVersion: 1,
   });
 });
@@ -350,7 +350,23 @@ test("real sidecar reindex atomically replaces an empty snapshot and preserves i
         throw Object.assign(new Error("injected source stat failure"), { code: "EACCES" });
       },
     }),
-    { code: "TS_INSIGHTS_REINDEX_INCOMPLETE" },
+    (error) => {
+      assert.equal(error.code, "TS_INSIGHTS_REINDEX_INCOMPLETE");
+      assert.equal(Object.keys(error).includes("failureSummary"), false);
+      assert.deepEqual(error.failureSummary, {
+        planned: 1,
+        committed: 0,
+        excluded: 0,
+        failed: 1,
+        diagnostics: [{
+          provider: "codex",
+          code: "source-stat-failed",
+          errorCode: "EACCES",
+          count: 1,
+        }],
+      });
+      return true;
+    },
   );
   assert.deepEqual(await readFile(value.databaseFile), activeDatabase);
   assert.deepEqual(await readFile(value.originSecretFile), secret);

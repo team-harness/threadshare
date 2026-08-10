@@ -278,6 +278,42 @@ test("Codex adapter uses only authoritative records and keeps sensitive bodies o
   }
 });
 
+test("Codex canonical file identity overrides a different provider lineage id", async () => {
+  const fixture = await fixtureFile(
+    `rollout-${IDS.codex}.jsonl`,
+    jsonl([
+      { type: "session_meta", payload: { id: IDS.codexRoot } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Keep canonical file identity" }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Provider id remains lineage evidence" }],
+        },
+      },
+    ]),
+  );
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      sessionId: IDS.codex,
+    });
+    assert.equal(delta.session.sessionKey, hashKey("session", "codex", IDS.codex));
+    assert.notEqual(delta.session.sessionKey, hashKey("session", "codex", IDS.codexRoot));
+    assert.equal(delta.session.duplicateMethod, "explicit-lineage");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Codex file-level subagent scope is decided before Turn parsing", async () => {
   const cases = [
     { thread_source: "subagent" },

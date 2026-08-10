@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use threadshare_insights_engine::analyzer::encode_term;
 use threadshare_insights_engine::fact_model::{SessionFactsDeltaV1, StableKey};
 use threadshare_insights_engine::source_state::PurgeState;
 use threadshare_insights_engine::storage::EngineStorage;
@@ -64,10 +65,11 @@ fn file_contains_canary(path: &Path) -> bool {
 
 fn fts_canary_counts(database: &Path) -> (i64, i64) {
     let connection = Connection::open(database).unwrap();
+    let encoded_canary = encode_term(PURGE_CANARY);
     let matching = connection
         .query_row(
             "SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH ?1",
-            [PURGE_CANARY],
+            [&encoded_canary],
             |row| row.get(0),
         )
         .unwrap();
@@ -75,7 +77,7 @@ fn fts_canary_counts(database: &Path) -> (i64, i64) {
         .query_row(
             "SELECT COALESCE(SUM(doc),0) FROM turns_fts_vocab
              WHERE term=?1 AND col='natural'",
-            [PURGE_CANARY],
+            [&encoded_canary],
             |row| row.get(0),
         )
         .unwrap();
@@ -94,10 +96,11 @@ fn purge_clears_sensitive_fts_state_before_reporting_purged() {
     let mut reader = Connection::open(&database.path).unwrap();
     reader.execute_batch("PRAGMA journal_mode=WAL").unwrap();
     let reader_snapshot = reader.transaction().unwrap();
+    let encoded_canary = encode_term(PURGE_CANARY);
     let visible_before_exclusion: i64 = reader_snapshot
         .query_row(
             "SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH ?1",
-            [PURGE_CANARY],
+            [&encoded_canary],
             |row| row.get(0),
         )
         .unwrap();

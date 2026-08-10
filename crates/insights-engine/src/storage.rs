@@ -753,6 +753,48 @@ impl EngineStorage {
         crate::engine_status::read_engine_status(&self.connection, self.database_path.as_deref())
     }
 
+    pub fn maintain_search_projection(
+        &mut self,
+        batch_size: u16,
+    ) -> Result<crate::search_projection::SearchProjectionProgress, StorageError> {
+        crate::search_projection::maintain_search_projection(&mut self.connection, batch_size)
+    }
+
+    pub fn search(
+        &mut self,
+        request: crate::query::SearchRequest,
+    ) -> Result<crate::query::SearchResponse, crate::query::QueryError> {
+        self.search_with_trace(request)
+            .map(|(response, _)| response)
+    }
+
+    pub fn search_with_trace(
+        &mut self,
+        request: crate::query::SearchRequest,
+    ) -> Result<(crate::query::SearchResponse, crate::query::SearchTrace), crate::query::QueryError>
+    {
+        self.maintain_search_projection(16).map_err(|error| {
+            crate::query::QueryError::new(error.code, "search projection maintenance failed")
+        })?;
+        crate::query::search_with_trace(&self.connection, request)
+    }
+
+    pub fn read_turn_evidence(
+        &self,
+        turn_key: &str,
+        expected_revision: Option<&str>,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<crate::evidence_path::TurnEvidencePage, crate::query::QueryError> {
+        crate::evidence_path::read_turn_evidence(
+            &self.connection,
+            turn_key,
+            expected_revision,
+            cursor,
+            limit,
+        )
+    }
+
     pub fn run_purge_maintenance(
         &mut self,
         limit: u16,
@@ -954,7 +996,10 @@ mod tests {
         assert!(status.snapshot_pending);
         assert_eq!(status.snapshot_age_ms, None);
         assert_eq!(status.fact_storage_profile, "normalized-row-v1");
-        assert!(status.projections.is_empty());
+        assert_eq!(status.projections.len(), 1);
+        assert_eq!(status.projections[0].name, "turn-search");
+        assert_eq!(status.projections[0].version, 2);
+        assert_eq!(status.projections[0].status, "active");
         assert_eq!(status.change_log.rows, "0");
         assert_eq!(status.purge.state, crate::source_state::PurgeState::Idle);
         assert_eq!(status.storage.wal_pressure_action, "none");

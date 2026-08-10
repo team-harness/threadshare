@@ -27,6 +27,7 @@ import {
   createPurgeStatusMessage,
   createReadPurgeStatusMessage,
   createReadEngineStatusMessage,
+  createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
   createRemoveSourceMessage,
   createReadyMessage,
@@ -39,7 +40,10 @@ import {
   createSourceExcludedMessage,
   createSourceRemovedMessage,
   createSourceStatesMessage,
+  createSearchTurnsMessage,
   createRunPurgeMaintenanceMessage,
+  createTurnEvidencePageMessage,
+  createTurnSearchResultsMessage,
   createUpsertBatchMessage,
   decodeSourceLocator,
   decodeProtocolFrames,
@@ -54,6 +58,8 @@ const DELTA_ID = "b".repeat(64);
 const EPOCH = "11111111-2222-4333-8444-555555555555";
 const COMPILE_OPTIONS_DIGEST = "c".repeat(64);
 const BUILD_MANIFEST_DIGEST = "d".repeat(64);
+const TURN_KEY = "e".repeat(64);
+const REVISION = "f".repeat(64);
 
 function handshakeContract(overrides = {}) {
   return {
@@ -206,6 +212,46 @@ function engineStatus() {
   };
 }
 
+function searchFilters(overrides = {}) {
+  return {
+    providers: [],
+    projectKeys: [],
+    observedAtOrAfterUnixMs: null,
+    observedBeforeUnixMs: null,
+    toolCapabilityKeys: [],
+    skillCapabilityKeys: [],
+    resultEvidence: [],
+    closureStates: [],
+    ...overrides,
+  };
+}
+
+function searchResult(overrides = {}) {
+  return {
+    turnKey: TURN_KEY,
+    sessionKey: SESSION_KEY,
+    revision: REVISION,
+    provider: "codex",
+    projectKey: null,
+    observedTimestamp: "2026-08-10T01:02:03.000Z",
+    problemExcerpt: "why did the query fail?",
+    problemTruncated: false,
+    finalAnswerExcerpt: "the query used an invalid filter",
+    finalAnswerTruncated: false,
+    closureState: "hard-sealed",
+    resultEvidence: "provider-completed",
+    score: {
+      relevancePpm: 925_000,
+      bm25Rank: 1,
+      rankComponentPpm: 1_000_000,
+      idfCoveragePpm: 875_000,
+      exact: false,
+      matchedTermIndexes: [0],
+    },
+    ...overrides,
+  };
+}
+
 async function collect(iterable) {
   const values = [];
   for await (const value of iterable) values.push(value);
@@ -282,6 +328,340 @@ test("engine status protocol is bounded, read-only, and rejects inconsistent sta
       },
     }),
     (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+});
+
+test("turn search requests canonicalize bounded filters and reject broad queries", () => {
+  const request = createSearchTurnsMessage({
+    requestId: "10",
+    query: "Bash timeout",
+    filters: searchFilters({
+      providers: ["codex", "claude"],
+      toolCapabilityKeys: ["2".repeat(64), "1".repeat(64)],
+      resultEvidence: ["unknown", "provider-completed"],
+    }),
+    nowUnixMs: "1786323723000",
+  });
+  assert.deepEqual(request.filters.providers, ["claude", "codex"]);
+  assert.deepEqual(request.filters.toolCapabilityKeys, ["1".repeat(64), "2".repeat(64)]);
+  assert.deepEqual(request.filters.resultEvidence, ["provider-completed", "unknown"]);
+  assert.equal(request.limit, 50);
+  assert.equal(request.pathLimit, 10);
+  assert.equal(request.quiescenceSeconds, 300);
+  assert.equal(assertProtocolMessage(request), request);
+
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "界".repeat(2_731),
+      filters: searchFilters(),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "QUERY_TOO_LONG" },
+  );
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "",
+      filters: searchFilters(),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "QUERY_TOO_BROAD" },
+  );
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "needle",
+      filters: searchFilters({ providers: Array.from({ length: 17 }, (_, index) => `p${index}`) }),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "needle",
+      filters: searchFilters({ providers: ["codex", "codex"] }),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "needle",
+      filters: searchFilters({
+        observedAtOrAfterUnixMs: "1786406400000",
+        observedBeforeUnixMs: "1786320000000",
+      }),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("turn search responses bound excerpts, scores, terms, and path evidence", () => {
+  const response = createTurnSearchResultsMessage({
+    requestId: "10",
+    snapshot: {
+      snapshotSeq: "21",
+      projectionVersion: 2,
+      analyzerVersion: 1,
+      rankerVersion: 1,
+    },
+    scoringTerms: [{
+      logicalTerm: "normalized",
+      field: "natural",
+      token: "tmfrgg",
+      documentFrequency: "10",
+      fieldDocumentCount: "20",
+    }],
+    results: [searchResult()],
+    evidencePaths: {
+      insufficientSample: false,
+      rawMatchCount: 5,
+      eligibleTurnCount: 5,
+      rawSessionCount: 5,
+      independentGroupCount: 3,
+      strongGroupCount: 2,
+      weakGroupCount: 1,
+      observedEofProvisionalGroupCount: 0,
+      unknownDedupeCount: 0,
+      unknownDedupeSessionCount: 0,
+      pathsTruncated: false,
+      families: [{
+        fingerprint: "3".repeat(64),
+        nodes: [{ providerScopedName: "codex:Bash", repeatBucket: "1" }],
+        truncated: false,
+        bestRelevancePpm: 925_000,
+        turnCount: 5,
+        rawSessionCount: 5,
+        independentGroupCount: 3,
+        strongGroupCount: 2,
+        weakGroupCount: 1,
+        observedEofProvisionalGroupCount: 0,
+        unknownDedupeSessionCount: 0,
+        latestUnixMs: 1_786_323_723_000,
+        toolStateCounts: { pending: 0, completed: 4, failed: 1, cancelled: 0, unknown: 0 },
+        evidenceTurnKeys: [TURN_KEY],
+      }],
+    },
+    diagnostic: {
+      analyzeMicros: 10,
+      dfMicros: 20,
+      postingFilterMicros: 30,
+      rerankMicros: 40,
+      pathMicros: 50,
+      zeroDfTermCount: 0,
+      highFrequencyTermCount: 0,
+      truncatedTermCount: 0,
+      scoringTermCount: 1,
+    },
+    searchTrace: {
+      candidateCount: 1,
+      candidateTurnKeys: [TURN_KEY],
+    },
+  });
+  assert.equal(assertProtocolMessage(response), response);
+  assert.ok(protocolPayloadByteLength(response) < MAX_PROTOCOL_PAYLOAD_BYTES);
+
+  const overlappingDedupeAxes = structuredClone(response);
+  overlappingDedupeAxes.evidencePaths.observedEofProvisionalGroupCount = 1;
+  overlappingDedupeAxes.evidencePaths.families[0].observedEofProvisionalGroupCount = 1;
+  assert.equal(assertProtocolMessage(overlappingDedupeAxes), overlappingDedupeAxes);
+
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      evidencePaths: {
+        ...structuredClone(response.evidencePaths),
+        strongGroupCount: 1,
+        weakGroupCount: 1,
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      evidencePaths: {
+        ...structuredClone(response.evidencePaths),
+        families: [{
+          ...structuredClone(response.evidencePaths.families[0]),
+          strongGroupCount: 1,
+          weakGroupCount: 1,
+        }],
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      evidencePaths: {
+        ...structuredClone(response.evidencePaths),
+        families: [{
+          ...structuredClone(response.evidencePaths.families[0]),
+          independentGroupCount: 2,
+          strongGroupCount: 1,
+          weakGroupCount: 1,
+        }],
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      results: [searchResult({ problemExcerpt: "界".repeat(171) })],
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      searchTrace: { candidateCount: 2, candidateTurnKeys: [TURN_KEY] },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      searchTrace: { candidateCount: 2, candidateTurnKeys: [TURN_KEY, TURN_KEY] },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      results: [searchResult({ score: { ...searchResult().score, relevancePpm: 0.5 } })],
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      scoringTerms: Array.from({ length: 33 }, (_, index) => ({
+        logicalTerm: `term-${index}`,
+        field: "natural",
+        token: `t${index}`,
+        documentFrequency: "1",
+        fieldDocumentCount: "1",
+      })),
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      scoringTerms: [],
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      results: [],
+      evidencePaths: {
+        ...structuredClone(response.evidencePaths),
+        eligibleTurnCount: 6,
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("turn evidence pages are revision-aware, strictly tagged, and frame bounded", () => {
+  const request = createReadTurnEvidenceMessage({
+    requestId: "11",
+    turnKey: TURN_KEY,
+    expectedRevision: REVISION,
+  });
+  assert.equal(request.cursor, null);
+  assert.equal(request.limit, 64);
+
+  const response = createTurnEvidencePageMessage({
+    requestId: "11",
+    snapshotSeq: "21",
+    turn: {
+      turnKey: TURN_KEY,
+      revision: REVISION,
+      problemText: "why did the query fail?",
+      finalAnswerExcerpt: "the query used an invalid filter",
+      observedTimestamp: "2026-08-10T01:02:03.000Z",
+      nextUserBoundary: false,
+      providerTerminal: "completed",
+      observedEofClosed: true,
+      providerVisibility: "active",
+      factTruncation: [],
+    },
+    entries: [{
+      factKind: "event",
+      fact: {
+        eventKey: "5".repeat(64),
+        occurredTurnKey: TURN_KEY,
+        linkedTurns: [{ turnKey: TURN_KEY, role: "lifecycle" }],
+        pointerKind: "/content/0",
+        pointerContentIndex: 0,
+        pointerEventOrdinal: 0,
+        originScope: "main",
+        observedTimestamp: "2026-08-10T01:02:03.000Z",
+        payload: {
+          kind: "turn-lifecycle",
+          lifecycleState: "completed",
+          providerTurnDigest: null,
+        },
+      },
+    }],
+    nextCursor: null,
+  });
+  assert.equal(assertProtocolMessage(response), response);
+  assert.ok(protocolPayloadByteLength(response) < MAX_PROTOCOL_PAYLOAD_BYTES);
+
+  assert.throws(
+    () => createReadTurnEvidenceMessage({
+      requestId: "11",
+      turnKey: TURN_KEY,
+      expectedRevision: REVISION,
+      cursor: "x".repeat(257),
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnEvidencePageMessage({
+      requestId: "11",
+      snapshotSeq: "21",
+      turn: {
+        ...response.turn,
+        problemText: "x".repeat(65_537),
+      },
+      entries: [],
+      nextCursor: null,
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createTurnEvidencePageMessage({
+      requestId: "11",
+      snapshotSeq: "21",
+      turn: response.turn,
+      entries: [{ factKind: "future", fact: {} }],
+      nextCursor: null,
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
   );
 });
 

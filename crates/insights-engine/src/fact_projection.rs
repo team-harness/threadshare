@@ -1,3 +1,4 @@
+use crate::analyzer::{AnalyzerOriginScope, CapabilityInput, analyze_document};
 use crate::fact_model::{
     CapabilityFact, CapabilityUseEvidenceFact, CapabilityUseFact, Eligibility, EvidenceEvent,
     LifecycleState, MessageRole, OriginScope, ProviderStatusKind, ProviderStatusState,
@@ -7,10 +8,12 @@ use crate::fact_model::{
 use crate::fact_repository::{FactEntity, FactEntityKind, FactRepository, SessionFactSnapshot};
 use crate::fts_projection::FtsDocument;
 use crate::projection::{
-    ACTIVE_TURN_PROJECTION_VERSION, ProjectionChange, ProjectionChangeOperation,
-    ProjectionRootKind, RollupContribution, TURN_SUMMARY_PROJECTION_NAME, TurnProjection,
-    advance_active_turn_projection_watermarks, append_projection_change, delete_turn_projection,
-    projection_change_log_usage, prune_consumed_projection_changes, upsert_turn_projection,
+    ACTIVE_TURN_SUMMARY_PROJECTION_VERSION, AnalyzedTurnProjection, ProjectionChange,
+    ProjectionChangeOperation, ProjectionRootKind, RollupContribution,
+    TURN_SUMMARY_PROJECTION_NAME, TurnProjection, advance_active_turn_projection_watermarks,
+    append_projection_change, delete_turn_projection, projection_change_log_usage,
+    prune_consumed_projection_changes, upsert_analyzed_turn_projection,
+    upsert_legacy_turn_projection,
 };
 use crate::retry_projection::cancel_retry_projection_for_change_log;
 use crate::storage::StorageError;
@@ -72,7 +75,13 @@ fn maintain_projection_change_log_with_usage(
         if !usage.exceeds_limit() {
             return Ok(());
         }
-        if !cancel_retry_projection_for_change_log(transaction, &name, version)? {
+        if !cancel_retry_projection_for_change_log(transaction, &name, version)?
+            && !crate::search_projection::cancel_search_projection_for_change_log(
+                transaction,
+                &name,
+                version,
+            )?
+        {
             return Err(StorageError::new(
                 "TS_INSIGHTS_PROJECTION_INVALID",
                 "the oldest building projection has no bounded cleanup handler",
@@ -300,47 +309,77 @@ fn materialize_turn_projection(
     let capabilities = closure
         .capabilities
         .iter()
-        .map(|capability| {
-            (
-                capability.capability_key,
-                capability.canonical_name.as_str(),
-            )
-        })
+        .map(|capability| (capability.capability_key, capability))
         .collect::<BTreeMap<_, _>>();
-    let mut capability_names = BTreeSet::new();
-    for usage in closure
+    let capability_inputs = closure
         .capability_uses
         .iter()
-        .filter(|usage| usage.origin_scope == OriginScope::Main)
-    {
-        capability_names.insert(usage.exact_observed_name.as_str());
-        if let Some(canonical_name) = capabilities.get(&usage.capability_key) {
-            capability_names.insert(*canonical_name);
-        }
-    }
-    let capability_text = capability_names.into_iter().collect::<Vec<_>>().join(" ");
+        .map(|usage| CapabilityInput {
+            origin_scope: match usage.origin_scope {
+                OriginScope::Main => AnalyzerOriginScope::Main,
+                OriginScope::Subagent => AnalyzerOriginScope::Subagent,
+                OriginScope::Unknown => AnalyzerOriginScope::Unknown,
+            },
+            turn_ordinal: usage.turn_ordinal,
+            capability_key: usage.capability_key.as_bytes(),
+            canonical_name: capabilities
+                .get(&usage.capability_key)
+                .map(|capability| capability.canonical_name.as_str()),
+        })
+        .collect::<Vec<_>>();
+    let legacy_capability = capability_inputs
+        .iter()
+        .filter(|input| input.origin_scope == AnalyzerOriginScope::Main)
+        .filter_map(|input| input.canonical_name)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let analyzed = analyze_document(&closure.turn.problem_text, &capability_inputs);
     let hard_sealed = hard_seal_event(&closure.turn, &facts.turn_evidence, events).is_some();
     let rollup = [RollupContribution {
         projection_name: TURN_SUMMARY_PROJECTION_NAME,
-        projection_version: ACTIVE_TURN_PROJECTION_VERSION,
+        projection_version: ACTIVE_TURN_SUMMARY_PROJECTION_VERSION,
         dimension: "session",
         bucket_key: facts.session.session_key.as_bytes(),
         metric: "hard-sealed-turn-count",
         value: 1,
         snapshot_seq,
     }];
-    upsert_turn_projection(
-        transaction,
-        &TurnProjection {
-            document: FtsDocument {
-                turn_id,
-                natural: &closure.turn.problem_text,
-                code: "",
-                capability: &capability_text,
+    let rollup_contributions = if hard_sealed { &rollup[..] } else { &[] };
+    match crate::search_projection::active_search_projection_version(transaction)? {
+        Some(crate::analyzer::SEARCH_PROJECTION_VERSION) => upsert_analyzed_turn_projection(
+            transaction,
+            &AnalyzedTurnProjection {
+                document: FtsDocument {
+                    turn_id,
+                    natural: &analyzed.natural.fts_text,
+                    code: &analyzed.code.fts_text,
+                    capability: &analyzed.capability.fts_text,
+                },
+                analyzer_diagnostics: &analyzed.diagnostics,
+                rollup_contributions,
             },
-            rollup_contributions: if hard_sealed { &rollup } else { &[] },
-        },
-    )?;
+        )?,
+        Some(1) => upsert_legacy_turn_projection(
+            transaction,
+            &TurnProjection {
+                document: FtsDocument {
+                    turn_id,
+                    natural: &closure.turn.problem_text,
+                    code: "",
+                    capability: &legacy_capability,
+                },
+                rollup_contributions,
+            },
+        )?,
+        _ => {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_PROJECTION_INVALID",
+                "no supported active Turn search projection is available",
+            ));
+        }
+    }
     Ok(())
 }
 

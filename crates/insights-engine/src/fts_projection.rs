@@ -1,3 +1,6 @@
+use crate::analyzer::{
+    AnalyzerDiagnostics, AnalyzerField, QueryTerm, analyzer_identity, is_encoded_term,
+};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value,
 };
@@ -65,6 +68,51 @@ pub struct DocumentFrequency {
     pub document_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsMatchExpression(String);
+
+impl FtsMatchExpression {
+    pub fn from_query_terms(terms: &[QueryTerm]) -> rusqlite::Result<Self> {
+        if terms.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "FTS MATCH requires at least one analyzed field-term".to_owned(),
+            ));
+        }
+        Self::from_field_terms(terms.iter().map(|term| {
+            let field = match term.field {
+                AnalyzerField::Natural => FtsField::Natural,
+                AnalyzerField::Code => FtsField::Code,
+                AnalyzerField::Capability => FtsField::Capability,
+            };
+            (field, term.encoded.as_str())
+        }))
+    }
+
+    pub fn from_field_terms<'a>(
+        terms: impl IntoIterator<Item = (FtsField, &'a str)>,
+    ) -> rusqlite::Result<Self> {
+        let mut expression = Vec::new();
+        for (field, encoded) in terms {
+            if !is_encoded_term(encoded) {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "FTS MATCH accepts only analyzer-encoded terms".to_owned(),
+                ));
+            }
+            expression.push(format!("{}:{encoded}", field.as_str()));
+        }
+        if expression.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "FTS MATCH requires at least one analyzed field-term".to_owned(),
+            ));
+        }
+        Ok(Self(expression.join(" OR ")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FieldPresence {
     natural: bool,
@@ -118,7 +166,34 @@ pub fn initialize_fts_projection_schema(connection: &Connection) -> rusqlite::Re
            detail=full
          );
          CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts_vocab USING
-           fts5vocab(turns_fts, 'col');",
+           fts5vocab(turns_fts, 'col');
+         CREATE TABLE IF NOT EXISTS fts_analyzer_identity (
+           singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+           projection_name TEXT NOT NULL,
+           projection_version INTEGER NOT NULL CHECK(projection_version > 0),
+           analyzer_version TEXT NOT NULL,
+           analyzer_capability TEXT NOT NULL,
+           pulldown_cmark_version TEXT NOT NULL,
+           unicode_normalization_version TEXT NOT NULL,
+           unicode_normalization_unicode_version TEXT NOT NULL,
+           rust_unicode_version TEXT NOT NULL,
+           codec_version TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS turn_analyzer_diagnostics (
+           turn_id INTEGER PRIMARY KEY CHECK(turn_id > 0),
+           input_token_count INTEGER NOT NULL CHECK(input_token_count >= 0),
+           token_count INTEGER NOT NULL CHECK(token_count BETWEEN 0 AND 8192),
+           input_distinct_field_term_count INTEGER NOT NULL
+             CHECK(input_distinct_field_term_count >= 0),
+           distinct_field_term_count INTEGER NOT NULL
+             CHECK(distinct_field_term_count BETWEEN 0 AND 4096),
+           capability_input_count INTEGER NOT NULL CHECK(capability_input_count >= 0),
+           capability_token_count INTEGER NOT NULL
+             CHECK(capability_token_count BETWEEN 0 AND 256),
+           token_truncated INTEGER NOT NULL CHECK(token_truncated IN (0, 1)),
+           distinct_truncated INTEGER NOT NULL CHECK(distinct_truncated IN (0, 1)),
+           capability_truncated INTEGER NOT NULL CHECK(capability_truncated IN (0, 1))
+         );",
     )?;
     connection.execute(
         "INSERT INTO turns_fts(turns_fts, rank) VALUES('automerge', 4)",
@@ -132,6 +207,21 @@ pub fn initialize_fts_projection_schema(connection: &Connection) -> rusqlite::Re
 }
 
 pub fn upsert_fts_document(
+    transaction: &Transaction<'_>,
+    document: &FtsDocument<'_>,
+) -> rusqlite::Result<()> {
+    validate_document_tokens(document)?;
+    upsert_fts_document_unchecked(transaction, document)
+}
+
+pub(crate) fn upsert_legacy_fts_document(
+    transaction: &Transaction<'_>,
+    document: &FtsDocument<'_>,
+) -> rusqlite::Result<()> {
+    upsert_fts_document_unchecked(transaction, document)
+}
+
+fn upsert_fts_document_unchecked(
     transaction: &Transaction<'_>,
     document: &FtsDocument<'_>,
 ) -> rusqlite::Result<()> {
@@ -173,6 +263,121 @@ pub fn upsert_fts_document(
     update_field_stats(transaction, previous.unwrap_or_default(), current)
 }
 
+pub fn upsert_analyzed_fts_document(
+    transaction: &Transaction<'_>,
+    document: &FtsDocument<'_>,
+    diagnostics: &AnalyzerDiagnostics,
+) -> rusqlite::Result<()> {
+    ensure_analyzer_identity(transaction)?;
+    upsert_fts_document(transaction, document)?;
+    transaction.execute(
+        "INSERT INTO turn_analyzer_diagnostics(
+           turn_id, input_token_count, token_count,
+           input_distinct_field_term_count, distinct_field_term_count,
+           capability_input_count, capability_token_count,
+           token_truncated, distinct_truncated, capability_truncated
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(turn_id) DO UPDATE SET
+           input_token_count=excluded.input_token_count,
+           token_count=excluded.token_count,
+           input_distinct_field_term_count=excluded.input_distinct_field_term_count,
+           distinct_field_term_count=excluded.distinct_field_term_count,
+           capability_input_count=excluded.capability_input_count,
+           capability_token_count=excluded.capability_token_count,
+           token_truncated=excluded.token_truncated,
+           distinct_truncated=excluded.distinct_truncated,
+           capability_truncated=excluded.capability_truncated",
+        params![
+            document.turn_id,
+            diagnostics.input_token_count as i64,
+            diagnostics.token_count as i64,
+            diagnostics.input_distinct_field_term_count as i64,
+            diagnostics.distinct_field_term_count as i64,
+            diagnostics.capability_input_count as i64,
+            diagnostics.capability_token_count as i64,
+            diagnostics.token_truncated,
+            diagnostics.distinct_truncated,
+            diagnostics.capability_truncated,
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_analyzer_identity(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    let identity = analyzer_identity();
+    let stored = transaction
+        .query_row(
+            "SELECT projection_name, projection_version, analyzer_version,
+                    analyzer_capability, pulldown_cmark_version,
+                    unicode_normalization_version,
+                    unicode_normalization_unicode_version,
+                    rust_unicode_version, codec_version
+             FROM fts_analyzer_identity WHERE singleton=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some(stored) = stored {
+        let matches = stored.0 == identity.search_projection_name
+            && stored.1 == identity.search_projection_version
+            && stored.2 == identity.analyzer_version
+            && stored.3 == identity.analyzer_capability
+            && stored.4 == identity.pulldown_cmark_version
+            && stored.5 == identity.unicode_normalization_version
+            && stored.6 == identity.unicode_normalization_unicode_version
+            && stored.7 == identity.rust_unicode_version
+            && stored.8 == identity.codec_version;
+        return matches.then_some(()).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(
+                "FTS analyzer identity mismatch requires projection rebuild".to_owned(),
+            )
+        });
+    }
+
+    let existing_rows: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turn_fts_documents LIMIT 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing_rows {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "legacy FTS rows require turn-search@2 projection rebuild".to_owned(),
+        ));
+    }
+    transaction.execute(
+        "INSERT INTO fts_analyzer_identity(
+           singleton, projection_name, projection_version, analyzer_version,
+           analyzer_capability, pulldown_cmark_version,
+           unicode_normalization_version, unicode_normalization_unicode_version,
+           rust_unicode_version, codec_version
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            identity.search_projection_name,
+            identity.search_projection_version,
+            identity.analyzer_version,
+            identity.analyzer_capability,
+            identity.pulldown_cmark_version,
+            identity.unicode_normalization_version,
+            identity.unicode_normalization_unicode_version,
+            identity.rust_unicode_version,
+            identity.codec_version,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn delete_fts_document(transaction: &Transaction<'_>, turn_id: i64) -> rusqlite::Result<bool> {
     let Some(previous) = read_presence(transaction, turn_id)? else {
         return Ok(false);
@@ -180,6 +385,10 @@ pub fn delete_fts_document(transaction: &Transaction<'_>, turn_id: i64) -> rusql
     transaction.execute("DELETE FROM turns_fts WHERE rowid=?1", params![turn_id])?;
     transaction.execute(
         "DELETE FROM turn_fts_documents WHERE turn_id=?1",
+        params![turn_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM turn_analyzer_diagnostics WHERE turn_id=?1",
         params![turn_id],
     )?;
     update_field_stats(transaction, previous, FieldPresence::default())?;
@@ -227,7 +436,7 @@ fn update_field_stats(
 
 pub fn search_fts(
     connection: &Connection,
-    match_expression: &str,
+    match_expression: &FtsMatchExpression,
     weights: Bm25Weights,
     limit: usize,
 ) -> rusqlite::Result<Vec<SearchHit>> {
@@ -251,7 +460,7 @@ pub fn search_fts(
                 weights.natural,
                 weights.code,
                 weights.capability,
-                match_expression,
+                match_expression.as_str(),
                 limit
             ],
             |row| {
@@ -262,6 +471,27 @@ pub fn search_fts(
             },
         )?
         .collect()
+}
+
+fn validate_document_tokens(document: &FtsDocument<'_>) -> rusqlite::Result<()> {
+    for (field, value) in [
+        (FtsField::Natural, document.natural),
+        (FtsField::Code, document.code),
+        (FtsField::Capability, document.capability),
+    ] {
+        if !valid_encoded_field(value) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "{} FTS field accepts only space-delimited analyzer tokens",
+                field.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_encoded_field(value: &str) -> bool {
+    value.is_empty()
+        || (value == value.trim() && !value.contains("  ") && value.split(' ').all(is_encoded_term))
 }
 
 pub fn df_parameter_tier(term_count: usize) -> Option<usize> {
@@ -348,11 +578,12 @@ fn df_lookup_parameters(terms: &[String], tier: usize, field: FtsField) -> Vec<V
 #[cfg(test)]
 mod tests {
     use super::{
-        Bm25Weights, DF_PARAMETER_TIERS, FtsDocument, FtsField, REQUIRED_DF_SEEK_INDEX,
-        delete_fts_document, explain_df_lookup_plan, fts5_virtual_table_index,
-        initialize_fts_projection_schema, lookup_field_document_frequencies, search_fts,
-        upsert_fts_document,
+        Bm25Weights, DF_PARAMETER_TIERS, FtsDocument, FtsField, FtsMatchExpression,
+        REQUIRED_DF_SEEK_INDEX, delete_fts_document, explain_df_lookup_plan,
+        fts5_virtual_table_index, initialize_fts_projection_schema,
+        lookup_field_document_frequencies, search_fts, upsert_fts_document,
     };
+    use crate::analyzer::encode_term;
     use rusqlite::{Connection, params};
 
     fn connection() -> Connection {
@@ -367,16 +598,47 @@ mod tests {
     fn insert_documents(connection: &mut Connection, documents: &[FtsDocument<'_>]) {
         let transaction = connection.transaction().unwrap();
         for document in documents {
-            upsert_fts_document(&transaction, document).unwrap();
+            let natural = encode_text(document.natural);
+            let code = encode_text(document.code);
+            let capability = encode_text(document.capability);
+            upsert_fts_document(
+                &transaction,
+                &FtsDocument {
+                    turn_id: document.turn_id,
+                    natural: &natural,
+                    code: &code,
+                    capability: &capability,
+                },
+            )
+            .unwrap();
         }
         transaction.commit().unwrap();
+    }
+
+    fn encode_text(value: &str) -> String {
+        value
+            .split_ascii_whitespace()
+            .map(encode_term)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn match_fields(logical: &str, fields: &[FtsField]) -> FtsMatchExpression {
+        let encoded = encode_term(logical);
+        FtsMatchExpression::from_field_terms(
+            fields
+                .iter()
+                .copied()
+                .map(|field| (field, encoded.as_str())),
+        )
+        .unwrap()
     }
 
     fn matching_count(connection: &Connection, query: &str) -> i64 {
         connection
             .query_row(
                 "SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH ?1",
-                params![query],
+                params![encode_term(query)],
                 |row| row.get(0),
             )
             .unwrap()
@@ -409,10 +671,11 @@ mod tests {
             ],
         );
 
-        let natural_weighted = search_fts(&connection, "alpha", Bm25Weights::default(), 3).unwrap();
+        let alpha = match_fields("alpha", &FtsField::ALL);
+        let natural_weighted = search_fts(&connection, &alpha, Bm25Weights::default(), 3).unwrap();
         let capability_weighted = search_fts(
             &connection,
-            "alpha",
+            &alpha,
             Bm25Weights {
                 natural: 2.0,
                 code: 4.0,
@@ -546,18 +809,18 @@ mod tests {
         let frequencies = lookup_field_document_frequencies(
             &connection,
             FtsField::Natural,
-            &["alpha".to_owned(), "beta".to_owned()],
+            &[encode_term("alpha"), encode_term("beta")],
         )
         .unwrap();
         assert_eq!(
             frequencies,
             vec![
                 super::DocumentFrequency {
-                    term: "alpha".to_owned(),
+                    term: encode_term("alpha"),
                     document_count: 2,
                 },
                 super::DocumentFrequency {
-                    term: "beta".to_owned(),
+                    term: encode_term("beta"),
                     document_count: 1,
                 },
             ]
@@ -626,10 +889,9 @@ mod tests {
             .unwrap();
         assert_eq!(columns, ["natural", "code", "capability"]);
 
-        for forbidden_column in ["answer", "excerpt"] {
-            let query = format!("{forbidden_column}:privateanswer");
-            assert!(search_fts(&connection, &query, Bm25Weights::default(), 10).is_err());
-        }
+        let expression = match_fields("privateanswer", &FtsField::ALL);
+        assert!(!expression.as_str().contains("answer:"));
+        assert!(!expression.as_str().contains("excerpt:"));
     }
 
     #[test]

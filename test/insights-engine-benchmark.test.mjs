@@ -10,8 +10,10 @@ import {
   createBenchmarkCorpus,
   createCapacityBenchmarkPlan,
   evaluateCapacityGates,
+  evaluateInsightsQueryGates,
   runInsightsCapacityBenchmark,
   runInsightsEngineBenchmark,
+  runInsightsQueryBenchmark,
   runInsightsRawBackfillBenchmark,
   sqliteFileFormatPages,
 } from "../scripts/benchmark-insights-engine.mjs";
@@ -62,6 +64,9 @@ test("capacity corpus streams deterministic high-density Facts with bounded rete
   const repeated = second.sessionAt(0);
   assert.equal(firstSession.canonical, repeated.canonical);
   assert.equal(firstSession.delta.turns.length, 4);
+  assert.equal(firstSession.delta.session.dedupeFingerprint === null, false);
+  assert.equal(firstSession.delta.session.duplicateConfidence, "strong");
+  assert.equal(firstSession.delta.session.dedupeEvidenceEventKeys.length, 3);
   assert.equal(firstSession.delta.sourceRecords.length, 4 * 9);
   assert.equal(firstSession.delta.evidenceEvents.length, 4 * 9);
   assert.equal(firstSession.delta.turnEvidence.length, 4 * 3);
@@ -106,6 +111,89 @@ test("capacity gates mechanically require packed Facts only above frozen limits"
     factBytes: 1,
     steadyStateBytes: 8 * gib + 1,
   }).packedFactsRequired, true);
+});
+
+test("query gates enforce both path modes and the frozen current/long-term budgets", async () => {
+  const group = (pathLimit, queryCount, p95, p99, overrides = {}) => ({
+    pathLimit,
+    queryCount,
+    warmupCount: 100,
+    roundTripMs: { p95, p99 },
+    emptyResultCount: 0,
+    insufficientSampleCount: 0,
+    evidencePathFamilyCount: pathLimit === 0 ? 0 : queryCount,
+    ...overrides,
+  });
+  const current = evaluateInsightsQueryGates({
+    turnCount: 25_000,
+    groups: [group(0, 1_000, 99.9, 249.9), group(10, 1_000, 80, 200)],
+    sidecarPeakBytes: 96 * 1024 * 1024 - 1,
+    detailFullFtsBytes: 400 * 1024 * 1024 - 1,
+    derivedStateBytes: 1024 ** 3 - 1,
+  });
+  assert.equal(current.budget.name, "current-25k");
+  assert.equal(current.acceptanceCorpusExact, true);
+  assert.equal(current.warmupCountAtLeast100, true);
+  assert.equal(current.allQueriesReturnedResults, true);
+  assert.equal(current.toolPathWorkloadComplete, true);
+  assert.equal(current.allMeasuredQueryGatesPassed, true);
+
+  const longTerm = evaluateInsightsQueryGates({
+    turnCount: 250_000,
+    groups: [group(0, 999, 200, 499), group(10, 1_000, 199, 500)],
+    sidecarPeakBytes: 128 * 1024 * 1024,
+    detailFullFtsBytes: 400 * 1024 * 1024,
+    derivedStateBytes: 8 * 1024 ** 3,
+  });
+  assert.equal(longTerm.budget.name, "long-term-250k");
+  assert.equal(longTerm.queryCountAtLeast1000, false);
+  assert.equal(longTerm.allLatencyWithinLimit, false);
+  assert.equal(longTerm.sidecarRssWithinLimit, false);
+  assert.equal(longTerm.detailFullFtsWithinLimit, false);
+  assert.equal(longTerm.derivedStateWithinLimit, false);
+  assert.equal(longTerm.allMeasuredQueryGatesPassed, false);
+  assert.throws(
+    () => evaluateInsightsQueryGates({
+      turnCount: 25_000,
+      groups: [group(0, 1_000, 1, 1), group(5, 1_000, 1, 1)],
+      sidecarPeakBytes: 1,
+      detailFullFtsBytes: 1,
+      derivedStateBytes: 1,
+    }),
+    /pathLimit=0 and pathLimit=10/u,
+  );
+  await assert.rejects(
+    runInsightsQueryBenchmark({ turnCount: 25_000, queryCount: 999 }),
+    /at least 1000 measured queries per path mode/u,
+  );
+  await assert.rejects(
+    runInsightsQueryBenchmark({ turnCount: 24_999, formal: true }),
+    /exactly 25000 or 250000 Turns/u,
+  );
+  await assert.rejects(
+    runInsightsQueryBenchmark({ turnCount: 25_000, turnsPerSession: 50, formal: true }),
+    /exactly 100 Turns per session/u,
+  );
+  await assert.rejects(
+    runInsightsQueryBenchmark({
+      turnCount: 25_000,
+      queryCount: 1_000,
+      warmupCount: 100,
+      seed: "wrong-formal-seed",
+      formal: true,
+    }),
+    /requires seed threadshare-insights-query-25k-v1/u,
+  );
+  await assert.rejects(
+    runInsightsQueryBenchmark({
+      turnCount: 25_000,
+      queryCount: 1_000,
+      warmupCount: 99,
+      seed: "threadshare-insights-query-25k-v1",
+      formal: true,
+    }),
+    /at least 100 warmup queries per path mode/u,
+  );
 });
 
 test("SQLite page accounting includes the lock-byte and freelist pages outside dbstat", () => {
@@ -270,6 +358,20 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
     report.rustSidecar.query.measurementPhase,
     "before-vacuum-capacity-maintenance",
   );
+  const search = report.rustSidecar.search;
+  assert.deepEqual(search.groups.map(({ pathLimit }) => pathLimit), [0, 10]);
+  assert.equal(search.groups.every(({ queryCount }) => queryCount === 8), true);
+  assert.equal(search.groups.every(({ emptyResultCount }) => emptyResultCount === 0), true);
+  assert.equal(search.groups.every(({ roundTripMs }) => roundTripMs.count === 8), true);
+  assert.equal(
+    search.groups.every(({ diagnosticStages }) =>
+      diagnosticStages.postingAndFilterCombined.attribution.includes("not expose")),
+    true,
+  );
+  assert.equal(search.rss.sidecarPeakBytes > 0, true);
+  assert.equal(search.storage.detailFullFtsBytes, audit.categories.fts.bytes);
+  assert.equal(search.gates.toolPathWorkloadComplete, false);
+  assert.equal(search.gates.allMeasuredQueryGatesPassed, false);
   assert.equal(report.rustSidecar.startup.emptyDatabase.readyMs >= 0, true);
   const populatedStartup = report.rustSidecar.startup.populatedDatabase;
   assert.equal(populatedStartup.readyMs >= 0, true);
@@ -297,6 +399,44 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   });
   assert.equal(report.mutations.corpus.turns, report.corpus.turns);
   assert.equal(report.mutations.corpus.sessions, report.corpus.sessions);
+});
+
+test("small ITEM-5 benchmark measures real Rust search with and without Tool paths", {
+  timeout: 120_000,
+  skip: Number(process.versions.node.split(".")[0]) < 22 || !existsSync(DEBUG_ENGINE_PATH)
+    ? "requires Node 22.5+ and a debug Insights Engine build"
+    : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-query-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const report = await runInsightsQueryBenchmark({
+    turnCount: 600,
+    turnsPerSession: 100,
+    queryCount: 8,
+    warmupCount: 2,
+    seed: "query-e2e-test",
+    binaryPath: DEBUG_ENGINE_PATH,
+    workingDirectory: directory,
+  });
+
+  assert.equal(report.format, "threadshare-insights-query-benchmark@v1");
+  assert.equal(report.measuredScope, "item-5-rust-search-and-tool-path-query");
+  assert.equal(report.corpus.turns, 600);
+  assert.deepEqual(report.query.groups.map(({ pathLimit }) => pathLimit), [0, 10]);
+  assert.equal(report.query.groups.every(({ resultCount }) => resultCount > 0), true);
+  assert.equal(report.query.groups[0].evidencePathFamilyCount, 0);
+  assert.equal(report.query.groups[1].insufficientSampleCount, 0);
+  assert.equal(report.query.groups[1].evidencePathFamilyCount > 0, true);
+  assert.equal(
+    report.query.groups.every(({ resultDigest }) => /^[0-9a-f]{64}$/u.test(resultDigest)),
+    true,
+  );
+  assert.equal(report.query.stageAttribution.includes("not falsely separated"), true);
+  assert.equal(report.query.storage.detailFullFtsBytes > 0, true);
+  assert.equal(report.gates.toolPathWorkloadComplete, true);
+  assert.equal(report.gates.allLatencyWithinLimit, true);
+  assert.equal(report.gates.queryCountAtLeast1000, false);
+  assert.equal(report.gates.allMeasuredQueryGatesPassed, false);
 });
 
 test("small raw benchmark crosses discovery, Adapter, worker, Engine, and append freshness", {

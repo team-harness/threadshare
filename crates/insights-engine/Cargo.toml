@@ -9,9 +9,11 @@ publish = false
 panic = "unwind"
 
 [dependencies]
+fs2 = "=0.4.3"
 hex = "0.4.3"
+pulldown-cmark = "=0.13.4"
 rusqlite = { version = "=0.40.2", features = ["bundled-full"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.9"
-unicode-normalization = "0.1.24"
+unicode-normalization = "=0.1.25"

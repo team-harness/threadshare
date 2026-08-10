@@ -17,6 +17,10 @@ use threadshare_insights_engine::retry_projection::{
     RETRY_PROJECTION_NAME, active_retry_summaries, advance_retry_projection_build,
     begin_retry_projection_build, catch_up_retry_projection,
 };
+use threadshare_insights_engine::search_projection::{
+    active_search_projection_version, advance_search_projection_build, catch_up_search_projection,
+    ensure_search_projection,
+};
 use threadshare_insights_engine::source_state::{PurgeState, SourceStatePage};
 use threadshare_insights_engine::storage::EngineStorage;
 use threadshare_insights_engine::{hash_key, try_canonical_json};
@@ -501,6 +505,34 @@ fn prepare_retry_switch(path: &Path, switch_version_two: bool) {
     }
 }
 
+fn prepare_search_switch(path: &Path, switch_version_two: bool) {
+    apply_fixture(path);
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "DELETE FROM projection_state
+             WHERE name='turn-search' AND version=2;
+             INSERT INTO projection_state(
+               name,version,input_fact_schema_version,root_kind,
+               base_snapshot_seq,watermark,status,error_digest
+             ) VALUES ('turn-search',1,1,'turn',0,1,'active',NULL);",
+        )
+        .unwrap();
+    ensure_search_projection(&mut connection).unwrap();
+    for _ in 0..4 {
+        if advance_search_projection_build(&mut connection, 256)
+            .unwrap()
+            .base_complete
+        {
+            break;
+        }
+    }
+    if switch_version_two {
+        let progress = catch_up_search_projection(&mut connection, 256).unwrap();
+        assert_eq!(progress.status, "active");
+    }
+}
+
 fn prepare_pending_purge(path: &Path) {
     apply_fixture(path);
     let mut storage = EngineStorage::open(path).unwrap();
@@ -587,6 +619,10 @@ fn crash_worker() {
         "retry-switch" => {
             let mut connection = Connection::open(path).unwrap();
             catch_up_retry_projection(&mut connection, 2, 256).unwrap();
+        }
+        "search-switch" => {
+            let mut connection = Connection::open(path).unwrap();
+            catch_up_search_projection(&mut connection, 256).unwrap();
         }
         "purge" => {
             let mut storage = EngineStorage::open(&path).unwrap();
@@ -699,6 +735,59 @@ fn retry_projection_shadow_switch_rolls_back_atomically_and_recovers_to_clean_sn
         vec![(1, "active".to_owned()), (2, "building".to_owned())]
     );
     activate_retry_projection(&mut connection, 2);
+    drop(connection);
+
+    assert_eq!(logical_snapshot(&recovered.path), expected);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn search_projection_shadow_switch_rolls_back_atomically_and_recovers_to_clean_snapshot() {
+    let clean = TemporaryDatabase::new("search-clean");
+    prepare_search_switch(&clean.path, true);
+    let expected = logical_snapshot(&clean.path);
+
+    let recovered = TemporaryDatabase::new("search-switch");
+    prepare_search_switch(&recovered.path, false);
+    let failpoint = "before-search-projection-switch-commit";
+    let crashed = spawn_crash_worker(&recovered.path, "search-switch", failpoint);
+    assert_aborted(
+        &crashed.status,
+        crashed.crash_marker.as_deref(),
+        failpoint,
+        "search projection switch worker",
+    );
+
+    let mut connection = Connection::open(&recovered.path).unwrap();
+    assert_eq!(
+        active_search_projection_version(&connection).unwrap(),
+        Some(1)
+    );
+    let states = {
+        let mut statement = connection
+            .prepare(
+                "SELECT version,status FROM projection_state
+                 WHERE name='turn-search' ORDER BY version",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        states,
+        vec![(1, "active".to_owned()), (2, "building".to_owned())]
+    );
+    assert_eq!(
+        catch_up_search_projection(&mut connection, 256)
+            .unwrap()
+            .status,
+        "active"
+    );
     drop(connection);
 
     assert_eq!(logical_snapshot(&recovered.path), expected);

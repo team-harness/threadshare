@@ -2,6 +2,10 @@ import { lstat, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInsightsEngineClient } from "./insights-engine-client.mjs";
+import {
+  ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
+  ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
+} from "./insights-engine-protocol.mjs";
 import { resolveInsightsPaths } from "./insights-paths.mjs";
 import { acquireInsightsWriterLock } from "./insights-writer-lock.mjs";
 
@@ -30,8 +34,8 @@ const STATUS_ENGINE_CONTRACT = Object.freeze({
   duplicatePolicyVersion: 1,
   factStorageProfile: "normalized-row-v1",
   storageSchemaVersion: 1,
-  projectionVersions: Object.freeze([]),
-  analyzerCapabilities: Object.freeze([]),
+  projectionVersions: ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
+  analyzerCapabilities: ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
   rankerVersion: 1,
 });
 

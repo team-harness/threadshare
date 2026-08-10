@@ -11,9 +11,11 @@ import {
   createListSourceStatesMessage,
   createReadEngineStatusMessage,
   createReadPurgeStatusMessage,
+  createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
   createRemoveSourceMessage,
   createRunPurgeMaintenanceMessage,
+  createSearchTurnsMessage,
   createSessionDeltaMessages,
   decodeSourceStateFromProtocol,
   encodeProtocolFrame,
@@ -71,6 +73,24 @@ function freezeEngineStatus(response) {
     storage: Object.freeze({ ...response.storage }),
     integrity: Object.freeze({ ...response.integrity }),
   });
+}
+
+function freezeProtocolValue(value) {
+  if (Array.isArray(value)) return Object.freeze(value.map(freezeProtocolValue));
+  if (value !== null && typeof value === "object") {
+    return Object.freeze(Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, freezeProtocolValue(item)]),
+    ));
+  }
+  return value;
+}
+
+function freezeSearchResults(response) {
+  return freezeProtocolValue(response);
+}
+
+function freezeEvidencePage(response) {
+  return freezeProtocolValue(response);
 }
 
 function disconnectedError(stderr, cause) {
@@ -534,6 +554,38 @@ class InsightsEngineClient {
     return operation;
   }
 
+  searchTurns(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#searchTurns(input, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readTurnEvidence(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#readTurnEvidence(input, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
   runPurgeMaintenance(input = {}, options = {}) {
     const limit = input.limit ?? 64;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
@@ -806,6 +858,46 @@ class InsightsEngineClient {
     );
     throwIfAborted(signal, this.#transport.stderr);
     return freezeEngineStatus(response);
+  }
+
+  async #searchTurns(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("searchTurns input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createSearchTurnsMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending SEARCH_TURNS", this.#timeoutMs);
+    const response = await this.#expect(
+      "TURN_SEARCH_RESULTS",
+      requestId,
+      {},
+      "waiting for TURN_SEARCH_RESULTS",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeSearchResults(response);
+  }
+
+  async #readTurnEvidence(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readTurnEvidence input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadTurnEvidenceMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending READ_TURN_EVIDENCE", this.#timeoutMs);
+    const response = await this.#expect(
+      "TURN_EVIDENCE_PAGE",
+      requestId,
+      {},
+      "waiting for TURN_EVIDENCE_PAGE",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeEvidencePage(response);
   }
 
   async #runPurgeMaintenance(limit, signal) {

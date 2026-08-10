@@ -1,5 +1,6 @@
 use crate::try_canonical_json;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Read, Write};
 
@@ -9,6 +10,20 @@ pub const PROTOCOL_FORMAT: &str = "threadshare-insights-protocol@v1";
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ENGINE_STATUS_PROJECTIONS: usize = 1_024;
+const MAX_QUERY_WIRE_BYTES: usize = MAX_FRAME_BYTES;
+const MAX_SEARCH_RESULTS: u64 = 200;
+const MAX_SEARCH_CANDIDATES: usize = 300;
+const MAX_PATH_FAMILIES: u64 = 20;
+const MAX_PATH_NODES: usize = 128;
+const MAX_SCORING_TERMS: usize = 32;
+const MAX_FILTER_KEYS: usize = 64;
+const MAX_FILTER_PROVIDERS: usize = 16;
+const MAX_SEARCH_EXCERPT_BYTES: usize = 512;
+const MAX_TURN_PROBLEM_BYTES: usize = 64 * 1_024;
+const MAX_TURN_ANSWER_BYTES: usize = 8 * 1_024;
+const MAX_EVIDENCE_PAGE_ENTRIES: u64 = 128;
+const MAX_CURSOR_BYTES: usize = 256;
+const MAX_PPM: u64 = 1_000_000;
 const WAL_PASSIVE_CHECKPOINT_BYTES: u64 = 64 * 1_024 * 1_024;
 const WAL_BACKPRESSURE_BYTES: u64 = 128 * 1_024 * 1_024;
 const COMMON_FIELDS: [&str; 3] = ["format", "type", "requestId"];
@@ -84,6 +99,10 @@ pub enum MessageKind {
     PurgeMaintenanceStatus,
     ReadEngineStatus,
     EngineStatus,
+    SearchTurns,
+    TurnSearchResults,
+    ReadTurnEvidence,
+    TurnEvidencePage,
     AbortSession,
     SessionAborted,
     Error,
@@ -115,6 +134,10 @@ impl MessageKind {
             Self::PurgeMaintenanceStatus => "PURGE_MAINTENANCE_STATUS",
             Self::ReadEngineStatus => "READ_ENGINE_STATUS",
             Self::EngineStatus => "ENGINE_STATUS",
+            Self::SearchTurns => "SEARCH_TURNS",
+            Self::TurnSearchResults => "TURN_SEARCH_RESULTS",
+            Self::ReadTurnEvidence => "READ_TURN_EVIDENCE",
+            Self::TurnEvidencePage => "TURN_EVIDENCE_PAGE",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
             Self::Error => "ERROR",
@@ -227,6 +250,104 @@ fn exact_object_keys(value: &Value, label: &str, required: &[&str]) -> Result<()
         }
     }
     Ok(())
+}
+
+fn bounded_string<'a>(
+    value: &'a Value,
+    label: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+    printable_ascii: bool,
+) -> Result<&'a str, ProtocolError> {
+    let text = value
+        .as_str()
+        .filter(|text| allow_empty || !text.is_empty())
+        .ok_or_else(|| invalid_frame(format!("{label} must be a string")))?;
+    if text.len() > max_bytes {
+        return Err(invalid_frame(format!("{label} exceeds its bounded limit")));
+    }
+    if printable_ascii && !text.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return Err(invalid_frame(format!(
+            "{label} must contain printable ASCII"
+        )));
+    }
+    Ok(text)
+}
+
+fn safe_integer_range(
+    value: &Value,
+    label: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, ProtocolError> {
+    value
+        .as_u64()
+        .filter(|number| *number >= minimum && *number <= maximum.min(MAX_SAFE_INTEGER))
+        .ok_or_else(|| invalid_frame(format!("{label} is outside its bounded range")))
+}
+
+fn boolean(value: &Value, label: &str) -> Result<bool, ProtocolError> {
+    value
+        .as_bool()
+        .ok_or_else(|| invalid_frame(format!("{label} must be boolean")))
+}
+
+fn enum_string<'a>(
+    value: &'a Value,
+    label: &str,
+    allowed: &[&str],
+) -> Result<&'a str, ProtocolError> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| invalid_frame(format!("{label} is invalid")))?;
+    if !allowed.contains(&text) {
+        return Err(invalid_frame(format!("{label} is invalid")));
+    }
+    Ok(text)
+}
+
+fn nullable_hex64(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    if !value.is_null() {
+        hex64(value, label)?;
+    }
+    Ok(())
+}
+
+fn nullable_timestamp(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    if !value.is_null() {
+        bounded_string(value, label, 32, false, true)?;
+    }
+    Ok(())
+}
+
+fn sorted_bounded_strings<'a>(
+    value: &'a Value,
+    label: &str,
+    maximum: usize,
+    max_bytes: usize,
+    printable_ascii: bool,
+) -> Result<Vec<&'a str>, ProtocolError> {
+    let values = value
+        .as_array()
+        .filter(|values| values.len() <= maximum)
+        .ok_or_else(|| invalid_frame(format!("{label} exceeds its bounded limit")))?;
+    let mut result = Vec::with_capacity(values.len());
+    for (index, item) in values.iter().enumerate() {
+        let text = bounded_string(
+            item,
+            &format!("{label}[{index}]"),
+            max_bytes,
+            false,
+            printable_ascii,
+        )?;
+        if result.last().is_some_and(|previous| previous >= &text) {
+            return Err(invalid_frame(format!(
+                "{label} must be sorted and contain unique values"
+            )));
+        }
+        result.push(text);
+    }
+    Ok(result)
 }
 
 fn field<'a>(value: &'a Value, field_name: &str, label: &str) -> Result<&'a Value, ProtocolError> {
@@ -716,6 +837,1215 @@ fn validate_envelope(
     Ok(())
 }
 
+fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
+    const FIELDS: [&str; 8] = [
+        "providers",
+        "projectKeys",
+        "observedAtOrAfterUnixMs",
+        "observedBeforeUnixMs",
+        "toolCapabilityKeys",
+        "skillCapabilityKeys",
+        "resultEvidence",
+        "closureStates",
+    ];
+    exact_object_keys(value, "SEARCH_TURNS.filters", &FIELDS)?;
+    sorted_bounded_strings(
+        field(value, "providers", "SEARCH_TURNS.filters")?,
+        "SEARCH_TURNS.filters.providers",
+        MAX_FILTER_PROVIDERS,
+        64,
+        true,
+    )?;
+    for name in ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"] {
+        let label = format!("SEARCH_TURNS.filters.{name}");
+        let values = field(value, name, "SEARCH_TURNS.filters")?
+            .as_array()
+            .filter(|values| values.len() <= MAX_FILTER_KEYS)
+            .ok_or_else(|| invalid_frame(format!("{label} exceeds its bounded limit")))?;
+        let mut previous = None;
+        for (index, item) in values.iter().enumerate() {
+            let current = hex64(item, &format!("{label}[{index}]"))?;
+            if previous.is_some_and(|value| value >= current) {
+                return Err(invalid_frame(format!(
+                    "{label} must be sorted and contain unique values"
+                )));
+            }
+            previous = Some(current);
+        }
+    }
+    let after = field(value, "observedAtOrAfterUnixMs", "SEARCH_TURNS.filters")?;
+    let before = field(value, "observedBeforeUnixMs", "SEARCH_TURNS.filters")?;
+    let after = if after.is_null() {
+        None
+    } else {
+        Some(decimal_u64(after, "SEARCH_TURNS.filters.observedAtOrAfterUnixMs")?.1)
+    };
+    let before = if before.is_null() {
+        None
+    } else {
+        Some(decimal_u64(before, "SEARCH_TURNS.filters.observedBeforeUnixMs")?.1)
+    };
+    if after.zip(before).is_some_and(|(start, end)| start >= end) {
+        return Err(invalid_frame(
+            "SEARCH_TURNS.filters timestamp interval must be non-empty",
+        ));
+    }
+    for (name, allowed) in [
+        (
+            "resultEvidence",
+            &["abandoned", "provider-completed", "unknown"][..],
+        ),
+        ("closureStates", &["hard-sealed", "open", "quiescent"][..]),
+    ] {
+        let label = format!("SEARCH_TURNS.filters.{name}");
+        let values = sorted_bounded_strings(
+            field(value, name, "SEARCH_TURNS.filters")?,
+            &label,
+            3,
+            32,
+            true,
+        )?;
+        if values.iter().any(|item| !allowed.contains(item)) {
+            return Err(invalid_frame(format!("{label} is invalid")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_search_turns(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "query",
+            "filters",
+            "limit",
+            "pathLimit",
+            "nowUnixMs",
+            "quiescenceSeconds",
+        ],
+    )?;
+    bounded_string(
+        field(message, "query", kind.as_str())?,
+        "SEARCH_TURNS.query",
+        MAX_QUERY_WIRE_BYTES,
+        true,
+        false,
+    )?;
+    validate_search_filters(field(message, "filters", kind.as_str())?)?;
+    safe_integer_range(
+        field(message, "limit", kind.as_str())?,
+        "SEARCH_TURNS.limit",
+        1,
+        MAX_SEARCH_RESULTS,
+    )?;
+    safe_integer_range(
+        field(message, "pathLimit", kind.as_str())?,
+        "SEARCH_TURNS.pathLimit",
+        0,
+        MAX_PATH_FAMILIES,
+    )?;
+    decimal_u64(
+        field(message, "nowUnixMs", kind.as_str())?,
+        "SEARCH_TURNS.nowUnixMs",
+    )?;
+    safe_integer_range(
+        field(message, "quiescenceSeconds", kind.as_str())?,
+        "SEARCH_TURNS.quiescenceSeconds",
+        60,
+        86_400,
+    )?;
+    Ok(())
+}
+
+fn validate_search_snapshot(value: &Value) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        "TURN_SEARCH_RESULTS.snapshot",
+        &[
+            "snapshotSeq",
+            "projectionVersion",
+            "analyzerVersion",
+            "rankerVersion",
+        ],
+    )?;
+    decimal_u64(
+        field(value, "snapshotSeq", "TURN_SEARCH_RESULTS.snapshot")?,
+        "TURN_SEARCH_RESULTS.snapshot.snapshotSeq",
+    )?;
+    for name in ["projectionVersion", "analyzerVersion", "rankerVersion"] {
+        positive_safe_integer(
+            field(value, name, "TURN_SEARCH_RESULTS.snapshot")?,
+            &format!("TURN_SEARCH_RESULTS.snapshot.{name}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_scoring_term(value: &Value, index: usize) -> Result<(), ProtocolError> {
+    let label = format!("TURN_SEARCH_RESULTS.scoringTerms[{index}]");
+    exact_object_keys(
+        value,
+        &label,
+        &[
+            "logicalTerm",
+            "field",
+            "token",
+            "documentFrequency",
+            "fieldDocumentCount",
+        ],
+    )?;
+    bounded_string(
+        field(value, "logicalTerm", &label)?,
+        &format!("{label}.logicalTerm"),
+        512,
+        false,
+        false,
+    )?;
+    enum_string(
+        field(value, "field", &label)?,
+        &format!("{label}.field"),
+        &["capability", "code", "natural"],
+    )?;
+    bounded_string(
+        field(value, "token", &label)?,
+        &format!("{label}.token"),
+        512,
+        false,
+        true,
+    )?;
+    let frequency = decimal_u64(
+        field(value, "documentFrequency", &label)?,
+        &format!("{label}.documentFrequency"),
+    )?
+    .1;
+    let document_count = decimal_u64(
+        field(value, "fieldDocumentCount", &label)?,
+        &format!("{label}.fieldDocumentCount"),
+    )?
+    .1;
+    if frequency > document_count {
+        return Err(invalid_frame(format!(
+            "{label}.documentFrequency exceeds its field document count"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ppm(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    safe_integer_range(value, label, 0, MAX_PPM)?;
+    Ok(())
+}
+
+fn validate_search_score(
+    value: &Value,
+    label: &str,
+    scoring_term_count: usize,
+) -> Result<(), ProtocolError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "relevancePpm",
+            "bm25Rank",
+            "rankComponentPpm",
+            "idfCoveragePpm",
+            "exact",
+            "matchedTermIndexes",
+        ],
+    )?;
+    for name in ["relevancePpm", "rankComponentPpm", "idfCoveragePpm"] {
+        validate_ppm(field(value, name, label)?, &format!("{label}.{name}"))?;
+    }
+    safe_integer_range(
+        field(value, "bm25Rank", label)?,
+        &format!("{label}.bm25Rank"),
+        1,
+        300,
+    )?;
+    boolean(field(value, "exact", label)?, &format!("{label}.exact"))?;
+    let indexes = field(value, "matchedTermIndexes", label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_SCORING_TERMS)
+        .ok_or_else(|| {
+            invalid_frame(format!(
+                "{label}.matchedTermIndexes exceeds its bounded limit"
+            ))
+        })?;
+    let mut previous = None;
+    for (index, item) in indexes.iter().enumerate() {
+        let current = safe_integer_range(
+            item,
+            &format!("{label}.matchedTermIndexes[{index}]"),
+            0,
+            scoring_term_count.saturating_sub(1) as u64,
+        )?;
+        if scoring_term_count == 0 || previous.is_some_and(|value| value >= current) {
+            return Err(invalid_frame(format!(
+                "{label}.matchedTermIndexes must be sorted and unique"
+            )));
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+fn validate_search_result(
+    value: &Value,
+    index: usize,
+    scoring_term_count: usize,
+) -> Result<(), ProtocolError> {
+    let label = format!("TURN_SEARCH_RESULTS.results[{index}]");
+    exact_object_keys(
+        value,
+        &label,
+        &[
+            "turnKey",
+            "sessionKey",
+            "revision",
+            "provider",
+            "projectKey",
+            "observedTimestamp",
+            "problemExcerpt",
+            "problemTruncated",
+            "finalAnswerExcerpt",
+            "finalAnswerTruncated",
+            "closureState",
+            "resultEvidence",
+            "score",
+        ],
+    )?;
+    for name in ["turnKey", "sessionKey", "revision"] {
+        hex64(field(value, name, &label)?, &format!("{label}.{name}"))?;
+    }
+    bounded_string(
+        field(value, "provider", &label)?,
+        &format!("{label}.provider"),
+        64,
+        false,
+        true,
+    )?;
+    nullable_hex64(
+        field(value, "projectKey", &label)?,
+        &format!("{label}.projectKey"),
+    )?;
+    nullable_timestamp(
+        field(value, "observedTimestamp", &label)?,
+        &format!("{label}.observedTimestamp"),
+    )?;
+    bounded_string(
+        field(value, "problemExcerpt", &label)?,
+        &format!("{label}.problemExcerpt"),
+        MAX_SEARCH_EXCERPT_BYTES,
+        true,
+        false,
+    )?;
+    boolean(
+        field(value, "problemTruncated", &label)?,
+        &format!("{label}.problemTruncated"),
+    )?;
+    let final_excerpt = field(value, "finalAnswerExcerpt", &label)?;
+    if !final_excerpt.is_null() {
+        bounded_string(
+            final_excerpt,
+            &format!("{label}.finalAnswerExcerpt"),
+            MAX_SEARCH_EXCERPT_BYTES,
+            true,
+            false,
+        )?;
+    }
+    boolean(
+        field(value, "finalAnswerTruncated", &label)?,
+        &format!("{label}.finalAnswerTruncated"),
+    )?;
+    enum_string(
+        field(value, "closureState", &label)?,
+        &format!("{label}.closureState"),
+        &["hard-sealed", "open", "quiescent"],
+    )?;
+    enum_string(
+        field(value, "resultEvidence", &label)?,
+        &format!("{label}.resultEvidence"),
+        &["abandoned", "provider-completed", "unknown"],
+    )?;
+    validate_search_score(
+        field(value, "score", &label)?,
+        &format!("{label}.score"),
+        scoring_term_count,
+    )?;
+    Ok(())
+}
+
+fn validate_tool_state_counts(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        &["pending", "completed", "failed", "cancelled", "unknown"],
+    )?;
+    for name in ["pending", "completed", "failed", "cancelled", "unknown"] {
+        safe_integer_range(
+            field(value, name, label)?,
+            &format!("{label}.{name}"),
+            0,
+            25_600,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_path_family(value: &Value, index: usize) -> Result<(), ProtocolError> {
+    let label = format!("TURN_SEARCH_RESULTS.evidencePaths.families[{index}]");
+    exact_object_keys(
+        value,
+        &label,
+        &[
+            "fingerprint",
+            "nodes",
+            "truncated",
+            "bestRelevancePpm",
+            "turnCount",
+            "rawSessionCount",
+            "independentGroupCount",
+            "strongGroupCount",
+            "weakGroupCount",
+            "observedEofProvisionalGroupCount",
+            "unknownDedupeSessionCount",
+            "latestUnixMs",
+            "toolStateCounts",
+            "evidenceTurnKeys",
+        ],
+    )?;
+    hex64(
+        field(value, "fingerprint", &label)?,
+        &format!("{label}.fingerprint"),
+    )?;
+    let nodes = field(value, "nodes", &label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_PATH_NODES)
+        .ok_or_else(|| invalid_frame(format!("{label}.nodes exceeds its bounded limit")))?;
+    for (node_index, node) in nodes.iter().enumerate() {
+        let node_label = format!("{label}.nodes[{node_index}]");
+        exact_object_keys(node, &node_label, &["providerScopedName", "repeatBucket"])?;
+        bounded_string(
+            field(node, "providerScopedName", &node_label)?,
+            &format!("{node_label}.providerScopedName"),
+            640,
+            false,
+            false,
+        )?;
+        enum_string(
+            field(node, "repeatBucket", &node_label)?,
+            &format!("{node_label}.repeatBucket"),
+            &["1", "2-3", "4+"],
+        )?;
+    }
+    boolean(
+        field(value, "truncated", &label)?,
+        &format!("{label}.truncated"),
+    )?;
+    validate_ppm(
+        field(value, "bestRelevancePpm", &label)?,
+        &format!("{label}.bestRelevancePpm"),
+    )?;
+    let mut counts = Vec::new();
+    for name in [
+        "turnCount",
+        "rawSessionCount",
+        "independentGroupCount",
+        "strongGroupCount",
+        "weakGroupCount",
+        "observedEofProvisionalGroupCount",
+        "unknownDedupeSessionCount",
+    ] {
+        counts.push(safe_integer_range(
+            field(value, name, &label)?,
+            &format!("{label}.{name}"),
+            0,
+            MAX_SEARCH_RESULTS,
+        )?);
+    }
+    let [
+        turns,
+        sessions,
+        independent,
+        strong,
+        weak,
+        provisional,
+        unknown,
+    ] = counts.as_slice()
+    else {
+        unreachable!("fixed support count set")
+    };
+    if sessions > turns
+        || independent > sessions
+        || strong + weak != *independent
+        || provisional > independent
+        || unknown > sessions
+        || *turns < 5
+        || *independent < 3
+    {
+        return Err(invalid_frame(format!(
+            "{label} support counts are inconsistent"
+        )));
+    }
+    safe_integer_range(
+        field(value, "latestUnixMs", &label)?,
+        &format!("{label}.latestUnixMs"),
+        0,
+        MAX_SAFE_INTEGER,
+    )?;
+    validate_tool_state_counts(
+        field(value, "toolStateCounts", &label)?,
+        &format!("{label}.toolStateCounts"),
+    )?;
+    let keys = field(value, "evidenceTurnKeys", &label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_SEARCH_RESULTS as usize)
+        .ok_or_else(|| {
+            invalid_frame(format!(
+                "{label}.evidenceTurnKeys exceeds its bounded limit"
+            ))
+        })?;
+    let mut previous = None;
+    for (key_index, key) in keys.iter().enumerate() {
+        let current = hex64(key, &format!("{label}.evidenceTurnKeys[{key_index}]"))?;
+        if previous.is_some_and(|value| value >= current) {
+            return Err(invalid_frame(format!(
+                "{label}.evidenceTurnKeys must be sorted and unique"
+            )));
+        }
+        previous = Some(current);
+    }
+    Ok(())
+}
+
+fn validate_evidence_path_report(value: &Value) -> Result<(), ProtocolError> {
+    let label = "TURN_SEARCH_RESULTS.evidencePaths";
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "insufficientSample",
+            "pathsTruncated",
+            "rawMatchCount",
+            "eligibleTurnCount",
+            "rawSessionCount",
+            "independentGroupCount",
+            "strongGroupCount",
+            "weakGroupCount",
+            "observedEofProvisionalGroupCount",
+            "unknownDedupeCount",
+            "unknownDedupeSessionCount",
+            "families",
+        ],
+    )?;
+    let insufficient = boolean(
+        field(value, "insufficientSample", label)?,
+        &format!("{label}.insufficientSample"),
+    )?;
+    boolean(
+        field(value, "pathsTruncated", label)?,
+        &format!("{label}.pathsTruncated"),
+    )?;
+    let raw = safe_integer_range(
+        field(value, "rawMatchCount", label)?,
+        &format!("{label}.rawMatchCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let eligible = safe_integer_range(
+        field(value, "eligibleTurnCount", label)?,
+        &format!("{label}.eligibleTurnCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let raw_sessions = safe_integer_range(
+        field(value, "rawSessionCount", label)?,
+        &format!("{label}.rawSessionCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let independent = safe_integer_range(
+        field(value, "independentGroupCount", label)?,
+        &format!("{label}.independentGroupCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let strong = safe_integer_range(
+        field(value, "strongGroupCount", label)?,
+        &format!("{label}.strongGroupCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let weak = safe_integer_range(
+        field(value, "weakGroupCount", label)?,
+        &format!("{label}.weakGroupCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let provisional = safe_integer_range(
+        field(value, "observedEofProvisionalGroupCount", label)?,
+        &format!("{label}.observedEofProvisionalGroupCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let unknown = safe_integer_range(
+        field(value, "unknownDedupeCount", label)?,
+        &format!("{label}.unknownDedupeCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let unknown_sessions = safe_integer_range(
+        field(value, "unknownDedupeSessionCount", label)?,
+        &format!("{label}.unknownDedupeSessionCount"),
+        0,
+        MAX_SEARCH_RESULTS,
+    )?;
+    if eligible > raw
+        || raw_sessions > eligible
+        || independent > raw_sessions
+        || strong + weak != independent
+        || provisional > independent
+        || unknown > eligible
+        || unknown_sessions > unknown
+        || independent + unknown_sessions > raw_sessions
+    {
+        return Err(invalid_frame(format!(
+            "{label} aggregate counts are inconsistent"
+        )));
+    }
+    let families = field(value, "families", label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_PATH_FAMILIES as usize)
+        .ok_or_else(|| invalid_frame(format!("{label}.families exceeds its bounded limit")))?;
+    if insufficient && !families.is_empty() {
+        return Err(invalid_frame(format!(
+            "{label}.families must be empty for an insufficient sample"
+        )));
+    }
+    let mut evidence_count = 0_usize;
+    for (index, family) in families.iter().enumerate() {
+        validate_path_family(family, index)?;
+        evidence_count += field(family, "evidenceTurnKeys", "path family")?
+            .as_array()
+            .expect("validated evidence keys")
+            .len();
+    }
+    if evidence_count > MAX_SEARCH_RESULTS as usize {
+        return Err(invalid_frame(format!(
+            "{label} path evidence exceeds its bounded limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_query_diagnostic(value: &Value) -> Result<(), ProtocolError> {
+    let label = "TURN_SEARCH_RESULTS.diagnostic";
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "analyzeMicros",
+            "dfMicros",
+            "postingFilterMicros",
+            "rerankMicros",
+            "pathMicros",
+            "zeroDfTermCount",
+            "highFrequencyTermCount",
+            "truncatedTermCount",
+            "scoringTermCount",
+        ],
+    )?;
+    for name in [
+        "analyzeMicros",
+        "dfMicros",
+        "postingFilterMicros",
+        "rerankMicros",
+        "pathMicros",
+    ] {
+        safe_integer_range(
+            field(value, name, label)?,
+            &format!("{label}.{name}"),
+            0,
+            MAX_SAFE_INTEGER,
+        )?;
+    }
+    for name in [
+        "zeroDfTermCount",
+        "highFrequencyTermCount",
+        "truncatedTermCount",
+        "scoringTermCount",
+    ] {
+        safe_integer_range(
+            field(value, name, label)?,
+            &format!("{label}.{name}"),
+            0,
+            u16::MAX.into(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_search_trace(value: &Value) -> Result<(), ProtocolError> {
+    let label = "TURN_SEARCH_RESULTS.searchTrace";
+    exact_object_keys(value, label, &["candidateCount", "candidateTurnKeys"])?;
+    let count = safe_integer_range(
+        field(value, "candidateCount", label)?,
+        &format!("{label}.candidateCount"),
+        0,
+        MAX_SEARCH_CANDIDATES as u64,
+    )?;
+    let keys = field(value, "candidateTurnKeys", label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_SEARCH_CANDIDATES)
+        .ok_or_else(|| {
+            invalid_frame(format!(
+                "{label}.candidateTurnKeys exceeds its bounded limit"
+            ))
+        })?;
+    if count != keys.len() as u64 {
+        return Err(invalid_frame(format!(
+            "{label} candidate count is inconsistent"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for (index, key) in keys.iter().enumerate() {
+        let key = hex64(key, &format!("{label}.candidateTurnKeys[{index}]"))?;
+        if !seen.insert(key) {
+            return Err(invalid_frame(format!(
+                "{label}.candidateTurnKeys contains a duplicate"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_turn_search_results(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "snapshot",
+            "scoringTerms",
+            "results",
+            "evidencePaths",
+            "diagnostic",
+            "searchTrace",
+        ],
+    )?;
+    validate_search_snapshot(field(message, "snapshot", kind.as_str())?)?;
+    let terms = field(message, "scoringTerms", kind.as_str())?
+        .as_array()
+        .filter(|values| values.len() <= MAX_SCORING_TERMS)
+        .ok_or_else(|| {
+            invalid_frame("TURN_SEARCH_RESULTS.scoringTerms exceeds its bounded limit")
+        })?;
+    for (index, term) in terms.iter().enumerate() {
+        validate_scoring_term(term, index)?;
+    }
+    let results = field(message, "results", kind.as_str())?
+        .as_array()
+        .filter(|values| values.len() <= MAX_SEARCH_RESULTS as usize)
+        .ok_or_else(|| invalid_frame("TURN_SEARCH_RESULTS.results exceeds its bounded limit"))?;
+    for (index, result) in results.iter().enumerate() {
+        validate_search_result(result, index, terms.len())?;
+    }
+    validate_evidence_path_report(field(message, "evidencePaths", kind.as_str())?)?;
+    let diagnostic = field(message, "diagnostic", kind.as_str())?;
+    validate_query_diagnostic(diagnostic)?;
+    validate_search_trace(field(message, "searchTrace", kind.as_str())?)?;
+    if field(
+        diagnostic,
+        "scoringTermCount",
+        "TURN_SEARCH_RESULTS.diagnostic",
+    )?
+    .as_u64()
+        != Some(terms.len() as u64)
+    {
+        return Err(invalid_frame(
+            "TURN_SEARCH_RESULTS scoring term count is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_read_turn_evidence(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &["turnKey", "expectedRevision", "cursor", "limit"],
+    )?;
+    hex64(
+        field(message, "turnKey", kind.as_str())?,
+        "READ_TURN_EVIDENCE.turnKey",
+    )?;
+    nullable_hex64(
+        field(message, "expectedRevision", kind.as_str())?,
+        "READ_TURN_EVIDENCE.expectedRevision",
+    )?;
+    let cursor = field(message, "cursor", kind.as_str())?;
+    if !cursor.is_null() {
+        bounded_string(
+            cursor,
+            "READ_TURN_EVIDENCE.cursor",
+            MAX_CURSOR_BYTES,
+            false,
+            true,
+        )?;
+    }
+    safe_integer_range(
+        field(message, "limit", kind.as_str())?,
+        "READ_TURN_EVIDENCE.limit",
+        1,
+        MAX_EVIDENCE_PAGE_ENTRIES,
+    )?;
+    Ok(())
+}
+
+fn validate_evidence_turn(value: &Value) -> Result<(), ProtocolError> {
+    let label = "TURN_EVIDENCE_PAGE.turn";
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "turnKey",
+            "revision",
+            "problemText",
+            "finalAnswerExcerpt",
+            "observedTimestamp",
+            "nextUserBoundary",
+            "providerTerminal",
+            "observedEofClosed",
+            "providerVisibility",
+            "factTruncation",
+        ],
+    )?;
+    hex64(field(value, "turnKey", label)?, &format!("{label}.turnKey"))?;
+    nullable_hex64(
+        field(value, "revision", label)?,
+        &format!("{label}.revision"),
+    )?;
+    bounded_string(
+        field(value, "problemText", label)?,
+        &format!("{label}.problemText"),
+        MAX_TURN_PROBLEM_BYTES,
+        true,
+        false,
+    )?;
+    let answer = field(value, "finalAnswerExcerpt", label)?;
+    if !answer.is_null() {
+        bounded_string(
+            answer,
+            &format!("{label}.finalAnswerExcerpt"),
+            MAX_TURN_ANSWER_BYTES,
+            true,
+            false,
+        )?;
+    }
+    nullable_timestamp(
+        field(value, "observedTimestamp", label)?,
+        &format!("{label}.observedTimestamp"),
+    )?;
+    boolean(
+        field(value, "nextUserBoundary", label)?,
+        &format!("{label}.nextUserBoundary"),
+    )?;
+    let terminal = field(value, "providerTerminal", label)?;
+    if !terminal.is_null() {
+        enum_string(
+            terminal,
+            &format!("{label}.providerTerminal"),
+            &["aborted", "completed"],
+        )?;
+    }
+    boolean(
+        field(value, "observedEofClosed", label)?,
+        &format!("{label}.observedEofClosed"),
+    )?;
+    enum_string(
+        field(value, "providerVisibility", label)?,
+        &format!("{label}.providerVisibility"),
+        &["active"],
+    )?;
+    sorted_bounded_strings(
+        field(value, "factTruncation", label)?,
+        &format!("{label}.factTruncation"),
+        64,
+        128,
+        true,
+    )?;
+    Ok(())
+}
+
+fn validate_nullable_digest_fields(
+    value: &Value,
+    label: &str,
+    names: &[&str],
+) -> Result<(), ProtocolError> {
+    for name in names {
+        nullable_hex64(field(value, name, label)?, &format!("{label}.{name}"))?;
+    }
+    Ok(())
+}
+
+fn validate_event_payload(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    let kind = field(value, "kind", label)?
+        .as_str()
+        .ok_or_else(|| invalid_frame(format!("{label}.kind is invalid")))?;
+    match kind {
+        "visible-message" => {
+            exact_object_keys(value, label, &["kind", "role"])?;
+            bounded_string(
+                field(value, "role", label)?,
+                &format!("{label}.role"),
+                128,
+                false,
+                true,
+            )?;
+        }
+        "capability-invocation" => {
+            exact_object_keys(
+                value,
+                label,
+                &[
+                    "kind",
+                    "capabilityKey",
+                    "correlationDigest",
+                    "inputFingerprint",
+                ],
+            )?;
+            hex64(
+                field(value, "capabilityKey", label)?,
+                &format!("{label}.capabilityKey"),
+            )?;
+            validate_nullable_digest_fields(
+                value,
+                label,
+                &["correlationDigest", "inputFingerprint"],
+            )?;
+        }
+        "capability-result" => {
+            exact_object_keys(
+                value,
+                label,
+                &[
+                    "kind",
+                    "correlationDigest",
+                    "providerState",
+                    "exitCode",
+                    "outputBytes",
+                    "durationMs",
+                ],
+            )?;
+            validate_nullable_digest_fields(value, label, &["correlationDigest"])?;
+            bounded_string(
+                field(value, "providerState", label)?,
+                &format!("{label}.providerState"),
+                128,
+                false,
+                true,
+            )?;
+            for name in ["exitCode", "outputBytes", "durationMs"] {
+                let item = field(value, name, label)?;
+                if !item.is_null() {
+                    decimal_u64(item, &format!("{label}.{name}"))?;
+                }
+            }
+        }
+        "skill-catalog-entry" => {
+            exact_object_keys(value, label, &["kind", "capabilityKey", "pathFingerprint"])?;
+            hex64(
+                field(value, "capabilityKey", label)?,
+                &format!("{label}.capabilityKey"),
+            )?;
+            nullable_hex64(
+                field(value, "pathFingerprint", label)?,
+                &format!("{label}.pathFingerprint"),
+            )?;
+        }
+        "skill-load" => {
+            exact_object_keys(
+                value,
+                label,
+                &["kind", "capabilityKey", "strength", "evidenceSource"],
+            )?;
+            hex64(
+                field(value, "capabilityKey", label)?,
+                &format!("{label}.capabilityKey"),
+            )?;
+            for name in ["strength", "evidenceSource"] {
+                bounded_string(
+                    field(value, name, label)?,
+                    &format!("{label}.{name}"),
+                    128,
+                    false,
+                    true,
+                )?;
+            }
+        }
+        "turn-lifecycle" => {
+            exact_object_keys(
+                value,
+                label,
+                &["kind", "lifecycleState", "providerTurnDigest"],
+            )?;
+            bounded_string(
+                field(value, "lifecycleState", label)?,
+                &format!("{label}.lifecycleState"),
+                128,
+                false,
+                true,
+            )?;
+            nullable_hex64(
+                field(value, "providerTurnDigest", label)?,
+                &format!("{label}.providerTurnDigest"),
+            )?;
+        }
+        "provider-status" => {
+            exact_object_keys(
+                value,
+                label,
+                &["kind", "statusKind", "providerState", "rolledBackTurnCount"],
+            )?;
+            for name in ["statusKind", "providerState"] {
+                bounded_string(
+                    field(value, name, label)?,
+                    &format!("{label}.{name}"),
+                    128,
+                    false,
+                    true,
+                )?;
+            }
+            let count = field(value, "rolledBackTurnCount", label)?;
+            if !count.is_null() {
+                decimal_u64(count, &format!("{label}.rolledBackTurnCount"))?;
+            }
+        }
+        _ => return Err(invalid_frame(format!("{label}.kind is invalid"))),
+    }
+    Ok(())
+}
+
+fn validate_evidence_event(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "eventKey",
+            "occurredTurnKey",
+            "linkedTurns",
+            "pointerKind",
+            "pointerContentIndex",
+            "pointerEventOrdinal",
+            "originScope",
+            "observedTimestamp",
+            "payload",
+        ],
+    )?;
+    hex64(
+        field(value, "eventKey", label)?,
+        &format!("{label}.eventKey"),
+    )?;
+    nullable_hex64(
+        field(value, "occurredTurnKey", label)?,
+        &format!("{label}.occurredTurnKey"),
+    )?;
+    let linked = field(value, "linkedTurns", label)?
+        .as_array()
+        .filter(|values| values.len() <= 512)
+        .ok_or_else(|| invalid_frame(format!("{label}.linkedTurns exceeds its bounded limit")))?;
+    for (index, link) in linked.iter().enumerate() {
+        let link_label = format!("{label}.linkedTurns[{index}]");
+        exact_object_keys(link, &link_label, &["turnKey", "role"])?;
+        hex64(
+            field(link, "turnKey", &link_label)?,
+            &format!("{link_label}.turnKey"),
+        )?;
+        bounded_string(
+            field(link, "role", &link_label)?,
+            &format!("{link_label}.role"),
+            64,
+            false,
+            true,
+        )?;
+    }
+    bounded_string(
+        field(value, "pointerKind", label)?,
+        &format!("{label}.pointerKind"),
+        128,
+        false,
+        true,
+    )?;
+    let content_index = field(value, "pointerContentIndex", label)?
+        .as_i64()
+        .filter(|number| i32::try_from(*number).is_ok())
+        .ok_or_else(|| invalid_frame(format!("{label}.pointerContentIndex is invalid")))?;
+    let _ = content_index;
+    safe_integer_range(
+        field(value, "pointerEventOrdinal", label)?,
+        &format!("{label}.pointerEventOrdinal"),
+        0,
+        u16::MAX.into(),
+    )?;
+    enum_string(
+        field(value, "originScope", label)?,
+        &format!("{label}.originScope"),
+        &["main", "subagent", "unknown"],
+    )?;
+    nullable_timestamp(
+        field(value, "observedTimestamp", label)?,
+        &format!("{label}.observedTimestamp"),
+    )?;
+    validate_event_payload(field(value, "payload", label)?, &format!("{label}.payload"))?;
+    Ok(())
+}
+
+fn validate_use_evidence(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    exact_object_keys(value, label, &["eventKey", "role"])?;
+    hex64(
+        field(value, "eventKey", label)?,
+        &format!("{label}.eventKey"),
+    )?;
+    enum_string(
+        field(value, "role", label)?,
+        &format!("{label}.role"),
+        &["corroboration", "invocation", "result"],
+    )?;
+    Ok(())
+}
+
+fn validate_capability_use(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "useKey",
+            "capabilityKey",
+            "provider",
+            "capabilityKind",
+            "canonicalName",
+            "turnOrdinal",
+            "exactObservedName",
+            "originScope",
+            "originFingerprint",
+            "inputFingerprint",
+            "providerTerminalState",
+            "strength",
+            "correlationDigest",
+            "evidence",
+        ],
+    )?;
+    for name in ["useKey", "capabilityKey"] {
+        hex64(field(value, name, label)?, &format!("{label}.{name}"))?;
+    }
+    bounded_string(
+        field(value, "provider", label)?,
+        &format!("{label}.provider"),
+        64,
+        false,
+        true,
+    )?;
+    enum_string(
+        field(value, "capabilityKind", label)?,
+        &format!("{label}.capabilityKind"),
+        &["skill", "tool"],
+    )?;
+    bounded_string(
+        field(value, "canonicalName", label)?,
+        &format!("{label}.canonicalName"),
+        512,
+        false,
+        false,
+    )?;
+    decimal_u64(
+        field(value, "turnOrdinal", label)?,
+        &format!("{label}.turnOrdinal"),
+    )?;
+    bounded_string(
+        field(value, "exactObservedName", label)?,
+        &format!("{label}.exactObservedName"),
+        512,
+        true,
+        false,
+    )?;
+    enum_string(
+        field(value, "originScope", label)?,
+        &format!("{label}.originScope"),
+        &["main", "subagent", "unknown"],
+    )?;
+    validate_nullable_digest_fields(
+        value,
+        label,
+        &["originFingerprint", "inputFingerprint", "correlationDigest"],
+    )?;
+    enum_string(
+        field(value, "providerTerminalState", label)?,
+        &format!("{label}.providerTerminalState"),
+        &["cancelled", "completed", "failed", "pending", "unknown"],
+    )?;
+    enum_string(
+        field(value, "strength", label)?,
+        &format!("{label}.strength"),
+        &["confirmed", "inferred", "observed"],
+    )?;
+    let evidence = field(value, "evidence", label)?
+        .as_array()
+        .filter(|values| values.len() <= 512)
+        .ok_or_else(|| invalid_frame(format!("{label}.evidence exceeds its bounded limit")))?;
+    for (index, link) in evidence.iter().enumerate() {
+        validate_use_evidence(link, &format!("{label}.evidence[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_evidence_entry(value: &Value, index: usize) -> Result<(), ProtocolError> {
+    let label = format!("TURN_EVIDENCE_PAGE.entries[{index}]");
+    exact_object_keys(value, &label, &["factKind", "fact"])?;
+    match field(value, "factKind", &label)?.as_str() {
+        Some("event") => {
+            validate_evidence_event(field(value, "fact", &label)?, &format!("{label}.fact"))
+        }
+        Some("capability-use") => {
+            validate_capability_use(field(value, "fact", &label)?, &format!("{label}.fact"))
+        }
+        _ => Err(invalid_frame(format!("{label}.factKind is invalid"))),
+    }
+}
+
+fn validate_turn_evidence_page(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &["snapshotSeq", "turn", "entries", "nextCursor"],
+    )?;
+    decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "TURN_EVIDENCE_PAGE.snapshotSeq",
+    )?;
+    validate_evidence_turn(field(message, "turn", kind.as_str())?)?;
+    let entries = field(message, "entries", kind.as_str())?
+        .as_array()
+        .filter(|values| values.len() <= MAX_EVIDENCE_PAGE_ENTRIES as usize)
+        .ok_or_else(|| invalid_frame("TURN_EVIDENCE_PAGE.entries exceeds its bounded limit"))?;
+    for (index, entry) in entries.iter().enumerate() {
+        validate_evidence_entry(entry, index)?;
+    }
+    let cursor = field(message, "nextCursor", kind.as_str())?;
+    if !cursor.is_null() {
+        bounded_string(
+            cursor,
+            "TURN_EVIDENCE_PAGE.nextCursor",
+            MAX_CURSOR_BYTES,
+            false,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, ProtocolError> {
     let root = object(message, "protocol message")?;
     if root.get("format").and_then(Value::as_str) != Some(PROTOCOL_FORMAT) {
@@ -756,6 +2086,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "PURGE_MAINTENANCE_STATUS" => MessageKind::PurgeMaintenanceStatus,
         "READ_ENGINE_STATUS" => MessageKind::ReadEngineStatus,
         "ENGINE_STATUS" => MessageKind::EngineStatus,
+        "SEARCH_TURNS" => MessageKind::SearchTurns,
+        "TURN_SEARCH_RESULTS" => MessageKind::TurnSearchResults,
+        "READ_TURN_EVIDENCE" => MessageKind::ReadTurnEvidence,
+        "TURN_EVIDENCE_PAGE" => MessageKind::TurnEvidencePage,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
         "ERROR" => MessageKind::Error,
@@ -1171,6 +2505,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             validate_envelope(message, kind, &[])?;
         }
         MessageKind::EngineStatus => validate_engine_status(message, kind)?,
+        MessageKind::SearchTurns => validate_search_turns(message, kind)?,
+        MessageKind::TurnSearchResults => validate_turn_search_results(message, kind)?,
+        MessageKind::ReadTurnEvidence => validate_read_turn_evidence(message, kind)?,
+        MessageKind::TurnEvidencePage => validate_turn_evidence_page(message, kind)?,
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
             decimal_u64(
@@ -1291,8 +2629,8 @@ pub fn accepted_contract_from_hello(message: &Value) -> Result<Value, ProtocolEr
             == Some(1)
         && contract.get("factStorageProfile").and_then(Value::as_str) == Some("normalized-row-v1")
         && contract.get("storageSchemaVersion").and_then(Value::as_u64) == Some(1)
-        && contract.get("projectionVersions") == Some(&json!([]))
-        && contract.get("analyzerCapabilities") == Some(&json!([]))
+        && contract.get("projectionVersions") == Some(&json!(["turn-search@2", "turn-summary@1"]))
+        && contract.get("analyzerCapabilities") == Some(&json!(["mixed-cjk-code@1"]))
         && contract.get("rankerVersion").and_then(Value::as_u64) == Some(1);
     if !supported {
         return Err(unsupported_contract(
@@ -1549,6 +2887,64 @@ mod tests {
     }
 
     #[test]
+    fn accepts_overlapping_observed_eof_groups_without_double_counting_confidence() {
+        let mut message = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "turn-search-results")
+            .unwrap()
+            .message;
+        message["evidencePaths"] = json!({
+            "insufficientSample": false,
+            "pathsTruncated": false,
+            "rawMatchCount": 5,
+            "eligibleTurnCount": 5,
+            "rawSessionCount": 3,
+            "independentGroupCount": 3,
+            "strongGroupCount": 2,
+            "weakGroupCount": 1,
+            "observedEofProvisionalGroupCount": 1,
+            "unknownDedupeCount": 0,
+            "unknownDedupeSessionCount": 0,
+            "families": [{
+                "fingerprint": "1".repeat(64),
+                "nodes": [{"providerScopedName": "codex:Bash", "repeatBucket": "1"}],
+                "truncated": false,
+                "bestRelevancePpm": 900000,
+                "turnCount": 5,
+                "rawSessionCount": 3,
+                "independentGroupCount": 3,
+                "strongGroupCount": 2,
+                "weakGroupCount": 1,
+                "observedEofProvisionalGroupCount": 1,
+                "unknownDedupeSessionCount": 0,
+                "latestUnixMs": 1786320000000_u64,
+                "toolStateCounts": {
+                    "pending": 0,
+                    "completed": 5,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "unknown": 0
+                },
+                "evidenceTurnKeys": [
+                    "1".repeat(64), "2".repeat(64), "3".repeat(64),
+                    "4".repeat(64), "5".repeat(64)
+                ]
+            }]
+        });
+
+        assert_eq!(
+            validate_protocol_message(&message).unwrap(),
+            MessageKind::TurnSearchResults
+        );
+        message["evidencePaths"]["families"][0]["weakGroupCount"] = json!(2);
+        assert_eq!(
+            validate_protocol_message(&message).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
     fn rejects_oversized_length_before_allocating_payload() {
         let mut bytes = ((MAX_FRAME_BYTES + 1) as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(b"{}");
@@ -1642,6 +3038,10 @@ mod tests {
                 MessageKind::PurgeMaintenanceStatus,
                 MessageKind::ReadEngineStatus,
                 MessageKind::EngineStatus,
+                MessageKind::SearchTurns,
+                MessageKind::TurnSearchResults,
+                MessageKind::ReadTurnEvidence,
+                MessageKind::TurnEvidencePage,
                 MessageKind::SessionCommitted,
                 MessageKind::AbortSession,
                 MessageKind::SessionAborted,
@@ -1724,6 +3124,34 @@ mod tests {
         inconsistent["storage"]["walBytes"] = Value::String("134217728".to_owned());
         assert_eq!(
             validate_protocol_message(&inconsistent).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn keeps_search_domain_rejections_out_of_frame_validation() {
+        let mut request = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "search-turns")
+            .unwrap()
+            .message;
+        request["query"] = Value::String("界".repeat(2_731));
+        assert_eq!(
+            validate_protocol_message(&request).unwrap(),
+            MessageKind::SearchTurns
+        );
+
+        request["query"] = Value::String(String::new());
+        request["filters"]["providers"] = json!([]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap(),
+            MessageKind::SearchTurns
+        );
+
+        request["filters"]["providers"] = json!(["codex", "codex"]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap_err().code,
             "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
         );
     }

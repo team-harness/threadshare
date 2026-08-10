@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   dedupe_closure TEXT,
   duplicate_policy_version INTEGER NOT NULL CHECK(duplicate_policy_version=1)
 );
+CREATE INDEX IF NOT EXISTS sessions_query_filters
+  ON sessions(eligibility, session_scope, provider, project_key, session_id);
+CREATE INDEX IF NOT EXISTS sessions_dedupe_support
+  ON sessions(
+    duplicate_group_key, eligibility, session_scope, duplicate_method,
+    duplicate_confidence, dedupe_corroboration_fingerprint, session_id
+  );
 
 CREATE TABLE IF NOT EXISTS session_commits (
   session_id INTEGER PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -80,6 +87,8 @@ CREATE TABLE IF NOT EXISTS turns (
   revision BLOB CHECK(revision IS NULL OR length(revision)=32)
 );
 CREATE INDEX IF NOT EXISTS turns_session_order ON turns(session_id, turn_start_offset, turn_id);
+CREATE INDEX IF NOT EXISTS turns_query_filters
+  ON turns(effective_provider_visibility, observed_timestamp DESC, turn_key, session_id);
 
 CREATE TABLE IF NOT EXISTS turn_fact_truncation (
   turn_id INTEGER NOT NULL REFERENCES turns(turn_id) ON DELETE CASCADE,
@@ -209,6 +218,8 @@ CREATE INDEX IF NOT EXISTS capability_uses_turn
   ON capability_uses(turn_id);
 CREATE INDEX IF NOT EXISTS capability_uses_capability
   ON capability_uses(capability_id);
+CREATE INDEX IF NOT EXISTS capability_uses_query_filter
+  ON capability_uses(turn_id, origin_scope, capability_id);
 
 CREATE TABLE IF NOT EXISTS capability_use_evidence (
   session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -298,7 +309,9 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
     if !legacy_receipt {
         connection.execute_batch(NORMALIZED_SCHEMA)?;
         crate::projection::initialize_projection_schema(connection)?;
+        crate::search_projection::initialize_search_projection_schema(connection)?;
         crate::retry_projection::initialize_retry_projection_schema(connection)?;
+        crate::search_projection::ensure_search_projection(connection)?;
         return Ok(());
     }
 
@@ -352,7 +365,9 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
     transaction.execute_batch("DROP TABLE legacy_session_commits_v0;")?;
     transaction.commit()?;
     crate::projection::initialize_projection_schema(connection)?;
+    crate::search_projection::initialize_search_projection_schema(connection)?;
     crate::retry_projection::initialize_retry_projection_schema(connection)?;
+    crate::search_projection::ensure_search_projection(connection)?;
     Ok(())
 }
 

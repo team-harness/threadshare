@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -40,8 +40,8 @@ function handshakeContract() {
     duplicatePolicyVersion: 1,
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
+    projectionVersions: ["turn-search@2", "turn-summary@1"],
+    analyzerCapabilities: ["mixed-cjk-code@1"],
     rankerVersion: 1,
   };
 }
@@ -147,6 +147,17 @@ function sampleDelta({
     diagnostics: [],
     coverage: {},
   });
+}
+
+async function queryFixtureDelta() {
+  const fixture = JSON.parse(await readFile(new URL(
+    "./fixtures/insights-fact-mutations/v1-basic.json",
+    import.meta.url,
+  ), "utf8"));
+  const delta = structuredClone(fixture.initial);
+  delta.originSecretEpoch = ORIGIN_SECRET_EPOCH;
+  delta.checkpoint.originSecretEpoch = ORIGIN_SECRET_EPOCH;
+  return finalizeDelta(delta);
 }
 
 function sourceStateForDelta(delta, overrides = {}) {
@@ -354,6 +365,89 @@ process.stdin.on("data", (chunk) => {
   return binaryPath;
 }
 
+async function createQueryProtocolEngine(directory) {
+  const binaryPath = path.join(directory, "query-protocol-engine");
+  const binary = `#!/usr/bin/env node
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+}
+function send(message) {
+  const payload = Buffer.from(canonical(message));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(payload.length);
+  process.stdout.write(Buffer.concat([prefix, payload]));
+}
+const turnKey = "e".repeat(64);
+const sessionKey = "a".repeat(64);
+const revision = "f".repeat(64);
+let input = Buffer.alloc(0);
+process.stdin.on("data", (chunk) => {
+  input = Buffer.concat([input, chunk]);
+  while (input.length >= 4) {
+    const length = input.readUInt32BE(0);
+    if (input.length < length + 4) return;
+    const message = JSON.parse(input.subarray(4, length + 4).toString("utf8"));
+    input = input.subarray(length + 4);
+    if (message.type === "HELLO") {
+      send({
+        format: "threadshare-insights-protocol@v1", type: "READY", requestId: message.requestId,
+        engineVersion: "test", target: "development", maxFrameBytes: 4194304,
+        sqliteVersion: "3.53.2", sqliteCompileOptionsDigest: "c".repeat(64),
+        buildManifestDigest: "d".repeat(64), acceptedContract: message.requiredContract,
+      });
+    } else if (message.type === "SEARCH_TURNS") {
+      if (message.query !== "needle" || message.filters.providers[0] !== "codex") process.exit(12);
+      send({
+        format: "threadshare-insights-protocol@v1", type: "TURN_SEARCH_RESULTS",
+        requestId: message.requestId,
+        snapshot: { snapshotSeq: "7", projectionVersion: 2, analyzerVersion: 1, rankerVersion: 1 },
+        scoringTerms: [], results: [],
+        evidencePaths: {
+          insufficientSample: true, rawMatchCount: 0, eligibleTurnCount: 0,
+          rawSessionCount: 0, independentGroupCount: 0, strongGroupCount: 0,
+          weakGroupCount: 0, observedEofProvisionalGroupCount: 0,
+          unknownDedupeCount: 0, unknownDedupeSessionCount: 0,
+          pathsTruncated: false, families: [],
+        },
+        diagnostic: {
+          analyzeMicros: 1, dfMicros: 0, postingFilterMicros: 1, rerankMicros: 0,
+          pathMicros: 0, zeroDfTermCount: 1, highFrequencyTermCount: 0,
+          truncatedTermCount: 0, scoringTermCount: 0,
+        },
+        searchTrace: { candidateCount: 0, candidateTurnKeys: [] },
+      });
+    } else if (message.type === "READ_TURN_EVIDENCE") {
+      if (message.turnKey !== turnKey || message.expectedRevision !== revision) process.exit(13);
+      send({
+        format: "threadshare-insights-protocol@v1", type: "TURN_EVIDENCE_PAGE",
+        requestId: message.requestId, snapshotSeq: "7",
+        turn: {
+          turnKey, revision, problemText: "question", finalAnswerExcerpt: "answer",
+          observedTimestamp: null, nextUserBoundary: false, providerTerminal: "completed",
+          observedEofClosed: true, providerVisibility: "active", factTruncation: [],
+        },
+        entries: [{
+          factKind: "event",
+          fact: {
+            eventKey: "5".repeat(64), occurredTurnKey: turnKey,
+            linkedTurns: [{ turnKey, role: "lifecycle" }], pointerKind: "/content/0",
+            pointerContentIndex: 0, pointerEventOrdinal: 0, originScope: "main",
+            observedTimestamp: null,
+            payload: { kind: "turn-lifecycle", lifecycleState: "completed", providerTurnDigest: null },
+          },
+        }],
+        nextCursor: null,
+      });
+    }
+  }
+});
+`;
+  await writeFile(binaryPath, binary, { mode: 0o700 });
+  return binaryPath;
+}
+
 test("canonical-domain frame errors terminate the sidecar without panic output", {
   timeout: 10_000,
 }, async (t) => {
@@ -419,7 +513,16 @@ test("real Rust sidecar reports bounded content-free engine status", {
   assert.equal(pending.snapshotAgeMs, null);
   assert.equal(pending.snapshotPending, true);
   assert.equal(pending.factStorageProfile, "normalized-row-v1");
-  assert.deepEqual(pending.projections, []);
+  assert.deepEqual(pending.projections, [{
+    name: "turn-search",
+    version: 2,
+    inputFactSchemaVersion: 1,
+    rootKind: "turn",
+    baseSnapshotSeq: "0",
+    watermark: "0",
+    status: "active",
+    errorDigest: null,
+  }]);
   assert.deepEqual(pending.changeLog, {
     rows: "0",
     payloadBytes: "0",
@@ -439,6 +542,72 @@ test("real Rust sidecar reports bounded content-free engine status", {
   assert.match(ready.snapshotAgeMs, /^(?:0|[1-9][0-9]*)$/u);
   assert.equal(JSON.stringify(ready).includes(delta.session.sessionKey), false);
   assert.equal(JSON.stringify(ready).includes("pendingState"), false);
+});
+
+test("real Rust sidecar searches committed Turns and pages their bounded evidence", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+  const delta = await queryFixtureDelta();
+  await client.applySessionFacts(delta);
+
+  const search = await client.searchTurns({
+    query: "normalized fact store",
+    filters: {
+      providers: ["codex"],
+      projectKeys: [],
+      observedAtOrAfterUnixMs: null,
+      observedBeforeUnixMs: null,
+      toolCapabilityKeys: [],
+      skillCapabilityKeys: [],
+      resultEvidence: [],
+      closureStates: [],
+    },
+    limit: 20,
+    pathLimit: 10,
+    nowUnixMs: "1786323723000",
+  });
+  assert.equal(search.results.length, 1);
+  assert.equal(search.results[0].turnKey, delta.turns[0].turnKey);
+  assert.deepEqual(search.searchTrace.candidateTurnKeys, [delta.turns[0].turnKey]);
+  assert.equal(search.scoringTerms.some((term) => term.logicalTerm === "normalized"), true);
+  assert.equal(search.results[0].score.matchedTermIndexes.length > 0, true);
+  assert.deepEqual({
+    rawMatchCount: search.evidencePaths.rawMatchCount,
+    eligibleTurnCount: search.evidencePaths.eligibleTurnCount,
+    rawSessionCount: search.evidencePaths.rawSessionCount,
+    independentGroupCount: search.evidencePaths.independentGroupCount,
+    strongGroupCount: search.evidencePaths.strongGroupCount,
+    weakGroupCount: search.evidencePaths.weakGroupCount,
+    observedEofProvisionalGroupCount:
+      search.evidencePaths.observedEofProvisionalGroupCount,
+    unknownDedupeCount: search.evidencePaths.unknownDedupeCount,
+    unknownDedupeSessionCount: search.evidencePaths.unknownDedupeSessionCount,
+  }, {
+    rawMatchCount: 1,
+    eligibleTurnCount: 1,
+    rawSessionCount: 1,
+    independentGroupCount: 0,
+    strongGroupCount: 0,
+    weakGroupCount: 0,
+    observedEofProvisionalGroupCount: 0,
+    unknownDedupeCount: 1,
+    unknownDedupeSessionCount: 1,
+  });
+
+  const evidence = await client.readTurnEvidence({
+    turnKey: search.results[0].turnKey,
+    expectedRevision: search.results[0].revision,
+    limit: 1,
+  });
+  assert.equal(evidence.turn.problemText, delta.turns[0].problemText);
+  assert.equal(evidence.entries.length, 1);
+  assert.equal(evidence.nextCursor === null || typeof evidence.nextCursor === "string", true);
+  assert.equal(JSON.stringify(evidence).includes("recordStartOffset"), false);
+  assert.equal(Object.isFrozen(evidence.turn), true);
 });
 
 test("source state commits atomically and reads summaries separately from parser checkpoints", {
@@ -631,6 +800,50 @@ test("an aborted operation does not poison a ready sidecar", {
   });
 });
 
+test("search and evidence requests use the strict paged query protocol", {
+  timeout: 30_000,
+  skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-query-client-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binaryPath = await createQueryProtocolEngine(directory);
+  const client = await createInsightsEngineClient({
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
+    },
+    requiredContract: handshakeContract(),
+    timeoutMs: 5_000,
+  });
+  t.after(() => client.close());
+
+  const search = await client.searchTurns({
+    query: "needle",
+    filters: {
+      providers: ["codex"],
+      projectKeys: [],
+      observedAtOrAfterUnixMs: null,
+      observedBeforeUnixMs: null,
+      toolCapabilityKeys: [],
+      skillCapabilityKeys: [],
+      resultEvidence: [],
+      closureStates: [],
+    },
+    nowUnixMs: "1786323723000",
+  });
+  assert.equal(search.snapshot.snapshotSeq, "7");
+  assert.equal(search.diagnostic.zeroDfTermCount, 1);
+  assert.deepEqual(search.searchTrace, { candidateCount: 0, candidateTurnKeys: [] });
+  assert.equal(Object.isFrozen(search), true);
+
+  const page = await client.readTurnEvidence({
+    turnKey: "e".repeat(64),
+    expectedRevision: "f".repeat(64),
+  });
+  assert.equal(page.turn.problemText, "question");
+  assert.equal(page.entries[0].fact.linkedTurns[0].role, "lifecycle");
+  assert.equal(Object.isFrozen(page), true);
+});
+
 test("disconnecting after SESSION_ACCEPTED does not commit the main database", {
   timeout: 30_000,
 }, async (t) => {
@@ -657,8 +870,8 @@ test("disconnecting after SESSION_ACCEPTED does not commit the main database", {
     requestId: "2",
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
+    projectionVersions: handshakeContract().projectionVersions,
+    analyzerCapabilities: handshakeContract().analyzerCapabilities,
     rankerVersion: 1,
   });
   await writeFrame(child.stdin, begin);

@@ -6,11 +6,15 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use threadshare_insights_engine::canonical_json;
 use threadshare_insights_engine::engine::{EngineError, SessionAccumulator};
+use threadshare_insights_engine::evidence_path::{
+    EvidencePathReport, SafeEvidenceEvent, SafeEvidenceFact, TurnEvidencePage,
+};
 use threadshare_insights_engine::protocol::{
     MAX_FRAME_BYTES, MessageKind, PROTOCOL_FORMAT, PROTOCOL_VERSION, ProtocolError,
     accepted_contract_from_hello, bounded_message, read_frame, request_id,
     validate_begin_against_contract, validate_protocol_message, write_frame,
 };
+use threadshare_insights_engine::query::{QueryError, SearchRequest, SearchResponse, SearchTrace};
 use threadshare_insights_engine::storage::{EngineStorage, StorageError};
 
 const ENGINE_VERSION: &str = match option_env!("THREADSHARE_RELEASE_VERSION") {
@@ -144,9 +148,215 @@ fn fatal(mut error: EngineError) -> EngineError {
     error
 }
 
+fn query_engine_error(error: QueryError) -> EngineError {
+    let (category, message) = match error.code {
+        "QUERY_FAILED" => ("storage", "Turn search failed"),
+        "EVIDENCE_READ_FAILED" => ("storage", "Turn evidence could not be read"),
+        "TURN_REVISION_MISMATCH" => ("conflict", "Turn revision changed; repeat the search"),
+        "TURN_NOT_FOUND" => ("validation", "Turn was not found"),
+        "QUERY_TOO_LONG" => ("validation", "Search query exceeds the supported limit"),
+        "QUERY_TOO_BROAD" => (
+            "validation",
+            "Search query requires more detail or a filter",
+        ),
+        "QUERY_INVALID_FILTER" => ("validation", "Search filters are invalid"),
+        "QUERY_INVALID_LIMIT" => ("validation", "Search result limit is invalid"),
+        "TS_INSIGHTS_PROJECTION_BUILDING" => (
+            "conflict",
+            "Turn search projection is still building; retry after local indexing advances",
+        ),
+        "TS_INSIGHTS_PROJECTION_FAILED" => (
+            "conflict",
+            "Turn search projection rebuild failed; rebuild local Insights state",
+        ),
+        "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED" => (
+            "storage",
+            "Turn search projection rebuild requires more free disk space",
+        ),
+        "EVIDENCE_INVALID_LIMIT" => ("validation", "Evidence page limit is invalid"),
+        "EVIDENCE_INVALID_CURSOR" => ("validation", "Evidence cursor is invalid"),
+        "EVIDENCE_INVALID_KEY" => ("validation", "Evidence key is invalid"),
+        "EVIDENCE_PAGE_TOO_LARGE" => ("validation", "Evidence page exceeds the supported limit"),
+        _ => ("validation", "Insights query could not be completed"),
+    };
+    EngineError::new(error.code, category, message)
+}
+
+fn search_request(message: &Value) -> SearchRequest {
+    let filters = &message["filters"];
+    SearchRequest {
+        query: message["query"]
+            .as_str()
+            .expect("validated search query")
+            .to_owned(),
+        providers: serde_json::from_value(filters["providers"].clone())
+            .expect("validated providers"),
+        project_keys: serde_json::from_value(filters["projectKeys"].clone())
+            .expect("validated project keys"),
+        tool_capability_keys: serde_json::from_value(filters["toolCapabilityKeys"].clone())
+            .expect("validated tool keys"),
+        skill_capability_keys: serde_json::from_value(filters["skillCapabilityKeys"].clone())
+            .expect("validated skill keys"),
+        after_unix_ms: filters["observedAtOrAfterUnixMs"]
+            .as_str()
+            .map(|value| value.parse().expect("validated after timestamp")),
+        before_unix_ms: filters["observedBeforeUnixMs"]
+            .as_str()
+            .map(|value| value.parse().expect("validated before timestamp")),
+        result_evidence: serde_json::from_value(filters["resultEvidence"].clone())
+            .expect("validated result evidence"),
+        closure: serde_json::from_value(filters["closureStates"].clone())
+            .expect("validated closure states"),
+        limit: u16::try_from(message["limit"].as_u64().expect("validated search limit"))
+            .expect("validated search limit fits u16"),
+        path_limit: u8::try_from(message["pathLimit"].as_u64().expect("validated path limit"))
+            .expect("validated path limit fits u8"),
+        now_unix_ms: message["nowUnixMs"]
+            .as_str()
+            .expect("validated now timestamp")
+            .parse()
+            .expect("validated now timestamp fits u64"),
+        quiescence_seconds: u32::try_from(
+            message["quiescenceSeconds"]
+                .as_u64()
+                .expect("validated quiescence"),
+        )
+        .expect("validated quiescence fits u32"),
+    }
+}
+
+fn evidence_paths_wire(report: EvidencePathReport) -> Value {
+    json!({
+        "insufficientSample": report.insufficient_sample,
+        "pathsTruncated": report.paths_truncated,
+        "rawMatchCount": report.raw_match_count,
+        "eligibleTurnCount": report.eligible_turn_count,
+        "rawSessionCount": report.raw_session_count,
+        "independentGroupCount": report.independent_group_count,
+        "strongGroupCount": report.strong_group_count,
+        "weakGroupCount": report.weak_group_count,
+        "observedEofProvisionalGroupCount": report.observed_eof_provisional_group_count,
+        "unknownDedupeCount": report.unknown_dedupe_count,
+        "unknownDedupeSessionCount": report.unknown_dedupe_session_count,
+        "families": report.families.into_iter().map(|family| json!({
+            "fingerprint": family.fingerprint,
+            "nodes": family.nodes.into_iter().map(|node| json!({
+                "providerScopedName": node.provider_scoped_name,
+                "repeatBucket": node.repeat_bucket.as_str(),
+            })).collect::<Vec<_>>(),
+            "truncated": family.truncated,
+            "bestRelevancePpm": family.best_relevance_ppm,
+            "turnCount": family.turn_count,
+            "rawSessionCount": family.raw_session_count,
+            "independentGroupCount": family.independent_group_count,
+            "strongGroupCount": family.strong_group_count,
+            "weakGroupCount": family.weak_group_count,
+            "observedEofProvisionalGroupCount": family.observed_eof_provisional_group_count,
+            "unknownDedupeSessionCount": family.unknown_dedupe_session_count,
+            "latestUnixMs": family.latest_unix_ms,
+            "toolStateCounts": family.tool_state_counts,
+            "evidenceTurnKeys": family.evidence_turn_keys,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn search_results_wire(request_id: &str, response: SearchResponse, trace: SearchTrace) -> Value {
+    let results = response
+        .results
+        .into_iter()
+        .map(|result| {
+            let score = result.bm25_rank.map_or(Value::Null, |rank| {
+                json!({
+                    "relevancePpm": result.relevance_ppm,
+                    "bm25Rank": rank,
+                    "rankComponentPpm": result.rank_component_ppm,
+                    "idfCoveragePpm": result.coverage_ppm,
+                    "exact": result.exact,
+                    "matchedTermIndexes": result.matched_term_indexes,
+                })
+            });
+            json!({
+                "turnKey": result.turn_key,
+                "sessionKey": result.session_key,
+                "revision": result.revision,
+                "provider": result.provider,
+                "projectKey": result.project_key,
+                "observedTimestamp": result.observed_timestamp,
+                "problemExcerpt": result.problem_summary,
+                "problemTruncated": result.problem_truncated,
+                "finalAnswerExcerpt": result.final_summary,
+                "finalAnswerTruncated": result.final_truncated,
+                "closureState": result.closure,
+                "resultEvidence": result.result_evidence,
+                "score": score,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "format": PROTOCOL_FORMAT,
+        "type": "TURN_SEARCH_RESULTS",
+        "requestId": request_id,
+        "snapshot": {
+            "snapshotSeq": response.snapshot_seq,
+            "projectionVersion": response.projection_version,
+            "analyzerVersion": response.analyzer_version,
+            "rankerVersion": response.ranker_version,
+        },
+        "scoringTerms": response.scoring_terms,
+        "results": results,
+        "evidencePaths": evidence_paths_wire(response.evidence_paths),
+        "diagnostic": response.diagnostic,
+        "searchTrace": {
+            "candidateCount": trace.candidate_count,
+            "candidateTurnKeys": trace.candidate_turn_keys,
+        },
+    })
+}
+
+fn evidence_event_wire(event: SafeEvidenceEvent) -> Value {
+    json!({
+        "eventKey": event.event_key,
+        "occurredTurnKey": event.occurred_turn_key,
+        "linkedTurns": event.linked_turns,
+        "pointerKind": event.pointer_kind,
+        "pointerContentIndex": event.pointer_content_index,
+        "pointerEventOrdinal": event.pointer_event_ordinal,
+        "originScope": event.origin_scope,
+        "observedTimestamp": event.observed_timestamp,
+        "payload": event.payload,
+    })
+}
+
+fn evidence_page_wire(request_id: &str, page: TurnEvidencePage) -> Value {
+    let entries = page
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            SafeEvidenceFact::Event(event) => json!({
+                "factKind": "event",
+                "fact": evidence_event_wire(event),
+            }),
+            SafeEvidenceFact::CapabilityUse(usage) => json!({
+                "factKind": "capability-use",
+                "fact": usage,
+            }),
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "format": PROTOCOL_FORMAT,
+        "type": "TURN_EVIDENCE_PAGE",
+        "requestId": request_id,
+        "snapshotSeq": page.snapshot_seq,
+        "turn": page.turn,
+        "entries": entries,
+        "nextCursor": page.next_cursor,
+    })
+}
+
 impl EngineServer {
-    fn new(storage: EngineStorage) -> Result<Self, EngineError> {
+    fn new(mut storage: EngineStorage) -> Result<Self, EngineError> {
         storage.verify_sqlite_contract()?;
+        storage.maintain_search_projection(16)?;
         Ok(Self {
             storage,
             state: State::AwaitHello,
@@ -208,6 +418,7 @@ impl EngineServer {
                             ))
                         }
                         MessageKind::ReadEngineStatus => {
+                            self.storage.maintain_search_projection(16)?;
                             let status = self.storage.read_engine_status()?;
                             Ok((
                                 State::Ready {
@@ -389,6 +600,37 @@ impl EngineServer {
                                     "pendingMaintenance": outcome.status.pending_maintenance,
                                     "purged": outcome.status.purged,
                                 }),
+                            ))
+                        }
+                        MessageKind::SearchTurns => {
+                            let (response, trace) = self
+                                .storage
+                                .search_with_trace(search_request(&message))
+                                .map_err(query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                search_results_wire(&request_id, response, trace),
+                            ))
+                        }
+                        MessageKind::ReadTurnEvidence => {
+                            let turn_key = message["turnKey"].as_str().expect("validated turn key");
+                            let expected_revision = message["expectedRevision"].as_str();
+                            let cursor = message["cursor"].as_str();
+                            let limit = u16::try_from(
+                                message["limit"].as_u64().expect("validated evidence limit"),
+                            )
+                            .expect("validated evidence limit fits u16");
+                            let page = self
+                                .storage
+                                .read_turn_evidence(turn_key, expected_revision, cursor, limit)
+                                .map_err(query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                evidence_page_wire(&request_id, page),
                             ))
                         }
                         _ => Err(EngineError::new(
@@ -629,11 +871,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineServer, State};
+    use super::{
+        EngineServer, State, evidence_event_wire, evidence_paths_wire, query_engine_error,
+        validate_protocol_message,
+    };
     use serde::Deserialize;
     use serde_json::{Value, json};
     use std::fs;
     use std::path::PathBuf;
+    use threadshare_insights_engine::evidence_path::{
+        EvidenceLink, EvidencePathFamily, EvidencePathReport, PathNode, RepeatBucket,
+        SafeEventPayload, SafeEvidenceEvent, ToolStateCounts,
+    };
+    use threadshare_insights_engine::query::QueryError;
     use threadshare_insights_engine::storage::EngineStorage;
 
     #[derive(Deserialize)]
@@ -702,6 +952,125 @@ mod tests {
         assert!(response.get("sessions").is_none());
         assert!(response.get("facts").is_none());
         assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn search_and_evidence_requests_use_ready_state_with_content_free_errors() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+
+        let response = server.handle_message(message("search-turns")).unwrap();
+        assert_eq!(response["type"], "TURN_SEARCH_RESULTS");
+        assert_eq!(response["snapshot"]["projectionVersion"], 2);
+        assert_eq!(response["snapshot"]["analyzerVersion"], 1);
+        assert_eq!(response["snapshot"]["rankerVersion"], 1);
+        assert_eq!(response["results"], json!([]));
+        assert_eq!(response["searchTrace"]["candidateCount"], 0);
+        assert_eq!(response["searchTrace"]["candidateTurnKeys"], json!([]));
+        validate_protocol_message(&response).unwrap();
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let mut broad = message("search-turns");
+        broad["query"] = Value::String(String::new());
+        broad["filters"]["providers"] = json!([]);
+        let error = server.handle_message(broad).unwrap_err();
+        assert_eq!(error.code, "QUERY_TOO_BROAD");
+        assert_eq!(
+            error.message,
+            "Search query requires more detail or a filter"
+        );
+        assert!(!error.fatal);
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let error = server
+            .handle_message(message("read-turn-evidence"))
+            .unwrap_err();
+        assert_eq!(error.code, "TURN_NOT_FOUND");
+        assert_eq!(error.message, "Turn was not found");
+        assert!(!error.fatal);
+        assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn query_wire_mapping_excludes_internal_identity_and_error_content() {
+        let path = evidence_paths_wire(EvidencePathReport {
+            insufficient_sample: false,
+            paths_truncated: true,
+            raw_match_count: 5,
+            eligible_turn_count: 5,
+            raw_session_count: 5,
+            independent_group_count: 3,
+            strong_group_count: 3,
+            weak_group_count: 0,
+            observed_eof_provisional_group_count: 0,
+            unknown_dedupe_count: 0,
+            unknown_dedupe_session_count: 0,
+            families: vec![EvidencePathFamily {
+                fingerprint: "1".repeat(64),
+                nodes: vec![PathNode {
+                    capability_key: "2".repeat(64),
+                    provider_scoped_name: "codex:Bash".to_owned(),
+                    repeat_bucket: RepeatBucket::One,
+                }],
+                truncated: false,
+                best_relevance_ppm: 900_000,
+                turn_count: 5,
+                raw_session_count: 3,
+                independent_group_count: 3,
+                strong_group_count: 3,
+                weak_group_count: 0,
+                observed_eof_provisional_group_count: 0,
+                unknown_dedupe_session_count: 0,
+                latest_unix_ms: 1_786_320_000_000,
+                tool_state_counts: ToolStateCounts::default(),
+                evidence_turn_keys: vec!["3".repeat(64)],
+            }],
+        });
+        assert_eq!(path["pathsTruncated"], true);
+        assert!(
+            path["families"][0]["nodes"][0]
+                .get("capabilityKey")
+                .is_none()
+        );
+        assert_eq!(path["families"][0]["nodes"][0]["repeatBucket"], "1");
+
+        let event = evidence_event_wire(SafeEvidenceEvent {
+            event_key: "4".repeat(64),
+            occurred_turn_key: None,
+            linked_turns: vec![EvidenceLink {
+                turn_key: "3".repeat(64),
+                role: "lifecycle".to_owned(),
+            }],
+            source_record_key: "private-source-record".to_owned(),
+            pointer_kind: "response_item".to_owned(),
+            pointer_content_index: 0,
+            pointer_event_ordinal: 0,
+            origin_scope: "main".to_owned(),
+            observed_timestamp: None,
+            payload: SafeEventPayload::VisibleMessage {
+                role: "user".to_owned(),
+            },
+        });
+        assert!(event.get("sourceRecordKey").is_none());
+        assert!(!event.to_string().contains("private-source-record"));
+
+        let error = query_engine_error(QueryError::new(
+            "QUERY_FAILED",
+            "database failure at /private/session.jsonl",
+        ));
+        assert_eq!(error.message, "Turn search failed");
+        assert!(!error.message.contains("/private"));
+
+        let space = query_engine_error(QueryError::new(
+            "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED",
+            "private filesystem details",
+        ));
+        assert_eq!(space.code, "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED");
+        assert_eq!(
+            space.message,
+            "Turn search projection rebuild requires more free disk space"
+        );
+        assert!(!space.message.contains("private"));
     }
 
     #[test]

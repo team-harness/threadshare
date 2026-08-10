@@ -3,8 +3,10 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use unicode_normalization::UnicodeNormalization;
 
+pub mod analyzer;
 pub mod engine;
 pub mod engine_status;
+pub mod evidence_path;
 pub mod fact_model;
 mod fact_projection;
 pub mod fact_repository;
@@ -12,7 +14,9 @@ pub mod fts_projection;
 pub mod normalized_repository;
 pub mod projection;
 pub mod protocol;
+pub mod query;
 pub mod retry_projection;
+pub mod search_projection;
 pub mod source_state;
 pub mod storage;
 

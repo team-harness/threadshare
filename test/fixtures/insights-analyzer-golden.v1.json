@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "identity": {
+    "analyzerVersion": "threadshare-fixed-v1",
+    "analyzerCapability": "mixed-cjk-code@1",
+    "searchProjectionName": "turn-search",
+    "searchProjectionVersion": 2,
+    "pulldownCmarkVersion": "0.13.4",
+    "unicodeNormalizationVersion": "0.1.25",
+    "unicodeNormalizationUnicodeVersion": "17.0.0",
+    "codecVersion": "threadshare-term-v1"
+  },
+  "codecVectors": [
+    {
+      "name": "short-rfc4648-base32",
+      "term": "hello",
+      "expected": "tnbswy3dp"
+    },
+    {
+      "name": "long-term-sha256",
+      "repeat": "a",
+      "count": 257,
+      "expected": "he8d95cc2b4bc198c54b40bd214df958afb65f5e73d2c2eafe0593cf5c635c1f0"
+    }
+  ],
+  "document": {
+    "markdown": "Fix parseHTTP2 in `foo_bar` and 路径测试。\n\n```sh\ncargoTest --release\n```\n\n    indented_name\n",
+    "capabilities": [
+      {
+        "originScope": "subagent",
+        "turnOrdinal": 1,
+        "capabilityKey": "01",
+        "canonicalName": "HiddenAlias"
+      },
+      {
+        "originScope": "main",
+        "turnOrdinal": 3,
+        "capabilityKey": "03",
+        "canonicalName": "cli/tool_name-v2"
+      },
+      {
+        "originScope": "main",
+        "turnOrdinal": 2,
+        "capabilityKey": "02",
+        "canonicalName": "ShellTool"
+      },
+      {
+        "originScope": "main",
+        "turnOrdinal": 4,
+        "capabilityKey": "04"
+      }
+    ],
+    "expectedNatural": [
+      "fix",
+      "parsehttp2",
+      "in",
+      "foo",
+      "bar",
+      "and",
+      "路径",
+      "路径测",
+      "径测",
+      "径测试",
+      "测试",
+      "sh",
+      "cargotest",
+      "release",
+      "indented",
+      "name"
+    ],
+    "expectedCode": [
+      "parsehttp2",
+      "parse",
+      "http2",
+      "foo_bar",
+      "foo",
+      "bar",
+      "cargotest",
+      "cargo",
+      "test",
+      "release",
+      "indented_name",
+      "indented",
+      "name"
+    ],
+    "expectedCapability": [
+      "shelltool",
+      "shell",
+      "tool",
+      "cli/tool_name-v2",
+      "cli",
+      "tool",
+      "name",
+      "v2"
+    ]
+  }
+}

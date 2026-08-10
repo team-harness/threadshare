@@ -1,12 +1,15 @@
+use crate::analyzer::AnalyzerDiagnostics;
 use crate::fts_projection::{
-    FtsDocument, delete_fts_document, initialize_fts_projection_schema, upsert_fts_document,
+    FtsDocument, delete_fts_document, initialize_fts_projection_schema,
+    upsert_analyzed_fts_document, upsert_fts_document, upsert_legacy_fts_document,
 };
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 pub const PROJECTION_SCHEMA_VERSION: u32 = 1;
 pub const CHANGE_LOG_MAX_ROWS: u64 = 1_000_000;
 pub const CHANGE_LOG_MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const ACTIVE_TURN_PROJECTION_VERSION: u32 = 1;
+pub const ACTIVE_TURN_SUMMARY_PROJECTION_VERSION: u32 = 1;
+pub const LEGACY_TURN_SEARCH_PLACEHOLDER_VERSION: u32 = 1;
 pub(crate) const TURN_SEARCH_PROJECTION_NAME: &str = "turn-search";
 pub(crate) const TURN_SUMMARY_PROJECTION_NAME: &str = "turn-summary";
 
@@ -73,6 +76,13 @@ pub struct RollupContribution<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct TurnProjection<'a> {
     pub document: FtsDocument<'a>,
+    pub rollup_contributions: &'a [RollupContribution<'a>],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzedTurnProjection<'a> {
+    pub document: FtsDocument<'a>,
+    pub analyzer_diagnostics: &'a AnalyzerDiagnostics,
     pub rollup_contributions: &'a [RollupContribution<'a>],
 }
 
@@ -189,11 +199,51 @@ pub fn upsert_turn_projection(
     projection: &TurnProjection<'_>,
 ) -> rusqlite::Result<()> {
     upsert_fts_document(transaction, &projection.document)?;
+    replace_rollup_contributions(
+        transaction,
+        projection.document.turn_id,
+        projection.rollup_contributions,
+    )
+}
+
+pub fn upsert_analyzed_turn_projection(
+    transaction: &Transaction<'_>,
+    projection: &AnalyzedTurnProjection<'_>,
+) -> rusqlite::Result<()> {
+    upsert_analyzed_fts_document(
+        transaction,
+        &projection.document,
+        projection.analyzer_diagnostics,
+    )?;
+    replace_rollup_contributions(
+        transaction,
+        projection.document.turn_id,
+        projection.rollup_contributions,
+    )
+}
+
+pub(crate) fn upsert_legacy_turn_projection(
+    transaction: &Transaction<'_>,
+    projection: &TurnProjection<'_>,
+) -> rusqlite::Result<()> {
+    upsert_legacy_fts_document(transaction, &projection.document)?;
+    replace_rollup_contributions(
+        transaction,
+        projection.document.turn_id,
+        projection.rollup_contributions,
+    )
+}
+
+fn replace_rollup_contributions(
+    transaction: &Transaction<'_>,
+    turn_id: i64,
+    contributions: &[RollupContribution<'_>],
+) -> rusqlite::Result<()> {
     transaction.execute(
         "DELETE FROM turn_rollup_contributions WHERE turn_id=?1",
-        params![projection.document.turn_id],
+        params![turn_id],
     )?;
-    for contribution in projection.rollup_contributions {
+    for contribution in contributions {
         transaction.execute(
             "INSERT INTO turn_rollup_contributions(
                projection_name,
@@ -208,7 +258,7 @@ pub fn upsert_turn_projection(
             params![
                 contribution.projection_name,
                 contribution.projection_version,
-                projection.document.turn_id,
+                turn_id,
                 contribution.dimension,
                 contribution.bucket_key,
                 contribution.metric,
@@ -272,21 +322,24 @@ pub(crate) fn advance_active_turn_projection_watermarks(
     transaction: &Transaction<'_>,
     snapshot_seq: i64,
 ) -> rusqlite::Result<()> {
-    for name in [TURN_SEARCH_PROJECTION_NAME, TURN_SUMMARY_PROJECTION_NAME] {
-        upsert_projection_state(
-            transaction,
-            &ProjectionState {
-                name,
-                version: ACTIVE_TURN_PROJECTION_VERSION,
-                input_fact_schema_version: 1,
-                root_kind: ProjectionRootKind::Turn,
-                base_snapshot_seq: 0,
-                watermark: snapshot_seq,
-                status: ProjectionStatus::Active,
-                error_digest: None,
-            },
-        )?;
-    }
+    upsert_projection_state(
+        transaction,
+        &ProjectionState {
+            name: TURN_SUMMARY_PROJECTION_NAME,
+            version: ACTIVE_TURN_SUMMARY_PROJECTION_VERSION,
+            input_fact_schema_version: 1,
+            root_kind: ProjectionRootKind::Turn,
+            base_snapshot_seq: 0,
+            watermark: snapshot_seq,
+            status: ProjectionStatus::Active,
+            error_digest: None,
+        },
+    )?;
+    transaction.execute(
+        "UPDATE projection_state SET watermark=?2
+         WHERE name=?1 AND status='active'",
+        params![TURN_SEARCH_PROJECTION_NAME, snapshot_seq],
+    )?;
     Ok(())
 }
 
@@ -370,7 +423,10 @@ mod tests {
         prune_consumed_projection_changes, prune_projection_change_log_through,
         upsert_projection_state, upsert_turn_projection, with_projection_transaction,
     };
-    use crate::fts_projection::{Bm25Weights, FtsDocument, search_fts};
+    use crate::analyzer::encode_term;
+    use crate::fts_projection::{
+        Bm25Weights, FtsDocument, FtsField, FtsMatchExpression, search_fts,
+    };
     use rusqlite::{Connection, params};
 
     const SESSION_KEY: [u8; 32] = [0x11; 32];
@@ -393,6 +449,11 @@ mod tests {
             value,
             snapshot_seq: 1,
         }
+    }
+
+    fn natural_match(logical: &str) -> FtsMatchExpression {
+        let encoded = encode_term(logical);
+        FtsMatchExpression::from_field_terms([(FtsField::Natural, encoded.as_str())]).unwrap()
     }
 
     #[test]
@@ -432,6 +493,45 @@ mod tests {
     }
 
     #[test]
+    fn search_and_summary_versions_advance_on_independent_axes() {
+        let mut connection = connection();
+        let transaction = connection.transaction().unwrap();
+        upsert_projection_state(
+            &transaction,
+            &ProjectionState {
+                name: "turn-search",
+                version: 2,
+                input_fact_schema_version: 1,
+                root_kind: ProjectionRootKind::Turn,
+                base_snapshot_seq: 0,
+                watermark: 0,
+                status: ProjectionStatus::Active,
+                error_digest: None,
+            },
+        )
+        .unwrap();
+        super::advance_active_turn_projection_watermarks(&transaction, 7).unwrap();
+        transaction.commit().unwrap();
+
+        let versions = connection
+            .prepare("SELECT name,version FROM projection_state ORDER BY name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            versions,
+            vec![
+                ("turn-search".to_owned(), 2),
+                ("turn-summary".to_owned(), 1)
+            ]
+        );
+    }
+
+    #[test]
     fn turn_rollup_replacement_uses_the_turn_id_index() {
         let connection = connection();
         let plan = connection
@@ -454,15 +554,18 @@ mod tests {
     #[test]
     fn turn_upsert_rolls_back_fts_field_stats_and_rollup_together() {
         let mut connection = connection();
+        let alpha = encode_term("alpha");
+        let beta = encode_term("beta");
+        let shelltool = encode_term("shelltool");
         with_projection_transaction(&mut connection, |transaction| {
             upsert_turn_projection(
                 transaction,
                 &TurnProjection {
                     document: FtsDocument {
                         turn_id: 7,
-                        natural: "alpha",
+                        natural: &alpha,
                         code: "",
-                        capability: "shelltool",
+                        capability: &shelltool,
                     },
                     rollup_contributions: &[contribution(1)],
                 },
@@ -477,9 +580,9 @@ mod tests {
                 &TurnProjection {
                     document: FtsDocument {
                         turn_id: 7,
-                        natural: "beta",
+                        natural: &beta,
                         code: "",
-                        capability: "shelltool",
+                        capability: &shelltool,
                     },
                     rollup_contributions: &duplicate,
                 },
@@ -488,15 +591,25 @@ mod tests {
         assert!(failure.is_err());
 
         assert_eq!(
-            search_fts(&connection, "alpha", Bm25Weights::default(), 10)
-                .unwrap()
-                .len(),
+            search_fts(
+                &connection,
+                &natural_match("alpha"),
+                Bm25Weights::default(),
+                10,
+            )
+            .unwrap()
+            .len(),
             1
         );
         assert!(
-            search_fts(&connection, "beta", Bm25Weights::default(), 10)
-                .unwrap()
-                .is_empty()
+            search_fts(
+                &connection,
+                &natural_match("beta"),
+                Bm25Weights::default(),
+                10,
+            )
+            .unwrap()
+            .is_empty()
         );
         let rollup_value: i64 = connection
             .query_row(
@@ -519,15 +632,18 @@ mod tests {
     #[test]
     fn explicit_delete_removes_fts_and_rollup_in_one_transaction() {
         let mut connection = connection();
+        let retiredtoken = encode_term("retiredtoken");
+        let cli_flag = encode_term("cli_flag");
+        let shelltool = encode_term("shelltool");
         with_projection_transaction(&mut connection, |transaction| {
             upsert_turn_projection(
                 transaction,
                 &TurnProjection {
                     document: FtsDocument {
                         turn_id: 9,
-                        natural: "retiredtoken",
-                        code: "cli_flag",
-                        capability: "shelltool",
+                        natural: &retiredtoken,
+                        code: &cli_flag,
+                        capability: &shelltool,
                     },
                     rollup_contributions: &[contribution(1)],
                 },
@@ -541,9 +657,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            search_fts(&connection, "retiredtoken", Bm25Weights::default(), 10)
-                .unwrap()
-                .is_empty()
+            search_fts(
+                &connection,
+                &natural_match("retiredtoken"),
+                Bm25Weights::default(),
+                10,
+            )
+            .unwrap()
+            .is_empty()
         );
         let rollup_count: i64 = connection
             .query_row(

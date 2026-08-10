@@ -5,6 +5,13 @@ import { assertWellFormedUnicode, canonicalJson } from "./canonical-json.mjs";
 export const INSIGHTS_PROTOCOL_FORMAT = "threadshare-insights-protocol@v1";
 export const INSIGHTS_PROTOCOL_VERSION = 1;
 export const MAX_PROTOCOL_PAYLOAD_BYTES = 4_194_304;
+export const ACTIVE_INSIGHTS_PROJECTION_VERSIONS = Object.freeze([
+  "turn-search@2",
+  "turn-summary@1",
+]);
+export const ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES = Object.freeze([
+  "mixed-cjk-code@1",
+]);
 
 export const RETRACTION_COLLECTION_ORDER = Object.freeze([
   "turnKeys",
@@ -46,6 +53,10 @@ const MESSAGE_TYPES = new Set([
   "PURGE_MAINTENANCE_STATUS",
   "READ_ENGINE_STATUS",
   "ENGINE_STATUS",
+  "SEARCH_TURNS",
+  "TURN_SEARCH_RESULTS",
+  "READ_TURN_EVIDENCE",
+  "TURN_EVIDENCE_PAGE",
   "ABORT_SESSION",
   "SESSION_ABORTED",
   "ERROR",
@@ -67,6 +78,24 @@ const CHANGE_LOG_MAX_ROWS = 1_000_000n;
 const CHANGE_LOG_MAX_PAYLOAD_BYTES = 64n * 1_024n * 1_024n;
 const WAL_PASSIVE_CHECKPOINT_BYTES = 64n * 1_024n * 1_024n;
 const WAL_BACKPRESSURE_BYTES = 128n * 1_024n * 1_024n;
+const MAX_QUERY_BYTES = 8 * 1_024;
+const MAX_SEARCH_RESULTS = 200;
+const MAX_SEARCH_CANDIDATES = 300;
+const MAX_PATH_FAMILIES = 20;
+const MAX_PATH_NODES = 128;
+const MAX_PATH_TOOL_EVENTS = MAX_SEARCH_RESULTS * MAX_PATH_NODES;
+const MAX_SCORING_TERMS = 32;
+const MAX_FILTER_KEYS = 64;
+const MAX_FILTER_PROVIDERS = 16;
+const MAX_SEARCH_EXCERPT_BYTES = 512;
+const MAX_TURN_PROBLEM_BYTES = 64 * 1_024;
+const MAX_TURN_ANSWER_BYTES = 8 * 1_024;
+const MAX_EVIDENCE_PAGE_ENTRIES = 128;
+const MAX_CURSOR_BYTES = 256;
+const MAX_PPM = 1_000_000;
+const SEARCH_RESULT_EVIDENCE = new Set(["abandoned", "provider-completed", "unknown"]);
+const SEARCH_CLOSURE_STATES = new Set(["hard-sealed", "open", "quiescent"]);
+const FTS_FIELDS = new Set(["capability", "code", "natural"]);
 
 export class InsightsProtocolError extends Error {
   constructor(code, message, options = {}) {
@@ -145,6 +174,86 @@ function assertDecimal(value, label) {
   if (typeof value !== "string" || !DECIMAL.test(value) || BigInt(value) > U64_MAX) {
     throw invalidFrame(`${label} must be a uint64 decimal string`);
   }
+}
+
+function assertSafeInteger(value, label, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw invalidFrame(`${label} must be a safe integer in [${min}, ${max}]`);
+  }
+}
+
+function assertBoolean(value, label) {
+  if (typeof value !== "boolean") throw invalidFrame(`${label} must be boolean`);
+}
+
+function assertBoundedString(
+  value,
+  label,
+  maxBytes,
+  { allowEmpty = true, ascii = false } = {},
+) {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) {
+    throw invalidFrame(`${label} must be ${allowEmpty ? "a" : "a non-empty"} string`);
+  }
+  try {
+    assertWellFormedUnicode(value);
+  } catch (error) {
+    throw invalidFrame(`${label} must contain well-formed Unicode`, error);
+  }
+  if (ascii && value.length > 0 && !ASCII_NAME.test(value)) {
+    throw invalidFrame(`${label} must contain printable ASCII`);
+  }
+  if (Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw invalidFrame(`${label} exceeds ${maxBytes} UTF-8 bytes`);
+  }
+}
+
+function assertNullableHex64(value, label) {
+  if (value !== null) assertHex64(value, label);
+}
+
+function assertCanonicalTimestamp(value, label) {
+  if (value === null) return;
+  assertBoundedString(value, label, 32, { allowEmpty: false, ascii: true });
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== value) {
+    throw invalidFrame(`${label} must be a canonical UTC timestamp`);
+  }
+}
+
+function assertEnum(value, label, allowed) {
+  if (typeof value !== "string" || !allowed.has(value)) {
+    throw invalidFrame(`${label} is invalid`);
+  }
+}
+
+function assertBoundedSortedArray(value, label, maxItems, validateItem) {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw invalidFrame(`${label} must be an array with at most ${maxItems} items`);
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    validateItem(value[index], `${label}[${index}]`);
+    if (index > 0 && compareAscii(value[index - 1], value[index]) >= 0) {
+      throw invalidFrame(`${label} must be ASCII-sorted and contain unique values`);
+    }
+  }
+}
+
+function canonicalBoundedArray(value, label, maxItems, validateItem) {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw invalidFrame(`${label} must be an array with at most ${maxItems} items`);
+  }
+  const result = [...value];
+  for (let index = 0; index < result.length; index += 1) {
+    validateItem(result[index], `${label}[${index}]`);
+  }
+  result.sort(compareAscii);
+  for (let index = 1; index < result.length; index += 1) {
+    if (result[index - 1] === result[index]) {
+      throw invalidFrame(`${label} contains duplicates`);
+    }
+  }
+  return result;
 }
 
 function assertUuid(value, label) {
@@ -824,6 +933,579 @@ function assertEngineStatus(message) {
   }
 }
 
+function assertSearchFilters(filters, label) {
+  assertExactKeys(filters, label, [
+    "providers",
+    "projectKeys",
+    "observedAtOrAfterUnixMs",
+    "observedBeforeUnixMs",
+    "toolCapabilityKeys",
+    "skillCapabilityKeys",
+    "resultEvidence",
+    "closureStates",
+  ]);
+  assertBoundedSortedArray(filters.providers, `${label}.providers`, MAX_FILTER_PROVIDERS,
+    (value, itemLabel) => assertBoundedString(value, itemLabel, 64, {
+      allowEmpty: false,
+      ascii: true,
+    }));
+  for (const field of ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"]) {
+    assertBoundedSortedArray(filters[field], `${label}.${field}`, MAX_FILTER_KEYS, assertHex64);
+  }
+  if (filters.observedAtOrAfterUnixMs !== null) {
+    assertDecimal(filters.observedAtOrAfterUnixMs, `${label}.observedAtOrAfterUnixMs`);
+  }
+  if (filters.observedBeforeUnixMs !== null) {
+    assertDecimal(filters.observedBeforeUnixMs, `${label}.observedBeforeUnixMs`);
+  }
+  if (filters.observedAtOrAfterUnixMs !== null && filters.observedBeforeUnixMs !== null &&
+      BigInt(filters.observedAtOrAfterUnixMs) >= BigInt(filters.observedBeforeUnixMs)) {
+    throw invalidFrame(`${label} timestamp interval must be non-empty`);
+  }
+  assertBoundedSortedArray(filters.resultEvidence, `${label}.resultEvidence`, 3,
+    (value, itemLabel) => assertEnum(value, itemLabel, SEARCH_RESULT_EVIDENCE));
+  assertBoundedSortedArray(filters.closureStates, `${label}.closureStates`, 3,
+    (value, itemLabel) => assertEnum(value, itemLabel, SEARCH_CLOSURE_STATES));
+}
+
+function hasStructuredSearchFilter(filters) {
+  return filters.providers.length > 0 || filters.projectKeys.length > 0 ||
+    filters.observedAtOrAfterUnixMs !== null || filters.observedBeforeUnixMs !== null ||
+    filters.toolCapabilityKeys.length > 0 || filters.skillCapabilityKeys.length > 0 ||
+    filters.resultEvidence.length > 0 || filters.closureStates.length > 0;
+}
+
+function assertSearchTurns(message) {
+  assertEnvelope(message, "SEARCH_TURNS", [
+    "query", "filters", "limit", "pathLimit", "nowUnixMs", "quiescenceSeconds",
+  ]);
+  assertBoundedString(message.query, "SEARCH_TURNS.query", MAX_PROTOCOL_PAYLOAD_BYTES);
+  assertSearchFilters(message.filters, "SEARCH_TURNS.filters");
+  assertSafeInteger(message.limit, "SEARCH_TURNS.limit", { min: 1, max: MAX_SEARCH_RESULTS });
+  assertSafeInteger(message.pathLimit, "SEARCH_TURNS.pathLimit", { min: 0, max: MAX_PATH_FAMILIES });
+  assertDecimal(message.nowUnixMs, "SEARCH_TURNS.nowUnixMs");
+  assertSafeInteger(message.quiescenceSeconds, "SEARCH_TURNS.quiescenceSeconds", {
+    min: 60,
+    max: 86_400,
+  });
+}
+
+function assertSearchRequestDomain(message) {
+  if (Buffer.byteLength(message.query, "utf8") > MAX_QUERY_BYTES) {
+    throw protocolError("QUERY_TOO_LONG", "query exceeds 8 KiB UTF-8");
+  }
+  if (message.query.length === 0 && !hasStructuredSearchFilter(message.filters)) {
+    throw protocolError("QUERY_TOO_BROAD", "query requires text or a structured filter");
+  }
+}
+
+function assertSearchSnapshot(snapshot, label) {
+  assertExactKeys(snapshot, label, [
+    "snapshotSeq", "projectionVersion", "analyzerVersion", "rankerVersion",
+  ]);
+  assertDecimal(snapshot.snapshotSeq, `${label}.snapshotSeq`);
+  assertVersion(snapshot.projectionVersion, `${label}.projectionVersion`);
+  assertVersion(snapshot.analyzerVersion, `${label}.analyzerVersion`);
+  assertVersion(snapshot.rankerVersion, `${label}.rankerVersion`);
+}
+
+function assertScoringTerm(term, label) {
+  assertExactKeys(term, label, [
+    "logicalTerm", "field", "token", "documentFrequency", "fieldDocumentCount",
+  ]);
+  assertBoundedString(term.logicalTerm, `${label}.logicalTerm`, 512, { allowEmpty: false });
+  assertEnum(term.field, `${label}.field`, FTS_FIELDS);
+  assertBoundedString(term.token, `${label}.token`, 512, { allowEmpty: false, ascii: true });
+  assertDecimal(term.documentFrequency, `${label}.documentFrequency`);
+  assertDecimal(term.fieldDocumentCount, `${label}.fieldDocumentCount`);
+  if (BigInt(term.documentFrequency) > BigInt(term.fieldDocumentCount)) {
+    throw invalidFrame(`${label}.documentFrequency exceeds its field document count`);
+  }
+}
+
+function assertPpm(value, label) {
+  assertSafeInteger(value, label, { min: 0, max: MAX_PPM });
+}
+
+function assertSearchScore(score, label, scoringTermCount) {
+  if (score === null) return;
+  assertExactKeys(score, label, [
+    "relevancePpm",
+    "bm25Rank",
+    "rankComponentPpm",
+    "idfCoveragePpm",
+    "exact",
+    "matchedTermIndexes",
+  ]);
+  assertPpm(score.relevancePpm, `${label}.relevancePpm`);
+  assertSafeInteger(score.bm25Rank, `${label}.bm25Rank`, { min: 1, max: 300 });
+  assertPpm(score.rankComponentPpm, `${label}.rankComponentPpm`);
+  assertPpm(score.idfCoveragePpm, `${label}.idfCoveragePpm`);
+  assertBoolean(score.exact, `${label}.exact`);
+  if (!Array.isArray(score.matchedTermIndexes) ||
+      score.matchedTermIndexes.length > MAX_SCORING_TERMS) {
+    throw invalidFrame(`${label}.matchedTermIndexes exceeds its bounded limit`);
+  }
+  if (scoringTermCount === 0 && score.matchedTermIndexes.length > 0) {
+    throw invalidFrame(`${label}.matchedTermIndexes requires scoring terms`);
+  }
+  for (let index = 0; index < score.matchedTermIndexes.length; index += 1) {
+    const termIndex = score.matchedTermIndexes[index];
+    assertSafeInteger(termIndex, `${label}.matchedTermIndexes[${index}]`, {
+      min: 0,
+      max: Math.max(0, scoringTermCount - 1),
+    });
+    if (index > 0 && score.matchedTermIndexes[index - 1] >= termIndex) {
+      throw invalidFrame(`${label}.matchedTermIndexes must be sorted and unique`);
+    }
+  }
+}
+
+function assertNullableBoundedString(value, label, maxBytes) {
+  if (value !== null) assertBoundedString(value, label, maxBytes);
+}
+
+function assertSearchResult(result, label, scoringTermCount) {
+  assertExactKeys(result, label, [
+    "turnKey",
+    "sessionKey",
+    "revision",
+    "provider",
+    "projectKey",
+    "observedTimestamp",
+    "problemExcerpt",
+    "problemTruncated",
+    "finalAnswerExcerpt",
+    "finalAnswerTruncated",
+    "closureState",
+    "resultEvidence",
+    "score",
+  ]);
+  assertHex64(result.turnKey, `${label}.turnKey`);
+  assertHex64(result.sessionKey, `${label}.sessionKey`);
+  assertHex64(result.revision, `${label}.revision`);
+  assertBoundedString(result.provider, `${label}.provider`, 64, {
+    allowEmpty: false,
+    ascii: true,
+  });
+  assertNullableHex64(result.projectKey, `${label}.projectKey`);
+  assertCanonicalTimestamp(result.observedTimestamp, `${label}.observedTimestamp`);
+  assertBoundedString(result.problemExcerpt, `${label}.problemExcerpt`, MAX_SEARCH_EXCERPT_BYTES);
+  assertBoolean(result.problemTruncated, `${label}.problemTruncated`);
+  assertNullableBoundedString(
+    result.finalAnswerExcerpt,
+    `${label}.finalAnswerExcerpt`,
+    MAX_SEARCH_EXCERPT_BYTES,
+  );
+  assertBoolean(result.finalAnswerTruncated, `${label}.finalAnswerTruncated`);
+  assertEnum(result.closureState, `${label}.closureState`, SEARCH_CLOSURE_STATES);
+  assertEnum(result.resultEvidence, `${label}.resultEvidence`, SEARCH_RESULT_EVIDENCE);
+  assertSearchScore(result.score, `${label}.score`, scoringTermCount);
+}
+
+function assertToolStateCounts(counts, label) {
+  assertExactKeys(counts, label, ["pending", "completed", "failed", "cancelled", "unknown"]);
+  for (const field of ["pending", "completed", "failed", "cancelled", "unknown"]) {
+    assertSafeInteger(counts[field], `${label}.${field}`, { min: 0, max: MAX_PATH_TOOL_EVENTS });
+  }
+}
+
+function assertPathFamily(family, label) {
+  assertExactKeys(family, label, [
+    "fingerprint",
+    "nodes",
+    "truncated",
+    "bestRelevancePpm",
+    "turnCount",
+    "rawSessionCount",
+    "independentGroupCount",
+    "strongGroupCount",
+    "weakGroupCount",
+    "observedEofProvisionalGroupCount",
+    "unknownDedupeSessionCount",
+    "latestUnixMs",
+    "toolStateCounts",
+    "evidenceTurnKeys",
+  ]);
+  assertHex64(family.fingerprint, `${label}.fingerprint`);
+  if (!Array.isArray(family.nodes) || family.nodes.length > MAX_PATH_NODES) {
+    throw invalidFrame(`${label}.nodes exceeds its bounded limit`);
+  }
+  for (let index = 0; index < family.nodes.length; index += 1) {
+    const node = family.nodes[index];
+    const nodeLabel = `${label}.nodes[${index}]`;
+    assertExactKeys(node, nodeLabel, ["providerScopedName", "repeatBucket"]);
+    assertBoundedString(node.providerScopedName, `${nodeLabel}.providerScopedName`, 640, {
+      allowEmpty: false,
+    });
+    assertEnum(node.repeatBucket, `${nodeLabel}.repeatBucket`, new Set(["1", "2-3", "4+"]));
+  }
+  assertBoolean(family.truncated, `${label}.truncated`);
+  assertPpm(family.bestRelevancePpm, `${label}.bestRelevancePpm`);
+  for (const field of [
+    "turnCount",
+    "rawSessionCount",
+    "independentGroupCount",
+    "strongGroupCount",
+    "weakGroupCount",
+    "observedEofProvisionalGroupCount",
+    "unknownDedupeSessionCount",
+  ]) {
+    assertSafeInteger(family[field], `${label}.${field}`, { min: 0, max: MAX_SEARCH_RESULTS });
+  }
+  if (family.rawSessionCount > family.turnCount ||
+      family.independentGroupCount > family.rawSessionCount ||
+      family.strongGroupCount + family.weakGroupCount !== family.independentGroupCount ||
+      family.observedEofProvisionalGroupCount > family.independentGroupCount ||
+      family.unknownDedupeSessionCount > family.rawSessionCount ||
+      family.turnCount < 5 ||
+      family.independentGroupCount < 3) {
+    throw invalidFrame(`${label} support counts are inconsistent`);
+  }
+  assertSafeInteger(family.latestUnixMs, `${label}.latestUnixMs`, {
+    min: 0,
+    max: Number.MAX_SAFE_INTEGER,
+  });
+  assertToolStateCounts(family.toolStateCounts, `${label}.toolStateCounts`);
+  assertBoundedSortedArray(
+    family.evidenceTurnKeys,
+    `${label}.evidenceTurnKeys`,
+    MAX_SEARCH_RESULTS,
+    assertHex64,
+  );
+}
+
+function assertEvidencePathReport(report, label) {
+  assertExactKeys(report, label, [
+    "insufficientSample",
+    "rawMatchCount",
+    "eligibleTurnCount",
+    "rawSessionCount",
+    "independentGroupCount",
+    "strongGroupCount",
+    "weakGroupCount",
+    "observedEofProvisionalGroupCount",
+    "unknownDedupeCount",
+    "unknownDedupeSessionCount",
+    "pathsTruncated",
+    "families",
+  ]);
+  assertBoolean(report.insufficientSample, `${label}.insufficientSample`);
+  assertBoolean(report.pathsTruncated, `${label}.pathsTruncated`);
+  for (const field of [
+    "rawMatchCount", "eligibleTurnCount", "rawSessionCount", "independentGroupCount",
+    "strongGroupCount", "weakGroupCount", "observedEofProvisionalGroupCount",
+    "unknownDedupeCount", "unknownDedupeSessionCount",
+  ]) {
+    assertSafeInteger(report[field], `${label}.${field}`, { min: 0, max: MAX_SEARCH_RESULTS });
+  }
+  if (report.eligibleTurnCount > report.rawMatchCount ||
+      report.rawSessionCount > report.eligibleTurnCount ||
+      report.independentGroupCount > report.rawSessionCount ||
+      report.strongGroupCount + report.weakGroupCount !== report.independentGroupCount ||
+      report.observedEofProvisionalGroupCount > report.independentGroupCount ||
+      report.unknownDedupeCount > report.eligibleTurnCount ||
+      report.unknownDedupeSessionCount > report.unknownDedupeCount ||
+      report.independentGroupCount + report.unknownDedupeSessionCount > report.rawSessionCount) {
+    throw invalidFrame(`${label} aggregate counts are inconsistent`);
+  }
+  if (!Array.isArray(report.families) || report.families.length > MAX_PATH_FAMILIES) {
+    throw invalidFrame(`${label}.families exceeds its bounded limit`);
+  }
+  if (report.insufficientSample && report.families.length > 0) {
+    throw invalidFrame(`${label}.families must be empty for an insufficient sample`);
+  }
+  let evidenceTurnCount = 0;
+  for (let index = 0; index < report.families.length; index += 1) {
+    assertPathFamily(report.families[index], `${label}.families[${index}]`);
+    evidenceTurnCount += report.families[index].evidenceTurnKeys.length;
+  }
+  if (evidenceTurnCount > MAX_SEARCH_RESULTS) {
+    throw invalidFrame(`${label} path evidence exceeds its bounded limit`);
+  }
+}
+
+function assertQueryDiagnostic(diagnostic, label) {
+  assertExactKeys(diagnostic, label, [
+    "analyzeMicros",
+    "dfMicros",
+    "postingFilterMicros",
+    "rerankMicros",
+    "pathMicros",
+    "zeroDfTermCount",
+    "highFrequencyTermCount",
+    "truncatedTermCount",
+    "scoringTermCount",
+  ]);
+  for (const field of [
+    "analyzeMicros", "dfMicros", "postingFilterMicros", "rerankMicros", "pathMicros",
+  ]) {
+    assertSafeInteger(diagnostic[field], `${label}.${field}`, {
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+  }
+  for (const field of [
+    "zeroDfTermCount", "highFrequencyTermCount", "truncatedTermCount", "scoringTermCount",
+  ]) {
+    assertSafeInteger(diagnostic[field], `${label}.${field}`, { min: 0, max: 65_535 });
+  }
+  if (diagnostic.scoringTermCount > MAX_SCORING_TERMS) {
+    throw invalidFrame(`${label}.scoringTermCount exceeds its bounded limit`);
+  }
+}
+
+function assertMessagePayloadBound(message, label) {
+  if (Buffer.byteLength(canonicalJson(message), "utf8") > MAX_PROTOCOL_PAYLOAD_BYTES) {
+    throw invalidFrame(`${label} exceeds the protocol payload limit`);
+  }
+}
+
+function assertSearchTrace(trace, label) {
+  assertExactKeys(trace, label, ["candidateCount", "candidateTurnKeys"]);
+  assertSafeInteger(trace.candidateCount, `${label}.candidateCount`, {
+    min: 0,
+    max: MAX_SEARCH_CANDIDATES,
+  });
+  if (!Array.isArray(trace.candidateTurnKeys) ||
+      trace.candidateTurnKeys.length > MAX_SEARCH_CANDIDATES) {
+    throw invalidFrame(`${label}.candidateTurnKeys exceeds its bounded limit`);
+  }
+  if (trace.candidateCount !== trace.candidateTurnKeys.length) {
+    throw invalidFrame(`${label} candidate count is inconsistent`);
+  }
+  const seen = new Set();
+  for (let index = 0; index < trace.candidateTurnKeys.length; index += 1) {
+    const key = trace.candidateTurnKeys[index];
+    assertHex64(key, `${label}.candidateTurnKeys[${index}]`);
+    if (seen.has(key)) throw invalidFrame(`${label}.candidateTurnKeys contains a duplicate`);
+    seen.add(key);
+  }
+}
+
+function assertTurnSearchResults(message) {
+  assertEnvelope(message, "TURN_SEARCH_RESULTS", [
+    "snapshot",
+    "scoringTerms",
+    "results",
+    "evidencePaths",
+    "diagnostic",
+    "searchTrace",
+  ]);
+  assertSearchSnapshot(message.snapshot, "TURN_SEARCH_RESULTS.snapshot");
+  if (!Array.isArray(message.scoringTerms) || message.scoringTerms.length > MAX_SCORING_TERMS) {
+    throw invalidFrame("TURN_SEARCH_RESULTS.scoringTerms exceeds its bounded limit");
+  }
+  for (let index = 0; index < message.scoringTerms.length; index += 1) {
+    assertScoringTerm(message.scoringTerms[index], `TURN_SEARCH_RESULTS.scoringTerms[${index}]`);
+  }
+  if (!Array.isArray(message.results) || message.results.length > MAX_SEARCH_RESULTS) {
+    throw invalidFrame("TURN_SEARCH_RESULTS.results exceeds its bounded limit");
+  }
+  for (let index = 0; index < message.results.length; index += 1) {
+    assertSearchResult(
+      message.results[index],
+      `TURN_SEARCH_RESULTS.results[${index}]`,
+      message.scoringTerms.length,
+    );
+  }
+  assertEvidencePathReport(message.evidencePaths, "TURN_SEARCH_RESULTS.evidencePaths");
+  assertQueryDiagnostic(message.diagnostic, "TURN_SEARCH_RESULTS.diagnostic");
+  assertSearchTrace(message.searchTrace, "TURN_SEARCH_RESULTS.searchTrace");
+  if (message.diagnostic.scoringTermCount !== message.scoringTerms.length) {
+    throw invalidFrame("TURN_SEARCH_RESULTS scoring term count is inconsistent");
+  }
+  assertMessagePayloadBound(message, "TURN_SEARCH_RESULTS");
+}
+
+function assertOpaqueCursor(value, label) {
+  if (value !== null) {
+    assertBoundedString(value, label, MAX_CURSOR_BYTES, { allowEmpty: false, ascii: true });
+  }
+}
+
+function assertReadTurnEvidence(message) {
+  assertEnvelope(message, "READ_TURN_EVIDENCE", [
+    "turnKey", "expectedRevision", "cursor", "limit",
+  ]);
+  assertHex64(message.turnKey, "READ_TURN_EVIDENCE.turnKey");
+  assertNullableHex64(message.expectedRevision, "READ_TURN_EVIDENCE.expectedRevision");
+  assertOpaqueCursor(message.cursor, "READ_TURN_EVIDENCE.cursor");
+  assertSafeInteger(message.limit, "READ_TURN_EVIDENCE.limit", {
+    min: 1,
+    max: MAX_EVIDENCE_PAGE_ENTRIES,
+  });
+}
+
+function assertEvidenceTurn(turn, label) {
+  assertExactKeys(turn, label, [
+    "turnKey",
+    "revision",
+    "problemText",
+    "finalAnswerExcerpt",
+    "observedTimestamp",
+    "nextUserBoundary",
+    "providerTerminal",
+    "observedEofClosed",
+    "providerVisibility",
+    "factTruncation",
+  ]);
+  assertHex64(turn.turnKey, `${label}.turnKey`);
+  assertNullableHex64(turn.revision, `${label}.revision`);
+  assertBoundedString(turn.problemText, `${label}.problemText`, MAX_TURN_PROBLEM_BYTES);
+  assertNullableBoundedString(
+    turn.finalAnswerExcerpt,
+    `${label}.finalAnswerExcerpt`,
+    MAX_TURN_ANSWER_BYTES,
+  );
+  assertCanonicalTimestamp(turn.observedTimestamp, `${label}.observedTimestamp`);
+  assertBoolean(turn.nextUserBoundary, `${label}.nextUserBoundary`);
+  if (turn.providerTerminal !== null) {
+    assertEnum(turn.providerTerminal, `${label}.providerTerminal`, new Set(["aborted", "completed"]));
+  }
+  assertBoolean(turn.observedEofClosed, `${label}.observedEofClosed`);
+  assertEnum(turn.providerVisibility, `${label}.providerVisibility`, new Set(["active"]));
+  assertBoundedSortedArray(turn.factTruncation, `${label}.factTruncation`, 64,
+    (value, itemLabel) => assertBoundedString(value, itemLabel, 128, {
+      allowEmpty: false,
+      ascii: true,
+    }));
+}
+
+function assertEvidenceLink(link, label, roles) {
+  assertExactKeys(link, label, ["eventKey", "role"]);
+  assertHex64(link.eventKey, `${label}.eventKey`);
+  assertEnum(link.role, `${label}.role`, roles);
+}
+
+function assertSafeEventPayload(payload, label) {
+  assertPlainObject(payload, label);
+  const fields = {
+    "visible-message": ["kind", "role"],
+    "capability-invocation": [
+      "kind", "capabilityKey", "correlationDigest", "inputFingerprint",
+    ],
+    "capability-result": [
+      "kind", "correlationDigest", "providerState", "exitCode", "outputBytes", "durationMs",
+    ],
+    "skill-catalog-entry": ["kind", "capabilityKey", "pathFingerprint"],
+    "skill-load": ["kind", "capabilityKey", "strength", "evidenceSource"],
+    "turn-lifecycle": ["kind", "lifecycleState", "providerTurnDigest"],
+    "provider-status": ["kind", "statusKind", "providerState", "rolledBackTurnCount"],
+  };
+  if (!Object.hasOwn(fields, payload.kind)) throw invalidFrame(`${label}.kind is invalid`);
+  assertExactKeys(payload, label, fields[payload.kind]);
+  if (payload.capabilityKey !== undefined) assertHex64(payload.capabilityKey, `${label}.capabilityKey`);
+  for (const field of ["correlationDigest", "inputFingerprint", "pathFingerprint", "providerTurnDigest"]) {
+    if (payload[field] !== undefined) assertNullableHex64(payload[field], `${label}.${field}`);
+  }
+  for (const field of ["role", "providerState", "strength", "evidenceSource", "lifecycleState",
+    "statusKind"]) {
+    if (payload[field] !== undefined) {
+      assertBoundedString(payload[field], `${label}.${field}`, 128, { allowEmpty: false, ascii: true });
+    }
+  }
+  for (const field of ["exitCode", "outputBytes", "durationMs", "rolledBackTurnCount"]) {
+    if (payload[field] !== undefined && payload[field] !== null) {
+      assertDecimal(payload[field], `${label}.${field}`);
+    }
+  }
+}
+
+function assertSafeEvent(event, label) {
+  assertExactKeys(event, label, [
+    "eventKey", "occurredTurnKey", "linkedTurns", "pointerKind", "pointerContentIndex",
+    "pointerEventOrdinal", "originScope", "observedTimestamp", "payload",
+  ]);
+  assertHex64(event.eventKey, `${label}.eventKey`);
+  assertNullableHex64(event.occurredTurnKey, `${label}.occurredTurnKey`);
+  if (!Array.isArray(event.linkedTurns) || event.linkedTurns.length > 512) {
+    throw invalidFrame(`${label}.linkedTurns exceeds its bounded limit`);
+  }
+  for (let index = 0; index < event.linkedTurns.length; index += 1) {
+    const link = event.linkedTurns[index];
+    assertExactKeys(link, `${label}.linkedTurns[${index}]`, ["turnKey", "role"]);
+    assertHex64(link.turnKey, `${label}.linkedTurns[${index}].turnKey`);
+    assertBoundedString(link.role, `${label}.linkedTurns[${index}].role`, 64, {
+      allowEmpty: false,
+      ascii: true,
+    });
+  }
+  assertBoundedString(event.pointerKind, `${label}.pointerKind`, 128, {
+    allowEmpty: false,
+    ascii: true,
+  });
+  assertSafeInteger(event.pointerContentIndex, `${label}.pointerContentIndex`, {
+    min: -2_147_483_648,
+    max: 2_147_483_647,
+  });
+  assertSafeInteger(event.pointerEventOrdinal, `${label}.pointerEventOrdinal`, {
+    min: 0,
+    max: 65_535,
+  });
+  assertEnum(event.originScope, `${label}.originScope`, new Set(["main", "subagent", "unknown"]));
+  assertCanonicalTimestamp(event.observedTimestamp, `${label}.observedTimestamp`);
+  assertSafeEventPayload(event.payload, `${label}.payload`);
+}
+
+function assertSafeCapabilityUse(use, label) {
+  assertExactKeys(use, label, [
+    "useKey", "capabilityKey", "provider", "capabilityKind", "canonicalName", "turnOrdinal",
+    "exactObservedName", "originScope", "originFingerprint", "inputFingerprint",
+    "providerTerminalState", "strength", "correlationDigest", "evidence",
+  ]);
+  assertHex64(use.useKey, `${label}.useKey`);
+  assertHex64(use.capabilityKey, `${label}.capabilityKey`);
+  assertBoundedString(use.provider, `${label}.provider`, 64, { allowEmpty: false, ascii: true });
+  assertEnum(use.capabilityKind, `${label}.capabilityKind`, new Set(["skill", "tool"]));
+  assertBoundedString(use.canonicalName, `${label}.canonicalName`, 512, { allowEmpty: false });
+  assertDecimal(use.turnOrdinal, `${label}.turnOrdinal`);
+  assertBoundedString(use.exactObservedName, `${label}.exactObservedName`, 512);
+  assertEnum(use.originScope, `${label}.originScope`, new Set(["main", "subagent", "unknown"]));
+  for (const field of ["originFingerprint", "inputFingerprint", "correlationDigest"]) {
+    assertNullableHex64(use[field], `${label}.${field}`);
+  }
+  assertEnum(use.providerTerminalState, `${label}.providerTerminalState`, new Set([
+    "cancelled", "completed", "failed", "pending", "unknown",
+  ]));
+  assertEnum(use.strength, `${label}.strength`, new Set(["confirmed", "inferred", "observed"]));
+  if (!Array.isArray(use.evidence) || use.evidence.length > 512) {
+    throw invalidFrame(`${label}.evidence exceeds its bounded limit`);
+  }
+  for (let index = 0; index < use.evidence.length; index += 1) {
+    assertEvidenceLink(use.evidence[index], `${label}.evidence[${index}]`, new Set([
+      "corroboration", "invocation", "result",
+    ]));
+  }
+}
+
+function assertEvidenceEntry(entry, label) {
+  assertExactKeys(entry, label, ["factKind", "fact"]);
+  if (entry.factKind === "event") {
+    assertSafeEvent(entry.fact, `${label}.fact`);
+  } else if (entry.factKind === "capability-use") {
+    assertSafeCapabilityUse(entry.fact, `${label}.fact`);
+  } else {
+    throw invalidFrame(`${label}.factKind is invalid`);
+  }
+}
+
+function assertTurnEvidencePage(message) {
+  assertEnvelope(message, "TURN_EVIDENCE_PAGE", [
+    "snapshotSeq", "turn", "entries", "nextCursor",
+  ]);
+  assertDecimal(message.snapshotSeq, "TURN_EVIDENCE_PAGE.snapshotSeq");
+  assertEvidenceTurn(message.turn, "TURN_EVIDENCE_PAGE.turn");
+  if (!Array.isArray(message.entries) || message.entries.length > MAX_EVIDENCE_PAGE_ENTRIES) {
+    throw invalidFrame("TURN_EVIDENCE_PAGE.entries exceeds its bounded limit");
+  }
+  for (let index = 0; index < message.entries.length; index += 1) {
+    assertEvidenceEntry(message.entries[index], `TURN_EVIDENCE_PAGE.entries[${index}]`);
+  }
+  assertOpaqueCursor(message.nextCursor, "TURN_EVIDENCE_PAGE.nextCursor");
+  assertMessagePayloadBound(message, "TURN_EVIDENCE_PAGE");
+}
+
 function assertAbortSession(message) {
   assertEnvelope(message, "ABORT_SESSION", ["nextSequence", "reason"]);
   assertDecimal(message.nextSequence, "ABORT_SESSION.nextSequence");
@@ -900,6 +1582,10 @@ export function assertProtocolMessage(message) {
   else if (message.type === "PURGE_MAINTENANCE_STATUS") assertPurgeMaintenanceStatus(message);
   else if (message.type === "READ_ENGINE_STATUS") assertReadEngineStatus(message);
   else if (message.type === "ENGINE_STATUS") assertEngineStatus(message);
+  else if (message.type === "SEARCH_TURNS") assertSearchTurns(message);
+  else if (message.type === "TURN_SEARCH_RESULTS") assertTurnSearchResults(message);
+  else if (message.type === "READ_TURN_EVIDENCE") assertReadTurnEvidence(message);
+  else if (message.type === "TURN_EVIDENCE_PAGE") assertTurnEvidencePage(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
   else if (message.type === "ERROR") assertErrorMessage(message);
@@ -1248,6 +1934,131 @@ export function createReadEngineStatusMessage({ requestId }) {
 export function createEngineStatusMessage({ requestId, status }) {
   assertPlainObject(status, "status");
   return assertProtocolMessage(envelope("ENGINE_STATUS", requestId, { ...status }));
+}
+
+function canonicalSearchFilters(filters) {
+  assertPlainObject(filters, "filters");
+  assertExactKeys(filters, "filters", [
+    "providers",
+    "projectKeys",
+    "observedAtOrAfterUnixMs",
+    "observedBeforeUnixMs",
+    "toolCapabilityKeys",
+    "skillCapabilityKeys",
+    "resultEvidence",
+    "closureStates",
+  ]);
+  const result = {
+    providers: canonicalBoundedArray(filters.providers, "filters.providers", MAX_FILTER_PROVIDERS,
+      (value, label) => assertBoundedString(value, label, 64, {
+        allowEmpty: false,
+        ascii: true,
+      })),
+    projectKeys: canonicalBoundedArray(
+      filters.projectKeys,
+      "filters.projectKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    ),
+    observedAtOrAfterUnixMs: filters.observedAtOrAfterUnixMs,
+    observedBeforeUnixMs: filters.observedBeforeUnixMs,
+    toolCapabilityKeys: canonicalBoundedArray(
+      filters.toolCapabilityKeys,
+      "filters.toolCapabilityKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    ),
+    skillCapabilityKeys: canonicalBoundedArray(
+      filters.skillCapabilityKeys,
+      "filters.skillCapabilityKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    ),
+    resultEvidence: canonicalBoundedArray(
+      filters.resultEvidence,
+      "filters.resultEvidence",
+      3,
+      (value, label) => assertEnum(value, label, SEARCH_RESULT_EVIDENCE),
+    ),
+    closureStates: canonicalBoundedArray(
+      filters.closureStates,
+      "filters.closureStates",
+      3,
+      (value, label) => assertEnum(value, label, SEARCH_CLOSURE_STATES),
+    ),
+  };
+  assertSearchFilters(result, "filters");
+  return result;
+}
+
+export function createSearchTurnsMessage({
+  requestId,
+  query,
+  filters,
+  limit = 50,
+  pathLimit = 10,
+  nowUnixMs,
+  quiescenceSeconds = 300,
+}) {
+  const message = assertProtocolMessage(envelope("SEARCH_TURNS", requestId, {
+    query,
+    filters: canonicalSearchFilters(filters),
+    limit,
+    pathLimit,
+    nowUnixMs,
+    quiescenceSeconds,
+  }));
+  assertSearchRequestDomain(message);
+  return message;
+}
+
+export function createTurnSearchResultsMessage({
+  requestId,
+  snapshot,
+  scoringTerms,
+  results,
+  evidencePaths,
+  diagnostic,
+  searchTrace,
+}) {
+  return assertProtocolMessage(envelope("TURN_SEARCH_RESULTS", requestId, {
+    snapshot,
+    scoringTerms,
+    results,
+    evidencePaths,
+    diagnostic,
+    searchTrace,
+  }));
+}
+
+export function createReadTurnEvidenceMessage({
+  requestId,
+  turnKey,
+  expectedRevision = null,
+  cursor = null,
+  limit = 64,
+}) {
+  return assertProtocolMessage(envelope("READ_TURN_EVIDENCE", requestId, {
+    turnKey,
+    expectedRevision,
+    cursor,
+    limit,
+  }));
+}
+
+export function createTurnEvidencePageMessage({
+  requestId,
+  snapshotSeq,
+  turn,
+  entries,
+  nextCursor = null,
+}) {
+  return assertProtocolMessage(envelope("TURN_EVIDENCE_PAGE", requestId, {
+    snapshotSeq,
+    turn,
+    entries,
+    nextCursor,
+  }));
 }
 
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {

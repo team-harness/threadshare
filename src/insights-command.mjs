@@ -1,6 +1,10 @@
 import { loadInsightsConfig, updateInsightsExclusion } from "./insights-config.mjs";
 import { createInsightsEngineClient } from "./insights-engine-client.mjs";
 import {
+  ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
+  ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
+} from "./insights-engine-protocol.mjs";
+import {
   createInsightsIndexWorker,
   hideConfiguredInsightsSources,
   runInsightsIndexer,
@@ -26,6 +30,41 @@ const EXCLUSION_KINDS = new Set(["provider", "project", "session"]);
 function commandError(code, message) {
   const error = new Error(message);
   error.code = code;
+  return error;
+}
+
+function incompleteIndexError(index) {
+  const counts = new Map();
+  for (const diagnostic of index.diagnostics ?? []) {
+    const provider = diagnostic?.provider === "codex" || diagnostic?.provider === "claude"
+      ? diagnostic.provider
+      : "unknown";
+    const code = typeof diagnostic?.code === "string" ? diagnostic.code : "unknown";
+    const errorCode = typeof diagnostic?.errorCode === "string"
+      ? diagnostic.errorCode
+      : "unknown";
+    const key = `${provider}\0${code}\0${errorCode}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const failureSummary = Object.freeze({
+    planned: index.planned,
+    committed: index.committed,
+    excluded: index.excluded,
+    failed: index.failed,
+    diagnostics: Object.freeze([...counts].sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, count]) => {
+        const [provider, code, errorCode] = key.split("\0");
+        return Object.freeze({ provider, code, errorCode, count });
+      })),
+  });
+  const error = commandError(
+    "TS_INSIGHTS_REINDEX_INCOMPLETE",
+    "Insights candidate contains failed session operations",
+  );
+  Object.defineProperty(error, "failureSummary", {
+    value: failureSummary,
+    enumerable: false,
+  });
   return error;
 }
 
@@ -104,8 +143,8 @@ export function insightsRequiredContract(originSecretEpoch) {
     duplicatePolicyVersion: 1,
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: Object.freeze([]),
-    analyzerCapabilities: Object.freeze([]),
+    projectionVersions: ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
+    analyzerCapabilities: ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
     rankerVersion: 1,
   });
 }
@@ -246,10 +285,7 @@ export async function reconcileInsights(options = {}) {
           readDelta: options.readDelta,
         });
         if (index.failed > 0) {
-          throw commandError(
-            "TS_INSIGHTS_REINDEX_INCOMPLETE",
-            "Insights candidate contains failed session operations",
-          );
+          throw incompleteIndexError(index);
         }
         const purge = await finishPurgeMaintenance(engine, { ...options, signal });
         if (insightsPurgeWorkPending(purge)) {

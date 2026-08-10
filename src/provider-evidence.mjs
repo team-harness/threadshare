@@ -1543,7 +1543,7 @@ function inspectMetadata(provider, file, summary, options, privacyContext) {
   const prior = options.checkpoint?.pendingState?.sessionState;
   if (provider === "codex") {
     const meta = summary.codexMeta;
-    const sessionId = String(meta?.session_id ?? meta?.id ?? fallbackId);
+    const sessionId = String(options.sessionId ?? meta?.session_id ?? meta?.id ?? fallbackId);
     const isSubagent = meta?.thread_source === "subagent" || meta?.source?.subagent?.thread_spawn != null;
     const root = meta?.forked_from_id ?? meta?.id ?? meta?.session_id;
     return {

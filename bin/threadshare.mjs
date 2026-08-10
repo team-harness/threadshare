@@ -759,6 +759,13 @@ function insightsFailure(error, action) {
       next: "Retry the same `threadshare insights exclude add` command; the operation is idempotent.",
     });
   }
+  if (error?.code === "TS_INSIGHTS_REINDEX_SPACE_REQUIRED" ||
+      error?.code === "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED") {
+    return cliDiagnostic(error.code, "Local Insights needs more free disk space before rebuilding its index.", {
+      command: "insights",
+      next: "Free local disk space, then retry the requested Insights operation.",
+    });
+  }
   const next = action === "reset"
     ? "Resolve the reported local state or writer-lock problem, then retry `threadshare insights reset`."
     : "Run `threadshare insights status`, resolve its diagnostic, then retry the requested action.";

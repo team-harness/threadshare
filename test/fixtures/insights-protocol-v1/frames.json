@@ -18,15 +18,20 @@
           "duplicatePolicyVersion": 1,
           "factStorageProfile": "normalized-row-v1",
           "storageSchemaVersion": 1,
-          "projectionVersions": [],
-          "analyzerCapabilities": [],
+          "projectionVersions": [
+            "turn-search@2",
+            "turn-summary@1"
+          ],
+          "analyzerCapabilities": [
+            "mixed-cjk-code@1"
+          ],
           "rankerVersion": 1
         }
       },
-      "payloadByteLength": 473,
-      "payloadSha256": "f7dbf38284b2be607ae715db691b72ed1d5f2e985d7627bd4496666b6173f511",
-      "lengthPrefixHex": "000001d9",
-      "canonicalPayload": "{\"clientVersion\":\"threadshare@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"requiredContract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"type\":\"HELLO\"}"
+      "payloadByteLength": 523,
+      "payloadSha256": "600283fb725bbd52e23e9326079612b00a896c92d1cd88d95e04c77250d3d6cc",
+      "lengthPrefixHex": "0000020b",
+      "canonicalPayload": "{\"clientVersion\":\"threadshare@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"requiredContract\":{\"analyzerCapabilities\":[\"mixed-cjk-code@1\"],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[\"turn-search@2\",\"turn-summary@1\"],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"type\":\"HELLO\"}"
     },
     {
       "name": "ready",
@@ -48,15 +53,20 @@
           "duplicatePolicyVersion": 1,
           "factStorageProfile": "normalized-row-v1",
           "storageSchemaVersion": 1,
-          "projectionVersions": [],
-          "analyzerCapabilities": [],
+          "projectionVersions": [
+            "turn-search@2",
+            "turn-summary@1"
+          ],
+          "analyzerCapabilities": [
+            "mixed-cjk-code@1"
+          ],
           "rankerVersion": 1
         }
       },
-      "payloadByteLength": 731,
-      "payloadSha256": "6e0cb6dbeaa9d6825c3dd8a891a3620fc441d80793423e78367d74066991f195",
-      "lengthPrefixHex": "000002db",
-      "canonicalPayload": "{\"acceptedContract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"buildManifestDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"engineVersion\":\"threadshare-insights-engine@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"sqliteCompileOptionsDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sqliteVersion\":\"3.53.2\",\"target\":\"aarch64-apple-darwin\",\"type\":\"READY\"}"
+      "payloadByteLength": 781,
+      "payloadSha256": "37389b57e6180210776acdcf21da793d78d648cfad2a503aa4baf90b818bf2fe",
+      "lengthPrefixHex": "0000030d",
+      "canonicalPayload": "{\"acceptedContract\":{\"analyzerCapabilities\":[\"mixed-cjk-code@1\"],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[\"turn-search@2\",\"turn-summary@1\"],\"providerAdapterVersions\":[\"claude@1\",\"codex@1\"],\"rankerVersion\":1,\"storageSchemaVersion\":1},\"buildManifestDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"engineVersion\":\"threadshare-insights-engine@0.6.1\",\"format\":\"threadshare-insights-protocol@v1\",\"maxFrameBytes\":4194304,\"requestId\":\"1\",\"sqliteCompileOptionsDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sqliteVersion\":\"3.53.2\",\"target\":\"aarch64-apple-darwin\",\"type\":\"READY\"}"
     },
     {
       "name": "begin-session",
@@ -84,8 +94,13 @@
           "duplicatePolicyVersion": 1,
           "factStorageProfile": "normalized-row-v1",
           "storageSchemaVersion": 1,
-          "projectionVersions": [],
-          "analyzerCapabilities": [],
+          "projectionVersions": [
+            "turn-search@2",
+            "turn-summary@1"
+          ],
+          "analyzerCapabilities": [
+            "mixed-cjk-code@1"
+          ],
           "rankerVersion": 1
         },
         "counts": {
@@ -101,10 +116,10 @@
           "capabilityUseEvidence": "0"
         }
       },
-      "payloadByteLength": 980,
-      "payloadSha256": "b0f0a9dcf2af774a8e048ff8b00d29a74787a895bf033b938eef7cbb0a6ea6d8",
-      "lengthPrefixHex": "000003d4",
-      "canonicalPayload": "{\"contract\":{\"analyzerCapabilities\":[],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[],\"providerAdapterVersion\":\"codex@1\",\"rankerVersion\":1,\"storageSchemaVersion\":1},\"counts\":{\"authoritativeTurnKeys\":\"1\",\"capabilities\":\"0\",\"capabilityUseEvidence\":\"0\",\"capabilityUses\":\"0\",\"evidenceEvents\":\"0\",\"orphanEventKeys\":\"0\",\"sourceRecords\":\"0\",\"turnEvidence\":\"0\",\"turnKeys\":\"1\",\"turns\":\"1\"},\"deltaFormat\":\"session-facts-delta@v1\",\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"expectedGeneration\":\"0\",\"format\":\"threadshare-insights-protocol@v1\",\"mode\":\"append\",\"requestId\":\"2\",\"session\":{\"duplicatePolicyVersion\":1,\"eligibility\":\"eligible\",\"provider\":\"codex\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionScope\":\"main\"},\"targetGeneration\":\"1\",\"type\":\"BEGIN_SESSION\"}"
+      "payloadByteLength": 1030,
+      "payloadSha256": "d33460edff2266f231a0d957c260148f92802db86682ae1ed2764b246dc945fd",
+      "lengthPrefixHex": "00000406",
+      "canonicalPayload": "{\"contract\":{\"analyzerCapabilities\":[\"mixed-cjk-code@1\"],\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"factStorageProfile\":\"normalized-row-v1\",\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"projectionVersions\":[\"turn-search@2\",\"turn-summary@1\"],\"providerAdapterVersion\":\"codex@1\",\"rankerVersion\":1,\"storageSchemaVersion\":1},\"counts\":{\"authoritativeTurnKeys\":\"1\",\"capabilities\":\"0\",\"capabilityUseEvidence\":\"0\",\"capabilityUses\":\"0\",\"evidenceEvents\":\"0\",\"orphanEventKeys\":\"0\",\"sourceRecords\":\"0\",\"turnEvidence\":\"0\",\"turnKeys\":\"1\",\"turns\":\"1\"},\"deltaFormat\":\"session-facts-delta@v1\",\"deltaId\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"expectedGeneration\":\"0\",\"format\":\"threadshare-insights-protocol@v1\",\"mode\":\"append\",\"requestId\":\"2\",\"session\":{\"duplicatePolicyVersion\":1,\"eligibility\":\"eligible\",\"provider\":\"codex\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionScope\":\"main\"},\"targetGeneration\":\"1\",\"type\":\"BEGIN_SESSION\"}"
     },
     {
       "name": "session-accepted",
@@ -472,6 +487,213 @@
       "payloadSha256": "75740e796a1adc69d4d35a944e0447309027efb2a8092421381e28f198860cc5",
       "lengthPrefixHex": "00000486",
       "canonicalPayload": "{\"changeLog\":{\"maxPayloadBytes\":\"67108864\",\"maxRows\":\"1000000\",\"payloadBytes\":\"4096\",\"rows\":\"42\",\"state\":\"within-cap\"},\"factStorageProfile\":\"normalized-row-v1\",\"format\":\"threadshare-insights-protocol@v1\",\"integrity\":{\"fts\":\"ok\",\"quickCheck\":\"ok\"},\"projections\":[{\"baseSnapshotSeq\":\"12\",\"errorDigest\":null,\"inputFactSchemaVersion\":1,\"name\":\"capability-retry-summary\",\"rootKind\":\"capability\",\"status\":\"active\",\"version\":1,\"watermark\":\"17\"},{\"baseSnapshotSeq\":\"17\",\"errorDigest\":null,\"inputFactSchemaVersion\":1,\"name\":\"turn-search\",\"rootKind\":\"turn\",\"status\":\"building\",\"version\":2,\"watermark\":\"17\"},{\"baseSnapshotSeq\":\"17\",\"errorDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"inputFactSchemaVersion\":1,\"name\":\"turn-search\",\"rootKind\":\"turn\",\"status\":\"failed\",\"version\":3,\"watermark\":\"17\"}],\"purge\":{\"pendingFacts\":\"1\",\"pendingMaintenance\":\"2\",\"purged\":\"3\",\"state\":\"pending-purge\"},\"requestId\":\"9\",\"snapshotAgeMs\":\"250\",\"snapshotPending\":false,\"snapshotSeq\":\"17\",\"storage\":{\"databaseBytes\":\"1048576\",\"recentDiagnostic\":\"TS_INSIGHTS_WAL_BACKPRESSURE\",\"walBytes\":\"134217728\",\"walPressureAction\":\"backpressure\"},\"type\":\"ENGINE_STATUS\"}"
+    },
+    {
+      "name": "search-turns",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SEARCH_TURNS",
+        "requestId": "10",
+        "query": "Bash timeout",
+        "filters": {
+          "providers": [
+            "codex"
+          ],
+          "projectKeys": [],
+          "observedAtOrAfterUnixMs": null,
+          "observedBeforeUnixMs": null,
+          "toolCapabilityKeys": [],
+          "skillCapabilityKeys": [],
+          "resultEvidence": [],
+          "closureStates": []
+        },
+        "limit": 50,
+        "pathLimit": 10,
+        "nowUnixMs": "1786320000000",
+        "quiescenceSeconds": 300
+      },
+      "payloadByteLength": 383,
+      "payloadSha256": "e31f316136b31118282988f85bfce166ea60f24acd06d021053cecc039e64995",
+      "lengthPrefixHex": "0000017f",
+      "canonicalPayload": "{\"filters\":{\"closureStates\":[],\"observedAtOrAfterUnixMs\":null,\"observedBeforeUnixMs\":null,\"projectKeys\":[],\"providers\":[\"codex\"],\"resultEvidence\":[],\"skillCapabilityKeys\":[],\"toolCapabilityKeys\":[]},\"format\":\"threadshare-insights-protocol@v1\",\"limit\":50,\"nowUnixMs\":\"1786320000000\",\"pathLimit\":10,\"query\":\"Bash timeout\",\"quiescenceSeconds\":300,\"requestId\":\"10\",\"type\":\"SEARCH_TURNS\"}"
+    },
+    {
+      "name": "turn-search-results",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "TURN_SEARCH_RESULTS",
+        "requestId": "10",
+        "snapshot": {
+          "snapshotSeq": "17",
+          "projectionVersion": 2,
+          "analyzerVersion": 1,
+          "rankerVersion": 1
+        },
+        "scoringTerms": [
+          {
+            "logicalTerm": "timeout",
+            "field": "natural",
+            "token": "tdgltz3vupv2a",
+            "documentFrequency": "2",
+            "fieldDocumentCount": "10"
+          }
+        ],
+        "results": [
+          {
+            "turnKey": "1111111111111111111111111111111111111111111111111111111111111111",
+            "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "revision": "2222222222222222222222222222222222222222222222222222222222222222",
+            "provider": "codex",
+            "projectKey": null,
+            "observedTimestamp": "2026-08-10T00:00:00.000Z",
+            "problemExcerpt": "Bash timeout",
+            "problemTruncated": false,
+            "finalAnswerExcerpt": null,
+            "finalAnswerTruncated": false,
+            "closureState": "hard-sealed",
+            "resultEvidence": "provider-completed",
+            "score": {
+              "relevancePpm": 900000,
+              "bm25Rank": 1,
+              "rankComponentPpm": 1000000,
+              "idfCoveragePpm": 1000000,
+              "exact": true,
+              "matchedTermIndexes": [
+                0
+              ]
+            }
+          }
+        ],
+        "evidencePaths": {
+          "insufficientSample": true,
+          "rawMatchCount": 1,
+          "eligibleTurnCount": 0,
+          "rawSessionCount": 0,
+          "independentGroupCount": 0,
+          "strongGroupCount": 0,
+          "weakGroupCount": 0,
+          "observedEofProvisionalGroupCount": 0,
+          "unknownDedupeCount": 0,
+          "unknownDedupeSessionCount": 0,
+          "pathsTruncated": false,
+          "families": []
+        },
+        "diagnostic": {
+          "analyzeMicros": 10,
+          "dfMicros": 5,
+          "postingFilterMicros": 20,
+          "rerankMicros": 8,
+          "pathMicros": 0,
+          "zeroDfTermCount": 0,
+          "highFrequencyTermCount": 0,
+          "truncatedTermCount": 0,
+          "scoringTermCount": 1
+        },
+        "searchTrace": {
+          "candidateCount": 1,
+          "candidateTurnKeys": [
+            "1111111111111111111111111111111111111111111111111111111111111111"
+          ]
+        }
+      },
+      "payloadByteLength": 1581,
+      "payloadSha256": "9078e8c4662d73b16d769e7d4f07912963d8b50331a54e2993304853226fea81",
+      "lengthPrefixHex": "0000062d",
+      "canonicalPayload": "{\"diagnostic\":{\"analyzeMicros\":10,\"dfMicros\":5,\"highFrequencyTermCount\":0,\"pathMicros\":0,\"postingFilterMicros\":20,\"rerankMicros\":8,\"scoringTermCount\":1,\"truncatedTermCount\":0,\"zeroDfTermCount\":0},\"evidencePaths\":{\"eligibleTurnCount\":0,\"families\":[],\"independentGroupCount\":0,\"insufficientSample\":true,\"observedEofProvisionalGroupCount\":0,\"pathsTruncated\":false,\"rawMatchCount\":1,\"rawSessionCount\":0,\"strongGroupCount\":0,\"unknownDedupeCount\":0,\"unknownDedupeSessionCount\":0,\"weakGroupCount\":0},\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"10\",\"results\":[{\"closureState\":\"hard-sealed\",\"finalAnswerExcerpt\":null,\"finalAnswerTruncated\":false,\"observedTimestamp\":\"2026-08-10T00:00:00.000Z\",\"problemExcerpt\":\"Bash timeout\",\"problemTruncated\":false,\"projectKey\":null,\"provider\":\"codex\",\"resultEvidence\":\"provider-completed\",\"revision\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"score\":{\"bm25Rank\":1,\"exact\":true,\"idfCoveragePpm\":1000000,\"matchedTermIndexes\":[0],\"rankComponentPpm\":1000000,\"relevancePpm\":900000},\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"turnKey\":\"1111111111111111111111111111111111111111111111111111111111111111\"}],\"scoringTerms\":[{\"documentFrequency\":\"2\",\"field\":\"natural\",\"fieldDocumentCount\":\"10\",\"logicalTerm\":\"timeout\",\"token\":\"tdgltz3vupv2a\"}],\"searchTrace\":{\"candidateCount\":1,\"candidateTurnKeys\":[\"1111111111111111111111111111111111111111111111111111111111111111\"]},\"snapshot\":{\"analyzerVersion\":1,\"projectionVersion\":2,\"rankerVersion\":1,\"snapshotSeq\":\"17\"},\"type\":\"TURN_SEARCH_RESULTS\"}"
+    },
+    {
+      "name": "read-turn-evidence",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "READ_TURN_EVIDENCE",
+        "requestId": "11",
+        "turnKey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "expectedRevision": "2222222222222222222222222222222222222222222222222222222222222222",
+        "cursor": null,
+        "limit": 64
+      },
+      "payloadByteLength": 278,
+      "payloadSha256": "f8c5475a5c28646a6298862ffaf6cd307cc87dfcec36e3488c1a71e41c2cbd27",
+      "lengthPrefixHex": "00000116",
+      "canonicalPayload": "{\"cursor\":null,\"expectedRevision\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"format\":\"threadshare-insights-protocol@v1\",\"limit\":64,\"requestId\":\"11\",\"turnKey\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"type\":\"READ_TURN_EVIDENCE\"}"
+    },
+    {
+      "name": "turn-evidence-page",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "TURN_EVIDENCE_PAGE",
+        "requestId": "11",
+        "snapshotSeq": "17",
+        "turn": {
+          "turnKey": "1111111111111111111111111111111111111111111111111111111111111111",
+          "revision": "2222222222222222222222222222222222222222222222222222222222222222",
+          "problemText": "Bash timeout",
+          "finalAnswerExcerpt": null,
+          "observedTimestamp": "2026-08-10T00:00:00.000Z",
+          "nextUserBoundary": true,
+          "providerTerminal": "completed",
+          "observedEofClosed": false,
+          "providerVisibility": "active",
+          "factTruncation": []
+        },
+        "entries": [
+          {
+            "factKind": "event",
+            "fact": {
+              "eventKey": "3333333333333333333333333333333333333333333333333333333333333333",
+              "occurredTurnKey": "1111111111111111111111111111111111111111111111111111111111111111",
+              "linkedTurns": [
+                {
+                  "turnKey": "1111111111111111111111111111111111111111111111111111111111111111",
+                  "role": "lifecycle"
+                }
+              ],
+              "pointerKind": "response_item",
+              "pointerContentIndex": 0,
+              "pointerEventOrdinal": 0,
+              "originScope": "main",
+              "observedTimestamp": "2026-08-10T00:00:01.000Z",
+              "payload": {
+                "kind": "capability-result",
+                "correlationDigest": null,
+                "providerState": "completed",
+                "exitCode": "0",
+                "outputBytes": "12",
+                "durationMs": "5"
+              }
+            }
+          },
+          {
+            "factKind": "capability-use",
+            "fact": {
+              "useKey": "4444444444444444444444444444444444444444444444444444444444444444",
+              "capabilityKey": "5555555555555555555555555555555555555555555555555555555555555555",
+              "provider": "codex",
+              "capabilityKind": "tool",
+              "canonicalName": "Bash",
+              "turnOrdinal": "1",
+              "exactObservedName": "Bash",
+              "originScope": "main",
+              "originFingerprint": null,
+              "inputFingerprint": null,
+              "providerTerminalState": "completed",
+              "strength": "observed",
+              "correlationDigest": null,
+              "evidence": [
+                {
+                  "eventKey": "3333333333333333333333333333333333333333333333333333333333333333",
+                  "role": "result"
+                }
+              ]
+            }
+          }
+        ],
+        "nextCursor": null
+      },
+      "payloadByteLength": 1703,
+      "payloadSha256": "07144302d6c988b32ac31ec1bd659bc470c767bd0e6ab190663235de21c733d7",
+      "lengthPrefixHex": "000006a7",
+      "canonicalPayload": "{\"entries\":[{\"fact\":{\"eventKey\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"linkedTurns\":[{\"role\":\"lifecycle\",\"turnKey\":\"1111111111111111111111111111111111111111111111111111111111111111\"}],\"observedTimestamp\":\"2026-08-10T00:00:01.000Z\",\"occurredTurnKey\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"originScope\":\"main\",\"payload\":{\"correlationDigest\":null,\"durationMs\":\"5\",\"exitCode\":\"0\",\"kind\":\"capability-result\",\"outputBytes\":\"12\",\"providerState\":\"completed\"},\"pointerContentIndex\":0,\"pointerEventOrdinal\":0,\"pointerKind\":\"response_item\"},\"factKind\":\"event\"},{\"fact\":{\"canonicalName\":\"Bash\",\"capabilityKey\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"capabilityKind\":\"tool\",\"correlationDigest\":null,\"evidence\":[{\"eventKey\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"role\":\"result\"}],\"exactObservedName\":\"Bash\",\"inputFingerprint\":null,\"originFingerprint\":null,\"originScope\":\"main\",\"provider\":\"codex\",\"providerTerminalState\":\"completed\",\"strength\":\"observed\",\"turnOrdinal\":\"1\",\"useKey\":\"4444444444444444444444444444444444444444444444444444444444444444\"},\"factKind\":\"capability-use\"}],\"format\":\"threadshare-insights-protocol@v1\",\"nextCursor\":null,\"requestId\":\"11\",\"snapshotSeq\":\"17\",\"turn\":{\"factTruncation\":[],\"finalAnswerExcerpt\":null,\"nextUserBoundary\":true,\"observedEofClosed\":false,\"observedTimestamp\":\"2026-08-10T00:00:00.000Z\",\"problemText\":\"Bash timeout\",\"providerTerminal\":\"completed\",\"providerVisibility\":\"active\",\"revision\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"turnKey\":\"1111111111111111111111111111111111111111111111111111111111111111\"},\"type\":\"TURN_EVIDENCE_PAGE\"}"
     },
     {
       "name": "session-committed",

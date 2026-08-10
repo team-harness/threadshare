@@ -28,12 +28,15 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
+  ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
+  ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
   assertHandshakeCompatible,
   createExcludeSourceMessage,
   createHelloMessage,
   createReadEngineStatusMessage,
   createRemoveSourceMessage,
   createRunPurgeMaintenanceMessage,
+  createSearchTurnsMessage,
   createSessionDeltaMessages,
   decodeProtocolFrames,
   encodeProtocolFrame,
@@ -75,6 +78,14 @@ const PROTOCOL_FORMAT = "threadshare-insights-protocol@v1";
 const BENCHMARK_FORMAT = "threadshare-insights-engine-benchmark@v1";
 const CAPACITY_BENCHMARK_FORMAT = "threadshare-insights-capacity-benchmark@v1";
 const RAW_BACKFILL_BENCHMARK_FORMAT = "threadshare-insights-raw-backfill-benchmark@v1";
+const QUERY_BENCHMARK_FORMAT = "threadshare-insights-query-benchmark@v1";
+export const FORMAL_QUERY_BENCHMARK_TURN_COUNTS = Object.freeze([25_000, 250_000]);
+export const FORMAL_QUERY_BENCHMARK_QUERY_COUNT = 1_000;
+export const FORMAL_QUERY_BENCHMARK_WARMUP_COUNT = 100;
+export const FORMAL_QUERY_BENCHMARK_SEEDS = Object.freeze({
+  25000: "threadshare-insights-query-25k-v1",
+  250000: "threadshare-insights-query-250k-v1",
+});
 const BASE_TIME_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
 const GIB = 1024 ** 3;
 const SQLITE_LOCK_BYTE_OFFSET = 1_073_741_824;
@@ -82,7 +93,25 @@ const NORMALIZED_FACT_LIMIT_BYTES = 6 * GIB;
 const STEADY_STATE_LIMIT_BYTES = 8 * GIB;
 const CURRENT_ENGINE_RSS_LIMIT_BYTES = 96 * 1024 * 1024;
 const LONG_TERM_ENGINE_RSS_LIMIT_BYTES = 128 * 1024 * 1024;
-const CAPACITY_CORPUS_VERSION = 2;
+const DETAIL_FULL_FTS_LIMIT_BYTES = 400 * 1024 * 1024;
+const QUERY_BUDGETS = Object.freeze({
+  current: Object.freeze({
+    maximumTurns: 25_000,
+    p95Ms: 100,
+    p99Ms: 250,
+    sidecarRssBytes: CURRENT_ENGINE_RSS_LIMIT_BYTES,
+    derivedStateBytes: 1 * GIB,
+  }),
+  longTerm: Object.freeze({
+    maximumTurns: 250_000,
+    p95Ms: 200,
+    p99Ms: 500,
+    sidecarRssBytes: LONG_TERM_ENGINE_RSS_LIMIT_BYTES,
+    derivedStateBytes: 8 * GIB,
+  }),
+});
+const CAPACITY_CORPUS_VERSION = 4;
+const CAPACITY_TOPIC_COUNT = 47;
 const CAPACITY_DENSITY = Object.freeze({
   sourceRecordsPerTurn: 9,
   evidenceEventsPerTurn: 9,
@@ -125,10 +154,16 @@ const FACT_TABLES = new Set([
   "checkpoint_event_pins", "checkpoint_use_pins", "checkpoint_capability_pins",
   "session_dedupe_evidence", "fact_diagnostics", "fact_coverage",
 ]);
-const FTS_TABLES = new Set(["turn_fts_documents", "field_stats"]);
+const FTS_TABLES = new Set([
+  "turn_fts_documents",
+  "field_stats",
+  "fts_analyzer_identity",
+  "turn_analyzer_diagnostics",
+]);
 const PROJECTION_TABLES = new Set([
   "turn_rollup_contributions", "projection_state", "projection_change_log",
   "capability_retry_contributions", "retry_projection_build_cursor",
+  "turn_search_build_cursor",
 ]);
 const SOURCE_STATE_TABLES = new Set([
   "source_ingestion_states", "source_ingestion_staging", "source_purge_states",
@@ -137,6 +172,25 @@ const ENGINE_OTHER_TABLES = new Set(["engine_metadata"]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function encodeBenchmarkTerm(value) {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length > 256) return `h${sha256(bytes)}`;
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let accumulator = 0;
+  let bits = 0;
+  let encoded = "t";
+  for (const byte of bytes) {
+    accumulator = (accumulator << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      encoded += alphabet[(accumulator >>> bits) & 31];
+    }
+  }
+  if (bits > 0) encoded += alphabet[(accumulator << (5 - bits)) & 31];
+  return encoded;
 }
 
 function positiveInteger(value, name) {
@@ -205,7 +259,7 @@ function capacityProblemText(globalIndex, provider, replacementMarker) {
     "capacity",
     "problem",
     `provider${provider}`,
-    `topic${alphabeticOrdinal(globalIndex % 97)}`,
+    `topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)}`,
   ];
   if (replacementMarker !== "") terms.push("replacementvtwo");
   const document = alphabeticOrdinal(globalIndex);
@@ -536,7 +590,11 @@ function createCapacitySession(plan, sessionIndex, {
     );
 
     for (let useIndex = 0; useIndex < CAPACITY_DENSITY.capabilityUsesPerTurn; useIndex += 1) {
-      const name = CAPABILITY_NAMES[(globalIndex * 3 + useIndex) % CAPABILITY_NAMES.length];
+      // Keep one Tool path per topic across independent sessions so the
+      // per-family evidence threshold is measurable instead of globally pooled.
+      const name = CAPABILITY_NAMES[
+        ((globalIndex % CAPACITY_TOPIC_COUNT) * 3 + useIndex) % CAPABILITY_NAMES.length
+      ];
       const tool = capability(provider, name);
       usedCapabilities.set(tool.capabilityKey, tool);
       const correlationDigest = hashKey(
@@ -591,6 +649,29 @@ function createCapacitySession(plan, sessionIndex, {
   const completeOffset = String(sessionTurnCount * 16_384);
   const targetGeneration = String(generation);
   const expectedGeneration = String(generation - 1);
+  const projectKey = hashKey("project", "benchmark-capacity", String(sessionIndex % 29));
+  const dedupeFingerprint = hashKey(
+    "benchmark-capacity-dedupe",
+    provider,
+    plan.seed,
+    String(sessionIndex),
+  );
+  const dedupeEvidenceEventKeys = evidenceEvents
+    .slice(0, 3)
+    .map(({ eventKey }) => eventKey);
+  const sourceCheckpoint = checkpoint(sessionKey, targetGeneration, completeOffset);
+  Object.assign(sourceCheckpoint.pendingState.sessionState, {
+    projectKey,
+    observedStart,
+    observedEnd: new Date(BASE_TIME_MS + lastGlobalTurn * 1_000).toISOString(),
+    dedupe: {
+      dedupeFingerprint,
+      duplicateMethod: "explicit-lineage",
+      duplicateConfidence: "strong",
+      dedupeClosure: "hard-sealed",
+      dedupeEvidenceEventKeys,
+    },
+  });
   const finalized = finalizeDelta({
     format: "session-facts-delta@v1",
     factSchemaVersion: 1,
@@ -607,17 +688,17 @@ function createCapacitySession(plan, sessionIndex, {
       provider,
       sessionScope: "main",
       eligibility: "eligible",
-      projectKey: hashKey("project", "benchmark-capacity", String(sessionIndex % 29)),
+      projectKey,
       observedStart,
       observedEnd: new Date(BASE_TIME_MS + lastGlobalTurn * 1_000).toISOString(),
       originatorVersion: "benchmark-capacity@1",
       duplicateGroupKey: null,
-      dedupeFingerprint: null,
+      dedupeFingerprint,
       dedupeCorroborationFingerprint: null,
-      duplicateMethod: null,
-      duplicateConfidence: null,
-      dedupeClosure: null,
-      dedupeEvidenceEventKeys: [],
+      duplicateMethod: "explicit-lineage",
+      duplicateConfidence: "strong",
+      dedupeClosure: "hard-sealed",
+      dedupeEvidenceEventKeys,
       duplicatePolicyVersion: 1,
       factTruncation: [],
     },
@@ -632,7 +713,7 @@ function createCapacitySession(plan, sessionIndex, {
       left.useKey < right.useKey ? -1 : left.useKey > right.useKey ? 1 : 0),
     capabilityUseEvidence: capabilityUseEvidence.sort((left, right) =>
       left.useKey.localeCompare(right.useKey) || left.eventKey.localeCompare(right.eventKey)),
-    checkpoint: checkpoint(sessionKey, targetGeneration, completeOffset),
+    checkpoint: sourceCheckpoint,
     diagnostics: [],
     coverage: {
       "benchmark-capability-invocation": sessionTurnCount * 3,
@@ -693,8 +774,8 @@ function requiredContract() {
     duplicatePolicyVersion: 1,
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
+    projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
+    analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
     rankerVersion: 1,
   };
 }
@@ -838,6 +919,10 @@ function storageOwner(name) {
     "checkpoint_use_pins_use",
     "checkpoint_capability_pins_capability",
     "session_dedupe_evidence_event",
+    "sessions_dedupe_support",
+    "sessions_query_filters",
+    "turns_query_filters",
+    "capability_uses_query_filter",
   ].includes(name)) return "fact";
   if (FTS_TABLES.has(owner) || owner === "turns_fts" || owner.startsWith("turns_fts_")) {
     return "fts";
@@ -1127,6 +1212,128 @@ function querySummary(database, sessionKeys, queryCount, warmupCount) {
   };
 }
 
+function latencySummary(values, unit = "ms") {
+  if (values.length === 0) {
+    return { unit, count: 0, total: 0, p50: 0, p95: 0, p99: 0, max: 0 };
+  }
+  return {
+    unit,
+    count: values.length,
+    total: values.reduce((sum, value) => sum + value, 0),
+    p50: percentile(values, 0.50),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    max: values.reduce((maximum, value) => Math.max(maximum, value), 0),
+  };
+}
+
+function queryBudget(turnCount) {
+  if (turnCount <= QUERY_BUDGETS.current.maximumTurns) {
+    return { name: "current-25k", ...QUERY_BUDGETS.current };
+  }
+  if (turnCount > QUERY_BUDGETS.longTerm.maximumTurns) {
+    throw new RangeError("query benchmark supports at most 250000 Turns");
+  }
+  return { name: "long-term-250k", ...QUERY_BUDGETS.longTerm };
+}
+
+export function evaluateInsightsQueryGates({
+  turnCount,
+  groups,
+  sidecarPeakBytes,
+  detailFullFtsBytes,
+  derivedStateBytes,
+}) {
+  positiveInteger(turnCount, "turnCount");
+  if (!Array.isArray(groups) || groups.length !== 2) {
+    throw new TypeError("groups must contain the path-disabled and path-enabled measurements");
+  }
+  const pathLimits = groups.map(({ pathLimit }) => pathLimit).sort((left, right) => left - right);
+  if (pathLimits[0] !== 0 || pathLimits[1] !== 10) {
+    throw new TypeError("groups must measure pathLimit=0 and pathLimit=10");
+  }
+  for (const [name, value] of Object.entries({
+    sidecarPeakBytes,
+    detailFullFtsBytes,
+    derivedStateBytes,
+  })) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new TypeError(`${name} must be a positive safe integer`);
+    }
+  }
+  const budget = queryBudget(turnCount);
+  const latency = groups.map((group) => {
+    if (!Number.isSafeInteger(group.queryCount) || group.queryCount < 1) {
+      throw new TypeError("group.queryCount must be a positive safe integer");
+    }
+    for (const name of [
+      "emptyResultCount",
+      "insufficientSampleCount",
+      "evidencePathFamilyCount",
+    ]) {
+      if (!Number.isSafeInteger(group[name]) || group[name] < 0) {
+        throw new TypeError(`group.${name} must be a non-negative safe integer`);
+      }
+    }
+    const { p95, p99 } = group.roundTripMs ?? {};
+    if (!Number.isFinite(p95) || !Number.isFinite(p99) || p95 < 0 || p99 < p95) {
+      throw new TypeError("group round-trip P95/P99 must be finite, non-negative, and ordered");
+    }
+    return {
+      pathLimit: group.pathLimit,
+      queryCount: group.queryCount,
+      p95Ms: p95,
+      p99Ms: p99,
+      p95WithinLimit: p95 < budget.p95Ms,
+      p99WithinLimit: p99 < budget.p99Ms,
+    };
+  });
+  const queryCountAtLeast1000 = groups.every(({ queryCount }) => queryCount >= 1_000);
+  const warmupCountAtLeast100 = groups.every(
+    ({ warmupCount }) => Number.isSafeInteger(warmupCount) && warmupCount >= 100,
+  );
+  const acceptanceCorpusExact = FORMAL_QUERY_BENCHMARK_TURN_COUNTS.includes(turnCount);
+  const allQueriesReturnedResults = groups.every(({ emptyResultCount }) => emptyResultCount === 0);
+  const pathDisabled = groups.find(({ pathLimit }) => pathLimit === 0);
+  const pathEnabled = groups.find(({ pathLimit }) => pathLimit === 10);
+  const toolPathWorkloadComplete =
+    pathDisabled.evidencePathFamilyCount === 0 &&
+    pathEnabled.insufficientSampleCount === 0 &&
+    pathEnabled.evidencePathFamilyCount >= pathEnabled.queryCount;
+  const allLatencyWithinLimit = latency.every(
+    ({ p95WithinLimit, p99WithinLimit }) => p95WithinLimit && p99WithinLimit,
+  );
+  const sidecarRssWithinLimit = sidecarPeakBytes < budget.sidecarRssBytes;
+  const detailFullFtsWithinLimit = detailFullFtsBytes < DETAIL_FULL_FTS_LIMIT_BYTES;
+  const derivedStateWithinLimit = derivedStateBytes < budget.derivedStateBytes;
+  return {
+    budget: {
+      name: budget.name,
+      maximumTurns: budget.maximumTurns,
+      p95Ms: budget.p95Ms,
+      p99Ms: budget.p99Ms,
+      sidecarRssBytes: budget.sidecarRssBytes,
+      detailFullFtsBytes: DETAIL_FULL_FTS_LIMIT_BYTES,
+      derivedStateBytes: budget.derivedStateBytes,
+    },
+    latency,
+    acceptanceCorpusExact,
+    queryCountAtLeast1000,
+    warmupCountAtLeast100,
+    allQueriesReturnedResults,
+    toolPathWorkloadComplete,
+    allLatencyWithinLimit,
+    sidecarRssWithinLimit,
+    detailFullFtsWithinLimit,
+    derivedStateWithinLimit,
+    allMeasuredQueryGatesPassed:
+      acceptanceCorpusExact && queryCountAtLeast1000 && warmupCountAtLeast100 &&
+      allQueriesReturnedResults && toolPathWorkloadComplete &&
+      allLatencyWithinLimit && sidecarRssWithinLimit && detailFullFtsWithinLimit &&
+      derivedStateWithinLimit,
+  };
+}
+
 async function openNodeDatabase(databasePath) {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 22) {
@@ -1305,8 +1512,8 @@ async function benchmarkRustSidecar({
         requestId,
         factStorageProfile: "normalized-row-v1",
         storageSchemaVersion: 1,
-        projectionVersions: [],
-        analyzerCapabilities: [],
+        projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
+        analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
         rankerVersion: 1,
       })) {
         messages.push({ message, frame: encodeProtocolFrame(message) });
@@ -1440,8 +1647,8 @@ async function sendCapacityDelta(runtime, delta, requestId) {
     requestId,
     factStorageProfile: "normalized-row-v1",
     storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
+    projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
+    analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
     rankerVersion: 1,
   });
   for await (const message of messages) {
@@ -1476,6 +1683,135 @@ async function sendCapacityRequest(runtime, message, expectedType) {
   runtime.stats.responseFrames += 1;
   runtime.stats.responseBytes += responseFrame.length;
   return response;
+}
+
+function capacitySearchFilters() {
+  return {
+    providers: [],
+    projectKeys: [],
+    observedAtOrAfterUnixMs: null,
+    observedBeforeUnixMs: null,
+    toolCapabilityKeys: [],
+    skillCapabilityKeys: [],
+    resultEvidence: [],
+    closureStates: [],
+  };
+}
+
+function capacitySearchText(plan, queryIndex) {
+  const topicCount = Math.min(CAPACITY_TOPIC_COUNT, plan.turnCount);
+  const topicIndex = (queryIndex * 37 + 11) % topicCount;
+  return `topic${alphabeticOrdinal(topicIndex)}`;
+}
+
+async function benchmarkCapacitySearchGroup({
+  runtime,
+  plan,
+  queryCount,
+  warmupCount,
+  pathLimit,
+  requestIdStart,
+}) {
+  const stageValues = {
+    analyzeMicros: [],
+    dfMicros: [],
+    postingFilterMicros: [],
+    rerankMicros: [],
+    pathMicros: [],
+  };
+  const roundTrips = [];
+  const digest = createHash("sha256");
+  let resultCount = 0;
+  let emptyResultCount = 0;
+  let insufficientSampleCount = 0;
+  let evidencePathFamilyCount = 0;
+  const total = warmupCount + queryCount;
+  for (let index = 0; index < total; index += 1) {
+    const query = capacitySearchText(plan, index);
+    const requestId = String(requestIdStart + index);
+    const message = createSearchTurnsMessage({
+      requestId,
+      query,
+      filters: capacitySearchFilters(),
+      limit: 20,
+      pathLimit,
+      nowUnixMs: String(BASE_TIME_MS + (plan.turnCount + 3_600) * 1_000),
+      quiescenceSeconds: 300,
+    });
+    const started = performance.now();
+    const response = await sendCapacityRequest(runtime, message, "TURN_SEARCH_RESULTS");
+    const roundTripMs = performance.now() - started;
+    if (index < warmupCount) continue;
+    roundTrips.push(roundTripMs);
+    for (const name of Object.keys(stageValues)) {
+      stageValues[name].push(response.diagnostic[name]);
+    }
+    resultCount += response.results.length;
+    if (response.results.length === 0) emptyResultCount += 1;
+    if (response.evidencePaths.insufficientSample) insufficientSampleCount += 1;
+    evidencePathFamilyCount += response.evidencePaths.families.length;
+    digest.update(canonicalJson({
+      query,
+      snapshot: response.snapshot,
+      scoringTerms: response.scoringTerms,
+      results: response.results,
+      evidencePaths: response.evidencePaths,
+    }));
+  }
+  return {
+    pathLimit,
+    queryCount,
+    warmupCount,
+    resultCount,
+    emptyResultCount,
+    insufficientSampleCount,
+    evidencePathFamilyCount,
+    resultDigest: digest.digest("hex"),
+    roundTripMs: latencySummary(roundTrips, "ms"),
+    diagnosticStages: {
+      analyze: latencySummary(stageValues.analyzeMicros, "microseconds"),
+      documentFrequencySeek: latencySummary(stageValues.dfMicros, "microseconds"),
+      postingAndFilterCombined: {
+        ...latencySummary(stageValues.postingFilterMicros, "microseconds"),
+        attribution:
+          "combined FTS posting traversal and SQL filter intersection; " +
+          "the Engine diagnostic does not expose a defensible split",
+      },
+      rerank: latencySummary(stageValues.rerankMicros, "microseconds"),
+      toolPath: latencySummary(stageValues.pathMicros, "microseconds"),
+    },
+  };
+}
+
+async function benchmarkCapacitySearch(runtime, plan, queryCount, warmupCount) {
+  const stopQueryRssSampler = startRssSampler(runtime.child.pid);
+  try {
+    const groups = [];
+    let requestIdStart = plan.sessionCount + 10_000;
+    for (const pathLimit of [0, 10]) {
+      groups.push(await benchmarkCapacitySearchGroup({
+        runtime,
+        plan,
+        queryCount,
+        warmupCount,
+        pathLimit,
+        requestIdStart,
+      }));
+      requestIdStart += queryCount + warmupCount + 1;
+    }
+    return {
+      queryShape:
+        "deterministic low-frequency topic term over the capacity corpus; no raw-session reads",
+      stageAttribution:
+        "analyze, df seek, combined posting/filter, rerank, and Tool-path timings are " +
+        "reported from the Engine; posting and filter are not falsely separated",
+      groups,
+      rss: await stopQueryRssSampler(),
+    };
+  } catch (error) {
+    await stopQueryRssSampler();
+    throw error;
+  }
 }
 
 async function closeCapacitySidecar(runtime) {
@@ -1603,7 +1939,15 @@ async function benchmarkCapacitySidecar({
     throw new Error(`${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`);
   }
   const backfillMs = performance.now() - started;
-  const rss = await closeCapacitySidecar(runtime);
+  let search;
+  let rss;
+  try {
+    search = await benchmarkCapacitySearch(runtime, plan, queryCount, warmupCount);
+    rss = await closeCapacitySidecar(runtime);
+  } catch (error) {
+    runtime.child.kill();
+    throw new Error(`${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`);
+  }
   if (lastCommittedSnapshotSeq === null) {
     throw new Error("capacity corpus did not commit any sessions");
   }
@@ -1631,6 +1975,23 @@ async function benchmarkCapacitySidecar({
         capacityAudit.gates.allMeasuredCapacityGatesPassed && populatedWarmOpenUnder500Ms,
     },
   };
+  const searchWithGates = {
+    ...search,
+    storage: {
+      measurementPhase: "post-vacuum capacity audit",
+      detailFullFtsBytes: capacity.categories.fts.bytes,
+      derivedStateBytes: capacity.compactedSteadyStateBytes,
+      observedDerivedStatePeakBytes: capacity.observedDerivedStatePeakBytes,
+      databasePageBytes: capacity.databasePageBytes,
+    },
+    gates: evaluateInsightsQueryGates({
+      turnCount: plan.turnCount,
+      groups: search.groups,
+      sidecarPeakBytes: search.rss.sidecarPeakBytes,
+      detailFullFtsBytes: capacity.categories.fts.bytes,
+      derivedStateBytes: capacity.compactedSteadyStateBytes,
+    }),
+  };
   const engineBackfillMs = Math.max(
     0,
     backfillMs - corpusGenerationMs - runtime.stats.protocolPreparationMs,
@@ -1640,6 +2001,10 @@ async function benchmarkCapacitySidecar({
   }
   return {
     engine: "rust-sidecar",
+    engineIdentity: {
+      ...runtime.versionDocument,
+      binarySha256: sha256(await readFile(binaryPath)),
+    },
     engineVersion: runtime.versionDocument.engineVersion,
     target: runtime.versionDocument.target,
     sqliteVersion: runtime.ready.sqliteVersion,
@@ -1675,6 +2040,7 @@ async function benchmarkCapacitySidecar({
       ...query,
       measurementPhase: "before-vacuum-capacity-maintenance",
     },
+    search: searchWithGates,
     capacity,
   };
 }
@@ -1742,8 +2108,8 @@ async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
   );
   const replacementFtsDocuments = Number(
     database.prepare(
-      "SELECT COUNT(*) AS value FROM turns_fts WHERE turns_fts MATCH 'replacementvtwo'",
-    ).get().value,
+      "SELECT COUNT(*) AS value FROM turns_fts WHERE turns_fts MATCH ?",
+    ).get(encodeBenchmarkTerm("replacementvtwo")).value,
   );
   const fieldStats = Object.fromEntries(
     database.prepare(
@@ -2028,7 +2394,7 @@ export async function runInsightsCapacityBenchmark({
       packedFactsDecision: rust.capacity.gates,
       notMeasured: [
         "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
-        "Top-20 BM25/ranker latency and Recall@300; those are ITEM-5 query gates",
+        "Recall@300, Top-20 Recall/NDCG, and ranker ablations; capacity search latency is in rustSidecar.search",
         "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
         "crash injection and projection shadow rebuild, which have dedicated integration suites",
       ],
@@ -2036,6 +2402,94 @@ export async function runInsightsCapacityBenchmark({
   } finally {
     if (ownsDirectory) await rm(directory, { recursive: true, force: true });
   }
+}
+
+export async function runInsightsQueryBenchmark({
+  turnCount = 25_000,
+  turnsPerSession = 100,
+  queryCount = 1_000,
+  warmupCount = 100,
+  seed = `${DEFAULT_SEED}-query`,
+  binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
+  workingDirectory,
+  formal = false,
+} = {}) {
+  if (formal && !FORMAL_QUERY_BENCHMARK_TURN_COUNTS.includes(turnCount)) {
+    throw new RangeError("formal query evidence requires exactly 25000 or 250000 Turns");
+  }
+  if (formal && turnsPerSession !== 100) {
+    throw new RangeError("formal query evidence requires exactly 100 Turns per session");
+  }
+  if (formal && seed !== FORMAL_QUERY_BENCHMARK_SEEDS[turnCount]) {
+    throw new RangeError(`formal query evidence requires seed ${FORMAL_QUERY_BENCHMARK_SEEDS[turnCount]}`);
+  }
+  if (
+    (formal || FORMAL_QUERY_BENCHMARK_TURN_COUNTS.includes(turnCount)) &&
+    queryCount < FORMAL_QUERY_BENCHMARK_QUERY_COUNT
+  ) {
+    throw new RangeError("formal query evidence requires at least 1000 measured queries per path mode");
+  }
+  if (
+    (formal || FORMAL_QUERY_BENCHMARK_TURN_COUNTS.includes(turnCount)) &&
+    warmupCount < FORMAL_QUERY_BENCHMARK_WARMUP_COUNT
+  ) {
+    throw new RangeError("formal query evidence requires at least 100 warmup queries per path mode");
+  }
+  const capacity = await runInsightsCapacityBenchmark({
+    turnCount,
+    turnsPerSession,
+    queryCount,
+    warmupCount,
+    seed,
+    binaryPath,
+    workingDirectory,
+    mutationTrace: formal,
+  });
+  const formalEvidenceContext = formal ? {
+    startup: capacity.rustSidecar.startup,
+    mutations: capacity.mutations,
+    capacityGates: capacity.rustSidecar.capacity.gates,
+  } : null;
+  const formalEvidenceGates = formal ? {
+    queryGatesPassed: capacity.rustSidecar.search.gates.allMeasuredQueryGatesPassed,
+    capacityGatesPassed: capacity.rustSidecar.capacity.gates.allMeasuredCapacityGatesPassed,
+    populatedStartupPassed:
+      capacity.rustSidecar.startup.populatedDatabase.gate.medianReadyUnder500Ms,
+    mutationTracePassed:
+      Object.keys(capacity.mutations.verified).length > 0 &&
+      Object.values(capacity.mutations.verified).every((passed) => passed === true),
+  } : null;
+  if (formalEvidenceGates) {
+    formalEvidenceGates.allFormalEvidenceGatesPassed = Object.values(formalEvidenceGates)
+      .every((passed) => passed === true);
+  }
+  return {
+    format: QUERY_BENCHMARK_FORMAT,
+    measuredScope: "item-5-rust-search-and-tool-path-query",
+    sourceRevision: capacity.sourceRevision,
+    sourceWorktreeDirty: capacity.sourceWorktreeDirty,
+    benchmarkScriptSha256: capacity.benchmarkScriptSha256,
+    environment: capacity.environment,
+    corpus: capacity.corpus,
+    query: capacity.rustSidecar.search,
+    backfillContext: {
+      engine: capacity.rustSidecar.engine,
+      engineVersion: capacity.rustSidecar.engineVersion,
+      target: capacity.rustSidecar.target,
+      sqliteVersion: capacity.rustSidecar.sqliteVersion,
+      wallMs: capacity.rustSidecar.backfill.wallMs,
+      engineTurnsPerSecond: capacity.rustSidecar.backfill.engineTurnsPerSecond,
+    },
+    engineIdentity: capacity.rustSidecar.engineIdentity,
+    formalEvidenceContext,
+    formalEvidenceGates,
+    gates: capacity.rustSidecar.search.gates,
+    notMeasured: [
+      "quality Recall/NDCG and ranker ablations use the frozen query evaluation fixture",
+      "30% real-session detail-full capacity is recorded separately as aggregate-only evidence",
+      "posting traversal and SQL filter intersection remain one honestly labelled Engine timing",
+    ],
+  };
 }
 
 function deterministicUuid(seed, index) {
@@ -2510,7 +2964,7 @@ export async function runInsightsRawBackfillBenchmark({
       appendMatches: Number(
         database.prepare(
           "SELECT COUNT(*) AS value FROM turns_fts WHERE turns_fts MATCH ?",
-        ).get(appendMarker).value,
+        ).get(encodeBenchmarkTerm(appendMarker)).value,
       ),
     };
     database.close();
@@ -2610,6 +3064,8 @@ function parseArguments(argv) {
     json: false,
     nodeReferenceWorker: false,
     capacity: false,
+    queryBenchmark: false,
+    formal: false,
     rawBackfill: false,
     sessionCount: 10_000,
     rawTextCharacters: 262_144,
@@ -2619,7 +3075,9 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") options.json = true;
+    else if (argument === "--formal") options.formal = true;
     else if (argument === "--capacity") options.capacity = true;
+    else if (argument === "--query-benchmark") options.queryBenchmark = true;
     else if (argument === "--raw-backfill") options.rawBackfill = true;
     else if (argument === "--skip-mutations") options.mutationTrace = false;
     else if (argument === "--node-reference-worker") options.nodeReferenceWorker = true;
@@ -2659,12 +3117,20 @@ async function main() {
 
   const result = options.rawBackfill
     ? await runInsightsRawBackfillBenchmark(options)
-    : options.capacity
-      ? await runInsightsCapacityBenchmark(options)
-      : await runInsightsEngineBenchmark(options);
+    : options.queryBenchmark
+      ? await runInsightsQueryBenchmark(options)
+      : options.capacity
+        ? await runInsightsCapacityBenchmark(options)
+        : await runInsightsEngineBenchmark(options);
   const rendered = options.json ? JSON.stringify(result) : `${JSON.stringify(result, null, 2)}\n`;
   if (options.outputPath) await writeFile(options.outputPath, `${JSON.stringify(result, null, 2)}\n`);
   process.stdout.write(options.json ? `${rendered}\n` : rendered);
+  if (
+    options.queryBenchmark && options.formal &&
+    !result.formalEvidenceGates?.allFormalEvidenceGatesPassed
+  ) {
+    throw new Error("ITEM-5 query benchmark gates failed");
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
