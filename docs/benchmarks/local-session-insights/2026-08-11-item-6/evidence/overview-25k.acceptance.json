@@ -1,0 +1,259 @@
+{
+  "format": "threadshare-insights-item6-overview-evidence@v1",
+  "measuredScope": "item-4-normalized-fact-fts-projection-capacity",
+  "notMeasured": [
+    "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
+    "Recall@300, Top-20 Recall/NDCG, and ranker ablations; capacity search latency is in rustSidecar.search",
+    "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
+    "crash injection and projection shadow rebuild, which have dedicated integration suites"
+  ],
+  "sourceRevision": "b70877b819787cebb18a9934903ee5be1f3d5d71",
+  "sourceWorktreeDirty": false,
+  "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
+  "benchmarkScriptSha256": "96f3af5395bf57878253df4ea5d9bd60c424d48d094150c38f5aeabb39e3fe73",
+  "packagerScriptSha256": "a313c2b7a3d39ca980b958d54bbbf5b06aed36c2db6607a534e8e53774e575c1",
+  "sourceReport": {
+    "bytes": 30694,
+    "sha256": "4091faab93bfe4fa27b9006005d523226763d893dd484724bee1f5ea52462345"
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 8.3740234375,
+        "fiveMinutes": 6.6572265625,
+        "fifteenMinutes": 6.359375,
+        "oneMinutePerLogicalCpu": 0.83740234375
+      },
+      "atReport": {
+        "oneMinute": 6.90087890625,
+        "fiveMinutes": 7.0205078125,
+        "fifteenMinutes": 6.5908203125,
+        "oneMinutePerLogicalCpu": 0.690087890625
+      }
+    }
+  },
+  "corpus": {
+    "corpusVersion": 4,
+    "seed": "threadshare-insights-dashboard-25k-v1",
+    "identityDigest": "527f02941cf41e8786c0ce75500fd1ef3d1625e89ca53b9c0ec25bdea2b21301",
+    "contentDigest": "0e7306cc07cd6540d34d6e20dd5a73958ae177ccff0a56c6162f107a73519513",
+    "turns": 25000,
+    "sessions": 250,
+    "turnsPerSession": 100,
+    "density": {
+      "sourceRecordsPerTurn": 9,
+      "evidenceEventsPerTurn": 9,
+      "turnEvidencePerTurn": 3,
+      "capabilityUsesPerTurn": 3,
+      "capabilityUseEvidencePerTurn": 6,
+      "capabilitiesPerProvider": 12,
+      "naturalTermsPerTurn": 135,
+      "uniqueNaturalTermsPerTurn": 6,
+      "problemTextCharacters": 1600,
+      "finalAnswerCharacters": 1100
+    },
+    "canonicalBytes": 433493225,
+    "maxSessionCanonicalBytes": 1734246,
+    "boundedMemoryModel": "one generated SessionFactsDeltaV1 plus one protocol batch"
+  },
+  "engineIdentity": {
+    "buildManifestDigest": "a59adc1d2c99a7680d365a22cdd8768f1886f1883956afd96255d2d25f309d8e",
+    "engineVersion": "0.0.0",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "development",
+    "binarySha256": "3dc78d8dd8fecf6b35924eae43dfeb37772838d283b2dd4d69bdbc74da18b938"
+  },
+  "engineBuildProvenance": "local-cargo-release-profile-unverifiable",
+  "startup": {
+    "populatedDatabase": {
+      "readyMs": 4.7953749999869615,
+      "statusReadMs": 732.9763749999984,
+      "readyAndStatusMs": 737.7717499999853,
+      "sampleCount": 3,
+      "samples": [
+        {
+          "readyMs": 4.979707999998936,
+          "statusReadMs": 830.7766659999907,
+          "readyAndStatusMs": 835.7563739999896
+        },
+        {
+          "readyMs": 4.7953749999869615,
+          "statusReadMs": 732.9763749999984,
+          "readyAndStatusMs": 737.7717499999853
+        },
+        {
+          "readyMs": 4.681749999988824,
+          "statusReadMs": 724.4023340000131,
+          "readyAndStatusMs": 729.0840840000019
+        }
+      ],
+      "gate": {
+        "limitMs": 500,
+        "medianReadyUnder500Ms": true
+      }
+    }
+  },
+  "overview": {
+    "measurement": "Rust sidecar READ_INSIGHTS_OVERVIEW over transactional rollups",
+    "measuredRequestCount": 1000,
+    "warmupRequestCount": 100,
+    "totalRequestCount": 1100,
+    "payloadDigest": "866db43a0f5ce2ff4dac97f07b7f35dbd048e34d1e49ad40d78822350b141033",
+    "payloadMismatchCount": 0,
+    "snapshotMismatchCount": 0,
+    "roundTripMs": {
+      "unit": "ms",
+      "count": 1000,
+      "total": 1635.6297590003524,
+      "p50": 1.579583000013372,
+      "p95": 1.9419579999812413,
+      "p99": 2.3275830000056885,
+      "max": 3.065792000008514
+    },
+    "gates": {
+      "budget": "current-25k",
+      "p95LimitMs": 100,
+      "p99LimitMs": 250,
+      "p95WithinLimit": true,
+      "p99WithinLimit": true,
+      "withinLimit": true,
+      "requestsComplete": true,
+      "snapshotStable": true,
+      "payloadStable": true,
+      "allMeasuredOverviewGatesPassed": true
+    }
+  },
+  "capacity": {
+    "measurement": "pre-maintenance persistent peak plus bounded staging for the 8 GiB gate; VACUUM then dbstat for category attribution",
+    "preVacuumPersistentBytes": 293724160,
+    "postVacuumPersistentBytes": 282841088,
+    "compactedSteadyStateBytes": 284575334,
+    "observedDerivedStatePeakBytes": 295458406,
+    "categories": {
+      "fact": {
+        "bytes": 252248064,
+        "rows": 1002774,
+        "objects": 61
+      },
+      "fts": {
+        "bytes": 23502848,
+        "rows": 50004,
+        "objects": 8
+      },
+      "projection": {
+        "bytes": 7036928,
+        "rows": 28616,
+        "objects": 22
+      },
+      "sourceState": {
+        "bytes": 12288,
+        "rows": 0,
+        "objects": 3
+      },
+      "sqliteInternal": {
+        "bytes": 36864,
+        "rows": 0,
+        "objects": 1
+      },
+      "engineOther": {
+        "bytes": 4096,
+        "rows": 0,
+        "objects": 1
+      },
+      "unclassified": {
+        "bytes": 0,
+        "rows": 0,
+        "objects": 0
+      }
+    },
+    "fileFormatPages": {
+      "lockBytePageBytes": 0,
+      "freelistBytes": 0,
+      "totalBytes": 0
+    },
+    "ftsMetrics": {
+      "documents": 25000,
+      "fieldTerms": 181025,
+      "postings": 3601064,
+      "occurrences": 3601064,
+      "byField": [
+        {
+          "field": "natural",
+          "fieldTerms": 181006,
+          "postings": 3475000,
+          "occurrences": 3475000
+        },
+        {
+          "field": "code",
+          "fieldTerms": 0,
+          "postings": 0,
+          "occurrences": 0
+        },
+        {
+          "field": "capability",
+          "fieldTerms": 19,
+          "postings": 126064,
+          "occurrences": 126064
+        }
+      ],
+      "density": {
+        "natural": {
+          "minimumFieldTerms": 150000,
+          "minimumPostings": 3375000,
+          "actualFieldTerms": 181006,
+          "actualPostings": 3475000,
+          "meetsExpectedDensity": true
+        },
+        "code": {
+          "expectedPostings": 0,
+          "actualFieldTerms": 0,
+          "actualPostings": 0,
+          "meetsExpectedDensity": true
+        },
+        "capability": {
+          "minimumPostings": 75000,
+          "actualFieldTerms": 19,
+          "actualPostings": 126064,
+          "meetsExpectedDensity": true
+        }
+      },
+      "detailFullBytes": 23502848,
+      "backendReevaluationLimitBytes": 419430400,
+      "backendReevaluationRequired": false
+    },
+    "engineRss": {
+      "limitBytes": 100663296,
+      "sidecarPeakBytes": 51855360,
+      "nodeHarnessPeakBytes": 172097536,
+      "combinedPeakBytes": 220643328,
+      "withinLimit": true
+    },
+    "gates": {
+      "normalizedFactLimitBytes": 6442450944,
+      "steadyStateLimitBytes": 8589934592,
+      "normalizedFactExceeded": false,
+      "steadyStateExceeded": false,
+      "packedFactsRequired": false,
+      "decision": "normalized-row-v1-within-capacity-gates",
+      "storageClassificationComplete": true,
+      "dbstatMatchesPageBytes": true,
+      "engineRssWithinLimit": true,
+      "ftsDensityMatchesCorpus": true,
+      "ftsBackendWithinLimit": true,
+      "allMeasuredCapacityGatesPassed": true,
+      "populatedWarmOpenUnder500Ms": true,
+      "overviewLatencyWithinLimit": true
+    }
+  }
+}

@@ -1,9 +1,9 @@
 ---
 epic: ../epics/local-session-insights.md
-phase: executing
+phase: acceptance
 approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
-current_item: ITEM-6
-next_action: freeze and independently review the final ITEM-6 Dashboard candidate
+current_item: null
+next_action: run a fresh Epic final acceptance review against the committed evidence milestone
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -17,7 +17,7 @@ remote_publish: final
 - [x] ITEM-3：Rust Insights Engine 与原生交付
 - [x] ITEM-4：事务化可恢复增量索引
 - [x] ITEM-5：历史问题检索与证据路径
-- [ ] ITEM-6：本地 Insights Dashboard
+- [x] ITEM-6：本地 Insights Dashboard
 
 ## 临时决策与证据
 
@@ -113,3 +113,9 @@ remote_publish: final
 - 2026-08-11：ITEM-6 当前验证通过 Rust 118 项、Insights Node 170 项、CLI 157、release 53、Viewer 7、API 32、FC 19、Cloudflare build、Skill validation、43-file npm dry-run pack 与 evidence verifier（ITEM-4 5 份、ITEM-5 6 份）。800 Turn real-sidecar capacity/Overview 冒烟约 38.7 秒，ITEM-5 小查询基准约 15.0 秒；这些是实现回归数据，不冒充 250,000 Turn 正式性能证据。
 - 2026-08-11：大规模测试资料统一由 `docs/benchmarks/local-session-insights/README.md` 编目并由 `verify-evidence.mjs` 逐 artifact 校验字节数与 SHA-256；仓库只保存去标识聚合 JSON、manifest、参数、环境、gate 与 digest，不保存 raw session、prompt/answer、真实身份/路径、SQLite/WAL/SHM 或多 GiB synthetic corpus，且 `docs/` 不进入 npm 包。
 - 2026-08-11：ITEM-6 真实 Chrome QA 覆盖 1440x900 与 390x844、Overview 必需 coverage/recent diagnostics、64-hex project filter、Search/Tool path/Turn evidence 和移动 inspector/bottom-nav。首轮发现关闭 inspector 把桌面文档撑到 1493px；最终改为 `display:none` 并加构建回归锁，复测桌面 `clientWidth=scrollWidth=1440`、移动 `390`，关闭 inspector 及全部后代 raw rect 均为 0，Console/page errors 为空；仅保留浏览器自动 `/favicon.ico` 404 作为非阻塞建议。
+- 2026-08-11：ITEM-6 同一 Paseo reviewer 的第三轮终审对冻结 hash `7961a9c8bf7b1851a7b050f72172b0e30748e7d6a855077594ab64dc7a5496e9` 完成首尾校验，0 blocking / 0 new important，确认 CSS 关闭态无横向溢出、Overview 安全/事务/协议契约成立，结论“可合入”；exact candidate 以 milestone commit `b70877b819787cebb18a9934903ee5be1f3d5d71` 合入，未 push。
+- 2026-08-11：从 Paseo 托管的 clean worktree 和 commit `b70877b819787cebb18a9934903ee5be1f3d5d71` 运行正式 ITEM-6 Overview acceptance。25,000 Turn 的 1,000 次测量 P95/P99 为 1.941958/2.327583 ms；250,000 Turn 为 14.164542/16.631125 ms，payload/snapshot mismatch 均为 0。250k post-VACUUM 数据库 2,779,881,472 bytes、带 staging 派生峰值 2,893,485,692 bytes、Engine sidecar peak RSS 50,708,480 bytes；全部 Overview/容量 gate 通过。
+- 2026-08-11：ITEM-6 测试资料已整理到 `docs/benchmarks/local-session-insights/2026-08-11-item-6/evidence/`，只保存 2 份去标识 aggregate JSON 与 manifest，总计约 19 KiB；manifest SHA-256 为 `293baa54190d239ecabfd2b8a399273729edad089fa1d25df1b3637b0246272b`。Engine identity 如实保留本地 Cargo release-profile 的 `0.0.0/development`，并显式标为 `local-cargo-release-profile-unverifiable`：version document 不携带 Cargo profile，不能冒充 npm stable provenance或声称可由 binary identity 独立证明。artifact 保留 `measuredScope`、`notMeasured`、FTS density、3 次 warm-open 样本与 packager digest；原始 report、session、prompt/answer、路径、stable key、SQLite/WAL/SHM 与多 GiB corpus 均未提交。
+- 2026-08-11：ITEM-6 evidence 首轮独立审查冻结 staged hash `b8efc19800c7d976d1922ae62eff025ad6183f4b468431e6308be2e4e4ce9a44`，0 blocking / 3 important：根 verifier 只信 gate 布尔、Cargo release profile 不可由 Engine identity 验证、artifact 丢失 `measuredScope/notMeasured`；定向预检另指出 FTS density 与 populated warm-open 缺实际测量字段。修订后根 verifier 会独立重算严格延迟、完整 startup 中位数、6/8 GiB、400 MiB FTS、96/128 MiB RSS、存储算术、FTS density、目录白名单与来源链；Engine 降级口径机器可读，缺测边界与实际 FTS/startup 样本均进入 artifact，21/21 正负测试通过。
+- 2026-08-11：ITEM-6 evidence follow-up 对冻结 staged hash `b05f65975fa1852c2e9019262a1c17d5236a96773208b9591c29e922c7f89390` 报告 0 blocking / 3 important：容量类别可通过新增 key 拆分 Fact、FTS density 下限可随 artifact 自描述下调、派生峰值在 packager/verifier 使用两个公式。修订后类别与 10 项合成 density 均由导出的 v1 冻结常量精确校验，派生峰值统一为 `max(preVacuum, postVacuum) + maxSessionCanonicalBytes`，并补 impossible latency total 负例；同一原始报告重打包后定向证据测试 25/25 通过。warm READY 的 500 ms gate 与 STATUS 读取审计值已明确分栏，不声称完整 warm-open 链路小于 500 ms。
+- 2026-08-11：ITEM-6 evidence 最终候选验证通过 Rust 123、Insights Node 195、release 53、定向 evidence 25、43-file npm dry-run pack、ITEM-4/5/6 artifact verifier 5/6/2 与 `git diff --check`；独立遍历归档 JSON 的 475 个 key 与 99 个字符串叶子，未发现绝对路径、URL/email、credential、stable key 或 SQLite/WAL/SHM 形状。正式原始 report 与 4.44 GiB 合成输入仍只保留在临时/clean workspace，不进入仓库或 npm 包。
