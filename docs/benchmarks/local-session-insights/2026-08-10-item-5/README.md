@@ -29,6 +29,8 @@
 RSS 和文件系统测量互相干扰；六份原始报告全部写到临时目录：
 
 ```bash
+export THREADSHARE_RELEASE_VERSION="$(node -p "require('./package.json').version")"
+export THREADSHARE_ENGINE_TARGET="$(node --input-type=module -e "import { insightsEngineTarget } from './src/insights-engine-targets.mjs'; const target = insightsEngineTarget(); if (!target) process.exit(1); process.stdout.write(target.target);")"
 cargo build --locked --release --manifest-path crates/insights-engine/Cargo.toml
 ITEM5_REPORT_DIR="$(mktemp -d)"
 node scripts/benchmark-insights-engine.mjs \
