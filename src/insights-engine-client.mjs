@@ -8,8 +8,10 @@ import {
   createAbortSessionMessage,
   createExcludeSourceMessage,
   createHelloMessage,
+  createListCapabilitiesMessage,
   createListSourceStatesMessage,
   createReadEngineStatusMessage,
+  createReadInsightsOverviewMessage,
   createReadPurgeStatusMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
@@ -554,6 +556,38 @@ class InsightsEngineClient {
     return operation;
   }
 
+  readInsightsOverview(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#readInsightsOverview(input, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  listCapabilities(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#listCapabilities(input, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
   searchTurns(input, options = {}) {
     if (this.#closed) {
       return Promise.reject(clientError(
@@ -858,6 +892,49 @@ class InsightsEngineClient {
     );
     throwIfAborted(signal, this.#transport.stderr);
     return freezeEngineStatus(response);
+  }
+
+  async #readInsightsOverview(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsOverview input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsOverviewMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending READ_INSIGHTS_OVERVIEW", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_OVERVIEW",
+      requestId,
+      {},
+      "waiting for INSIGHTS_OVERVIEW",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response);
+  }
+
+  async #listCapabilities(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("listCapabilities input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createListCapabilitiesMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending LIST_CAPABILITIES", this.#timeoutMs);
+    const response = await this.#expect(
+      "CAPABILITY_PAGE",
+      requestId,
+      {},
+      "waiting for CAPABILITY_PAGE",
+      this.#timeoutMs,
+    );
+    if (response.items.some((item) => item.kind !== request.kind)) {
+      throw unexpectedResponse("CAPABILITY_PAGE", response, this.#transport.stderr);
+    }
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response);
   }
 
   async #searchTurns(input, signal) {

@@ -899,6 +899,11 @@ async function main() {
         ...options,
         "regenerate-secret": options["regenerate-secret"],
       });
+      if (invocation.action === "dashboard") {
+        const { runInsightsDashboardUntilSignal } = await import("../src/insights-dashboard.mjs");
+        await runInsightsDashboardUntilSignal();
+        return;
+      }
       if (invocation.regenerateSecret) {
         await confirmInsightsSecretRegeneration(REGENERATE_SECRET_CONFIRMATION);
       }

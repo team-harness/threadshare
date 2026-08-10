@@ -11,6 +11,7 @@ pub mod fact_model;
 mod fact_projection;
 pub mod fact_repository;
 pub mod fts_projection;
+pub mod insights_overview;
 pub mod normalized_repository;
 pub mod projection;
 pub mod protocol;

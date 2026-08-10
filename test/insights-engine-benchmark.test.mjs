@@ -11,6 +11,7 @@ import {
   createCapacityBenchmarkPlan,
   evaluateCapacityGates,
   evaluateInsightsQueryGates,
+  evaluateOverviewLatencyGate,
   runInsightsCapacityBenchmark,
   runInsightsEngineBenchmark,
   runInsightsQueryBenchmark,
@@ -111,6 +112,25 @@ test("capacity gates mechanically require packed Facts only above frozen limits"
     factBytes: 1,
     steadyStateBytes: 8 * gib + 1,
   }).packedFactsRequired, true);
+});
+
+test("overview latency gate fails closed at the 25k and 250k budgets", () => {
+  assert.equal(evaluateOverviewLatencyGate({
+    turnCount: 25_000,
+    roundTripMs: { p95: 99, p99: 249 },
+  }).withinLimit, true);
+  assert.equal(evaluateOverviewLatencyGate({
+    turnCount: 25_000,
+    roundTripMs: { p95: 100, p99: 249 },
+  }).withinLimit, false);
+  assert.equal(evaluateOverviewLatencyGate({
+    turnCount: 250_000,
+    roundTripMs: { p95: 199, p99: 500 },
+  }).withinLimit, false);
+  assert.throws(
+    () => evaluateOverviewLatencyGate({ turnCount: 250_001, roundTripMs: { p95: 1, p99: 1 } }),
+    /at most 250000 Turns/u,
+  );
 });
 
 test("query gates enforce both path modes and the frozen current/long-term budgets", async () => {
@@ -340,9 +360,22 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(audit.gates.ftsDensityMatchesCorpus, true);
   assert.equal(audit.gates.ftsBackendWithinLimit, true);
   assert.equal(audit.gates.populatedWarmOpenUnder500Ms, true);
+  assert.equal(audit.gates.overviewLatencyWithinLimit, true);
   assert.equal(audit.gates.allMeasuredCapacityGatesPassed, true);
   assert.equal(audit.engineRss.sidecarPeakBytes, report.rustSidecar.rss.sidecarPeakBytes);
   assert.equal(report.rustSidecar.rss.peakSampled, true);
+  assert.equal(report.rustSidecar.overview.measuredRequestCount, 8);
+  assert.equal(report.rustSidecar.overview.warmupRequestCount, 2);
+  assert.equal(report.rustSidecar.overview.totalRequestCount, 10);
+  assert.deepEqual(report.rustSidecar.overview.requestIdRange, {
+    first: "2000000",
+    last: "2000009",
+  });
+  assert.equal(report.rustSidecar.overview.roundTripMs.count, 8);
+  assert.equal(report.rustSidecar.overview.payloadMismatchCount, 0);
+  assert.equal(report.rustSidecar.overview.snapshotMismatchCount, 0);
+  assert.equal(report.rustSidecar.overview.gates.allMeasuredOverviewGatesPassed, true);
+  assert.match(report.rustSidecar.overview.measurement, /transactional rollups/u);
   const backfill = report.rustSidecar.backfill;
   assert.equal(backfill.corpusGenerationMs > 0, true);
   assert.equal(backfill.protocolPreparationMs > 0, true);

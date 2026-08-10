@@ -78,6 +78,21 @@ export function parseInsightsInvocation(positionals, options = {}) {
   const [, action, operation, kind, value, ...extra] = positionals;
   const format = options.format ?? "text";
   assertFormat(format);
+  if (action === undefined) {
+    if (options["regenerate-secret"] === true) {
+      throw commandError(
+        "TS_USAGE_OPTION_NOT_ALLOWED",
+        "--regenerate-secret is only valid for insights reindex",
+      );
+    }
+    if (format !== "text") {
+      throw commandError(
+        "TS_USAGE_OPTION_NOT_ALLOWED",
+        "--format is only valid for Insights maintenance actions",
+      );
+    }
+    return Object.freeze({ action: "dashboard", format, regenerateSecret: false });
+  }
   if (!ACTIONS.has(action)) {
     throw commandError(
       "TS_USAGE_INVALID_VALUE",
@@ -179,7 +194,7 @@ async function finishPurgeMaintenance(engine, options) {
   return Object.freeze({ ...status, batches });
 }
 
-function insightsChildEnv(paths, options) {
+export function insightsChildEnv(paths, options) {
   return {
     ...process.env,
     ...options.childEnv,
@@ -283,6 +298,7 @@ export async function reconcileInsights(options = {}) {
           statSource: options.statSource,
           sampleSource: options.sampleSource,
           readDelta: options.readDelta,
+          onProgress: options.onProgress,
         });
         if (index.failed > 0) {
           throw incompleteIndexError(index);
@@ -360,6 +376,7 @@ export async function reconcileActiveInsights(options = {}) {
         statSource: options.statSource,
         sampleSource: options.sampleSource,
         readDelta: options.readDelta,
+        onProgress: options.onProgress,
       });
       const purge = await finishPurgeMaintenance(engine, { ...options, signal: options.signal });
       return Object.freeze({

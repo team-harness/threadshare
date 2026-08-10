@@ -34,6 +34,7 @@ import {
   createExcludeSourceMessage,
   createHelloMessage,
   createReadEngineStatusMessage,
+  createReadInsightsOverviewMessage,
   createRemoveSourceMessage,
   createRunPurgeMaintenanceMessage,
   createSearchTurnsMessage,
@@ -164,7 +165,8 @@ const FTS_TABLES = new Set([
 const PROJECTION_TABLES = new Set([
   "turn_rollup_contributions", "projection_state", "projection_change_log",
   "capability_retry_contributions", "retry_projection_build_cursor",
-  "turn_search_build_cursor",
+  "turn_search_build_cursor", "overview_rollup_state", "overview_session_rollups",
+  "overview_session_capabilities", "overview_session_fact_signals",
 ]);
 const SOURCE_STATE_TABLES = new Set([
   "source_ingestion_states", "source_ingestion_staging", "source_purge_states",
@@ -935,6 +937,11 @@ function storageOwner(name) {
     "projection_state_build_watermark",
     "projection_change_log_owner",
     "capability_retry_summary_lookup",
+    "overview_session_provider",
+    "overview_session_project",
+    "overview_session_dedupe",
+    "overview_capability_kind_key",
+    "overview_fact_signal_lookup",
   ].includes(name)) return "projection";
   if (SOURCE_STATE_TABLES.has(owner)) return "sourceState";
   if (name === "sqlite_schema" || name === "sqlite_sequence") return "sqliteInternal";
@@ -1236,6 +1243,25 @@ function queryBudget(turnCount) {
     throw new RangeError("query benchmark supports at most 250000 Turns");
   }
   return { name: "long-term-250k", ...QUERY_BUDGETS.longTerm };
+}
+
+export function evaluateOverviewLatencyGate({ turnCount, roundTripMs }) {
+  positiveInteger(turnCount, "turnCount");
+  const { p95, p99 } = roundTripMs ?? {};
+  if (!Number.isFinite(p95) || !Number.isFinite(p99) || p95 < 0 || p99 < p95) {
+    throw new TypeError("overview round-trip P95/P99 must be finite, non-negative, and ordered");
+  }
+  const budget = queryBudget(turnCount);
+  const p95WithinLimit = p95 < budget.p95Ms;
+  const p99WithinLimit = p99 < budget.p99Ms;
+  return {
+    budget: budget.name,
+    p95LimitMs: budget.p95Ms,
+    p99LimitMs: budget.p99Ms,
+    p95WithinLimit,
+    p99WithinLimit,
+    withinLimit: p95WithinLimit && p99WithinLimit,
+  };
 }
 
 export function evaluateInsightsQueryGates({
@@ -1957,6 +1983,68 @@ async function benchmarkCapacitySearch(runtime, plan, queryCount, warmupCount) {
   }
 }
 
+async function benchmarkCapacityOverview(
+  runtime,
+  plan,
+  queryCount,
+  warmupCount,
+  expectedSnapshotSeq,
+) {
+  const roundTrips = [];
+  const total = warmupCount + queryCount;
+  const requestIdStart = 2_000_000;
+  let payloadDigest = null;
+  let payloadMismatchCount = 0;
+  let snapshotMismatchCount = 0;
+  for (let index = 0; index < total; index += 1) {
+    const message = createReadInsightsOverviewMessage({
+      requestId: String(requestIdStart + index),
+      nowUnixMs: String(BASE_TIME_MS + (plan.turnCount + 3_600) * 1_000),
+      quiescenceSeconds: 300,
+    });
+    const started = performance.now();
+    const response = await sendCapacityRequest(runtime, message, "INSIGHTS_OVERVIEW");
+    const roundTripMs = performance.now() - started;
+    if (index < warmupCount) continue;
+    roundTrips.push(roundTripMs);
+    if (response.snapshotSeq !== expectedSnapshotSeq) snapshotMismatchCount += 1;
+    const { requestId: _requestId, ...payload } = response;
+    const currentDigest = sha256(canonicalJson(payload));
+    if (payloadDigest === null) payloadDigest = currentDigest;
+    else if (payloadDigest !== currentDigest) payloadMismatchCount += 1;
+  }
+  const latency = latencySummary(roundTrips, "ms");
+  const latencyGate = evaluateOverviewLatencyGate({
+    turnCount: plan.turnCount,
+    roundTripMs: latency,
+  });
+  const requestsComplete = roundTrips.length === queryCount;
+  const snapshotStable = snapshotMismatchCount === 0;
+  const payloadStable = payloadDigest !== null && payloadMismatchCount === 0;
+  return {
+    measurement: "Rust sidecar READ_INSIGHTS_OVERVIEW over transactional rollups",
+    measuredRequestCount: queryCount,
+    warmupRequestCount: warmupCount,
+    totalRequestCount: total,
+    requestIdRange: {
+      first: String(requestIdStart),
+      last: String(requestIdStart + total - 1),
+    },
+    payloadDigest,
+    payloadMismatchCount,
+    snapshotMismatchCount,
+    roundTripMs: latency,
+    gates: {
+      ...latencyGate,
+      requestsComplete,
+      snapshotStable,
+      payloadStable,
+      allMeasuredOverviewGatesPassed:
+        latencyGate.withinLimit && requestsComplete && snapshotStable && payloadStable,
+    },
+  };
+}
+
 async function closeCapacitySidecar(runtime) {
   const rss = runtime.stopRssSampler ? await runtime.stopRssSampler() : null;
   runtime.child.stdin.end();
@@ -2083,9 +2171,17 @@ async function benchmarkCapacitySidecar({
   }
   const backfillMs = performance.now() - started;
   let search;
+  let overview;
   let rss;
   try {
     search = await benchmarkCapacitySearch(runtime, plan, queryCount, warmupCount);
+    overview = await benchmarkCapacityOverview(
+      runtime,
+      plan,
+      queryCount,
+      warmupCount,
+      lastCommittedSnapshotSeq,
+    );
     rss = await closeCapacitySidecar(runtime);
   } catch (error) {
     runtime.child.kill();
@@ -2114,8 +2210,10 @@ async function benchmarkCapacitySidecar({
     gates: {
       ...capacityAudit.gates,
       populatedWarmOpenUnder500Ms,
+      overviewLatencyWithinLimit: overview.gates.allMeasuredOverviewGatesPassed,
       allMeasuredCapacityGatesPassed:
-        capacityAudit.gates.allMeasuredCapacityGatesPassed && populatedWarmOpenUnder500Ms,
+        capacityAudit.gates.allMeasuredCapacityGatesPassed && populatedWarmOpenUnder500Ms &&
+        overview.gates.allMeasuredOverviewGatesPassed,
     },
   };
   const searchWithGates = {
@@ -2184,6 +2282,7 @@ async function benchmarkCapacitySidecar({
       measurementPhase: "before-vacuum-capacity-maintenance",
     },
     search: searchWithGates,
+    overview,
     capacity,
   };
 }
@@ -2677,6 +2776,7 @@ export async function runInsightsQueryBenchmark({
   });
   const formalEvidenceContext = formal ? {
     startup: capacity.rustSidecar.startup,
+    overview: capacity.rustSidecar.overview,
     mutations: capacity.mutations,
     capacityGates: capacity.rustSidecar.capacity.gates,
   } : null;

@@ -705,12 +705,16 @@ test("runs session batches newest first with fixed concurrency", async () => {
   const started = [];
   const releases = [];
   const commits = [];
+  const progress = [];
   let active = 0;
   let maximumActive = 0;
 
   const running = runInsightsIndexer({
     sources,
     concurrency: 2,
+    onProgress(value) {
+      progress.push(value);
+    },
     privacyContext: { originSecretEpoch: "44444444-4444-4444-8444-444444444444" },
     engine: {
       async readSourceStates() {
@@ -778,6 +782,10 @@ test("runs session batches newest first with fixed concurrency", async () => {
   ]);
   assert.equal(commits.length, 5);
   assert.equal(report.committed, 5);
+  assert.equal(report.bytesProcessed, "50");
+  assert.equal(report.bytesTotal, "50");
+  assert.deepEqual(progress[0], { bytesProcessed: "0", bytesTotal: "50" });
+  assert.deepEqual(progress.at(-1), { bytesProcessed: "50", bytesTotal: "50" });
   assert.deepEqual(report.diagnostics, []);
 });
 

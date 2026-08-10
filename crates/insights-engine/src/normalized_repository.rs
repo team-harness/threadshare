@@ -312,6 +312,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
         crate::search_projection::initialize_search_projection_schema(connection)?;
         crate::retry_projection::initialize_retry_projection_schema(connection)?;
         crate::search_projection::ensure_search_projection(connection)?;
+        crate::insights_overview::initialize_overview_rollup_schema(connection)?;
         return Ok(());
     }
 
@@ -368,6 +369,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
     crate::search_projection::initialize_search_projection_schema(connection)?;
     crate::retry_projection::initialize_retry_projection_schema(connection)?;
     crate::search_projection::ensure_search_projection(connection)?;
+    crate::insights_overview::initialize_overview_rollup_schema(connection)?;
     Ok(())
 }
 
@@ -492,6 +494,7 @@ pub(crate) fn apply_session_facts(
             force_all_turns: delta.mode == MutationMode::ReplaceSession,
         },
     )?;
+    crate::insights_overview::refresh_session_overview_rollup(&transaction, session_id)?;
     // SQLite enforces every touched foreign key inside this transaction. A full
     // foreign_key_check scans the entire repository, so it belongs to explicit
     // integrity maintenance and capacity validation rather than the commit path.

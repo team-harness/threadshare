@@ -157,6 +157,7 @@ test("renders a self-describing root and command help contract", () => {
     "TS_PUBLISH_POLICY_UNCONFIRMED",
     "TS_QUERY_TOO_LONG",
     "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",
@@ -270,6 +271,7 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
   for (const code of [
     "TS_QUERY_TOO_LONG",
     "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",

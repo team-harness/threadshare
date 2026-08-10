@@ -11,6 +11,7 @@ import {
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
 } from "../src/insights-engine-targets.mjs";
+import { verifyInsightsDashboardBuild } from "./build-insights-dashboard.mjs";
 
 const execFileAsync = promisify(execFile);
 export const PACKAGE_NAME = "@team-harness/threadshare";
@@ -23,6 +24,10 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "README.md",
   "README.zh-CN.md",
   "bin/threadshare.mjs",
+  "insights-dashboard/app.js",
+  "insights-dashboard/index.html",
+  "insights-dashboard/state.js",
+  "insights-dashboard/styles.css",
   "package.json",
   "schema/session-facts-delta.v1.schema.json",
   "schema/threadshare-history.v1.schema.json",
@@ -34,6 +39,8 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/history-selection.mjs",
   "src/insights-command.mjs",
   "src/insights-config.mjs",
+  "src/insights-dashboard-server.mjs",
+  "src/insights-dashboard.mjs",
   "src/insights-engine-client.mjs",
   "src/insights-engine-protocol.mjs",
   "src/insights-engine-runtime.mjs",
@@ -156,6 +163,14 @@ export function validatePackOutput(packOutput, metadata) {
     files.some((file, index) => file !== expectedFiles[index])
   ) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
+  }
+  if (metadata.kind !== "platform") {
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 256 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 256 KiB");
+    }
+    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1024 * 1024) {
+      throw new Error("npm root package unpacked size must not exceed 1 MiB");
+    }
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };
 }
@@ -326,6 +341,7 @@ async function releaseMetadata(tag, cwd) {
 }
 
 async function inspectPackage(metadata, cwd) {
+  await verifyInsightsDashboardBuild({ root: cwd });
   const { stdout } = await execFileAsync(
     "npm",
     [

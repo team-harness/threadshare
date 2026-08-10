@@ -167,10 +167,10 @@ export const COMMAND_SPECS = Object.freeze({
     ],
   }),
   insights: command({
-    summary: "Inspect and maintain the local Session Insights index.",
-    usage: "threadshare insights <status|reindex|reset|exclude> [subcommand] [options]",
+    summary: "Open the local Session Insights dashboard or maintain its index.",
+    usage: "threadshare insights [status|reindex|reset|exclude] [subcommand] [options]",
     arguments: [
-      argument("action", "<status|reindex|reset|exclude>", "Insights maintenance action."),
+      argument("action", "[status|reindex|reset|exclude]", "Optional Insights maintenance action.", true),
       argument("operation", "[add|remove|list]", "Required only after exclude.", true),
       argument("kind", "[provider|project|session]", "Required for exclusion add or remove.", true),
       argument("value", "[value]", "Provider, project path, or session ID to exclude.", true),
@@ -182,6 +182,7 @@ export const COMMAND_SPECS = Object.freeze({
     },
     defaults: ["--format text", "A normal reindex preserves the origin secret and stable keyed Facts."],
     output: [
+      "no action: opens the authenticated local Dashboard and waits until stopped.",
       "status: content-free index state and storage footprint.",
       "reindex/reset/exclude: bounded text or one-line JSON result.",
     ],
@@ -191,6 +192,7 @@ export const COMMAND_SPECS = Object.freeze({
       "--regenerate-secret fails closed without a TTY and the exact typed confirmation.",
     ],
     examples: [
+      "threadshare insights",
       "threadshare insights status --format json",
       "threadshare insights reindex",
       "threadshare insights exclude add project /work/private",
@@ -440,6 +442,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   "TS_PUBLISH_POLICY_UNCONFIRMED",
   "TS_QUERY_TOO_LONG",
   "TS_QUERY_TOO_BROAD",
+  "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
   "TS_INSIGHTS_ENGINE_UNAVAILABLE",
   "TS_INSIGHTS_ENGINE_INVALID",
   "TS_INSIGHTS_STORAGE_FAILED",

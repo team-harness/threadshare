@@ -45,6 +45,14 @@ async function writeFixtureRoot(root) {
     if (relative === "package.json") await writeFile(pathname, `${JSON.stringify(manifest)}\n`);
     else await writeFile(pathname, `${relative}\n`);
   }
+  const dashboardSource = path.join(root, "src", "insights-dashboard");
+  await mkdir(dashboardSource, { recursive: true });
+  for (const relative of ["app.js", "index.html", "state.js", "styles.css"]) {
+    await writeFile(
+      path.join(dashboardSource, relative),
+      await readFile(path.join(root, "insights-dashboard", relative)),
+    );
+  }
   await writeFile(path.join(root, "package-lock.json"), `${JSON.stringify(lock)}\n`);
   return { lock, manifest };
 }

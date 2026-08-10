@@ -99,6 +99,10 @@ pub enum MessageKind {
     PurgeMaintenanceStatus,
     ReadEngineStatus,
     EngineStatus,
+    ReadInsightsOverview,
+    InsightsOverview,
+    ListCapabilities,
+    CapabilityPage,
     SearchTurns,
     TurnSearchResults,
     ReadTurnEvidence,
@@ -134,6 +138,10 @@ impl MessageKind {
             Self::PurgeMaintenanceStatus => "PURGE_MAINTENANCE_STATUS",
             Self::ReadEngineStatus => "READ_ENGINE_STATUS",
             Self::EngineStatus => "ENGINE_STATUS",
+            Self::ReadInsightsOverview => "READ_INSIGHTS_OVERVIEW",
+            Self::InsightsOverview => "INSIGHTS_OVERVIEW",
+            Self::ListCapabilities => "LIST_CAPABILITIES",
+            Self::CapabilityPage => "CAPABILITY_PAGE",
             Self::SearchTurns => "SEARCH_TURNS",
             Self::TurnSearchResults => "TURN_SEARCH_RESULTS",
             Self::ReadTurnEvidence => "READ_TURN_EVIDENCE",
@@ -653,6 +661,339 @@ fn validate_engine_status(message: &Value, kind: MessageKind) -> Result<(), Prot
         return Err(invalid_frame(
             "ENGINE_STATUS.integrity must report successful checks",
         ));
+    }
+    Ok(())
+}
+
+fn decimal_object(value: &Value, label: &str, fields: &[&str]) -> Result<Vec<u64>, ProtocolError> {
+    exact_object_keys(value, label, fields)?;
+    decimal_fields(value, label, fields)
+}
+
+fn decimal_fields(value: &Value, label: &str, fields: &[&str]) -> Result<Vec<u64>, ProtocolError> {
+    fields
+        .iter()
+        .map(|name| {
+            decimal_u64(field(value, name, label)?, &format!("{label}.{name}"))
+                .map(|(_, number)| number)
+        })
+        .collect()
+}
+
+fn checked_sum(values: &[u64], label: &str) -> Result<u64, ProtocolError> {
+    values.iter().try_fold(0_u64, |total, value| {
+        total
+            .checked_add(*value)
+            .ok_or_else(|| invalid_frame(format!("{label} count sum exceeds uint64")))
+    })
+}
+
+fn bounded_collection<'a>(
+    value: &'a Value,
+    label: &str,
+    maximum: usize,
+) -> Result<&'a Vec<Value>, ProtocolError> {
+    exact_object_keys(value, label, &["items", "truncated"])?;
+    boolean(
+        field(value, "truncated", label)?,
+        &format!("{label}.truncated"),
+    )?;
+    field(value, "items", label)?
+        .as_array()
+        .filter(|items| items.len() <= maximum)
+        .ok_or_else(|| invalid_frame(format!("{label}.items exceeds its bounded limit")))
+}
+
+fn validate_overview_rollups(
+    value: &Value,
+    label: &str,
+    maximum: usize,
+    key_name: &str,
+) -> Result<(), ProtocolError> {
+    let items = bounded_collection(value, label, maximum)?;
+    let mut previous: Option<&str> = None;
+    for (index, item) in items.iter().enumerate() {
+        let item_label = format!("{label}.items[{index}]");
+        exact_object_keys(
+            item,
+            &item_label,
+            &[
+                key_name,
+                "rawSessionCount",
+                "eligibleSessionCount",
+                "indexedTurnCount",
+            ],
+        )?;
+        let key = if key_name == "projectKey" {
+            hex64(
+                field(item, key_name, &item_label)?,
+                &format!("{item_label}.{key_name}"),
+            )?
+        } else {
+            bounded_string(
+                field(item, key_name, &item_label)?,
+                &format!("{item_label}.{key_name}"),
+                128,
+                false,
+                true,
+            )?
+        };
+        if previous.is_some_and(|value| value >= key) {
+            return Err(invalid_frame(format!(
+                "{label}.items must be key sorted and unique"
+            )));
+        }
+        previous = Some(key);
+        let counts = decimal_fields(
+            item,
+            &item_label,
+            &[
+                "rawSessionCount",
+                "eligibleSessionCount",
+                "indexedTurnCount",
+            ],
+        )?;
+        if counts[1] > counts[0] {
+            return Err(invalid_frame(format!(
+                "{item_label} eligible sessions exceed raw sessions"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fact_count_items(
+    value: &Value,
+    label: &str,
+    key_name: &str,
+) -> Result<(), ProtocolError> {
+    let items = bounded_collection(
+        value,
+        label,
+        crate::insights_overview::MAX_OVERVIEW_FACT_SIGNALS,
+    )?;
+    let mut previous: Option<&str> = None;
+    for (index, item) in items.iter().enumerate() {
+        let item_label = format!("{label}.items[{index}]");
+        exact_object_keys(item, &item_label, &[key_name, "count"])?;
+        let key = bounded_string(
+            field(item, key_name, &item_label)?,
+            &format!("{item_label}.{key_name}"),
+            256,
+            false,
+            true,
+        )?;
+        if previous.is_some_and(|value| value >= key) {
+            return Err(invalid_frame(format!(
+                "{label}.items must be key sorted and unique"
+            )));
+        }
+        previous = Some(key);
+        decimal_u64(
+            field(item, "count", &item_label)?,
+            &format!("{item_label}.count"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_insights_overview(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "snapshotSeq",
+            "sessions",
+            "scopes",
+            "dedupe",
+            "turns",
+            "capabilities",
+            "providers",
+            "projects",
+            "coverage",
+            "diagnostics",
+        ],
+    )?;
+    decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.snapshotSeq",
+    )?;
+    let sessions = decimal_object(
+        field(message, "sessions", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.sessions",
+        &["raw", "eligible", "excluded", "subagentExcluded", "unknown"],
+    )?;
+    if checked_sum(&sessions[1..], "INSIGHTS_OVERVIEW.sessions")? != sessions[0] {
+        return Err(invalid_frame(
+            "INSIGHTS_OVERVIEW session categories do not sum to raw",
+        ));
+    }
+    let scopes = decimal_object(
+        field(message, "scopes", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.scopes",
+        &["main", "subagent", "unknown"],
+    )?;
+    if checked_sum(&scopes, "INSIGHTS_OVERVIEW.scopes")? != sessions[0] {
+        return Err(invalid_frame(
+            "INSIGHTS_OVERVIEW scope counts do not sum to raw sessions",
+        ));
+    }
+    decimal_object(
+        field(message, "dedupe", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.dedupe",
+        &[
+            "strongGroup",
+            "weakGroup",
+            "observedEofProvisionalSession",
+            "unknownSession",
+        ],
+    )?;
+    let turns = decimal_object(
+        field(message, "turns", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.turns",
+        &[
+            "indexed",
+            "active",
+            "rolledBack",
+            "unknownVisibility",
+            "hardSealed",
+            "quiescent",
+            "open",
+        ],
+    )?;
+    if turns[0] > turns[1]
+        || checked_sum(&turns[4..], "INSIGHTS_OVERVIEW.turns closure")? > turns[1]
+    {
+        return Err(invalid_frame(
+            "INSIGHTS_OVERVIEW Turn counts are inconsistent",
+        ));
+    }
+    let capabilities = decimal_object(
+        field(message, "capabilities", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.capabilities",
+        &["total", "tool", "skill"],
+    )?;
+    if checked_sum(&capabilities[1..], "INSIGHTS_OVERVIEW.capabilities")? != capabilities[0] {
+        return Err(invalid_frame(
+            "INSIGHTS_OVERVIEW capability categories do not sum to total",
+        ));
+    }
+    validate_overview_rollups(
+        field(message, "providers", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.providers",
+        crate::insights_overview::MAX_OVERVIEW_PROVIDERS,
+        "provider",
+    )?;
+    validate_overview_rollups(
+        field(message, "projects", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.projects",
+        crate::insights_overview::MAX_OVERVIEW_PROJECTS,
+        "projectKey",
+    )?;
+    validate_fact_count_items(
+        field(message, "coverage", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.coverage",
+        "key",
+    )?;
+    validate_fact_count_items(
+        field(message, "diagnostics", kind.as_str())?,
+        "INSIGHTS_OVERVIEW.diagnostics",
+        "code",
+    )?;
+    Ok(())
+}
+
+fn validate_capability_page(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(message, kind, &["snapshotSeq", "items", "nextCursor"])?;
+    decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "CAPABILITY_PAGE.snapshotSeq",
+    )?;
+    let items = field(message, "items", kind.as_str())?
+        .as_array()
+        .filter(|items| {
+            items.len() <= usize::from(crate::insights_overview::MAX_CAPABILITY_PAGE_SIZE)
+        })
+        .ok_or_else(|| invalid_frame("CAPABILITY_PAGE.items exceeds 200"))?;
+    let mut previous: Option<&str> = None;
+    for (index, item) in items.iter().enumerate() {
+        let label = format!("CAPABILITY_PAGE.items[{index}]");
+        exact_object_keys(
+            item,
+            &label,
+            &[
+                "capabilityKey",
+                "provider",
+                "kind",
+                "canonicalName",
+                "useCount",
+                "turnCount",
+                "sessionCount",
+                "terminal",
+                "strength",
+            ],
+        )?;
+        let key = hex64(
+            field(item, "capabilityKey", &label)?,
+            &format!("{label}.capabilityKey"),
+        )?;
+        if previous.is_some_and(|value| value >= key) {
+            return Err(invalid_frame(
+                "CAPABILITY_PAGE.items must be capabilityKey sorted and unique",
+            ));
+        }
+        previous = Some(key);
+        bounded_string(
+            field(item, "provider", &label)?,
+            &format!("{label}.provider"),
+            128,
+            false,
+            true,
+        )?;
+        enum_string(
+            field(item, "kind", &label)?,
+            &format!("{label}.kind"),
+            &["tool", "skill"],
+        )?;
+        bounded_string(
+            field(item, "canonicalName", &label)?,
+            &format!("{label}.canonicalName"),
+            512,
+            false,
+            false,
+        )?;
+        let counts = decimal_fields(item, &label, &["useCount", "turnCount", "sessionCount"])?;
+        if counts[1] > counts[0] || counts[2] > counts[1] {
+            return Err(invalid_frame(format!(
+                "{label} aggregate counts are inconsistent"
+            )));
+        }
+        let terminal = decimal_object(
+            field(item, "terminal", &label)?,
+            &format!("{label}.terminal"),
+            &["pending", "completed", "failed", "cancelled", "unknown"],
+        )?;
+        let strength = decimal_object(
+            field(item, "strength", &label)?,
+            &format!("{label}.strength"),
+            &["observed", "confirmed", "inferred"],
+        )?;
+        if checked_sum(&terminal, &format!("{label}.terminal"))? != counts[0]
+            || checked_sum(&strength, &format!("{label}.strength"))? != counts[0]
+        {
+            return Err(invalid_frame(format!(
+                "{label} state counts do not sum to useCount"
+            )));
+        }
+    }
+    let next_cursor = field(message, "nextCursor", kind.as_str())?;
+    if !next_cursor.is_null() {
+        let cursor = hex64(next_cursor, "CAPABILITY_PAGE.nextCursor")?;
+        if previous != Some(cursor) {
+            return Err(invalid_frame(
+                "CAPABILITY_PAGE.nextCursor must equal the final capabilityKey",
+            ));
+        }
     }
     Ok(())
 }
@@ -2086,6 +2427,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "PURGE_MAINTENANCE_STATUS" => MessageKind::PurgeMaintenanceStatus,
         "READ_ENGINE_STATUS" => MessageKind::ReadEngineStatus,
         "ENGINE_STATUS" => MessageKind::EngineStatus,
+        "READ_INSIGHTS_OVERVIEW" => MessageKind::ReadInsightsOverview,
+        "INSIGHTS_OVERVIEW" => MessageKind::InsightsOverview,
+        "LIST_CAPABILITIES" => MessageKind::ListCapabilities,
+        "CAPABILITY_PAGE" => MessageKind::CapabilityPage,
         "SEARCH_TURNS" => MessageKind::SearchTurns,
         "TURN_SEARCH_RESULTS" => MessageKind::TurnSearchResults,
         "READ_TURN_EVIDENCE" => MessageKind::ReadTurnEvidence,
@@ -2505,6 +2850,39 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             validate_envelope(message, kind, &[])?;
         }
         MessageKind::EngineStatus => validate_engine_status(message, kind)?,
+        MessageKind::ReadInsightsOverview => {
+            validate_envelope(message, kind, &["nowUnixMs", "quiescenceSeconds"])?;
+            decimal_u64(
+                field(message, "nowUnixMs", kind.as_str())?,
+                "READ_INSIGHTS_OVERVIEW.nowUnixMs",
+            )?;
+            safe_integer_range(
+                field(message, "quiescenceSeconds", kind.as_str())?,
+                "READ_INSIGHTS_OVERVIEW.quiescenceSeconds",
+                60,
+                86_400,
+            )?;
+        }
+        MessageKind::InsightsOverview => validate_insights_overview(message, kind)?,
+        MessageKind::ListCapabilities => {
+            validate_envelope(message, kind, &["kind", "cursor", "limit"])?;
+            enum_string(
+                field(message, "kind", kind.as_str())?,
+                "LIST_CAPABILITIES.kind",
+                &["tool", "skill"],
+            )?;
+            nullable_hex64(
+                field(message, "cursor", kind.as_str())?,
+                "LIST_CAPABILITIES.cursor",
+            )?;
+            safe_integer_range(
+                field(message, "limit", kind.as_str())?,
+                "LIST_CAPABILITIES.limit",
+                1,
+                u64::from(crate::insights_overview::MAX_CAPABILITY_PAGE_SIZE),
+            )?;
+        }
+        MessageKind::CapabilityPage => validate_capability_page(message, kind)?,
         MessageKind::SearchTurns => validate_search_turns(message, kind)?,
         MessageKind::TurnSearchResults => validate_turn_search_results(message, kind)?,
         MessageKind::ReadTurnEvidence => validate_read_turn_evidence(message, kind)?,
@@ -3122,6 +3500,93 @@ mod tests {
 
         let mut inconsistent = response;
         inconsistent["storage"]["walBytes"] = Value::String("134217728".to_owned());
+        assert_eq!(
+            validate_protocol_message(&inconsistent).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn validates_bounded_dashboard_overview_and_capability_frames() {
+        let overview_request = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_INSIGHTS_OVERVIEW",
+            "requestId": "41",
+            "nowUnixMs": "1786320000000",
+            "quiescenceSeconds": 300,
+        });
+        assert_eq!(
+            validate_protocol_message(&overview_request).unwrap(),
+            MessageKind::ReadInsightsOverview
+        );
+
+        let overview = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "INSIGHTS_OVERVIEW",
+            "requestId": "41",
+            "snapshotSeq": "7",
+            "sessions": {
+                "raw": "3", "eligible": "1", "excluded": "1",
+                "subagentExcluded": "1", "unknown": "0"
+            },
+            "scopes": {"main": "2", "subagent": "1", "unknown": "0"},
+            "dedupe": {
+                "strongGroup": "1", "weakGroup": "0",
+                "observedEofProvisionalSession": "1", "unknownSession": "0"
+            },
+            "turns": {
+                "indexed": "1", "active": "2", "rolledBack": "1",
+                "unknownVisibility": "0", "hardSealed": "1", "quiescent": "0", "open": "0"
+            },
+            "capabilities": {"total": "1", "tool": "1", "skill": "0"},
+            "providers": {"items": [{
+                "provider": "codex", "rawSessionCount": "3",
+                "eligibleSessionCount": "1", "indexedTurnCount": "1"
+            }], "truncated": false},
+            "projects": {"items": [{
+                "projectKey": "a".repeat(64), "rawSessionCount": "2",
+                "eligibleSessionCount": "1", "indexedTurnCount": "1"
+            }], "truncated": false},
+            "coverage": {"items": [{"key": "records", "count": "10"}], "truncated": false},
+            "diagnostics": {"items": [{"code": "unknown-record", "count": "1"}], "truncated": false},
+        });
+        assert_eq!(
+            validate_protocol_message(&overview).unwrap(),
+            MessageKind::InsightsOverview
+        );
+
+        let list = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "LIST_CAPABILITIES",
+            "requestId": "42",
+            "kind": "tool",
+            "cursor": null,
+            "limit": 200,
+        });
+        assert_eq!(
+            validate_protocol_message(&list).unwrap(),
+            MessageKind::ListCapabilities
+        );
+        let page = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "CAPABILITY_PAGE",
+            "requestId": "42",
+            "snapshotSeq": "7",
+            "items": [{
+                "capabilityKey": "b".repeat(64), "provider": "codex", "kind": "tool",
+                "canonicalName": "Read", "useCount": "2", "turnCount": "2", "sessionCount": "1",
+                "terminal": {"pending": "0", "completed": "1", "failed": "1", "cancelled": "0", "unknown": "0"},
+                "strength": {"observed": "2", "confirmed": "0", "inferred": "0"}
+            }],
+            "nextCursor": null,
+        });
+        assert_eq!(
+            validate_protocol_message(&page).unwrap(),
+            MessageKind::CapabilityPage
+        );
+
+        let mut inconsistent = page;
+        inconsistent["items"][0]["terminal"]["failed"] = json!("0");
         assert_eq!(
             validate_protocol_message(&inconsistent).unwrap_err().code,
             "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"

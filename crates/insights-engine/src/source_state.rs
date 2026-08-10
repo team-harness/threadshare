@@ -825,6 +825,7 @@ pub fn exclude_source(
                 ProjectionChangeOperation::Tombstone,
             )?;
         }
+        crate::insights_overview::refresh_session_overview_rollup(&transaction, session_id)?;
         maintain_projection_change_log(&transaction, snapshot_seq)?;
     }
     transaction.commit()?;

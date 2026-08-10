@@ -73,7 +73,7 @@ jq -e '.rustSidecar.capacity.fileFormatPages.lockBytePageBytes == 4096 and .rust
 
 ## 数据边界
 
-仓库只保存约 75 KiB 的指标 JSON，不保存合成 JSONL、多 GiB SQLite/WAL/SHM、Engine binary、CPU profile 或临时目录。所有 corpus 都是确定性合成数据；证据包不包含真实 session、原始 prompt、用户名路径或凭据。
+仓库只保存约 85 KiB 的指标 JSON，不保存合成 JSONL、多 GiB SQLite/WAL/SHM、Engine binary、CPU profile 或临时目录。所有 corpus 都是确定性合成数据；证据包不包含真实 session、原始 prompt、用户名路径或凭据。
 
 这些文件不进入 npm 包。`package.json.files` 与 release allowlist 都不包含 `docs/`；发布验证仍需断言 source-root 包保持精确 37 文件。
 

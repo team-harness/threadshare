@@ -753,6 +753,20 @@ impl EngineStorage {
         crate::engine_status::read_engine_status(&self.connection, self.database_path.as_deref())
     }
 
+    pub fn read_insights_overview(
+        &self,
+        request: crate::insights_overview::InsightsOverviewRequest,
+    ) -> Result<crate::insights_overview::InsightsOverview, StorageError> {
+        crate::insights_overview::read_insights_overview(&self.connection, request)
+    }
+
+    pub fn list_capabilities(
+        &self,
+        request: crate::insights_overview::CapabilityPageRequest,
+    ) -> Result<crate::insights_overview::CapabilityPage, StorageError> {
+        crate::insights_overview::list_capabilities(&self.connection, request)
+    }
+
     pub fn maintain_search_projection(
         &mut self,
         batch_size: u16,

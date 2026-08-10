@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>Threadshare Insights</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell" id="app">
+    <header class="topbar">
+      <div class="brand-block">
+        <span class="brand-mark" aria-hidden="true">T</span>
+        <div>
+          <strong>Threadshare Insights</strong>
+          <span class="muted" id="snapshot-label">Loading committed snapshot</span>
+        </div>
+      </div>
+      <div class="status-strip" id="status-strip" aria-live="polite"></div>
+      <button class="quiet-button" id="refresh-button" type="button">Refresh</button>
+    </header>
+
+    <aside class="sidebar" aria-label="Insights views">
+      <nav class="view-nav">
+        <button type="button" data-view="overview" aria-current="page">Overview</button>
+        <button type="button" data-view="search">Search</button>
+        <button type="button" data-view="skill">Skills</button>
+        <button type="button" data-view="tool">Tools</button>
+      </nav>
+      <div class="index-meta" id="index-meta"></div>
+    </aside>
+
+    <main class="workspace" id="workspace" tabindex="-1">
+      <section class="view" data-view-panel="overview" aria-labelledby="overview-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Committed facts</p>
+            <h1 id="overview-heading">Index overview</h1>
+          </div>
+          <span class="muted" id="overview-updated"></span>
+        </div>
+        <div class="metric-band" id="overview-metrics"></div>
+        <div class="overview-grid">
+          <section class="plain-section" aria-labelledby="coverage-heading">
+            <div class="subheading">
+              <h2 id="coverage-heading">Coverage</h2>
+              <span class="muted">Observed provider records</span>
+            </div>
+            <div class="bar-list" id="coverage-list"></div>
+          </section>
+          <section class="plain-section" aria-labelledby="providers-heading">
+            <div class="subheading">
+              <h2 id="providers-heading">Providers</h2>
+              <span class="muted">Eligible main sessions</span>
+            </div>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Provider</th><th>Observed sessions</th><th>Eligible sessions</th><th>Indexed turns</th></tr></thead>
+              <tbody id="provider-rows"></tbody>
+            </table></div>
+          </section>
+        </div>
+        <section class="plain-section diagnostics-section" aria-labelledby="diagnostics-heading">
+          <div class="subheading">
+            <h2 id="diagnostics-heading">Diagnostics</h2>
+            <span class="muted">Codes only; no source content</span>
+          </div>
+          <div class="diagnostic-list" id="diagnostic-list"></div>
+        </section>
+      </section>
+
+      <section class="view is-hidden" data-view-panel="search" aria-labelledby="search-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Historical turns</p>
+            <h1 id="search-heading">Search</h1>
+          </div>
+        </div>
+        <form class="search-controls" id="search-form">
+          <label class="query-field"><span>Query</span><input id="search-query" name="query" type="search" maxlength="8192" autocomplete="off" placeholder="Tool timeout, failed deploy, parser error"></label>
+          <label><span>Provider</span><select id="provider-filter" name="provider"><option value="">All</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+          <label><span>Project</span><input id="project-filter" name="project" type="text" list="project-options" maxlength="64" pattern="[0-9a-f]{64}" autocomplete="off" spellcheck="false" placeholder="All or project key"><datalist id="project-options"></datalist><small class="filter-state" id="project-filter-state" hidden>Project suggestions truncated</small></label>
+          <label><span>Closure</span><select id="closure-filter" name="closure"><option value="">All</option><option value="hard-sealed">Hard sealed</option><option value="quiescent">Quiescent</option><option value="open">Open</option></select></label>
+          <label><span>Result</span><select id="result-filter" name="result"><option value="">All</option><option value="provider-completed">Completed</option><option value="abandoned">Abandoned</option><option value="unknown">Unknown</option></select></label>
+          <label><span>From date</span><input id="after-filter" name="after" type="date"></label>
+          <label><span>Before date</span><input id="before-filter" name="before" type="date"></label>
+          <label><span>Tool</span><select id="tool-filter" name="tool"><option value="">All</option></select></label>
+          <label><span>Skill</span><select id="skill-filter" name="skill"><option value="">All</option></select></label>
+          <button class="primary-button" type="submit">Search</button>
+        </form>
+        <div class="search-summary" id="search-summary" aria-live="polite"></div>
+        <div class="table-wrap search-table"><table>
+          <thead><tr><th>Turn</th><th>Provider</th><th>Closure</th><th>Evidence</th><th>Score</th></tr></thead>
+          <tbody id="search-rows"></tbody>
+        </table></div>
+        <section class="plain-section path-section" aria-labelledby="paths-heading">
+          <div class="subheading"><h2 id="paths-heading">Tool paths</h2><span class="muted" id="path-summary"></span></div>
+          <div class="path-list" id="path-list"></div>
+        </section>
+      </section>
+
+      <section class="view is-hidden" data-view-panel="skill" aria-labelledby="skill-heading">
+        <div class="section-heading"><div><p class="eyebrow">Observed capabilities</p><h1 id="skill-heading">Skills</h1></div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Skill</th><th>Provider</th><th>Uses</th><th>Turns</th><th>Sessions</th><th>Evidence</th></tr></thead>
+          <tbody id="skill-rows"></tbody>
+        </table></div>
+        <button class="quiet-button load-more" type="button" data-load-more="skill">Load more</button>
+      </section>
+
+      <section class="view is-hidden" data-view-panel="tool" aria-labelledby="tool-heading">
+        <div class="section-heading"><div><p class="eyebrow">Observed capabilities</p><h1 id="tool-heading">Tools</h1></div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Tool</th><th>Provider</th><th>Uses</th><th>Turns</th><th>Sessions</th><th>Results</th></tr></thead>
+          <tbody id="tool-rows"></tbody>
+        </table></div>
+        <button class="quiet-button load-more" type="button" data-load-more="tool">Load more</button>
+      </section>
+    </main>
+
+    <aside class="inspector is-closed" id="inspector" aria-label="Evidence inspector" aria-hidden="true">
+      <div class="inspector-heading">
+        <div><p class="eyebrow">Selected item</p><h2 id="inspector-title">Evidence</h2></div>
+        <button class="icon-button" id="inspector-close" type="button" aria-label="Close inspector" title="Close inspector">&times;</button>
+      </div>
+      <div id="inspector-body"></div>
+      <button class="quiet-button load-more" id="evidence-more" type="button">Load more evidence</button>
+    </aside>
+
+    <div class="toast is-hidden" id="toast" role="status" aria-live="polite"></div>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

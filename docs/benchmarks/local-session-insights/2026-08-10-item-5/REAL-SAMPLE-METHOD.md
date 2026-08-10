@@ -7,11 +7,16 @@
 
 ```bash
 cargo build --locked --release --manifest-path crates/insights-engine/Cargo.toml
+ITEM5_REPORT_DIR="${ITEM5_REPORT_DIR:-$(mktemp -d)}"
 node scripts/benchmark-insights-real-sample.mjs \
   --execute \
   --engine crates/insights-engine/target/release/threadshare-insights-engine \
-  --output docs/benchmarks/local-session-insights/2026-08-10-item-5/real-sample-30pct.acceptance.json
+  --output "$ITEM5_REPORT_DIR/real-sample-30pct.acceptance.json"
 ```
+
+这条命令只生成六份输入报告之一。只有按照同目录 README 的完整流程生成全部报告，
+并由 `package-insights-benchmark-evidence.mjs` 校验后原子安装到 `evidence/` 的结果才是
+正式证据；不要把单独 runner 输出直接写进或手工复制进正式目录。
 
 脚本从 `HOME`、`CODEX_HOME` 和 `THREADSHARE_CONFIG` 解析真实 provider roots 与排除配置。
 未传 `--execute` 时不会扫描或读取 session。快速回归只使用生成的小语料：

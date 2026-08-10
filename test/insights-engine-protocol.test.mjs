@@ -20,13 +20,17 @@ import {
   createBeginSessionMessage,
   createExcludeSourceMessage,
   createEngineStatusMessage,
+  createCapabilityPageMessage,
   createHelloMessage,
+  createInsightsOverviewMessage,
+  createListCapabilitiesMessage,
   createListSourceStatesMessage,
   createProtocolErrorMessage,
   createPurgeMaintenanceStatusMessage,
   createPurgeStatusMessage,
   createReadPurgeStatusMessage,
   createReadEngineStatusMessage,
+  createReadInsightsOverviewMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
   createRemoveSourceMessage,
@@ -328,6 +332,120 @@ test("engine status protocol is bounded, read-only, and rejects inconsistent sta
       },
     }),
     (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+});
+
+test("Insights overview protocol keeps aggregate categories bounded and consistent", () => {
+  const request = createReadInsightsOverviewMessage({
+    requestId: "10",
+    nowUnixMs: "1786323723000",
+  });
+  assert.equal(request.quiescenceSeconds, 300);
+  const overview = {
+    snapshotSeq: "7",
+    sessions: { raw: "3", eligible: "1", excluded: "1", subagentExcluded: "1", unknown: "0" },
+    scopes: { main: "2", subagent: "1", unknown: "0" },
+    dedupe: {
+      strongGroup: "1", weakGroup: "0", observedEofProvisionalSession: "1", unknownSession: "0",
+    },
+    turns: {
+      indexed: "2", active: "2", rolledBack: "1", unknownVisibility: "0",
+      hardSealed: "1", quiescent: "0", open: "1",
+    },
+    capabilities: { total: "2", tool: "1", skill: "1" },
+    providers: {
+      items: [{
+        provider: "codex", rawSessionCount: "3", eligibleSessionCount: "1", indexedTurnCount: "2",
+      }],
+      truncated: false,
+    },
+    projects: {
+      items: [{
+        projectKey: "1".repeat(64), rawSessionCount: "1", eligibleSessionCount: "1",
+        indexedTurnCount: "2",
+      }],
+      truncated: false,
+    },
+    coverage: { items: [{ key: "records", count: "9" }], truncated: false },
+    diagnostics: { items: [{ code: "fixture-observed", count: "1" }], truncated: false },
+  };
+  const response = createInsightsOverviewMessage({ requestId: "10", overview });
+  assert.equal(assertProtocolMessage(response), response);
+  assert.ok(protocolPayloadByteLength(response) < MAX_PROTOCOL_PAYLOAD_BYTES);
+  assert.doesNotThrow(() => createInsightsOverviewMessage({
+    requestId: "10",
+    overview: {
+      ...structuredClone(overview),
+      coverage: { items: overview.coverage.items, truncated: true },
+    },
+  }));
+
+  assert.throws(
+    () => createInsightsOverviewMessage({
+      requestId: "10",
+      overview: { ...structuredClone(overview), sessions: { ...overview.sessions, eligible: "2" } },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsOverviewMessage({
+      requestId: "10",
+      overview: {
+        ...structuredClone(overview),
+        coverage: { items: [{ key: "z", count: "1" }, { key: "a", count: "1" }], truncated: false },
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("capability pages are stable-key paged and contain only bounded aggregates", () => {
+  const request = createListCapabilitiesMessage({
+    requestId: "11",
+    kind: "tool",
+    limit: 100,
+  });
+  assert.deepEqual(request, {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "LIST_CAPABILITIES",
+    requestId: "11",
+    kind: "tool",
+    cursor: null,
+    limit: 100,
+  });
+  const item = {
+    capabilityKey: "2".repeat(64),
+    provider: "codex",
+    kind: "tool",
+    canonicalName: "Read",
+    useCount: "3",
+    turnCount: "2",
+    sessionCount: "1",
+    terminal: { pending: "0", completed: "2", failed: "1", cancelled: "0", unknown: "0" },
+    strength: { observed: "3", confirmed: "0", inferred: "0" },
+  };
+  const response = createCapabilityPageMessage({
+    requestId: "11",
+    page: { snapshotSeq: "7", items: [item], nextCursor: item.capabilityKey },
+  });
+  assert.equal(assertProtocolMessage(response), response);
+  assert.throws(
+    () => createCapabilityPageMessage({
+      requestId: "11",
+      page: { snapshotSeq: "7", items: [item], nextCursor: "3".repeat(64) },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createCapabilityPageMessage({
+      requestId: "11",
+      page: {
+        snapshotSeq: "7",
+        items: [{ ...item, sourcePath: "/private/session.jsonl" }],
+        nextCursor: null,
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
   );
 });
 

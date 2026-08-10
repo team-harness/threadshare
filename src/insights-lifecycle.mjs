@@ -177,7 +177,7 @@ export async function inspectInsightsState(options = {}) {
   if (reindexManifest !== null) {
     diagnostics.push("TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED");
   }
-  if (databasePresent && originSecretPresent) {
+  if (databasePresent && originSecretPresent && options.includeEngineStatus !== false) {
     try {
       const createEngineClient = options.createEngineClient ?? createInsightsEngineClient;
       const engine = await createEngineClient({
@@ -201,9 +201,12 @@ export async function inspectInsightsState(options = {}) {
         ? "corrupt"
         : "engine-unavailable";
     }
-  } else if (databasePresent) {
+  } else if (databasePresent && !originSecretPresent) {
     state = "origin-secret-missing";
     diagnostics.push("TS_INSIGHTS_ORIGIN_SECRET_MISSING");
+  } else if (databasePresent) {
+    state = "engine-status-skipped";
+    diagnostics.push("TS_INSIGHTS_ENGINE_STATUS_SKIPPED");
   } else if (originSecretPresent) {
     state = "not-indexed";
   }

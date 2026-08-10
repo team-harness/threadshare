@@ -20,6 +20,7 @@ import {
   insightsEnginePackageName,
 } from "../src/insights-engine-targets.mjs";
 import { canonicalJson } from "../src/canonical-json.mjs";
+import { verifyInsightsDashboardBuild } from "./build-insights-dashboard.mjs";
 import { EXPECTED_PACKAGE_FILES } from "./verify-release.mjs";
 
 const ENGINE_BASENAME = "threadshare-insights-engine";
@@ -195,6 +196,7 @@ function assertRegistryArtifact(document, { sourceSha, target, version }) {
 
 export async function stageInsightsRelease({ root, binariesDirectory, outputDirectory, version, sourceSha }) {
   assertReleaseIdentity(version, sourceSha);
+  await verifyInsightsDashboardBuild({ root });
   const [sourceManifest, packageLock] = await Promise.all([
     readFile(path.join(root, "package.json"), "utf8").then(JSON.parse),
     readFile(path.join(root, "package-lock.json"), "utf8").then(JSON.parse),

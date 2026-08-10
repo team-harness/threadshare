@@ -9,6 +9,9 @@ use threadshare_insights_engine::engine::{EngineError, SessionAccumulator};
 use threadshare_insights_engine::evidence_path::{
     EvidencePathReport, SafeEvidenceEvent, SafeEvidenceFact, TurnEvidencePage,
 };
+use threadshare_insights_engine::insights_overview::{
+    CapabilityListKind, CapabilityPageRequest, InsightsOverviewRequest,
+};
 use threadshare_insights_engine::protocol::{
     MAX_FRAME_BYTES, MessageKind, PROTOCOL_FORMAT, PROTOCOL_VERSION, ProtocolError,
     accepted_contract_from_hello, bounded_message, read_frame, request_id,
@@ -180,6 +183,14 @@ fn query_engine_error(error: QueryError) -> EngineError {
         _ => ("validation", "Insights query could not be completed"),
     };
     EngineError::new(error.code, category, message)
+}
+
+fn dashboard_storage_error(error: StorageError) -> EngineError {
+    EngineError::new(
+        error.code,
+        "storage",
+        "Insights dashboard data could not be read",
+    )
 }
 
 fn search_request(message: &Value) -> SearchRequest {
@@ -437,6 +448,80 @@ impl EngineServer {
                                     "purge": status.purge,
                                     "storage": status.storage,
                                     "integrity": status.integrity,
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadInsightsOverview => {
+                            let overview = self
+                                .storage
+                                .read_insights_overview(InsightsOverviewRequest {
+                                    now_unix_ms: message["nowUnixMs"]
+                                        .as_str()
+                                        .expect("validated overview time")
+                                        .parse()
+                                        .expect("validated overview time fits u64"),
+                                    quiescence_seconds: u32::try_from(
+                                        message["quiescenceSeconds"]
+                                            .as_u64()
+                                            .expect("validated overview quiescence"),
+                                    )
+                                    .expect("validated overview quiescence fits u32"),
+                                })
+                                .map_err(dashboard_storage_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "INSIGHTS_OVERVIEW",
+                                    "requestId": request_id,
+                                    "snapshotSeq": overview.snapshot_seq,
+                                    "sessions": overview.sessions,
+                                    "scopes": overview.scopes,
+                                    "dedupe": overview.dedupe,
+                                    "turns": overview.turns,
+                                    "capabilities": overview.capabilities,
+                                    "providers": overview.providers,
+                                    "projects": overview.projects,
+                                    "coverage": overview.coverage,
+                                    "diagnostics": overview.diagnostics,
+                                }),
+                            ))
+                        }
+                        MessageKind::ListCapabilities => {
+                            let kind = match message["kind"]
+                                .as_str()
+                                .expect("validated capability kind")
+                            {
+                                "tool" => CapabilityListKind::Tool,
+                                "skill" => CapabilityListKind::Skill,
+                                _ => unreachable!("protocol validated capability kind"),
+                            };
+                            let page = self
+                                .storage
+                                .list_capabilities(CapabilityPageRequest {
+                                    kind,
+                                    cursor: message["cursor"].as_str().map(str::to_owned),
+                                    limit: u16::try_from(
+                                        message["limit"]
+                                            .as_u64()
+                                            .expect("validated capability limit"),
+                                    )
+                                    .expect("validated capability limit fits u16"),
+                                })
+                                .map_err(dashboard_storage_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "CAPABILITY_PAGE",
+                                    "requestId": request_id,
+                                    "snapshotSeq": page.snapshot_seq,
+                                    "items": page.items,
+                                    "nextCursor": page.next_cursor,
                                 }),
                             ))
                         }
@@ -951,6 +1036,43 @@ mod tests {
         assert_eq!(response["integrity"]["fts"], "ok");
         assert!(response.get("sessions").is_none());
         assert!(response.get("facts").is_none());
+        assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn dashboard_overview_and_capability_page_are_ready_state_reads() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+
+        let overview = server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "READ_INSIGHTS_OVERVIEW",
+                "requestId": "51",
+                "nowUnixMs": "1786320000000",
+                "quiescenceSeconds": 300,
+            }))
+            .unwrap();
+        assert_eq!(overview["type"], "INSIGHTS_OVERVIEW");
+        assert_eq!(overview["snapshotSeq"], "0");
+        assert_eq!(overview["sessions"]["raw"], "0");
+        validate_protocol_message(&overview).unwrap();
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let page = server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "LIST_CAPABILITIES",
+                "requestId": "52",
+                "kind": "tool",
+                "cursor": null,
+                "limit": 20,
+            }))
+            .unwrap();
+        assert_eq!(page["type"], "CAPABILITY_PAGE");
+        assert_eq!(page["snapshotSeq"], "0");
+        assert_eq!(page["items"], json!([]));
+        validate_protocol_message(&page).unwrap();
         assert!(matches!(server.state, State::Ready { .. }));
     }
 

@@ -1001,6 +1001,9 @@ function assertDeltaMatchesItem(delta, item, privacyContext, requiredContract) {
 
 export async function runInsightsIndexer(options = {}) {
   assertIndexerEngine(options.engine);
+  if (options.onProgress !== undefined && typeof options.onProgress !== "function") {
+    throw new TypeError("onProgress must be a function");
+  }
   if (!options.privacyContext || typeof options.privacyContext.originSecretEpoch !== "string") {
     throw new TypeError("privacyContext is required");
   }
@@ -1031,6 +1034,27 @@ export async function runInsightsIndexer(options = {}) {
     statSource,
     sampleSource,
   });
+  const itemBytes = (item) => BigInt(item.metadata?.size ?? item.previous?.metadata?.size ?? "0");
+  const bytesTotal = plan.items.reduce((total, item) => total + itemBytes(item), 0n);
+  let bytesProcessed = plan.items
+    .filter(({ action }) => action === "unchanged")
+    .reduce((total, item) => total + itemBytes(item), 0n);
+  const notifyProgress = () => {
+    if (options.onProgress === undefined) return;
+    try {
+      void Promise.resolve(options.onProgress(Object.freeze({
+        bytesProcessed: bytesProcessed.toString(),
+        bytesTotal: bytesTotal.toString(),
+      }))).catch(() => {});
+    } catch {
+      // Progress observers cannot affect reconciliation or commit ordering.
+    }
+  };
+  const markProcessed = (item) => {
+    bytesProcessed += itemBytes(item);
+    notifyProgress();
+  };
+  notifyProgress();
   const diagnostics = [...plan.diagnostics];
   let excluded = 0;
   let missing = 0;
@@ -1063,6 +1087,7 @@ export async function runInsightsIndexer(options = {}) {
     if (!completed) lifecycleFailed += 1;
     else if (item.action === "exclude") excluded += 1;
     else missing += 1;
+    markProcessed(item);
   }
 
   const actionable = plan.items
@@ -1113,6 +1138,8 @@ export async function runInsightsIndexer(options = {}) {
       if (isAbort(error, options.signal)) throw error;
       diagnostics.push(diagnosticForItem("session-index-failed", item, error));
       return { status: "failed" };
+    } finally {
+      markProcessed(item);
     }
   });
 
@@ -1123,6 +1150,8 @@ export async function runInsightsIndexer(options = {}) {
     excluded: excluded + results.filter(({ status }) => status === "excluded").length,
     missing,
     committed: results.filter(({ status }) => status === "committed").length,
+    bytesProcessed: bytesProcessed.toString(),
+    bytesTotal: bytesTotal.toString(),
     failed:
       plan.planningFailed +
       lifecycleFailed +

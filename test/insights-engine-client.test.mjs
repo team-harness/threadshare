@@ -599,6 +599,22 @@ test("real Rust sidecar searches committed Turns and pages their bounded evidenc
   const delta = await queryFixtureDelta();
   await client.applySessionFacts(delta);
 
+  const overview = await client.readInsightsOverview({
+    nowUnixMs: "1786323723000",
+    quiescenceSeconds: 300,
+  });
+  assert.equal(overview.snapshotSeq, "1");
+  assert.equal(overview.sessions.eligible, "1");
+  assert.equal(overview.turns.indexed, "1");
+  assert.equal(Object.isFrozen(overview.sessions), true);
+  const capabilities = await client.listCapabilities({ kind: "tool", cursor: null, limit: 20 });
+  assert.equal(capabilities.snapshotSeq, "1");
+  assert.equal(capabilities.items.length, 1);
+  assert.equal(capabilities.items[0].kind, "tool");
+  assert.equal(capabilities.items[0].canonicalName, "Read");
+  assert.equal(JSON.stringify(capabilities).includes("problemText"), false);
+  assert.equal(Object.isFrozen(capabilities.items[0].terminal), true);
+
   const search = await client.searchTurns({
     query: "normalized fact store",
     filters: {

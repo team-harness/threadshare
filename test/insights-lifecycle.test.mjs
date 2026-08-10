@@ -125,6 +125,29 @@ test("status starts the sidecar and publishes its content-free health snapshot",
   }
 });
 
+test("status never calls an unverified database ready when Engine validation is skipped", async () => {
+  const fixture = await lifecycleFixture();
+  try {
+    await mkdir(fixture.paths.stateDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(fixture.paths.databaseFile, "private database bytes", { mode: 0o600 });
+    await writeFile(fixture.paths.originSecretFile, "secret", { mode: 0o600 });
+    const status = await inspectInsightsState({
+      paths: fixture.paths,
+      includeEngineStatus: false,
+      createEngineClient() {
+        throw new Error("Engine validation must stay skipped");
+      },
+    });
+
+    assert.equal(status.state, "engine-status-skipped");
+    assert.deepEqual(status.diagnostics, ["TS_INSIGHTS_ENGINE_STATUS_SKIPPED"]);
+    assert.equal(Object.hasOwn(status, "engine"), false);
+    assert.equal(JSON.stringify(status).includes("private database bytes"), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("status reports an unfinished reindex swap without exposing its contents", async () => {
   const fixture = await lifecycleFixture();
   try {

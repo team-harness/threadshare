@@ -45,6 +45,10 @@ const expectedPackageFiles = [
   "README.md",
   "README.zh-CN.md",
   "bin/threadshare.mjs",
+  "insights-dashboard/app.js",
+  "insights-dashboard/index.html",
+  "insights-dashboard/state.js",
+  "insights-dashboard/styles.css",
   "package.json",
   "schema/session-facts-delta.v1.schema.json",
   "schema/threadshare-history.v1.schema.json",
@@ -56,6 +60,8 @@ const expectedPackageFiles = [
   "src/history-selection.mjs",
   "src/insights-command.mjs",
   "src/insights-config.mjs",
+  "src/insights-dashboard-server.mjs",
+  "src/insights-dashboard.mjs",
   "src/insights-engine-client.mjs",
   "src/insights-engine-protocol.mjs",
   "src/insights-engine-runtime.mjs",
@@ -142,6 +148,8 @@ test("locks npm pack to the exact public root files", () => {
     name: "@team-harness/threadshare",
     version: "0.4.2",
     integrity,
+    size: 128 * 1024,
+    unpackedSize: 512 * 1024,
     entryCount: expectedPackageFiles.length,
     files: expectedPackageFiles.map((filePath) => ({ path: filePath })),
   };
@@ -176,6 +184,20 @@ test("locks npm pack to the exact public root files", () => {
         { name: "@team-harness/threadshare", version: "0.4.2" },
       ),
     /package files/,
+  );
+  assert.throws(
+    () => validatePackOutput([{ ...packed, size: 256 * 1024 + 1 }], {
+      name: "@team-harness/threadshare",
+      version: "0.4.2",
+    }),
+    /compressed size/,
+  );
+  assert.throws(
+    () => validatePackOutput([{ ...packed, unpackedSize: 1024 * 1024 + 1 }], {
+      name: "@team-harness/threadshare",
+      version: "0.4.2",
+    }),
+    /unpacked size/,
   );
 });
 
@@ -791,6 +813,7 @@ test("release-time modules import from a clean tree without node_modules", async
     "src/insights-engine-protocol.mjs",
     "src/insights-engine-runtime.mjs",
     "src/insights-engine-client.mjs",
+    "scripts/build-insights-dashboard.mjs",
     "scripts/verify-release.mjs",
     "scripts/prepare-insights-release.mjs",
     "scripts/package-insights-release.mjs",
