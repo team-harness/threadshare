@@ -8,6 +8,9 @@ pub const MAX_FRAME_BYTES: usize = 4_194_304;
 pub const PROTOCOL_FORMAT: &str = "threadshare-insights-protocol@v1";
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_ENGINE_STATUS_PROJECTIONS: usize = 1_024;
+const WAL_PASSIVE_CHECKPOINT_BYTES: u64 = 64 * 1_024 * 1_024;
+const WAL_BACKPRESSURE_BYTES: u64 = 128 * 1_024 * 1_024;
 const COMMON_FIELDS: [&str; 3] = ["format", "type", "requestId"];
 const HANDSHAKE_CONTRACT_FIELDS: [&str; 10] = [
     "factSchemaVersion",
@@ -67,6 +70,20 @@ pub enum MessageKind {
     BatchAccepted,
     CommitSession,
     SessionCommitted,
+    ListSourceStates,
+    SourceStates,
+    ReadSourceCheckpoint,
+    SourceCheckpoint,
+    RemoveSource,
+    SourceRemoved,
+    ExcludeSource,
+    SourceExcluded,
+    ReadPurgeStatus,
+    PurgeStatus,
+    RunPurgeMaintenance,
+    PurgeMaintenanceStatus,
+    ReadEngineStatus,
+    EngineStatus,
     AbortSession,
     SessionAborted,
     Error,
@@ -84,6 +101,20 @@ impl MessageKind {
             Self::BatchAccepted => "BATCH_ACCEPTED",
             Self::CommitSession => "COMMIT_SESSION",
             Self::SessionCommitted => "SESSION_COMMITTED",
+            Self::ListSourceStates => "LIST_SOURCE_STATES",
+            Self::SourceStates => "SOURCE_STATES",
+            Self::ReadSourceCheckpoint => "READ_SOURCE_CHECKPOINT",
+            Self::SourceCheckpoint => "SOURCE_CHECKPOINT",
+            Self::RemoveSource => "REMOVE_SOURCE",
+            Self::SourceRemoved => "SOURCE_REMOVED",
+            Self::ExcludeSource => "EXCLUDE_SOURCE",
+            Self::SourceExcluded => "SOURCE_EXCLUDED",
+            Self::ReadPurgeStatus => "READ_PURGE_STATUS",
+            Self::PurgeStatus => "PURGE_STATUS",
+            Self::RunPurgeMaintenance => "RUN_PURGE_MAINTENANCE",
+            Self::PurgeMaintenanceStatus => "PURGE_MAINTENANCE_STATUS",
+            Self::ReadEngineStatus => "READ_ENGINE_STATUS",
+            Self::EngineStatus => "ENGINE_STATUS",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
             Self::Error => "ERROR",
@@ -242,6 +273,267 @@ fn hex64<'a>(value: &'a Value, label: &str) -> Result<&'a str, ProtocolError> {
         )));
     }
     Ok(value)
+}
+
+fn purge_state<'a>(value: &'a Value, label: &str) -> Result<&'a str, ProtocolError> {
+    let value = value
+        .as_str()
+        .ok_or_else(|| invalid_frame(format!("{label} is invalid")))?;
+    if !matches!(value, "idle" | "pending-purge" | "purged") {
+        return Err(invalid_frame(format!("{label} is invalid")));
+    }
+    Ok(value)
+}
+
+fn purge_status_fields(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    purge_state(field(message, "state", kind.as_str())?, "purge state")?;
+    for name in ["pendingFacts", "pendingMaintenance", "purged"] {
+        decimal_u64(field(message, name, kind.as_str())?, name)?;
+    }
+    Ok(())
+}
+
+fn engine_status_projection(value: &Value, label: &str) -> Result<(String, u64), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        &[
+            "name",
+            "version",
+            "inputFactSchemaVersion",
+            "rootKind",
+            "baseSnapshotSeq",
+            "watermark",
+            "status",
+            "errorDigest",
+        ],
+    )?;
+    let name = ascii_name(field(value, "name", label)?, &format!("{label}.name"))?;
+    if name.len() > 128 {
+        return Err(invalid_frame(format!("{label}.name exceeds 128 bytes")));
+    }
+    let version =
+        positive_safe_integer(field(value, "version", label)?, &format!("{label}.version"))?;
+    positive_safe_integer(
+        field(value, "inputFactSchemaVersion", label)?,
+        &format!("{label}.inputFactSchemaVersion"),
+    )?;
+    if !matches!(
+        field(value, "rootKind", label)?.as_str(),
+        Some("session" | "turn" | "capability")
+    ) {
+        return Err(invalid_frame(format!("{label}.rootKind is invalid")));
+    }
+    let (_, base_snapshot_seq) = decimal_u64(
+        field(value, "baseSnapshotSeq", label)?,
+        &format!("{label}.baseSnapshotSeq"),
+    )?;
+    let (_, watermark) = decimal_u64(
+        field(value, "watermark", label)?,
+        &format!("{label}.watermark"),
+    )?;
+    if watermark < base_snapshot_seq {
+        return Err(invalid_frame(format!(
+            "{label}.watermark precedes baseSnapshotSeq"
+        )));
+    }
+    let status = field(value, "status", label)?
+        .as_str()
+        .ok_or_else(|| invalid_frame(format!("{label}.status is invalid")))?;
+    if !matches!(status, "active" | "building" | "failed") {
+        return Err(invalid_frame(format!("{label}.status is invalid")));
+    }
+    let error_digest = field(value, "errorDigest", label)?;
+    if status == "failed" {
+        hex64(error_digest, &format!("{label}.errorDigest"))?;
+    } else if !error_digest.is_null() {
+        return Err(invalid_frame(format!(
+            "{label}.errorDigest is only valid for failed projections"
+        )));
+    }
+    Ok((name.to_owned(), version))
+}
+
+fn validate_engine_status(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "snapshotSeq",
+            "snapshotAgeMs",
+            "snapshotPending",
+            "factStorageProfile",
+            "projections",
+            "changeLog",
+            "purge",
+            "storage",
+            "integrity",
+        ],
+    )?;
+    let (_, snapshot_seq) = decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "ENGINE_STATUS.snapshotSeq",
+    )?;
+    let snapshot_pending = field(message, "snapshotPending", kind.as_str())?
+        .as_bool()
+        .ok_or_else(|| invalid_frame("ENGINE_STATUS.snapshotPending must be boolean"))?;
+    if snapshot_pending != (snapshot_seq == 0) {
+        return Err(invalid_frame(
+            "ENGINE_STATUS snapshot pending state is inconsistent",
+        ));
+    }
+    let snapshot_age = field(message, "snapshotAgeMs", kind.as_str())?;
+    if snapshot_pending {
+        if !snapshot_age.is_null() {
+            return Err(invalid_frame(
+                "ENGINE_STATUS.snapshotAgeMs must be null while pending",
+            ));
+        }
+    } else {
+        decimal_u64(snapshot_age, "ENGINE_STATUS.snapshotAgeMs")?;
+    }
+    if !matches!(
+        field(message, "factStorageProfile", kind.as_str())?.as_str(),
+        Some("normalized-row-v1" | "packed-facts-v1")
+    ) {
+        return Err(invalid_frame("ENGINE_STATUS.factStorageProfile is invalid"));
+    }
+
+    let projections = field(message, "projections", kind.as_str())?
+        .as_array()
+        .filter(|values| values.len() <= MAX_ENGINE_STATUS_PROJECTIONS)
+        .ok_or_else(|| invalid_frame("ENGINE_STATUS.projections exceeds its bounded limit"))?;
+    let mut previous: Option<(String, u64)> = None;
+    for (index, projection) in projections.iter().enumerate() {
+        let current =
+            engine_status_projection(projection, &format!("ENGINE_STATUS.projections[{index}]"))?;
+        if previous.as_ref().is_some_and(|value| value >= &current) {
+            return Err(invalid_frame(
+                "ENGINE_STATUS.projections must be name/version sorted and unique",
+            ));
+        }
+        previous = Some(current);
+    }
+
+    let change_log = field(message, "changeLog", kind.as_str())?;
+    exact_object_keys(
+        change_log,
+        "ENGINE_STATUS.changeLog",
+        &[
+            "rows",
+            "payloadBytes",
+            "maxRows",
+            "maxPayloadBytes",
+            "state",
+        ],
+    )?;
+    let (_, rows) = decimal_u64(
+        field(change_log, "rows", "ENGINE_STATUS.changeLog")?,
+        "ENGINE_STATUS.changeLog.rows",
+    )?;
+    let (_, payload_bytes) = decimal_u64(
+        field(change_log, "payloadBytes", "ENGINE_STATUS.changeLog")?,
+        "ENGINE_STATUS.changeLog.payloadBytes",
+    )?;
+    let (_, max_rows) = decimal_u64(
+        field(change_log, "maxRows", "ENGINE_STATUS.changeLog")?,
+        "ENGINE_STATUS.changeLog.maxRows",
+    )?;
+    let (_, max_payload_bytes) = decimal_u64(
+        field(change_log, "maxPayloadBytes", "ENGINE_STATUS.changeLog")?,
+        "ENGINE_STATUS.changeLog.maxPayloadBytes",
+    )?;
+    if max_rows != crate::projection::CHANGE_LOG_MAX_ROWS
+        || max_payload_bytes != crate::projection::CHANGE_LOG_MAX_PAYLOAD_BYTES
+    {
+        return Err(invalid_frame("ENGINE_STATUS.changeLog caps are invalid"));
+    }
+    let expected_change_log_state = if rows > max_rows || payload_bytes > max_payload_bytes {
+        "cap-exceeded"
+    } else {
+        "within-cap"
+    };
+    if field(change_log, "state", "ENGINE_STATUS.changeLog")?.as_str()
+        != Some(expected_change_log_state)
+    {
+        return Err(invalid_frame(
+            "ENGINE_STATUS.changeLog.state is inconsistent",
+        ));
+    }
+
+    let purge = field(message, "purge", kind.as_str())?;
+    exact_object_keys(
+        purge,
+        "ENGINE_STATUS.purge",
+        &["state", "pendingFacts", "pendingMaintenance", "purged"],
+    )?;
+    purge_state(
+        field(purge, "state", "ENGINE_STATUS.purge")?,
+        "ENGINE_STATUS.purge.state",
+    )?;
+    for name in ["pendingFacts", "pendingMaintenance", "purged"] {
+        decimal_u64(
+            field(purge, name, "ENGINE_STATUS.purge")?,
+            &format!("ENGINE_STATUS.purge.{name}"),
+        )?;
+    }
+
+    let storage = field(message, "storage", kind.as_str())?;
+    exact_object_keys(
+        storage,
+        "ENGINE_STATUS.storage",
+        &[
+            "databaseBytes",
+            "walBytes",
+            "walPressureAction",
+            "recentDiagnostic",
+        ],
+    )?;
+    decimal_u64(
+        field(storage, "databaseBytes", "ENGINE_STATUS.storage")?,
+        "ENGINE_STATUS.storage.databaseBytes",
+    )?;
+    let (_, wal_bytes) = decimal_u64(
+        field(storage, "walBytes", "ENGINE_STATUS.storage")?,
+        "ENGINE_STATUS.storage.walBytes",
+    )?;
+    let expected_action = if wal_bytes >= WAL_BACKPRESSURE_BYTES {
+        "backpressure"
+    } else if wal_bytes >= WAL_PASSIVE_CHECKPOINT_BYTES {
+        "passive-checkpoint"
+    } else {
+        "none"
+    };
+    if field(storage, "walPressureAction", "ENGINE_STATUS.storage")?.as_str()
+        != Some(expected_action)
+    {
+        return Err(invalid_frame(
+            "ENGINE_STATUS.storage.walPressureAction is inconsistent",
+        ));
+    }
+    let recent_diagnostic = field(storage, "recentDiagnostic", "ENGINE_STATUS.storage")?;
+    if expected_action == "backpressure" {
+        if recent_diagnostic.as_str() != Some("TS_INSIGHTS_WAL_BACKPRESSURE") {
+            return Err(invalid_frame(
+                "ENGINE_STATUS.storage.recentDiagnostic is inconsistent",
+            ));
+        }
+    } else if !recent_diagnostic.is_null() {
+        return Err(invalid_frame(
+            "ENGINE_STATUS.storage.recentDiagnostic is inconsistent",
+        ));
+    }
+
+    let integrity = field(message, "integrity", kind.as_str())?;
+    exact_object_keys(integrity, "ENGINE_STATUS.integrity", &["quickCheck", "fts"])?;
+    if field(integrity, "quickCheck", "ENGINE_STATUS.integrity")?.as_str() != Some("ok")
+        || field(integrity, "fts", "ENGINE_STATUS.integrity")?.as_str() != Some("ok")
+    {
+        return Err(invalid_frame(
+            "ENGINE_STATUS.integrity must report successful checks",
+        ));
+    }
+    Ok(())
 }
 
 pub fn decimal_u64<'a>(value: &'a Value, label: &str) -> Result<(&'a str, u64), ProtocolError> {
@@ -450,6 +742,20 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "BATCH_ACCEPTED" => MessageKind::BatchAccepted,
         "COMMIT_SESSION" => MessageKind::CommitSession,
         "SESSION_COMMITTED" => MessageKind::SessionCommitted,
+        "LIST_SOURCE_STATES" => MessageKind::ListSourceStates,
+        "SOURCE_STATES" => MessageKind::SourceStates,
+        "READ_SOURCE_CHECKPOINT" => MessageKind::ReadSourceCheckpoint,
+        "SOURCE_CHECKPOINT" => MessageKind::SourceCheckpoint,
+        "REMOVE_SOURCE" => MessageKind::RemoveSource,
+        "SOURCE_REMOVED" => MessageKind::SourceRemoved,
+        "EXCLUDE_SOURCE" => MessageKind::ExcludeSource,
+        "SOURCE_EXCLUDED" => MessageKind::SourceExcluded,
+        "READ_PURGE_STATUS" => MessageKind::ReadPurgeStatus,
+        "PURGE_STATUS" => MessageKind::PurgeStatus,
+        "RUN_PURGE_MAINTENANCE" => MessageKind::RunPurgeMaintenance,
+        "PURGE_MAINTENANCE_STATUS" => MessageKind::PurgeMaintenanceStatus,
+        "READ_ENGINE_STATUS" => MessageKind::ReadEngineStatus,
+        "ENGINE_STATUS" => MessageKind::EngineStatus,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
         "ERROR" => MessageKind::Error,
@@ -637,7 +943,13 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             validate_envelope(
                 message,
                 kind,
-                &["nextSequence", "checkpoint", "diagnostics", "coverage"],
+                &[
+                    "nextSequence",
+                    "checkpoint",
+                    "diagnostics",
+                    "coverage",
+                    "sourceState",
+                ],
             )?;
             decimal_u64(
                 field(message, "nextSequence", kind.as_str())?,
@@ -654,6 +966,15 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 field(message, "coverage", kind.as_str())?,
                 "COMMIT_SESSION.coverage",
             )?;
+            let source_state = field(message, "sourceState", kind.as_str())?;
+            if !source_state.is_null() {
+                let source_state: crate::source_state::SourceState =
+                    serde_json::from_value(source_state.clone())
+                        .map_err(|_| invalid_frame("COMMIT_SESSION.sourceState is invalid"))?;
+                source_state
+                    .validate_identity()
+                    .map_err(|_| invalid_frame("COMMIT_SESSION.sourceState is invalid"))?;
+            }
         }
         MessageKind::SessionCommitted => {
             validate_envelope(
@@ -679,6 +1000,177 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 ));
             }
         }
+        MessageKind::ListSourceStates => {
+            validate_envelope(message, kind, &["cursor", "limit"])?;
+            let cursor = field(message, "cursor", kind.as_str())?;
+            if !cursor.is_null() {
+                hex64(cursor, "LIST_SOURCE_STATES.cursor")?;
+            }
+            let limit = positive_safe_integer(
+                field(message, "limit", kind.as_str())?,
+                "LIST_SOURCE_STATES.limit",
+            )?;
+            if limit > u64::from(crate::source_state::MAX_SOURCE_STATE_PAGE_SIZE) {
+                return Err(invalid_frame("LIST_SOURCE_STATES.limit exceeds 256"));
+            }
+        }
+        MessageKind::SourceStates => {
+            validate_envelope(message, kind, &["states", "nextCursor"])?;
+            let states = field(message, "states", kind.as_str())?
+                .as_array()
+                .ok_or_else(|| invalid_frame("SOURCE_STATES.states must be an array"))?;
+            if states.len() > usize::from(crate::source_state::MAX_SOURCE_STATE_PAGE_SIZE) {
+                return Err(invalid_frame("SOURCE_STATES.states exceeds 256 items"));
+            }
+            let mut previous = None;
+            for state in states {
+                let state: crate::source_state::SourceStateSummary =
+                    serde_json::from_value(state.clone()).map_err(|_| {
+                        invalid_frame("SOURCE_STATES.states contains an invalid item")
+                    })?;
+                state
+                    .validate()
+                    .map_err(|_| invalid_frame("SOURCE_STATES.states contains an invalid item"))?;
+                if previous.is_some_and(|value| value >= state.state.session_key) {
+                    return Err(invalid_frame(
+                        "SOURCE_STATES.states must be sessionKey-sorted and unique",
+                    ));
+                }
+                previous = Some(state.state.session_key);
+            }
+            let next_cursor = field(message, "nextCursor", kind.as_str())?;
+            if !next_cursor.is_null() {
+                let cursor: crate::fact_model::StableKey =
+                    serde_json::from_value(next_cursor.clone())
+                        .map_err(|_| invalid_frame("SOURCE_STATES.nextCursor is invalid"))?;
+                if Some(cursor) != previous {
+                    return Err(invalid_frame(
+                        "SOURCE_STATES.nextCursor must equal the final state sessionKey",
+                    ));
+                }
+            }
+        }
+        MessageKind::ReadSourceCheckpoint => {
+            validate_envelope(message, kind, &["sessionKey"])?;
+            hex64(
+                field(message, "sessionKey", kind.as_str())?,
+                "READ_SOURCE_CHECKPOINT.sessionKey",
+            )?;
+        }
+        MessageKind::SourceCheckpoint => {
+            validate_envelope(message, kind, &["sessionKey", "checkpoint"])?;
+            hex64(
+                field(message, "sessionKey", kind.as_str())?,
+                "SOURCE_CHECKPOINT.sessionKey",
+            )?;
+            let checkpoint = field(message, "checkpoint", kind.as_str())?;
+            if !checkpoint.is_null() {
+                let checkpoint: crate::fact_model::Checkpoint =
+                    serde_json::from_value(checkpoint.clone())
+                        .map_err(|_| invalid_frame("SOURCE_CHECKPOINT.checkpoint is invalid"))?;
+                crate::source_state::validate_checkpoint(&checkpoint)
+                    .map_err(|_| invalid_frame("SOURCE_CHECKPOINT.checkpoint is invalid"))?;
+            }
+        }
+        MessageKind::RemoveSource | MessageKind::ExcludeSource => {
+            validate_envelope(message, kind, &["sessionKey"])?;
+            hex64(
+                field(message, "sessionKey", kind.as_str())?,
+                &format!("{}.sessionKey", kind.as_str()),
+            )?;
+        }
+        MessageKind::SourceRemoved => {
+            validate_envelope(message, kind, &["sessionKey", "removed"])?;
+            hex64(
+                field(message, "sessionKey", kind.as_str())?,
+                "SOURCE_REMOVED.sessionKey",
+            )?;
+            if field(message, "removed", kind.as_str())?
+                .as_bool()
+                .is_none()
+            {
+                return Err(invalid_frame("SOURCE_REMOVED.removed must be boolean"));
+            }
+        }
+        MessageKind::SourceExcluded => {
+            validate_envelope(message, kind, &["sessionKey", "excluded", "purgeState"])?;
+            hex64(
+                field(message, "sessionKey", kind.as_str())?,
+                "SOURCE_EXCLUDED.sessionKey",
+            )?;
+            if field(message, "excluded", kind.as_str())?
+                .as_bool()
+                .is_none()
+            {
+                return Err(invalid_frame("SOURCE_EXCLUDED.excluded must be boolean"));
+            }
+            purge_state(
+                field(message, "purgeState", kind.as_str())?,
+                "SOURCE_EXCLUDED.purgeState",
+            )?;
+        }
+        MessageKind::ReadPurgeStatus => {
+            validate_envelope(message, kind, &["sessionKey"])?;
+            let session_key = field(message, "sessionKey", kind.as_str())?;
+            if !session_key.is_null() {
+                hex64(session_key, "READ_PURGE_STATUS.sessionKey")?;
+            }
+        }
+        MessageKind::PurgeStatus => {
+            validate_envelope(
+                message,
+                kind,
+                &[
+                    "sessionKey",
+                    "state",
+                    "pendingFacts",
+                    "pendingMaintenance",
+                    "purged",
+                ],
+            )?;
+            let session_key = field(message, "sessionKey", kind.as_str())?;
+            if !session_key.is_null() {
+                hex64(session_key, "PURGE_STATUS.sessionKey")?;
+            }
+            purge_status_fields(message, kind)?;
+        }
+        MessageKind::RunPurgeMaintenance => {
+            validate_envelope(message, kind, &["limit"])?;
+            let limit = positive_safe_integer(
+                field(message, "limit", kind.as_str())?,
+                "RUN_PURGE_MAINTENANCE.limit",
+            )?;
+            if limit > u64::from(crate::source_state::MAX_PURGE_MAINTENANCE_BATCH_SIZE) {
+                return Err(invalid_frame("RUN_PURGE_MAINTENANCE.limit exceeds 256"));
+            }
+        }
+        MessageKind::PurgeMaintenanceStatus => {
+            validate_envelope(
+                message,
+                kind,
+                &[
+                    "processedSessions",
+                    "purgedSessions",
+                    "state",
+                    "pendingFacts",
+                    "pendingMaintenance",
+                    "purged",
+                ],
+            )?;
+            decimal_u64(
+                field(message, "processedSessions", kind.as_str())?,
+                "PURGE_MAINTENANCE_STATUS.processedSessions",
+            )?;
+            decimal_u64(
+                field(message, "purgedSessions", kind.as_str())?,
+                "PURGE_MAINTENANCE_STATUS.purgedSessions",
+            )?;
+            purge_status_fields(message, kind)?;
+        }
+        MessageKind::ReadEngineStatus => {
+            validate_envelope(message, kind, &[])?;
+        }
+        MessageKind::EngineStatus => validate_engine_status(message, kind)?,
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
             decimal_u64(
@@ -717,7 +1209,14 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             non_empty_string(field(message, "code", kind.as_str())?, "ERROR.code")?;
             if !matches!(
                 field(message, "category", kind.as_str())?.as_str(),
-                Some("protocol" | "compatibility" | "validation" | "conflict" | "storage")
+                Some(
+                    "protocol"
+                        | "compatibility"
+                        | "validation"
+                        | "conflict"
+                        | "storage"
+                        | "maintenance"
+                )
             ) {
                 return Err(invalid_frame("ERROR.category is invalid"));
             }
@@ -974,8 +1473,8 @@ pub fn write_frame<W: Write>(writer: &mut W, value: &Value) -> Result<(), Protoc
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FRAME_BYTES, MessageKind, ProtocolError, read_frame, validate_protocol_message,
-        write_frame,
+        MAX_FRAME_BYTES, MessageKind, PROTOCOL_FORMAT, ProtocolError, read_frame,
+        validate_protocol_message, write_frame,
     };
     use crate::canonical_json;
     use serde::Deserialize;
@@ -1129,6 +1628,20 @@ mod tests {
                 MessageKind::UpsertFacts,
                 MessageKind::BatchAccepted,
                 MessageKind::CommitSession,
+                MessageKind::ListSourceStates,
+                MessageKind::SourceStates,
+                MessageKind::ReadSourceCheckpoint,
+                MessageKind::SourceCheckpoint,
+                MessageKind::RemoveSource,
+                MessageKind::SourceRemoved,
+                MessageKind::ExcludeSource,
+                MessageKind::SourceExcluded,
+                MessageKind::ReadPurgeStatus,
+                MessageKind::PurgeStatus,
+                MessageKind::RunPurgeMaintenance,
+                MessageKind::PurgeMaintenanceStatus,
+                MessageKind::ReadEngineStatus,
+                MessageKind::EngineStatus,
                 MessageKind::SessionCommitted,
                 MessageKind::AbortSession,
                 MessageKind::SessionAborted,
@@ -1149,5 +1662,69 @@ mod tests {
         assert!(validate_protocol_message(&hello).is_err());
         hello["requiredContract"]["providerAdapterVersions"] = json!(["cödex@1"]);
         assert!(validate_protocol_message(&hello).is_err());
+    }
+
+    #[test]
+    fn validates_bounded_read_only_engine_status_frames() {
+        let request = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_ENGINE_STATUS",
+            "requestId": "9",
+        });
+        assert_eq!(
+            validate_protocol_message(&request).unwrap(),
+            MessageKind::ReadEngineStatus
+        );
+
+        let response = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "ENGINE_STATUS",
+            "requestId": "9",
+            "snapshotSeq": "17",
+            "snapshotAgeMs": "1234",
+            "snapshotPending": false,
+            "factStorageProfile": "normalized-row-v1",
+            "projections": [{
+                "name": "turn-summary",
+                "version": 1,
+                "inputFactSchemaVersion": 1,
+                "rootKind": "turn",
+                "baseSnapshotSeq": "5",
+                "watermark": "17",
+                "status": "active",
+                "errorDigest": null,
+            }],
+            "changeLog": {
+                "rows": "2",
+                "payloadBytes": "234",
+                "maxRows": "1000000",
+                "maxPayloadBytes": "67108864",
+                "state": "within-cap",
+            },
+            "purge": {
+                "state": "pending-purge",
+                "pendingFacts": "1",
+                "pendingMaintenance": "0",
+                "purged": "0",
+            },
+            "storage": {
+                "databaseBytes": "4096",
+                "walBytes": "0",
+                "walPressureAction": "none",
+                "recentDiagnostic": null,
+            },
+            "integrity": { "quickCheck": "ok", "fts": "ok" },
+        });
+        assert_eq!(
+            validate_protocol_message(&response).unwrap(),
+            MessageKind::EngineStatus
+        );
+
+        let mut inconsistent = response;
+        inconsistent["storage"]["walBytes"] = Value::String("134217728".to_owned());
+        assert_eq!(
+            validate_protocol_message(&inconsistent).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
     }
 }

@@ -3,8 +3,24 @@
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { cpus, platform as osPlatform, release as osRelease, totalmem } from "node:os";
+import {
+  access,
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import {
+  cpus,
+  loadavg,
+  platform as osPlatform,
+  release as osRelease,
+  totalmem,
+} from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -13,7 +29,11 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertHandshakeCompatible,
+  createExcludeSourceMessage,
   createHelloMessage,
+  createReadEngineStatusMessage,
+  createRemoveSourceMessage,
+  createRunPurgeMaintenanceMessage,
   createSessionDeltaMessages,
   decodeProtocolFrames,
   encodeProtocolFrame,
@@ -21,8 +41,19 @@ import {
 import {
   assertSessionFactsDelta,
   canonicalJson,
+  createPrivacyContext,
   hashKey,
 } from "../src/session-facts.mjs";
+import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
+import {
+  createInsightsIndexWorker,
+  runInsightsIndexer,
+} from "../src/insights-indexer.mjs";
+import { insightsRequiredContract } from "../src/insights-command.mjs";
+import {
+  discoverProviderEvidenceSources,
+  readProviderSessionDelta,
+} from "../src/provider-evidence.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -42,7 +73,67 @@ const DEFAULT_SEED = "threadshare-insights-benchmark-v1";
 const ORIGIN_SECRET_EPOCH = "33333333-3333-4333-8333-333333333333";
 const PROTOCOL_FORMAT = "threadshare-insights-protocol@v1";
 const BENCHMARK_FORMAT = "threadshare-insights-engine-benchmark@v1";
+const CAPACITY_BENCHMARK_FORMAT = "threadshare-insights-capacity-benchmark@v1";
+const RAW_BACKFILL_BENCHMARK_FORMAT = "threadshare-insights-raw-backfill-benchmark@v1";
 const BASE_TIME_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
+const GIB = 1024 ** 3;
+const SQLITE_LOCK_BYTE_OFFSET = 1_073_741_824;
+const NORMALIZED_FACT_LIMIT_BYTES = 6 * GIB;
+const STEADY_STATE_LIMIT_BYTES = 8 * GIB;
+const CURRENT_ENGINE_RSS_LIMIT_BYTES = 96 * 1024 * 1024;
+const LONG_TERM_ENGINE_RSS_LIMIT_BYTES = 128 * 1024 * 1024;
+const CAPACITY_CORPUS_VERSION = 2;
+const CAPACITY_DENSITY = Object.freeze({
+  sourceRecordsPerTurn: 9,
+  evidenceEventsPerTurn: 9,
+  turnEvidencePerTurn: 3,
+  capabilityUsesPerTurn: 3,
+  capabilityUseEvidencePerTurn: 6,
+  capabilitiesPerProvider: 12,
+  naturalTermsPerTurn: 135,
+  uniqueNaturalTermsPerTurn: 6,
+  problemTextCharacters: 1_600,
+  finalAnswerCharacters: 1_100,
+});
+const CAPABILITY_NAMES = Object.freeze([
+  "Read", "Search", "Shell", "Edit", "Write", "ApplyPatch",
+  "WebSearch", "ListFiles", "GitStatus", "Test", "Build", "Deploy",
+]);
+
+export function sqliteFileFormatPages({ pageCount, pageSize, freelistCount }) {
+  const databasePageBytes = pageCount * pageSize;
+  // SQLite reserves one whole page containing the fixed 1 GiB lock-byte offset.
+  // dbstat intentionally does not attribute that page to a table or index.
+  const lockBytePageBytes = databasePageBytes > SQLITE_LOCK_BYTE_OFFSET
+    ? pageSize
+    : 0;
+  const freelistBytes = freelistCount * pageSize;
+  return {
+    lockBytePageBytes,
+    freelistBytes,
+    totalBytes: lockBytePageBytes + freelistBytes,
+  };
+}
+
+const FACT_TABLES = new Set([
+  "sessions", "session_commits", "session_fact_truncation", "source_checkpoints",
+  "turns", "turn_fact_truncation", "source_records", "capabilities",
+  "evidence_events", "visible_message_events", "capability_invocation_events",
+  "capability_result_events", "skill_catalog_entry_events", "skill_load_events",
+  "turn_lifecycle_events", "provider_status_events", "turn_evidence",
+  "capability_uses", "capability_use_evidence", "checkpoint_turn_pins",
+  "checkpoint_event_pins", "checkpoint_use_pins", "checkpoint_capability_pins",
+  "session_dedupe_evidence", "fact_diagnostics", "fact_coverage",
+]);
+const FTS_TABLES = new Set(["turn_fts_documents", "field_stats"]);
+const PROJECTION_TABLES = new Set([
+  "turn_rollup_contributions", "projection_state", "projection_change_log",
+  "capability_retry_contributions", "retry_projection_build_cursor",
+]);
+const SOURCE_STATE_TABLES = new Set([
+  "source_ingestion_states", "source_ingestion_staging", "source_purge_states",
+]);
+const ENGINE_OTHER_TABLES = new Set(["engine_metadata"]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -71,6 +162,119 @@ function round(value, digits = 3) {
   if (value === null || value === undefined || !Number.isFinite(value)) return value;
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
+}
+
+function uint64(value) {
+  const output = Buffer.alloc(8);
+  output.writeBigUInt64BE(BigInt(value));
+  return output;
+}
+
+function int32(value) {
+  const output = Buffer.alloc(4);
+  output.writeInt32BE(value);
+  return output;
+}
+
+function uint16(value) {
+  const output = Buffer.alloc(2);
+  output.writeUInt16BE(value);
+  return output;
+}
+
+function sizedText(prefix, characters) {
+  const vocabulary = " search index query retry evidence tool workflow code_path flag-name topic ";
+  if (prefix.length >= characters) return prefix.slice(0, characters);
+  const repeats = Math.ceil((characters - prefix.length) / vocabulary.length);
+  return `${prefix}${vocabulary.repeat(repeats)}`.slice(0, characters);
+}
+
+function alphabeticOrdinal(value) {
+  let remaining = positiveInteger(value + 1, "alphabetic ordinal");
+  let result = "";
+  while (remaining > 0) {
+    remaining -= 1;
+    result = String.fromCharCode(97 + (remaining % 26)) + result;
+    remaining = Math.floor(remaining / 26);
+  }
+  return result;
+}
+
+function capacityProblemText(globalIndex, provider, replacementMarker) {
+  const terms = [
+    "capacity",
+    "problem",
+    `provider${provider}`,
+    `topic${alphabeticOrdinal(globalIndex % 97)}`,
+  ];
+  if (replacementMarker !== "") terms.push("replacementvtwo");
+  const document = alphabeticOrdinal(globalIndex);
+  for (let index = 0; index < CAPACITY_DENSITY.uniqueNaturalTermsPerTurn; index += 1) {
+    terms.push(`unique${document}x${alphabeticOrdinal(index)}`);
+  }
+  const sharedTerms =
+    CAPACITY_DENSITY.naturalTermsPerTurn - CAPACITY_DENSITY.uniqueNaturalTermsPerTurn;
+  for (let index = 0; index < sharedTerms; index += 1) {
+    const vocabularyIndex = (globalIndex * 131 + index * 17) % 10_000;
+    terms.push(`shared${alphabeticOrdinal(vocabularyIndex)}`);
+  }
+  const text = terms.join(" ");
+  return text.length >= CAPACITY_DENSITY.problemTextCharacters
+    ? text.slice(0, CAPACITY_DENSITY.problemTextCharacters)
+    : text.padEnd(CAPACITY_DENSITY.problemTextCharacters, "x");
+}
+
+function capability(provider, name) {
+  return {
+    capabilityKey: hashKey("capability", provider, "tool", name, Buffer.from([1])),
+    provider,
+    kind: "tool",
+    canonicalName: name,
+    identityVersion: 1,
+  };
+}
+
+function eventIdentity(sessionKey, recordStartOffset) {
+  return hashKey(
+    "event",
+    Buffer.from(sessionKey, "hex"),
+    uint64(recordStartOffset),
+    int32(-1),
+    uint16(0),
+  );
+}
+
+function sourceRecord(sessionKey, startOffset, providerRecordClass, identity) {
+  return {
+    sourceRecordKey: hashKey(
+      "source-record",
+      Buffer.from(sessionKey, "hex"),
+      uint64(startOffset),
+    ),
+    ownerSessionKey: sessionKey,
+    startOffset: String(startOffset),
+    endOffset: String(startOffset + 512),
+    recordSha256: sha256(`capacity-record:${identity}`),
+    providerRecordClass,
+  };
+}
+
+function commonEvent(record, turnKey, kind, pointerKind, timestamp) {
+  return {
+    eventKey: eventIdentity(record.ownerSessionKey, record.startOffset),
+    ownerSessionKey: record.ownerSessionKey,
+    occurredTurnKey: turnKey,
+    sourceRecordKey: record.sourceRecordKey,
+    sourceOrder: {
+      recordStartOffset: record.startOffset,
+      contentIndex: -1,
+      eventOrdinal: 0,
+    },
+    pointer: { pointerKind, contentIndex: -1, eventOrdinal: 0 },
+    originScope: "main",
+    observedTimestamp: timestamp,
+    kind,
+  };
 }
 
 function checkpoint(sessionKey, generation, completeOffset) {
@@ -241,6 +445,245 @@ export function createBenchmarkCorpus({
   });
 }
 
+function createCapacitySession(plan, sessionIndex, {
+  generation = 1,
+  replacement = false,
+} = {}) {
+  if (!Number.isSafeInteger(sessionIndex) || sessionIndex < 0 || sessionIndex >= plan.sessionCount) {
+    throw new RangeError("sessionIndex is outside the capacity corpus");
+  }
+  const firstGlobalTurn = sessionIndex * plan.turnsPerSession;
+  const sessionTurnCount = Math.min(
+    plan.turnsPerSession,
+    plan.turnCount - firstGlobalTurn,
+  );
+  const provider = sessionIndex % 2 === 0 ? "codex" : "claude";
+  const sessionKey = hashKey("session", provider, `${plan.seed}:${sessionIndex}`);
+  const observedStart = new Date(BASE_TIME_MS + firstGlobalTurn * 1_000).toISOString();
+  const turns = [];
+  const sourceRecords = [];
+  const evidenceEvents = [];
+  const turnEvidence = [];
+  const capabilityUses = [];
+  const capabilityUseEvidence = [];
+  const usedCapabilities = new Map();
+
+  for (let localIndex = 0; localIndex < sessionTurnCount; localIndex += 1) {
+    const globalIndex = firstGlobalTurn + localIndex;
+    const turnStartOffset = localIndex * 16_384;
+    const turnKey = hashKey("turn", Buffer.from(sessionKey, "hex"), uint64(turnStartOffset));
+    const timestamp = new Date(BASE_TIME_MS + globalIndex * 1_000).toISOString();
+    const replacementMarker = replacement && localIndex === 0 ? " replacement-v2" : "";
+    turns.push({
+      turnKey,
+      ownerSessionKey: sessionKey,
+      turnStartOffset: String(turnStartOffset),
+      problemText: capacityProblemText(globalIndex, provider, replacementMarker),
+      finalAnswerExcerpt: sizedText(
+        `capacity answer ${globalIndex} outcome-${globalIndex % 17}`,
+        CAPACITY_DENSITY.finalAnswerCharacters,
+      ),
+      observedTimestamp: timestamp,
+      rawClosure: {
+        nextUserBoundary: localIndex + 1 < sessionTurnCount,
+        providerTerminal: "completed",
+        observedEofClosed: false,
+      },
+      providerVisibility: "active",
+      factTruncation: [],
+    });
+
+    const addEvent = (slot, providerRecordClass, identity, fields) => {
+      const recordStartOffset = turnStartOffset + slot * 1_024 + 1;
+      const record = sourceRecord(
+        sessionKey,
+        recordStartOffset,
+        providerRecordClass,
+        `${plan.seed}:${sessionIndex}:${globalIndex}:${identity}:${replacementMarker}`,
+      );
+      const event = {
+        ...commonEvent(
+          record,
+          turnKey,
+          fields.kind,
+          `benchmark:${fields.kind}`,
+          timestamp,
+        ),
+        ...fields,
+      };
+      sourceRecords.push(record);
+      evidenceEvents.push(event);
+      return event;
+    };
+
+    const user = addEvent(0, "benchmark:visible-user", "user", {
+      kind: "visible-message",
+      role: "user",
+    });
+    const assistant = addEvent(1, "benchmark:visible-assistant", "assistant", {
+      kind: "visible-message",
+      role: "assistant",
+    });
+    const lifecycle = addEvent(2, "benchmark:turn-complete", "lifecycle", {
+      kind: "turn-lifecycle",
+      lifecycleState: "completed",
+      providerTurnDigest: hashKey("benchmark-provider-turn", sessionKey, String(globalIndex)),
+    });
+    turnEvidence.push(
+      { ownerSessionKey: sessionKey, turnKey, eventKey: user.eventKey, role: "boundary" },
+      { ownerSessionKey: sessionKey, turnKey, eventKey: assistant.eventKey, role: "result" },
+      { ownerSessionKey: sessionKey, turnKey, eventKey: lifecycle.eventKey, role: "lifecycle" },
+    );
+
+    for (let useIndex = 0; useIndex < CAPACITY_DENSITY.capabilityUsesPerTurn; useIndex += 1) {
+      const name = CAPABILITY_NAMES[(globalIndex * 3 + useIndex) % CAPABILITY_NAMES.length];
+      const tool = capability(provider, name);
+      usedCapabilities.set(tool.capabilityKey, tool);
+      const correlationDigest = hashKey(
+        "provider-correlation",
+        Buffer.from(sessionKey, "hex"),
+        `benchmark-call:${globalIndex}:${useIndex}`,
+      );
+      const inputFingerprint = hashKey(
+        "benchmark-input",
+        Buffer.from(sessionKey, "hex"),
+        String(globalIndex),
+        String(useIndex),
+      );
+      const invocation = addEvent(3 + useIndex * 2, "benchmark:tool-invocation", `invoke:${useIndex}`, {
+        kind: "capability-invocation",
+        capabilityKey: tool.capabilityKey,
+        correlationDigest,
+        inputFingerprint,
+      });
+      const failed = (globalIndex + useIndex) % 7 === 0;
+      const result = addEvent(4 + useIndex * 2, "benchmark:tool-result", `result:${useIndex}`, {
+        kind: "capability-result",
+        correlationDigest,
+        providerState: failed ? "failed" : "completed",
+        exitCode: failed ? "1" : "0",
+        outputBytes: String(512 + (globalIndex * 37 + useIndex * 101) % 16_384),
+        durationMs: String(5 + (globalIndex * 13 + useIndex * 17) % 2_000),
+      });
+      const branch = Buffer.concat([Buffer.from([1]), Buffer.from(correlationDigest, "hex")]);
+      const useKey = hashKey("capability-use", Buffer.from(turnKey, "hex"), branch);
+      capabilityUses.push({
+        useKey,
+        ownerSessionKey: sessionKey,
+        turnKey,
+        capabilityKey: tool.capabilityKey,
+        turnOrdinal: useIndex,
+        exactObservedName: name,
+        originScope: "main",
+        inputFingerprint,
+        providerTerminalState: failed ? "failed" : "completed",
+        strength: "observed",
+        correlationDigest,
+      });
+      capabilityUseEvidence.push(
+        { ownerSessionKey: sessionKey, useKey, eventKey: invocation.eventKey, role: "invocation" },
+        { ownerSessionKey: sessionKey, useKey, eventKey: result.eventKey, role: "result" },
+      );
+    }
+  }
+
+  const lastGlobalTurn = firstGlobalTurn + sessionTurnCount - 1;
+  const completeOffset = String(sessionTurnCount * 16_384);
+  const targetGeneration = String(generation);
+  const expectedGeneration = String(generation - 1);
+  const finalized = finalizeDelta({
+    format: "session-facts-delta@v1",
+    factSchemaVersion: 1,
+    providerAdapterVersion: `${provider}@1`,
+    privacyPolicyVersion: 1,
+    originSecretEpoch: ORIGIN_SECRET_EPOCH,
+    duplicatePolicyVersion: 1,
+    expectedGeneration,
+    targetGeneration,
+    mode: replacement ? "replace-session" : "append",
+    deltaId: "0".repeat(64),
+    session: {
+      sessionKey,
+      provider,
+      sessionScope: "main",
+      eligibility: "eligible",
+      projectKey: hashKey("project", "benchmark-capacity", String(sessionIndex % 29)),
+      observedStart,
+      observedEnd: new Date(BASE_TIME_MS + lastGlobalTurn * 1_000).toISOString(),
+      originatorVersion: "benchmark-capacity@1",
+      duplicateGroupKey: null,
+      dedupeFingerprint: null,
+      dedupeCorroborationFingerprint: null,
+      duplicateMethod: null,
+      duplicateConfidence: null,
+      dedupeClosure: null,
+      dedupeEvidenceEventKeys: [],
+      duplicatePolicyVersion: 1,
+      factTruncation: [],
+    },
+    retractions: { turnKeys: [], orphanEventKeys: [], authoritativeTurnKeys: [] },
+    turns,
+    sourceRecords,
+    evidenceEvents,
+    turnEvidence,
+    capabilities: [...usedCapabilities.values()].sort((left, right) =>
+      left.capabilityKey < right.capabilityKey ? -1 : left.capabilityKey > right.capabilityKey ? 1 : 0),
+    capabilityUses: capabilityUses.sort((left, right) =>
+      left.useKey < right.useKey ? -1 : left.useKey > right.useKey ? 1 : 0),
+    capabilityUseEvidence: capabilityUseEvidence.sort((left, right) =>
+      left.useKey.localeCompare(right.useKey) || left.eventKey.localeCompare(right.eventKey)),
+    checkpoint: checkpoint(sessionKey, targetGeneration, completeOffset),
+    diagnostics: [],
+    coverage: {
+      "benchmark-capability-invocation": sessionTurnCount * 3,
+      "benchmark-capability-result": sessionTurnCount * 3,
+    },
+  });
+  return Object.freeze({
+    ...finalized,
+    sessionIndex,
+    turnCount: sessionTurnCount,
+  });
+}
+
+export function createCapacityBenchmarkPlan({
+  turnCount = 25_000,
+  turnsPerSession = 100,
+  seed = `${DEFAULT_SEED}-capacity`,
+} = {}) {
+  positiveInteger(turnCount, "turnCount");
+  positiveInteger(turnsPerSession, "turnsPerSession");
+  if (typeof seed !== "string" || seed.length === 0) {
+    throw new TypeError("seed must be a non-empty string");
+  }
+  const sessionCount = Math.ceil(turnCount / turnsPerSession);
+  const identity = Object.freeze({
+    corpusVersion: CAPACITY_CORPUS_VERSION,
+    seed,
+    turnCount,
+    turnsPerSession,
+    sessionCount,
+    density: CAPACITY_DENSITY,
+  });
+  const plan = {
+    ...identity,
+    identityDigest: sha256(canonicalJson(identity)),
+    sessionKey(sessionIndex) {
+      const provider = sessionIndex % 2 === 0 ? "codex" : "claude";
+      return hashKey("session", provider, `${seed}:${sessionIndex}`);
+    },
+    sessionAt(sessionIndex, options) {
+      return createCapacitySession(plan, sessionIndex, options);
+    },
+    *stream() {
+      for (let sessionIndex = 0; sessionIndex < sessionCount; sessionIndex += 1) {
+        yield createCapacitySession(plan, sessionIndex);
+      }
+    },
+  };
+  return Object.freeze(plan);
+}
+
 function requiredContract() {
   return {
     factSchemaVersion: 1,
@@ -328,15 +771,16 @@ function startRssSampler(pid) {
       combinedPeakBytes = Math.max(combinedPeakBytes, nodeBytes + sidecarBytes);
     }
   };
-  // Linux exposes RSS as a cheap procfs read. macOS and Windows require a new
-  // subprocess per sample, which materially distorts this short benchmark, so
-  // those platforms report start/end observations instead of claiming a peak.
-  const periodic = process.platform === "linux";
-  const timer = periodic
+  const sampleIntervalMs = process.platform === "linux"
+    ? 100
+    : process.platform === "darwin" || process.platform === "win32"
+      ? 500
+      : null;
+  const timer = sampleIntervalMs !== null
     ? setInterval(() => {
       if (stopped) return;
       pending = pending.then(sample, sample);
-    }, 100)
+    }, sampleIntervalMs)
     : null;
   timer?.unref();
   pending = sample();
@@ -347,7 +791,10 @@ function startRssSampler(pid) {
     await pending;
     await sample();
     return {
-      samplingMode: periodic ? "linux-procfs-100ms" : "process-start-end-observations",
+      samplingMode: sampleIntervalMs === null
+        ? "process-start-end-observations"
+        : `${process.platform}-${sampleIntervalMs}ms`,
+      peakSampled: sampleIntervalMs !== null,
       sidecarPeakBytes,
       nodeHarnessPeakBytes,
       combinedPeakBytes,
@@ -367,9 +814,287 @@ async function databaseFootprint(databasePath) {
   return bytes;
 }
 
+function storageOwner(name) {
+  const autoIndex = /^sqlite_autoindex_(.+)_[0-9]+$/u.exec(name)?.[1] ?? null;
+  const owner = autoIndex ?? name;
+  if (FACT_TABLES.has(owner) || [
+    "turns_session_order",
+    "source_records_session_order",
+    "evidence_events_session_order",
+    "evidence_events_source_record",
+    "evidence_events_occurred_turn",
+    "capability_invocation_events_capability",
+    "skill_catalog_entry_events_capability",
+    "skill_load_events_capability",
+    "turn_evidence_session_role",
+    "turn_evidence_event",
+    "capability_uses_session_key",
+    "capability_uses_turn",
+    "capability_uses_capability",
+    "capability_use_evidence_session",
+    "capability_use_evidence_event",
+    "checkpoint_turn_pins_turn",
+    "checkpoint_event_pins_event",
+    "checkpoint_use_pins_use",
+    "checkpoint_capability_pins_capability",
+    "session_dedupe_evidence_event",
+  ].includes(name)) return "fact";
+  if (FTS_TABLES.has(owner) || owner === "turns_fts" || owner.startsWith("turns_fts_")) {
+    return "fts";
+  }
+  if (PROJECTION_TABLES.has(owner) || [
+    "turn_rollup_by_turn",
+    "turn_rollup_lookup",
+    "projection_state_one_active",
+    "projection_state_build_watermark",
+    "projection_change_log_owner",
+    "capability_retry_summary_lookup",
+  ].includes(name)) return "projection";
+  if (SOURCE_STATE_TABLES.has(owner)) return "sourceState";
+  if (name === "sqlite_schema" || name === "sqlite_sequence") return "sqliteInternal";
+  if (ENGINE_OTHER_TABLES.has(owner)) return "engineOther";
+  return "unclassified";
+}
+
+function quoteIdentifier(value) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+export function evaluateCapacityGates({ factBytes, steadyStateBytes }) {
+  if (!Number.isSafeInteger(factBytes) || factBytes < 0 ||
+      !Number.isSafeInteger(steadyStateBytes) || steadyStateBytes < 0) {
+    throw new TypeError("capacity bytes must be non-negative safe integers");
+  }
+  const normalizedFactExceeded = factBytes > NORMALIZED_FACT_LIMIT_BYTES;
+  const steadyStateExceeded = steadyStateBytes > STEADY_STATE_LIMIT_BYTES;
+  const packedFactsRequired = normalizedFactExceeded || steadyStateExceeded;
+  return Object.freeze({
+    normalizedFactLimitBytes: NORMALIZED_FACT_LIMIT_BYTES,
+    steadyStateLimitBytes: STEADY_STATE_LIMIT_BYTES,
+    normalizedFactExceeded,
+    steadyStateExceeded,
+    packedFactsRequired,
+    decision: packedFactsRequired
+      ? "packed-facts-v1-required"
+      : "normalized-row-v1-within-capacity-gates",
+  });
+}
+
+async function auditCapacityDatabase(databasePath, {
+  stagingUpperBoundBytes,
+  rss,
+  turnCount,
+}) {
+  const preVacuumPersistentBytes = await databaseFootprint(databasePath);
+  const database = await openNodeDatabase(databasePath);
+  const vacuumStarted = performance.now();
+  database.exec("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
+  const vacuumMs = performance.now() - vacuumStarted;
+
+  const pageRows = database.prepare(
+    "SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name ORDER BY name",
+  ).all();
+  const byObject = {};
+  const categories = {
+    fact: { bytes: 0, rows: 0, objects: 0 },
+    fts: { bytes: 0, rows: 0, objects: 0 },
+    projection: { bytes: 0, rows: 0, objects: 0 },
+    sourceState: { bytes: 0, rows: 0, objects: 0 },
+    sqliteInternal: { bytes: 0, rows: 0, objects: 0 },
+    engineOther: { bytes: 0, rows: 0, objects: 0 },
+    unclassified: { bytes: 0, rows: 0, objects: 0 },
+  };
+  for (const row of pageRows) {
+    const bytes = Number(row.bytes);
+    const category = storageOwner(row.name);
+    byObject[row.name] = { bytes, category };
+    categories[category].bytes += bytes;
+    categories[category].objects += 1;
+  }
+
+  const rowCounts = {};
+  const logicalTables = [...new Set([
+    ...FACT_TABLES,
+    ...FTS_TABLES,
+    ...PROJECTION_TABLES,
+    ...SOURCE_STATE_TABLES,
+  ])].sort();
+  const existingTables = new Set(database.prepare(
+    "SELECT name FROM sqlite_schema WHERE type IN ('table','view')",
+  ).all().map((row) => row.name));
+  for (const table of logicalTables) {
+    if (!existingTables.has(table)) continue;
+    const rows = Number(database.prepare(
+      `SELECT COUNT(*) AS value FROM ${quoteIdentifier(table)}`,
+    ).get().value);
+    rowCounts[table] = rows;
+    categories[storageOwner(table)].rows += rows;
+  }
+  const ftsRows = existingTables.has("turns_fts_vocab")
+    ? database.prepare(
+      `SELECT col AS field, COUNT(*) AS fieldTerms,
+              COALESCE(SUM(doc),0) AS postings,
+              COALESCE(SUM(cnt),0) AS occurrences
+         FROM turns_fts_vocab GROUP BY col ORDER BY col`,
+    ).all().map((row) => ({
+      field: row.field,
+      fieldTerms: Number(row.fieldTerms),
+      postings: Number(row.postings),
+      occurrences: Number(row.occurrences),
+    }))
+    : [];
+  const ftsRowsByField = new Map(ftsRows.map((row) => [row.field, row]));
+  const ftsByField = ["natural", "code", "capability"].map((field) =>
+    ftsRowsByField.get(field) ?? {
+      field,
+      fieldTerms: 0,
+      postings: 0,
+      occurrences: 0,
+    });
+  const naturalFts = ftsByField.find(({ field }) => field === "natural");
+  const codeFts = ftsByField.find(({ field }) => field === "code");
+  const capabilityFts = ftsByField.find(({ field }) => field === "capability");
+  const ftsDensity = {
+    natural: {
+      minimumFieldTerms:
+        (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.uniqueNaturalTermsPerTurn,
+      minimumPostings:
+        (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.naturalTermsPerTurn,
+      actualFieldTerms: naturalFts.fieldTerms,
+      actualPostings: naturalFts.postings,
+      meetsExpectedDensity:
+        naturalFts.fieldTerms >=
+          (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.uniqueNaturalTermsPerTurn &&
+        naturalFts.postings >=
+          (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.naturalTermsPerTurn,
+    },
+    code: {
+      expectedPostings: 0,
+      actualFieldTerms: codeFts.fieldTerms,
+      actualPostings: codeFts.postings,
+      meetsExpectedDensity: codeFts.fieldTerms === 0 && codeFts.postings === 0,
+    },
+    capability: {
+      minimumPostings:
+        (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.capabilityUsesPerTurn,
+      actualFieldTerms: capabilityFts.fieldTerms,
+      actualPostings: capabilityFts.postings,
+      meetsExpectedDensity:
+        capabilityFts.postings >=
+          (rowCounts.turn_fts_documents ?? 0) * CAPACITY_DENSITY.capabilityUsesPerTurn,
+    },
+  };
+  const ftsMetrics = {
+    documents: rowCounts.turn_fts_documents ?? 0,
+    fieldTerms: ftsByField.reduce((total, item) => total + item.fieldTerms, 0),
+    postings: ftsByField.reduce((total, item) => total + item.postings, 0),
+    occurrences: ftsByField.reduce((total, item) => total + item.occurrences, 0),
+    byField: ftsByField,
+    density: ftsDensity,
+    detailFullBytes: categories.fts.bytes,
+    backendReevaluationLimitBytes: 400 * 1024 * 1024,
+    backendReevaluationRequired: categories.fts.bytes > 400 * 1024 * 1024,
+  };
+  const integrity = database.prepare("PRAGMA integrity_check").all()
+    .map((row) => row.integrity_check);
+  const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all().length;
+  const pageCount = Number(database.prepare("PRAGMA page_count").get().page_count);
+  const pageSize = Number(database.prepare("PRAGMA page_size").get().page_size);
+  const freelistCount = Number(
+    database.prepare("PRAGMA freelist_count").get().freelist_count,
+  );
+  database.close();
+
+  const postVacuumPersistentBytes = await databaseFootprint(databasePath);
+  const dbstatBytes = Object.values(categories)
+    .reduce((total, category) => total + category.bytes, 0);
+  const databasePageBytes = pageCount * pageSize;
+  const fileFormatPages = sqliteFileFormatPages({
+    pageCount,
+    pageSize,
+    freelistCount,
+  });
+  const dbstatAccountedPageBytes = dbstatBytes + fileFormatPages.totalBytes;
+  const unclassifiedObjects = Object.entries(byObject)
+    .filter(([, value]) => value.category === "unclassified")
+    .map(([name]) => name)
+    .sort();
+  const observedPersistentPeakBytes = Math.max(
+    preVacuumPersistentBytes,
+    postVacuumPersistentBytes,
+    dbstatBytes,
+  );
+  const compactedSteadyStateBytes = postVacuumPersistentBytes + stagingUpperBoundBytes;
+  const observedDerivedStatePeakBytes = observedPersistentPeakBytes + stagingUpperBoundBytes;
+  const engineRssLimitBytes = turnCount <= 25_000
+    ? CURRENT_ENGINE_RSS_LIMIT_BYTES
+    : LONG_TERM_ENGINE_RSS_LIMIT_BYTES;
+  const diskGates = evaluateCapacityGates({
+    factBytes: categories.fact.bytes,
+    steadyStateBytes: observedDerivedStatePeakBytes,
+  });
+  const storageClassificationComplete = unclassifiedObjects.length === 0;
+  const dbstatMatchesPageBytes = dbstatAccountedPageBytes === databasePageBytes;
+  const engineRssWithinLimit =
+    rss.sidecarPeakBytes > 0 && rss.sidecarPeakBytes <= engineRssLimitBytes;
+  const ftsDensityMatchesCorpus = Object.values(ftsDensity)
+    .every(({ meetsExpectedDensity }) => meetsExpectedDensity);
+  const ftsBackendWithinLimit = !ftsMetrics.backendReevaluationRequired;
+  return {
+    measurement:
+      "pre-maintenance persistent peak plus bounded staging for the 8 GiB gate; " +
+      "VACUUM then dbstat for category attribution",
+    vacuumMs,
+    preVacuumPersistentBytes,
+    postVacuumPersistentBytes,
+    dbstatBytes,
+    dbstatAccountedPageBytes,
+    databasePageBytes,
+    pageCount,
+    pageSize,
+    freelistCount,
+    fileFormatPages,
+    stagingUpperBoundBytes,
+    stagingMeasurement: "maximum canonical SessionFactsDeltaV1 bytes",
+    observedPersistentPeakBytes,
+    compactedSteadyStateBytes,
+    observedDerivedStatePeakBytes,
+    engineRss: {
+      limitBytes: engineRssLimitBytes,
+      sidecarPeakBytes: rss.sidecarPeakBytes,
+      nodeHarnessPeakBytes: rss.nodeHarnessPeakBytes,
+      combinedPeakBytes: rss.combinedPeakBytes,
+      withinLimit: engineRssWithinLimit,
+    },
+    categories,
+    byObject,
+    unclassifiedObjects,
+    rowCounts,
+    ftsMetrics,
+    integrity,
+    foreignKeyViolations,
+    gates: {
+      ...diskGates,
+      storageClassificationComplete,
+      dbstatMatchesPageBytes,
+      engineRssWithinLimit,
+      ftsDensityMatchesCorpus,
+      ftsBackendWithinLimit,
+      allMeasuredCapacityGatesPassed:
+        !diskGates.packedFactsRequired && storageClassificationComplete &&
+        dbstatMatchesPageBytes && engineRssWithinLimit &&
+        ftsDensityMatchesCorpus && ftsBackendWithinLimit,
+    },
+  };
+}
+
 function querySummary(database, sessionKeys, queryCount, warmupCount) {
   const point = database.prepare(
-    "SELECT generation, hex(delta_id) AS deltaId, length(canonical_delta) AS canonicalBytes, snapshot_seq AS snapshotSeq FROM session_commits WHERE session_key=?",
+    `SELECT hex(c.generation) AS generation, hex(c.delta_id) AS deltaId,
+            hex(c.canonical_digest) AS canonicalDigest, c.snapshot_seq AS snapshotSeq
+     FROM session_commits AS c
+     JOIN sessions AS s ON s.session_id=c.session_id
+     WHERE s.session_key=?`,
   );
   const count = database.prepare("SELECT COUNT(*) AS value FROM session_commits");
   const pick = (index) => sessionKeys[(index * 7_919 + 17) % sessionKeys.length];
@@ -422,13 +1147,21 @@ function configureReferenceDatabase(database) {
       value TEXT NOT NULL
     ) WITHOUT ROWID;
     INSERT INTO engine_metadata(key, value) VALUES ('snapshot_seq', '0');
+    CREATE TABLE sessions (
+      session_id INTEGER PRIMARY KEY,
+      session_key BLOB NOT NULL UNIQUE,
+      provider TEXT NOT NULL,
+      session_scope TEXT NOT NULL,
+      eligibility TEXT NOT NULL,
+      duplicate_policy_version INTEGER NOT NULL
+    );
     CREATE TABLE session_commits (
-      session_key BLOB PRIMARY KEY,
-      generation TEXT NOT NULL,
+      session_id INTEGER PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+      generation BLOB NOT NULL,
       delta_id BLOB NOT NULL,
-      canonical_delta TEXT NOT NULL,
+      canonical_digest BLOB NOT NULL,
       snapshot_seq INTEGER NOT NULL
-    ) WITHOUT ROWID;
+    );
   `);
 }
 
@@ -448,13 +1181,19 @@ export async function benchmarkNodeSqliteReference({
   const updateMetadata = database.prepare(
     "UPDATE engine_metadata SET value=? WHERE key='snapshot_seq'",
   );
+  const insertSession = database.prepare(`
+    INSERT INTO sessions(
+      session_key, provider, session_scope, eligibility, duplicate_policy_version
+    ) VALUES (?, ?, ?, ?, ?)
+    RETURNING session_id AS sessionId
+  `);
   const upsert = database.prepare(`
-    INSERT INTO session_commits(session_key, generation, delta_id, canonical_delta, snapshot_seq)
+    INSERT INTO session_commits(session_id, generation, delta_id, canonical_digest, snapshot_seq)
     VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(session_key) DO UPDATE SET
+    ON CONFLICT(session_id) DO UPDATE SET
       generation=excluded.generation,
       delta_id=excluded.delta_id,
-      canonical_delta=excluded.canonical_delta,
+      canonical_digest=excluded.canonical_digest,
       snapshot_seq=excluded.snapshot_seq
   `);
   let peakRssBytes = process.memoryUsage().rss;
@@ -465,11 +1204,19 @@ export async function benchmarkNodeSqliteReference({
     database.exec("BEGIN IMMEDIATE");
     try {
       updateMetadata.run(String(snapshotSeq));
+      const session = delta.session;
+      const { sessionId } = insertSession.get(
+        Buffer.from(session.sessionKey, "hex"),
+        session.provider,
+        session.sessionScope,
+        session.eligibility,
+        session.duplicatePolicyVersion,
+      );
       upsert.run(
-        Buffer.from(delta.session.sessionKey, "hex"),
-        delta.targetGeneration,
+        sessionId,
+        Buffer.from(BigInt(delta.targetGeneration).toString(16).padStart(16, "0"), "hex"),
         Buffer.from(delta.deltaId, "hex"),
-        canonical,
+        createHash("sha256").update(canonical).digest(),
         snapshotSeq,
       );
       database.exec("COMMIT");
@@ -634,7 +1381,441 @@ async function benchmarkRustSidecar({
   };
 }
 
-function sanitizedEnvironment() {
+async function openCapacitySidecar(binaryPath, databasePath, { sampleRss = true } = {}) {
+  await access(binaryPath);
+  const { stdout: versionStdout } = await execFileAsync(binaryPath, ["--version", "--json"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+  const versionDocument = JSON.parse(versionStdout);
+  const child = spawn(binaryPath, ["--db", databasePath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-16_384);
+  });
+  const responses = decodeProtocolFrames(child.stdout)[Symbol.asyncIterator]();
+  const stopRssSampler = sampleRss ? startRssSampler(child.pid) : null;
+  const stats = {
+    requestFrames: 0,
+    responseFrames: 0,
+    requestBytes: 0,
+    responseBytes: 0,
+    protocolPreparationMs: 0,
+  };
+  const start = performance.now();
+  const hello = createHelloMessage({
+    requestId: "1",
+    clientVersion: "threadshare-capacity-benchmark@1",
+    requiredContract: requiredContract(),
+  });
+  const helloFrame = encodeProtocolFrame(hello);
+  await writeEncodedFrame(child.stdin, helloFrame);
+  stats.requestFrames += 1;
+  stats.requestBytes += helloFrame.length;
+  const ready = await nextResponse(responses, "READY", "1");
+  const readyFrame = encodeProtocolFrame(ready);
+  stats.responseFrames += 1;
+  stats.responseBytes += readyFrame.length;
+  assertHandshakeCompatible(hello, ready);
+  return {
+    child,
+    responses,
+    ready,
+    versionDocument,
+    stats,
+    warmOpenMs: performance.now() - start,
+    stopRssSampler,
+    stderr: () => stderr,
+  };
+}
+
+async function sendCapacityDelta(runtime, delta, requestId) {
+  let committed = null;
+  let prepareCursor = performance.now();
+  const messages = createSessionDeltaMessages(delta, {
+    requestId,
+    factStorageProfile: "normalized-row-v1",
+    storageSchemaVersion: 1,
+    projectionVersions: [],
+    analyzerCapabilities: [],
+    rankerVersion: 1,
+  });
+  for await (const message of messages) {
+    const frame = encodeProtocolFrame(message);
+    runtime.stats.protocolPreparationMs += performance.now() - prepareCursor;
+    runtime.stats.requestFrames += 1;
+    runtime.stats.requestBytes += frame.length;
+    await writeEncodedFrame(runtime.child.stdin, frame);
+    const expectedType = message.type === "BEGIN_SESSION"
+      ? "SESSION_ACCEPTED"
+      : message.type === "COMMIT_SESSION"
+        ? "SESSION_COMMITTED"
+        : "BATCH_ACCEPTED";
+    const response = await nextResponse(runtime.responses, expectedType, requestId);
+    const responseFrame = encodeProtocolFrame(response);
+    runtime.stats.responseFrames += 1;
+    runtime.stats.responseBytes += responseFrame.length;
+    if (expectedType === "SESSION_COMMITTED") committed = response;
+    prepareCursor = performance.now();
+  }
+  if (committed === null) throw new Error("capacity delta did not commit");
+  return committed;
+}
+
+async function sendCapacityRequest(runtime, message, expectedType) {
+  const frame = encodeProtocolFrame(message);
+  runtime.stats.requestFrames += 1;
+  runtime.stats.requestBytes += frame.length;
+  await writeEncodedFrame(runtime.child.stdin, frame);
+  const response = await nextResponse(runtime.responses, expectedType, message.requestId);
+  const responseFrame = encodeProtocolFrame(response);
+  runtime.stats.responseFrames += 1;
+  runtime.stats.responseBytes += responseFrame.length;
+  return response;
+}
+
+async function closeCapacitySidecar(runtime) {
+  const rss = runtime.stopRssSampler ? await runtime.stopRssSampler() : null;
+  runtime.child.stdin.end();
+  const [exitCode] = await once(runtime.child, "close");
+  if (exitCode !== 0) {
+    throw new Error(`Insights Engine exited ${exitCode}: ${runtime.stderr()}`);
+  }
+  return rss;
+}
+
+async function measurePopulatedCapacityStartupOnce(binaryPath, databasePath, expectedSnapshotSeq) {
+  const runtime = await openCapacitySidecar(binaryPath, databasePath, { sampleRss: false });
+  const statusStarted = performance.now();
+  try {
+    const status = await sendCapacityRequest(
+      runtime,
+      createReadEngineStatusMessage({ requestId: "2" }),
+      "ENGINE_STATUS",
+    );
+    const statusReadMs = performance.now() - statusStarted;
+    if (status.snapshotSeq !== expectedSnapshotSeq || status.snapshotPending !== false) {
+      throw new Error(
+        `populated capacity database reopened at snapshot ${status.snapshotSeq}; ` +
+        `expected committed snapshot ${expectedSnapshotSeq}`,
+      );
+    }
+    await closeCapacitySidecar(runtime);
+    return {
+      readyMs: runtime.warmOpenMs,
+      statusReadMs,
+      readyAndStatusMs: runtime.warmOpenMs + statusReadMs,
+      status,
+    };
+  } catch (error) {
+    runtime.child.kill();
+    throw new Error(
+      `${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`,
+    );
+  }
+}
+
+async function measurePopulatedCapacityStartup(
+  binaryPath,
+  databasePath,
+  expectedSnapshotSeq,
+  sampleCount = 3,
+) {
+  const samples = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    samples.push(await measurePopulatedCapacityStartupOnce(
+      binaryPath,
+      databasePath,
+      expectedSnapshotSeq,
+    ));
+  }
+  const readyMs = percentile(samples.map((sample) => sample.readyMs), 0.5);
+  const statusReadMs = percentile(samples.map((sample) => sample.statusReadMs), 0.5);
+  const readyAndStatusMs = percentile(
+    samples.map((sample) => sample.readyAndStatusMs),
+    0.5,
+  );
+  return {
+    readyMs,
+    statusReadMs,
+    readyAndStatusMs,
+    status: samples[0].status,
+    sampleCount: samples.length,
+    samples: samples.map(({ readyMs, statusReadMs, readyAndStatusMs }) => ({
+      readyMs,
+      statusReadMs,
+      readyAndStatusMs,
+    })),
+    gate: {
+      limitMs: 500,
+      medianReadyUnder500Ms: readyMs < 500,
+    },
+  };
+}
+
+async function benchmarkCapacitySidecar({
+  binaryPath,
+  databasePath,
+  plan,
+  queryCount,
+  warmupCount,
+}) {
+  const runtime = await openCapacitySidecar(binaryPath, databasePath);
+  const digest = createHash("sha256");
+  const sessionKeys = [];
+  let canonicalBytes = 0;
+  let maxSessionCanonicalBytes = 0;
+  let lastCommittedSnapshotSeq = null;
+  let corpusGenerationMs = 0;
+  const started = performance.now();
+  try {
+    const sessions = plan.stream()[Symbol.iterator]();
+    while (true) {
+      const generationStarted = performance.now();
+      const next = sessions.next();
+      if (next.done) {
+        corpusGenerationMs += performance.now() - generationStarted;
+        break;
+      }
+      const session = next.value;
+      digest.update(session.canonical);
+      const bytes = Buffer.byteLength(session.canonical, "utf8");
+      canonicalBytes += bytes;
+      maxSessionCanonicalBytes = Math.max(maxSessionCanonicalBytes, bytes);
+      sessionKeys.push(session.delta.session.sessionKey);
+      corpusGenerationMs += performance.now() - generationStarted;
+      const response = await sendCapacityDelta(
+        runtime,
+        session.delta,
+        String(session.sessionIndex + 2),
+      );
+      if (response.idempotent !== false) {
+        throw new Error("fresh capacity corpus unexpectedly produced an idempotent commit");
+      }
+      lastCommittedSnapshotSeq = response.snapshotSeq;
+    }
+  } catch (error) {
+    runtime.child.kill();
+    throw new Error(`${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`);
+  }
+  const backfillMs = performance.now() - started;
+  const rss = await closeCapacitySidecar(runtime);
+  if (lastCommittedSnapshotSeq === null) {
+    throw new Error("capacity corpus did not commit any sessions");
+  }
+  const populatedStartup = await measurePopulatedCapacityStartup(
+    binaryPath,
+    databasePath,
+    lastCommittedSnapshotSeq,
+  );
+  const database = await openNodeDatabase(databasePath);
+  const query = querySummary(database, sessionKeys, queryCount, warmupCount);
+  database.close();
+  const capacityAudit = await auditCapacityDatabase(databasePath, {
+    stagingUpperBoundBytes: maxSessionCanonicalBytes,
+    rss,
+    turnCount: plan.turnCount,
+  });
+  const populatedWarmOpenUnder500Ms =
+    populatedStartup.gate.medianReadyUnder500Ms;
+  const capacity = {
+    ...capacityAudit,
+    gates: {
+      ...capacityAudit.gates,
+      populatedWarmOpenUnder500Ms,
+      allMeasuredCapacityGatesPassed:
+        capacityAudit.gates.allMeasuredCapacityGatesPassed && populatedWarmOpenUnder500Ms,
+    },
+  };
+  const engineBackfillMs = Math.max(
+    0,
+    backfillMs - corpusGenerationMs - runtime.stats.protocolPreparationMs,
+  );
+  if (engineBackfillMs === 0) {
+    throw new Error("capacity engine backfill time was not measurable");
+  }
+  return {
+    engine: "rust-sidecar",
+    engineVersion: runtime.versionDocument.engineVersion,
+    target: runtime.versionDocument.target,
+    sqliteVersion: runtime.ready.sqliteVersion,
+    startup: {
+      emptyDatabase: { readyMs: runtime.warmOpenMs },
+      populatedDatabase: populatedStartup,
+    },
+    corpusDigest: digest.digest("hex"),
+    canonicalBytes,
+    maxSessionCanonicalBytes,
+    backfill: {
+      wallMs: backfillMs,
+      corpusGenerationMs,
+      protocolPreparationMs: runtime.stats.protocolPreparationMs,
+      engineBackfillMs,
+      endToEndTurnsPerSecond: plan.turnCount / (backfillMs / 1_000),
+      engineTurnsPerSecond: plan.turnCount / (engineBackfillMs / 1_000),
+      endToEndCanonicalMiBPerSecond:
+        (canonicalBytes / 1_048_576) / (backfillMs / 1_000),
+      engineCanonicalMiBPerSecond:
+        (canonicalBytes / 1_048_576) / (engineBackfillMs / 1_000),
+    },
+    protocol: {
+      ...runtime.stats,
+      totalWireBytes: runtime.stats.requestBytes + runtime.stats.responseBytes,
+      wireAmplification: ratio(
+        runtime.stats.requestBytes + runtime.stats.responseBytes,
+        canonicalBytes,
+      ),
+    },
+    rss,
+    query: {
+      ...query,
+      measurementPhase: "before-vacuum-capacity-maintenance",
+    },
+    capacity,
+  };
+}
+
+async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
+  if (plan.sessionCount < 3) {
+    throw new RangeError("capacity mutation trace requires at least three sessions");
+  }
+  const runtime = await openCapacitySidecar(binaryPath, databasePath, { sampleRss: false });
+  const steps = [];
+  const time = async (kind, action) => {
+    const started = performance.now();
+    const outcome = await action();
+    steps.push({ kind, wallMs: performance.now() - started, outcome });
+    return outcome;
+  };
+  try {
+    const replacement = plan.sessionAt(0, { generation: 2, replacement: true });
+    await time("replace-session", async () => {
+      const response = await sendCapacityDelta(runtime, replacement.delta, "10");
+      return { committed: response.idempotent === false, snapshotSeq: response.snapshotSeq };
+    });
+    await time("delete-source", async () => {
+      const response = await sendCapacityRequest(
+        runtime,
+        createRemoveSourceMessage({ requestId: "11", sessionKey: plan.sessionKey(1) }),
+        "SOURCE_REMOVED",
+      );
+      return { removed: response.removed };
+    });
+    await time("exclude-source", async () => {
+      const response = await sendCapacityRequest(
+        runtime,
+        createExcludeSourceMessage({ requestId: "12", sessionKey: plan.sessionKey(2) }),
+        "SOURCE_EXCLUDED",
+      );
+      return { excluded: response.excluded, purgeState: response.purgeState };
+    });
+    await time("purge-maintenance", async () => {
+      const response = await sendCapacityRequest(
+        runtime,
+        createRunPurgeMaintenanceMessage({ requestId: "13", limit: 8 }),
+        "PURGE_MAINTENANCE_STATUS",
+      );
+      return {
+        processedSessions: response.processedSessions,
+        purgedSessions: response.purgedSessions,
+        state: response.state,
+      };
+    });
+    await closeCapacitySidecar(runtime);
+  } catch (error) {
+    runtime.child.kill();
+    throw new Error(`${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`);
+  }
+
+  const database = await openNodeDatabase(databasePath);
+  const remainingSessions = Number(database.prepare("SELECT COUNT(*) AS value FROM sessions").get().value);
+  const remainingTurns = Number(database.prepare("SELECT COUNT(*) AS value FROM turns").get().value);
+  const remainingFtsDocuments = Number(
+    database.prepare("SELECT COUNT(*) AS value FROM turn_fts_documents").get().value,
+  );
+  const remainingRollups = Number(
+    database.prepare("SELECT COUNT(*) AS value FROM turn_rollup_contributions").get().value,
+  );
+  const replacementFtsDocuments = Number(
+    database.prepare(
+      "SELECT COUNT(*) AS value FROM turns_fts WHERE turns_fts MATCH 'replacementvtwo'",
+    ).get().value,
+  );
+  const fieldStats = Object.fromEntries(
+    database.prepare(
+      "SELECT field,fts_doc_count AS documents FROM field_stats ORDER BY field",
+    ).all().map((row) => [row.field, Number(row.documents)]),
+  );
+  const changeLogRows = Number(
+    database.prepare("SELECT COUNT(*) AS value FROM projection_change_log").get().value,
+  );
+  const replacementGeneration = database.prepare(
+    `SELECT hex(c.generation) AS value
+       FROM session_commits c JOIN sessions s ON s.session_id=c.session_id
+      WHERE s.session_key=?`,
+  ).get(Buffer.from(plan.sessionKey(0), "hex"))?.value ?? null;
+  const purgedState = database.prepare(
+    "SELECT purge_state AS value FROM source_purge_states WHERE session_key=?",
+  ).get(Buffer.from(plan.sessionKey(2), "hex"))?.value ?? null;
+  const integrity = database.prepare("PRAGMA integrity_check").all()
+    .map((row) => row.integrity_check);
+  const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all().length;
+  database.close();
+  const removedTurns =
+    plan.sessionAt(1).delta.turns.length + plan.sessionAt(2).delta.turns.length;
+  const expectedRemainingTurns = plan.turnCount - removedTurns;
+  return {
+    format: "threadshare-insights-capacity-mutation-trace@v1",
+    corpus: { turns: plan.turnCount, sessions: plan.sessionCount, seed: plan.seed },
+    steps,
+    finalState: {
+      remainingSessions,
+      remainingTurns,
+      remainingFtsDocuments,
+      remainingRollups,
+      replacementFtsDocuments,
+      fieldStats,
+      changeLogRows,
+      replacementGeneration,
+      purgedState,
+      integrity,
+      foreignKeyViolations,
+    },
+    verified: {
+      replace: replacementGeneration === "0000000000000002",
+      delete: steps.find((step) => step.kind === "delete-source")?.outcome.removed === true,
+      purge: purgedState === "purged",
+      expectedRemainingFacts:
+        remainingSessions === plan.sessionCount - 2 &&
+        remainingTurns === expectedRemainingTurns,
+      projectionCleanup:
+        remainingFtsDocuments === expectedRemainingTurns &&
+        remainingRollups === expectedRemainingTurns &&
+        fieldStats.natural === expectedRemainingTurns &&
+        fieldStats.capability === expectedRemainingTurns,
+      replacementSearchable: replacementFtsDocuments === 1,
+      boundedChangeLog: changeLogRows <= plan.turnsPerSession + 16,
+      integrity: integrity.length === 1 && integrity[0] === "ok" && foreignKeyViolations === 0,
+    },
+  };
+}
+
+function hostLoad() {
+  const [oneMinute, fiveMinutes, fifteenMinutes] = loadavg();
+  const logicalCpuCount = cpus().length;
+  return {
+    oneMinute,
+    fiveMinutes,
+    fifteenMinutes,
+    oneMinutePerLogicalCpu: logicalCpuCount === 0 ? null : oneMinute / logicalCpuCount,
+  };
+}
+
+function sanitizedEnvironment(hostLoadAtStart) {
   const processors = cpus();
   return {
     platform: process.platform,
@@ -645,6 +1826,10 @@ function sanitizedEnvironment() {
     totalMemoryBytes: totalmem(),
     nodeVersion: process.version,
     v8Version: process.versions.v8,
+    hostLoad: {
+      atStart: hostLoadAtStart,
+      atReport: hostLoad(),
+    },
   };
 }
 
@@ -702,6 +1887,7 @@ export async function runInsightsEngineBenchmark({
   binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
   workingDirectory,
 } = {}) {
+  const hostLoadAtStart = hostLoad();
   positiveInteger(turnCount, "turnCount");
   positiveInteger(turnsPerSession, "turnsPerSession");
   positiveInteger(queryCount, "queryCount");
@@ -745,7 +1931,7 @@ export async function runInsightsEngineBenchmark({
       sourceRevision: await sourceRevision(),
       sourceWorktreeDirty: await sourceWorktreeDirty(),
       benchmarkScriptSha256: sha256(await readFile(SCRIPT_PATH)),
-      environment: sanitizedEnvironment(),
+      environment: sanitizedEnvironment(hostLoadAtStart),
       corpus: {
         seed,
         turns: corpus.turnCount,
@@ -781,6 +1967,637 @@ export async function runInsightsEngineBenchmark({
   }
 }
 
+export async function runInsightsCapacityBenchmark({
+  turnCount = 25_000,
+  turnsPerSession = 100,
+  queryCount = 100,
+  warmupCount = 20,
+  seed = `${DEFAULT_SEED}-capacity`,
+  binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
+  workingDirectory,
+  mutationTrace = true,
+} = {}) {
+  const hostLoadAtStart = hostLoad();
+  positiveInteger(turnCount, "turnCount");
+  positiveInteger(turnsPerSession, "turnsPerSession");
+  positiveInteger(queryCount, "queryCount");
+  positiveInteger(warmupCount, "warmupCount");
+  const ownsDirectory = workingDirectory === undefined;
+  const directory = workingDirectory ?? await mkdtemp(
+    path.join(tmpdir(), "threadshare-insights-capacity-benchmark-"),
+  );
+  const capacityDatabasePath = path.join(directory, "capacity.sqlite3");
+  try {
+    const plan = createCapacityBenchmarkPlan({ turnCount, turnsPerSession, seed });
+    const rust = await benchmarkCapacitySidecar({
+      binaryPath: path.resolve(binaryPath),
+      databasePath: capacityDatabasePath,
+      plan,
+      queryCount,
+      warmupCount,
+    });
+    const mutations = mutationTrace
+      ? await runCapacityMutationTrace({
+        binaryPath: path.resolve(binaryPath),
+        databasePath: capacityDatabasePath,
+        plan,
+      })
+      : null;
+    return {
+      format: CAPACITY_BENCHMARK_FORMAT,
+      measuredScope: "item-4-normalized-fact-fts-projection-capacity",
+      sourceRevision: await sourceRevision(),
+      sourceWorktreeDirty: await sourceWorktreeDirty(),
+      benchmarkScriptSha256: sha256(await readFile(SCRIPT_PATH)),
+      environment: sanitizedEnvironment(hostLoadAtStart),
+      corpus: {
+        corpusVersion: plan.corpusVersion,
+        seed,
+        identityDigest: plan.identityDigest,
+        contentDigest: rust.corpusDigest,
+        turns: plan.turnCount,
+        sessions: plan.sessionCount,
+        turnsPerSession,
+        density: plan.density,
+        canonicalBytes: rust.canonicalBytes,
+        maxSessionCanonicalBytes: rust.maxSessionCanonicalBytes,
+        boundedMemoryModel: "one generated SessionFactsDeltaV1 plus one protocol batch",
+      },
+      rustSidecar: rust,
+      mutations,
+      packedFactsDecision: rust.capacity.gates,
+      notMeasured: [
+        "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
+        "Top-20 BM25/ranker latency and Recall@300; those are ITEM-5 query gates",
+        "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
+        "crash injection and projection shadow rebuild, which have dedicated integration suites",
+      ],
+    };
+  } finally {
+    if (ownsDirectory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function deterministicUuid(seed, index) {
+  const digest = sha256(`${seed}\u0000${index}`);
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    `4${digest.slice(13, 16)}`,
+    `8${digest.slice(17, 20)}`,
+    digest.slice(20, 32),
+  ].join("-");
+}
+
+function rawBenchmarkText(index, characters, suffix = "initial") {
+  const identity = index.toString(36).padStart(6, "0");
+  const chunk = [
+    `session_${identity}_${suffix}`,
+    `identifier_${((index * 17) % 65_521).toString(36)}`,
+    `error_${((index * 31) % 8_191).toString(16)}`,
+    "分析 Rust SQLite FTS 增量索引 rollback retry projection",
+  ].join(" ");
+  return `${chunk} ${chunk.repeat(Math.ceil(characters / chunk.length))}`.slice(0, characters);
+}
+
+function rawBenchmarkRecords(provider, sessionId, index, textCharacters, suffix = "initial") {
+  const timestamp = new Date(BASE_TIME_MS + index * 1_000).toISOString();
+  const question = rawBenchmarkText(index, textCharacters, suffix);
+  const answer = `Resolved ${rawBenchmarkText(index, Math.min(1_024, textCharacters), suffix)}`;
+  if (provider === "codex") {
+    const turnId = `turn-${index}-${suffix}`;
+    const callId = `call_${index}_${suffix}`;
+    return [
+      {
+        type: "session_meta",
+        timestamp,
+        payload: {
+          id: sessionId,
+          cwd: `/benchmark/project-${index % 97}`,
+          cli_version: "1.0.0-benchmark",
+        },
+      },
+      { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+      {
+        type: "response_item",
+        timestamp,
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: question }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          call_id: callId,
+          name: index % 2 === 0 ? "Read" : "Bash",
+          arguments: JSON.stringify({ benchmark: index, suffix }),
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: callId,
+          output: `benchmark output ${index}`,
+          status: "completed",
+          exit_code: 0,
+          duration_ms: 5 + (index % 17),
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: answer }],
+        },
+      },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: turnId } },
+    ];
+  }
+  const userUuid = deterministicUuid(`${sessionId}-user-${suffix}`, index);
+  const assistantUuid = deterministicUuid(`${sessionId}-assistant-${suffix}`, index);
+  const resultUuid = deterministicUuid(`${sessionId}-result-${suffix}`, index);
+  const finalUuid = deterministicUuid(`${sessionId}-final-${suffix}`, index);
+  const toolId = `tool-${index}-${suffix}`;
+  return [
+    {
+      type: "user",
+      sessionId,
+      uuid: userUuid,
+      timestamp,
+      cwd: `/benchmark/project-${index % 97}`,
+      version: "2.1.222",
+      message: { role: "user", content: [{ type: "text", text: question }] },
+    },
+    {
+      type: "assistant",
+      sessionId,
+      uuid: assistantUuid,
+      timestamp,
+      message: {
+        role: "assistant",
+        content: [{
+          type: "tool_use",
+          id: toolId,
+          name: index % 2 === 0 ? "Read" : "Bash",
+          input: { benchmark: index, suffix },
+        }],
+      },
+    },
+    {
+      type: "user",
+      sessionId,
+      uuid: resultUuid,
+      timestamp,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: toolId, content: "benchmark output" }],
+      },
+    },
+    {
+      type: "assistant",
+      sessionId,
+      uuid: finalUuid,
+      timestamp,
+      message: { role: "assistant", content: [{ type: "text", text: answer }] },
+    },
+  ];
+}
+
+function jsonlBytes(records) {
+  return Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+}
+
+async function writeRawBackfillCorpus({ directory, sessionCount, textCharacters, seed }) {
+  const providerHome = path.join(directory, "providers");
+  const codexRoot = path.join(providerHome, "codex", "sessions", "2026", "08", "10");
+  const claudeRoot = path.join(providerHome, ".claude", "projects", "benchmark-project");
+  await Promise.all([
+    mkdir(codexRoot, { recursive: true }),
+    mkdir(claudeRoot, { recursive: true }),
+  ]);
+  const sessions = [];
+  let rawBytes = 0;
+  for (let batchStart = 0; batchStart < sessionCount; batchStart += 64) {
+    const batch = [];
+    for (let index = batchStart; index < Math.min(sessionCount, batchStart + 64); index += 1) {
+      const provider = index % 2 === 0 ? "codex" : "claude";
+      const sessionId = deterministicUuid(seed, index);
+      const file = provider === "codex"
+        ? path.join(codexRoot, `rollout-2026-08-10T00-00-00-${sessionId}.jsonl`)
+        : path.join(claudeRoot, `${sessionId}.jsonl`);
+      const bytes = jsonlBytes(rawBenchmarkRecords(
+        provider,
+        sessionId,
+        index,
+        textCharacters,
+      ));
+      rawBytes += bytes.length;
+      sessions.push({ provider, sessionId, file, index, bytes: bytes.length });
+      const observed = new Date(BASE_TIME_MS + index * 1_000);
+      batch.push((async () => {
+        await writeFile(file, bytes);
+        await utimes(file, observed, observed);
+      })());
+    }
+    await Promise.all(batch);
+  }
+  return Object.freeze({
+    environment: Object.freeze({
+      HOME: providerHome,
+      CODEX_HOME: path.join(providerHome, "codex"),
+    }),
+    watchRoots: Object.freeze([
+      path.join(providerHome, "codex", "sessions"),
+      path.join(providerHome, ".claude", "projects"),
+    ]),
+    sessions: Object.freeze(sessions),
+    rawBytes,
+  });
+}
+
+function phaseTimings(values) {
+  if (values.length === 0) return { count: 0, totalMs: 0, p50Ms: 0, p95Ms: 0, maxMs: 0 };
+  const totals = values.reduce(
+    (summary, value) => ({
+      totalMs: summary.totalMs + value,
+      maxMs: Math.max(summary.maxMs, value),
+    }),
+    { totalMs: 0, maxMs: 0 },
+  );
+  return {
+    count: values.length,
+    totalMs: totals.totalMs,
+    p50Ms: percentile(values, 0.50),
+    p95Ms: percentile(values, 0.95),
+    maxMs: totals.maxMs,
+  };
+}
+
+function createWorkerCycleObserver() {
+  const waiters = new Set();
+  const settle = (waiter, action, value) => {
+    clearTimeout(waiter.timer);
+    waiters.delete(waiter);
+    action(value);
+  };
+  return Object.freeze({
+    waitFor(predicate, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          settle(
+            waiter,
+            reject,
+            new Error("Insights worker did not observe the expected report"),
+          );
+        }, timeoutMs);
+        waiters.add(waiter);
+      });
+    },
+    onCycle({ report }) {
+      for (const waiter of [...waiters]) {
+        try {
+          if (waiter.predicate(report)) settle(waiter, waiter.resolve, report);
+        } catch (error) {
+          settle(waiter, waiter.reject, error);
+        }
+      }
+    },
+    onError(error) {
+      for (const waiter of [...waiters]) settle(waiter, waiter.reject, error);
+    },
+  });
+}
+
+function summarizeRawBackfillCycles(cycles) {
+  const sum = (field) => cycles.reduce((total, cycle) => total + cycle.report[field], 0);
+  return Object.freeze({
+    format: "threadshare-insights-index-benchmark-summary@v1",
+    cycles: cycles.length,
+    reasons: cycles.map(({ reasons }) => reasons),
+    discoveredPerCycle: cycles.map(({ discovered }) => discovered),
+    uniqueDiscoveredPerCycle: cycles.map(({ uniqueDiscovered }) => uniqueDiscovered),
+    planned: sum("planned"),
+    unchanged: sum("unchanged"),
+    excluded: sum("excluded"),
+    missing: sum("missing"),
+    committed: sum("committed"),
+    failed: sum("failed"),
+    discoveryDiagnostics: cycles.flatMap(({ discoveryDiagnostics }) => discoveryDiagnostics),
+    indexDiagnostics: cycles.flatMap(({ report }) => report.diagnostics),
+  });
+}
+
+function instrumentEngine(engine, observeCommit) {
+  return new Proxy(engine, {
+    get(target, property) {
+      if (property === "commitSourceDelta") {
+        return async (input, options) => {
+          const started = performance.now();
+          const response = await target.commitSourceDelta(input, options);
+          observeCommit(input, response, performance.now() - started);
+          return response;
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+export async function runInsightsRawBackfillBenchmark({
+  sessionCount = 10_000,
+  rawTextCharacters = 262_144,
+  seed = `${DEFAULT_SEED}-raw-backfill`,
+  binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
+  workingDirectory,
+} = {}) {
+  const hostLoadAtStart = hostLoad();
+  positiveInteger(sessionCount, "sessionCount");
+  positiveInteger(rawTextCharacters, "rawTextCharacters");
+  const ownsDirectory = workingDirectory === undefined;
+  const directory = workingDirectory ?? await mkdtemp(
+    path.join(tmpdir(), "threadshare-insights-raw-backfill-"),
+  );
+  const databasePath = path.join(directory, "raw-backfill.sqlite3");
+  const corpus = await writeRawBackfillCorpus({
+    directory,
+    sessionCount,
+    textCharacters: rawTextCharacters,
+    seed,
+  });
+  const originSecretEpoch = "55555555-5555-4555-8555-555555555555";
+  const privacyContext = createPrivacyContext({
+    originSecretEpoch,
+    secret: Buffer.alloc(32, 0x52),
+  });
+  const requiredContract = insightsRequiredContract(originSecretEpoch);
+  const latestTarget = Math.min(100, sessionCount);
+  const newestFiles = new Set(
+    corpus.sessions.slice(-latestTarget).map(({ file }) => file),
+  );
+  const newestCommitted = new Set();
+  const backfillCommittedFiles = new Set();
+  const phase = {
+    name: "backfill",
+    backfill: { adapter: [], commit: [], physicalBytes: 0 },
+    append: { adapter: [], commit: [], physicalBytes: 0 },
+  };
+  const cycleReports = [];
+  let latestSessionsCommittedMs = null;
+  let appendCommittedMs = null;
+  let backfillStarted = performance.now();
+  let appendStarted = null;
+  let appendTargetFile = null;
+  let activeCycleCommittedFiles = null;
+  let worker;
+  let engine;
+  const cycleObserver = createWorkerCycleObserver();
+  try {
+    engine = await createInsightsEngineClient({
+      databasePath,
+      requiredContract,
+      runtimeOptions: {
+        env: {
+          ...process.env,
+          THREADSHARE_INSIGHTS_ENGINE_PATH: path.resolve(binaryPath),
+        },
+      },
+      childEnv: {
+        ...process.env,
+        SQLITE_TMPDIR: directory,
+        TMPDIR: directory,
+        TEMP: directory,
+        TMP: directory,
+      },
+      timeoutMs: 120_000,
+    });
+    const measuredEngine = instrumentEngine(engine, (input, _response, wallMs) => {
+      phase[phase.name].commit.push(wallMs);
+      const file = input.sourceState.file;
+      activeCycleCommittedFiles?.add(file);
+      if (phase.name === "backfill") {
+        backfillCommittedFiles.add(file);
+        if (newestFiles.has(file)) newestCommitted.add(file);
+        if (newestCommitted.size === latestTarget && latestSessionsCommittedMs === null) {
+          latestSessionsCommittedMs = performance.now() - backfillStarted;
+        }
+      } else if (file === appendTargetFile && appendCommittedMs === null) {
+        appendCommittedMs = performance.now() - appendStarted;
+      }
+    });
+    const reconcile = async ({ reasons }) => {
+      const discoveries = await Promise.all(
+        ["codex", "claude"].map((provider) =>
+          discoverProviderEvidenceSources(provider, { environment: corpus.environment })),
+      );
+      const diagnostics = discoveries.flatMap(({ diagnostics }) => diagnostics);
+      const sources = discoveries.flatMap(({ sources }) => sources);
+      const committedFiles = new Set();
+      activeCycleCommittedFiles = committedFiles;
+      let report;
+      try {
+        report = await runInsightsIndexer({
+          sources,
+          config: {
+            insights: {
+              excludeProviders: [],
+              excludeProjects: [],
+              excludeSessions: [],
+            },
+          },
+          engine: measuredEngine,
+          privacyContext,
+          requiredContract,
+          concurrency: 4,
+          adapterOptions: {
+            onBytesRead({ bytesRead }) {
+              phase[phase.name].physicalBytes += bytesRead;
+            },
+          },
+          async readDelta(...arguments_) {
+            const started = performance.now();
+            try {
+              return await readProviderSessionDelta(...arguments_);
+            } finally {
+              phase[phase.name].adapter.push(performance.now() - started);
+            }
+          },
+        });
+      } finally {
+        activeCycleCommittedFiles = null;
+      }
+      const cycle = Object.freeze({
+        reasons,
+        discovered: sources.length,
+        uniqueDiscovered: new Set(sources.map(({ file }) => file)).size,
+        committedTarget: appendTargetFile !== null && committedFiles.has(appendTargetFile),
+        report,
+        discoveryDiagnostics: diagnostics,
+      });
+      cycleReports.push(cycle);
+      if (report.failed > 0) {
+        const codes = report.diagnostics.map((diagnostic) => JSON.stringify(diagnostic)).join(",");
+        throw new Error(
+          `raw backfill cycle failed ${report.failed} session operations` +
+          (codes ? ` (${codes})` : ""),
+        );
+      }
+      return cycle;
+    };
+    worker = createInsightsIndexWorker({
+      reconcile,
+      watchRoots: corpus.watchRoots,
+      debounceMs: 100,
+      pollIntervalMs: 60_000,
+      onCycle: cycleObserver.onCycle,
+      onError: cycleObserver.onError,
+    });
+    const initialCycle = cycleObserver.waitFor(
+      (cycle) => cycle.reasons.includes("startup"),
+      24 * 60 * 60 * 1_000,
+    );
+    worker.start();
+    await initialCycle;
+    await worker.whenIdle();
+    if (worker.status().lastError) throw worker.status().lastError;
+    const backfillWallMs = performance.now() - backfillStarted;
+    const backfillCycles = cycleReports.slice();
+    const backfillReport = summarizeRawBackfillCycles(backfillCycles);
+
+    phase.name = "append";
+    const appendTarget = corpus.sessions.at(-1);
+    appendTargetFile = appendTarget.file;
+    const appendMarker = `freshmarker${appendTarget.index.toString(36)}`;
+    const appendCycle = cycleObserver.waitFor(
+      (cycle) => cycle.reasons.includes("filesystem") &&
+        cycle.report.committed === 1 && cycle.committedTarget,
+      30_000,
+    );
+    appendStarted = performance.now();
+    const appended = rawBenchmarkRecords(
+      appendTarget.provider,
+      appendTarget.sessionId,
+      appendTarget.index,
+      Math.min(rawTextCharacters, 4_096),
+      appendMarker,
+    ).filter((record) => record.type !== "session_meta");
+    await appendFile(appendTarget.file, jsonlBytes(appended));
+    const appendReport = await appendCycle;
+    await worker.whenIdle();
+    if (worker.status().lastError) throw worker.status().lastError;
+    const appendCycleWallMs = performance.now() - appendStarted;
+    await worker.stop();
+    worker = null;
+    await engine.close();
+    engine = null;
+
+    const database = await openNodeDatabase(databasePath);
+    const facts = {
+      sessions: Number(database.prepare("SELECT COUNT(*) AS value FROM sessions").get().value),
+      turns: Number(database.prepare("SELECT COUNT(*) AS value FROM turns").get().value),
+      ftsDocuments: Number(
+        database.prepare("SELECT COUNT(*) AS value FROM turn_fts_documents").get().value,
+      ),
+      sourceStates: Number(
+        database.prepare("SELECT COUNT(*) AS value FROM source_ingestion_states").get().value,
+      ),
+      appendMatches: Number(
+        database.prepare(
+          "SELECT COUNT(*) AS value FROM turns_fts WHERE turns_fts MATCH ?",
+        ).get(appendMarker).value,
+      ),
+    };
+    database.close();
+    const rawMiBPerSecond =
+      (corpus.rawBytes / 1_048_576) / (backfillWallMs / 1_000);
+    const discoveryComplete =
+      backfillCycles.length > 0 &&
+      backfillCycles.every((cycle) =>
+        cycle.discovered === sessionCount && cycle.uniqueDiscovered === sessionCount) &&
+      backfillReport.discoveryDiagnostics.length === 0;
+    const commitComplete =
+      backfillCommittedFiles.size === sessionCount &&
+      backfillReport.committed === sessionCount &&
+      backfillReport.failed === 0 &&
+      backfillReport.indexDiagnostics.length === 0;
+    const persistedCorpusComplete =
+      facts.sessions === sessionCount &&
+      facts.sourceStates === sessionCount &&
+      facts.turns === sessionCount + 1 &&
+      facts.ftsDocuments === sessionCount + 1;
+    const rawBackfillCorpusComplete =
+      discoveryComplete && commitComplete && persistedCorpusComplete;
+    return {
+      format: RAW_BACKFILL_BENCHMARK_FORMAT,
+      measuredScope: "item-4-raw-provider-adapter-worker-engine-backfill",
+      sourceRevision: await sourceRevision(),
+      sourceWorktreeDirty: await sourceWorktreeDirty(),
+      benchmarkScriptSha256: sha256(await readFile(SCRIPT_PATH)),
+      environment: sanitizedEnvironment(hostLoadAtStart),
+      corpus: {
+        seed,
+        sessions: sessionCount,
+        providers: { codex: Math.ceil(sessionCount / 2), claude: Math.floor(sessionCount / 2) },
+        rawTextCharacters,
+        rawBytes: corpus.rawBytes,
+        uniqueSessionIds: new Set(corpus.sessions.map(({ sessionId }) => sessionId)).size,
+      },
+      backfill: {
+        wallMs: backfillWallMs,
+        rawMiBPerSecond,
+        physicalBytesRead: phase.backfill.physicalBytes,
+        latestSessions: {
+          target: latestTarget,
+          committed: newestCommitted.size,
+          allCommittedMs: latestSessionsCommittedMs,
+        },
+        adapter: phaseTimings(phase.backfill.adapter),
+        commitAck: phaseTimings(phase.backfill.commit),
+        uniqueCommittedSources: backfillCommittedFiles.size,
+        report: backfillReport,
+      },
+      appendFreshness: {
+        wallMs: appendCycleWallMs,
+        committedMs: appendCommittedMs,
+        physicalBytesRead: phase.append.physicalBytes,
+        adapter: phaseTimings(phase.append.adapter),
+        commitAck: phaseTimings(phase.append.commit),
+        target: {
+          provider: appendTarget.provider,
+          sessionId: appendTarget.sessionId,
+          committed: appendReport.committedTarget,
+        },
+        searchableMatches: facts.appendMatches,
+        report: appendReport,
+      },
+      facts,
+      gates: {
+        rawBackfillCorpusComplete,
+        discoveryComplete,
+        commitComplete,
+        persistedCorpusComplete,
+        rawBackfillAtLeast10MiBPerSecond:
+          rawBackfillCorpusComplete && rawMiBPerSecond >= 10,
+        newest100Within30Seconds:
+          latestSessionsCommittedMs !== null && latestSessionsCommittedMs <= 30_000,
+        appendedTurnWithin2Seconds:
+          appendReport.committedTarget && appendCommittedMs !== null &&
+          appendCommittedMs <= 2_000 && facts.appendMatches > 0,
+      },
+    };
+  } finally {
+    if (worker) await worker.stop();
+    if (engine) await engine.close();
+    if (ownsDirectory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
 function parseArguments(argv) {
   const options = {
     turnCount: 25_000,
@@ -792,14 +2609,26 @@ function parseArguments(argv) {
     outputPath: null,
     json: false,
     nodeReferenceWorker: false,
+    capacity: false,
+    rawBackfill: false,
+    sessionCount: 10_000,
+    rawTextCharacters: 262_144,
+    mutationTrace: true,
     databasePath: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") options.json = true;
+    else if (argument === "--capacity") options.capacity = true;
+    else if (argument === "--raw-backfill") options.rawBackfill = true;
+    else if (argument === "--skip-mutations") options.mutationTrace = false;
     else if (argument === "--node-reference-worker") options.nodeReferenceWorker = true;
     else if (argument === "--turns") options.turnCount = positiveInteger(argv[++index], "--turns");
-    else if (argument === "--turns-per-session") {
+    else if (argument === "--sessions") {
+      options.sessionCount = positiveInteger(argv[++index], "--sessions");
+    } else if (argument === "--raw-text-characters") {
+      options.rawTextCharacters = positiveInteger(argv[++index], "--raw-text-characters");
+    } else if (argument === "--turns-per-session") {
       options.turnsPerSession = positiveInteger(argv[++index], "--turns-per-session");
     } else if (argument === "--queries") options.queryCount = positiveInteger(argv[++index], "--queries");
     else if (argument === "--warmup") options.warmupCount = positiveInteger(argv[++index], "--warmup");
@@ -828,7 +2657,11 @@ async function main() {
     return;
   }
 
-  const result = await runInsightsEngineBenchmark(options);
+  const result = options.rawBackfill
+    ? await runInsightsRawBackfillBenchmark(options)
+    : options.capacity
+      ? await runInsightsCapacityBenchmark(options)
+      : await runInsightsEngineBenchmark(options);
   const rendered = options.json ? JSON.stringify(result) : `${JSON.stringify(result, null, 2)}\n`;
   if (options.outputPath) await writeFile(options.outputPath, `${JSON.stringify(result, null, 2)}\n`);
   process.stdout.write(options.json ? `${rendered}\n` : rendered);

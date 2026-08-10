@@ -1,6 +1,6 @@
 import { TextDecoder } from "node:util";
 
-import { canonicalJson } from "./canonical-json.mjs";
+import { assertWellFormedUnicode, canonicalJson } from "./canonical-json.mjs";
 
 export const INSIGHTS_PROTOCOL_FORMAT = "threadshare-insights-protocol@v1";
 export const INSIGHTS_PROTOCOL_VERSION = 1;
@@ -32,6 +32,20 @@ const MESSAGE_TYPES = new Set([
   "BATCH_ACCEPTED",
   "COMMIT_SESSION",
   "SESSION_COMMITTED",
+  "LIST_SOURCE_STATES",
+  "SOURCE_STATES",
+  "READ_SOURCE_CHECKPOINT",
+  "SOURCE_CHECKPOINT",
+  "REMOVE_SOURCE",
+  "SOURCE_REMOVED",
+  "EXCLUDE_SOURCE",
+  "SOURCE_EXCLUDED",
+  "READ_PURGE_STATUS",
+  "PURGE_STATUS",
+  "RUN_PURGE_MAINTENANCE",
+  "PURGE_MAINTENANCE_STATUS",
+  "READ_ENGINE_STATUS",
+  "ENGINE_STATUS",
   "ABORT_SESSION",
   "SESSION_ABORTED",
   "ERROR",
@@ -44,6 +58,15 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const ASCII_NAME = /^[\x21-\x7e]+$/u;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const MAX_SOURCE_STATE_PAGE_SIZE = 256;
+const MAX_PURGE_MAINTENANCE_BATCH_SIZE = 256;
+const MAX_SOURCE_LOCATOR_BYTES = 12 * 1_024;
+const SOURCE_FINGERPRINT_BYTES = 4 * 1_024;
+const MAX_ENGINE_STATUS_PROJECTIONS = 1_024;
+const CHANGE_LOG_MAX_ROWS = 1_000_000n;
+const CHANGE_LOG_MAX_PAYLOAD_BYTES = 64n * 1_024n * 1_024n;
+const WAL_PASSIVE_CHECKPOINT_BYTES = 64n * 1_024n * 1_024n;
+const WAL_BACKPRESSURE_BYTES = 128n * 1_024n * 1_024n;
 
 export class InsightsProtocolError extends Error {
   constructor(code, message, options = {}) {
@@ -246,6 +269,179 @@ function assertSessionContract(contract, label) {
   assertVersion(contract.rankerVersion, `${label}.rankerVersion`);
 }
 
+const SOURCE_STATE_FIELDS = [
+  "provider",
+  "sessionId",
+  "fileUtf8Hex",
+  "sessionKey",
+  "projectKey",
+  "metadata",
+  "fingerprints",
+  "contract",
+];
+
+const SOURCE_CONTRACT_FIELDS = [
+  "factSchemaVersion",
+  "providerAdapterVersion",
+  "privacyPolicyVersion",
+  "duplicatePolicyVersion",
+  "originSecretEpoch",
+];
+
+function assertPortableAbsolutePath(value, label) {
+  assertNonEmptyString(value, label);
+  assertWellFormedUnicode(value);
+  const absolute = value.startsWith("/") || value.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/u.test(value);
+  if (!absolute || Buffer.byteLength(value, "utf8") > MAX_SOURCE_LOCATOR_BYTES ||
+      /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw invalidFrame(`${label} must be a bounded absolute source locator`);
+  }
+}
+
+function assertEncodedSourceLocator(value, label) {
+  if (typeof value !== "string" || value.length === 0 ||
+      value.length > MAX_SOURCE_LOCATOR_BYTES * 2 ||
+      value.length % 2 !== 0 || !/^[0-9a-f]+$/u.test(value)) {
+    throw invalidFrame(`${label} must be canonical lowercase UTF-8 hex`);
+  }
+  let decoded;
+  try {
+    decoded = utf8Decoder.decode(Buffer.from(value, "hex"));
+  } catch (cause) {
+    throw invalidFrame(`${label} must encode valid UTF-8`, cause);
+  }
+  assertPortableAbsolutePath(decoded, label);
+  if (Buffer.from(decoded, "utf8").toString("hex") !== value) {
+    throw invalidFrame(`${label} must use canonical UTF-8 hex`);
+  }
+}
+
+export function encodeSourceLocator(value) {
+  assertPortableAbsolutePath(value, "source locator");
+  return Buffer.from(value, "utf8").toString("hex");
+}
+
+export function decodeSourceLocator(value) {
+  assertEncodedSourceLocator(value, "encoded source locator");
+  return utf8Decoder.decode(Buffer.from(value, "hex"));
+}
+
+export function decodeSourceStateFromProtocol(value) {
+  assertSourceStateSummary(value, "source state");
+  const { fileUtf8Hex, ...state } = value;
+  return { ...state, file: decodeSourceLocator(fileUtf8Hex) };
+}
+
+function assertSourceContract(value, label) {
+  assertExactKeys(value, label, SOURCE_CONTRACT_FIELDS);
+  assertVersion(value.factSchemaVersion, `${label}.factSchemaVersion`);
+  assertAsciiName(value.providerAdapterVersion, `${label}.providerAdapterVersion`);
+  if (Buffer.byteLength(value.providerAdapterVersion, "utf8") > 128) {
+    throw invalidFrame(`${label}.providerAdapterVersion exceeds 128 bytes`);
+  }
+  assertVersion(value.privacyPolicyVersion, `${label}.privacyPolicyVersion`);
+  assertVersion(value.duplicatePolicyVersion, `${label}.duplicatePolicyVersion`);
+  assertUuid(value.originSecretEpoch, `${label}.originSecretEpoch`);
+  if (value.originSecretEpoch !== value.originSecretEpoch.toLowerCase()) {
+    throw invalidFrame(`${label}.originSecretEpoch must be lowercase`);
+  }
+}
+
+function assertSourceFingerprint(value, label) {
+  assertExactKeys(value, label, ["offset", "length", "sha256"]);
+  assertDecimal(value.offset, `${label}.offset`);
+  if (!Number.isSafeInteger(value.length) || value.length < 0 ||
+      value.length > SOURCE_FINGERPRINT_BYTES) {
+    throw invalidFrame(`${label}.length must be between 0 and 4096`);
+  }
+  assertHex64(value.sha256, `${label}.sha256`);
+}
+
+function assertSourceStateFields(value, label) {
+  if (value.provider !== "codex" && value.provider !== "claude") {
+    throw invalidFrame(`${label}.provider is invalid`);
+  }
+  assertUuid(value.sessionId, `${label}.sessionId`);
+  if (value.sessionId !== value.sessionId.toLowerCase()) {
+    throw invalidFrame(`${label}.sessionId must be lowercase`);
+  }
+  assertEncodedSourceLocator(value.fileUtf8Hex, `${label}.fileUtf8Hex`);
+  assertHex64(value.sessionKey, `${label}.sessionKey`);
+  if (value.projectKey !== null) assertHex64(value.projectKey, `${label}.projectKey`);
+  assertExactKeys(value.metadata, `${label}.metadata`, ["dev", "ino", "size", "mtimeNs"]);
+  for (const field of ["dev", "ino", "size", "mtimeNs"]) {
+    assertDecimal(value.metadata[field], `${label}.metadata.${field}`);
+  }
+  assertExactKeys(value.fingerprints, `${label}.fingerprints`, ["head", "boundary"]);
+  assertSourceFingerprint(value.fingerprints.head, `${label}.fingerprints.head`);
+  assertSourceFingerprint(value.fingerprints.boundary, `${label}.fingerprints.boundary`);
+  assertSourceContract(value.contract, `${label}.contract`);
+}
+
+function assertSourceState(value, label) {
+  assertExactKeys(value, label, SOURCE_STATE_FIELDS);
+  assertSourceStateFields(value, label);
+}
+
+function assertSourceStateSummary(value, label) {
+  assertExactKeys(value, label, [...SOURCE_STATE_FIELDS, "checkpoint"]);
+  assertSourceStateFields(value, label);
+  assertExactKeys(value.checkpoint, `${label}.checkpoint`, [
+    "completeOffset",
+    "sourceSnapshotStable",
+    "generation",
+  ]);
+  assertDecimal(value.checkpoint.completeOffset, `${label}.checkpoint.completeOffset`);
+  assertDecimal(value.checkpoint.generation, `${label}.checkpoint.generation`);
+  if (typeof value.checkpoint.sourceSnapshotStable !== "boolean") {
+    throw invalidFrame(`${label}.checkpoint.sourceSnapshotStable must be boolean`);
+  }
+  const sourceSize = BigInt(value.metadata.size);
+  const completeOffset = BigInt(value.checkpoint.completeOffset);
+  const head = value.fingerprints.head;
+  const boundary = value.fingerprints.boundary;
+  if (completeOffset > sourceSize || head.offset !== "0" ||
+      BigInt(head.length) !== (sourceSize < 4096n ? sourceSize : 4096n) ||
+      BigInt(boundary.length) !== (completeOffset < 4096n ? completeOffset : 4096n) ||
+      BigInt(boundary.offset) + BigInt(boundary.length) !== completeOffset) {
+    throw invalidFrame(`${label} fingerprint geometry is invalid`);
+  }
+}
+
+function assertSourceCheckpointValue(value, label) {
+  assertExactKeys(value, label, [
+    "completeOffset",
+    "eofObserved",
+    "partialTailLength",
+    "partialTailDigest",
+    "sourceSize",
+    "sourceMtimeNs",
+    "sourceSnapshotStable",
+    "originSecretEpoch",
+    "generation",
+    "pendingState",
+  ]);
+  for (const field of [
+    "completeOffset",
+    "partialTailLength",
+    "sourceSize",
+    "sourceMtimeNs",
+    "generation",
+  ]) assertDecimal(value[field], `${label}.${field}`);
+  assertHex64(value.partialTailDigest, `${label}.partialTailDigest`);
+  assertUuid(value.originSecretEpoch, `${label}.originSecretEpoch`);
+  if (typeof value.eofObserved !== "boolean" ||
+      typeof value.sourceSnapshotStable !== "boolean") {
+    throw invalidFrame(`${label} boolean fields are invalid`);
+  }
+  assertPlainObject(value.pendingState, `${label}.pendingState`);
+  if (BigInt(value.completeOffset) > BigInt(value.sourceSize) ||
+      BigInt(value.partialTailLength) > BigInt(value.sourceSize)) {
+    throw invalidFrame(`${label} offsets exceed sourceSize`);
+  }
+}
+
 function assertMaxFrameBytes(value, label) {
   if (value !== MAX_PROTOCOL_PAYLOAD_BYTES) {
     throw protocolError(
@@ -343,6 +539,7 @@ function assertCommitSession(message) {
     "checkpoint",
     "diagnostics",
     "coverage",
+    "sourceState",
   ]);
   assertDecimal(message.nextSequence, "COMMIT_SESSION.nextSequence");
   assertPlainObject(message.checkpoint, "COMMIT_SESSION.checkpoint");
@@ -350,6 +547,9 @@ function assertCommitSession(message) {
     throw invalidFrame("COMMIT_SESSION.diagnostics must be an array");
   }
   assertPlainObject(message.coverage, "COMMIT_SESSION.coverage");
+  if (message.sourceState !== null) {
+    assertSourceState(message.sourceState, "COMMIT_SESSION.sourceState");
+  }
 }
 
 function assertSessionCommitted(message) {
@@ -364,6 +564,263 @@ function assertSessionCommitted(message) {
   assertDecimal(message.snapshotSeq, "SESSION_COMMITTED.snapshotSeq");
   if (typeof message.idempotent !== "boolean") {
     throw invalidFrame("SESSION_COMMITTED.idempotent must be boolean");
+  }
+}
+
+function assertListSourceStates(message) {
+  assertEnvelope(message, "LIST_SOURCE_STATES", ["cursor", "limit"]);
+  if (message.cursor !== null) assertHex64(message.cursor, "LIST_SOURCE_STATES.cursor");
+  if (!Number.isSafeInteger(message.limit) || message.limit < 1 ||
+      message.limit > MAX_SOURCE_STATE_PAGE_SIZE) {
+    throw invalidFrame("LIST_SOURCE_STATES.limit must be between 1 and 256");
+  }
+}
+
+function assertSourceStates(message) {
+  assertEnvelope(message, "SOURCE_STATES", ["states", "nextCursor"]);
+  if (!Array.isArray(message.states) || message.states.length > MAX_SOURCE_STATE_PAGE_SIZE) {
+    throw invalidFrame("SOURCE_STATES.states must contain at most 256 items");
+  }
+  let previous = null;
+  for (let index = 0; index < message.states.length; index += 1) {
+    const state = message.states[index];
+    assertSourceStateSummary(state, `SOURCE_STATES.states[${index}]`);
+    if (previous !== null && compareAscii(previous, state.sessionKey) >= 0) {
+      throw invalidFrame("SOURCE_STATES.states must be sessionKey-sorted and unique");
+    }
+    previous = state.sessionKey;
+  }
+  if (message.nextCursor !== null) {
+    assertHex64(message.nextCursor, "SOURCE_STATES.nextCursor");
+    if (message.nextCursor !== previous) {
+      throw invalidFrame("SOURCE_STATES.nextCursor must equal the final state sessionKey");
+    }
+  }
+}
+
+function assertReadSourceCheckpoint(message) {
+  assertEnvelope(message, "READ_SOURCE_CHECKPOINT", ["sessionKey"]);
+  assertHex64(message.sessionKey, "READ_SOURCE_CHECKPOINT.sessionKey");
+}
+
+function assertSourceCheckpoint(message) {
+  assertEnvelope(message, "SOURCE_CHECKPOINT", ["sessionKey", "checkpoint"]);
+  assertHex64(message.sessionKey, "SOURCE_CHECKPOINT.sessionKey");
+  if (message.checkpoint !== null) {
+    assertSourceCheckpointValue(message.checkpoint, "SOURCE_CHECKPOINT.checkpoint");
+  }
+}
+
+function assertPurgeState(value, label) {
+  if (value !== "idle" && value !== "pending-purge" && value !== "purged") {
+    throw invalidFrame(`${label} is invalid`);
+  }
+}
+
+function assertPurgeStatusFields(message, label) {
+  assertPurgeState(message.state, `${label}.state`);
+  assertDecimal(message.pendingFacts, `${label}.pendingFacts`);
+  assertDecimal(message.pendingMaintenance, `${label}.pendingMaintenance`);
+  assertDecimal(message.purged, `${label}.purged`);
+}
+
+function assertSourceLifecycleRequest(message, type) {
+  assertEnvelope(message, type, ["sessionKey"]);
+  assertHex64(message.sessionKey, `${type}.sessionKey`);
+}
+
+function assertSourceRemoved(message) {
+  assertEnvelope(message, "SOURCE_REMOVED", ["sessionKey", "removed"]);
+  assertHex64(message.sessionKey, "SOURCE_REMOVED.sessionKey");
+  if (typeof message.removed !== "boolean") {
+    throw invalidFrame("SOURCE_REMOVED.removed must be boolean");
+  }
+}
+
+function assertSourceExcluded(message) {
+  assertEnvelope(message, "SOURCE_EXCLUDED", ["sessionKey", "excluded", "purgeState"]);
+  assertHex64(message.sessionKey, "SOURCE_EXCLUDED.sessionKey");
+  if (typeof message.excluded !== "boolean") {
+    throw invalidFrame("SOURCE_EXCLUDED.excluded must be boolean");
+  }
+  assertPurgeState(message.purgeState, "SOURCE_EXCLUDED.purgeState");
+}
+
+function assertReadPurgeStatus(message) {
+  assertEnvelope(message, "READ_PURGE_STATUS", ["sessionKey"]);
+  if (message.sessionKey !== null) {
+    assertHex64(message.sessionKey, "READ_PURGE_STATUS.sessionKey");
+  }
+}
+
+function assertPurgeStatus(message) {
+  assertEnvelope(message, "PURGE_STATUS", [
+    "sessionKey",
+    "state",
+    "pendingFacts",
+    "pendingMaintenance",
+    "purged",
+  ]);
+  if (message.sessionKey !== null) assertHex64(message.sessionKey, "PURGE_STATUS.sessionKey");
+  assertPurgeStatusFields(message, "PURGE_STATUS");
+}
+
+function assertRunPurgeMaintenance(message) {
+  assertEnvelope(message, "RUN_PURGE_MAINTENANCE", ["limit"]);
+  if (!Number.isSafeInteger(message.limit) || message.limit < 1 ||
+      message.limit > MAX_PURGE_MAINTENANCE_BATCH_SIZE) {
+    throw invalidFrame("RUN_PURGE_MAINTENANCE.limit must be between 1 and 256");
+  }
+}
+
+function assertPurgeMaintenanceStatus(message) {
+  assertEnvelope(message, "PURGE_MAINTENANCE_STATUS", [
+    "processedSessions",
+    "purgedSessions",
+    "state",
+    "pendingFacts",
+    "pendingMaintenance",
+    "purged",
+  ]);
+  assertDecimal(message.processedSessions, "PURGE_MAINTENANCE_STATUS.processedSessions");
+  assertDecimal(message.purgedSessions, "PURGE_MAINTENANCE_STATUS.purgedSessions");
+  assertPurgeStatusFields(message, "PURGE_MAINTENANCE_STATUS");
+}
+
+function assertReadEngineStatus(message) {
+  assertEnvelope(message, "READ_ENGINE_STATUS", []);
+}
+
+function assertProjectionStatus(value, label) {
+  assertExactKeys(value, label, [
+    "name",
+    "version",
+    "inputFactSchemaVersion",
+    "rootKind",
+    "baseSnapshotSeq",
+    "watermark",
+    "status",
+    "errorDigest",
+  ]);
+  assertAsciiName(value.name, `${label}.name`);
+  if (Buffer.byteLength(value.name, "utf8") > 128) {
+    throw invalidFrame(`${label}.name exceeds 128 bytes`);
+  }
+  assertVersion(value.version, `${label}.version`);
+  assertVersion(value.inputFactSchemaVersion, `${label}.inputFactSchemaVersion`);
+  if (!new Set(["session", "turn", "capability"]).has(value.rootKind)) {
+    throw invalidFrame(`${label}.rootKind is invalid`);
+  }
+  assertDecimal(value.baseSnapshotSeq, `${label}.baseSnapshotSeq`);
+  assertDecimal(value.watermark, `${label}.watermark`);
+  if (BigInt(value.watermark) < BigInt(value.baseSnapshotSeq)) {
+    throw invalidFrame(`${label}.watermark precedes baseSnapshotSeq`);
+  }
+  if (!new Set(["active", "building", "failed"]).has(value.status)) {
+    throw invalidFrame(`${label}.status is invalid`);
+  }
+  if (value.status === "failed") assertHex64(value.errorDigest, `${label}.errorDigest`);
+  else if (value.errorDigest !== null) {
+    throw invalidFrame(`${label}.errorDigest is only valid for failed projections`);
+  }
+}
+
+function assertEngineStatus(message) {
+  assertEnvelope(message, "ENGINE_STATUS", [
+    "snapshotSeq",
+    "snapshotAgeMs",
+    "snapshotPending",
+    "factStorageProfile",
+    "projections",
+    "changeLog",
+    "purge",
+    "storage",
+    "integrity",
+  ]);
+  assertDecimal(message.snapshotSeq, "ENGINE_STATUS.snapshotSeq");
+  if (typeof message.snapshotPending !== "boolean") {
+    throw invalidFrame("ENGINE_STATUS.snapshotPending must be boolean");
+  }
+  const pending = message.snapshotSeq === "0";
+  if (message.snapshotPending !== pending) {
+    throw invalidFrame("ENGINE_STATUS snapshot pending state is inconsistent");
+  }
+  if (pending) {
+    if (message.snapshotAgeMs !== null) {
+      throw invalidFrame("ENGINE_STATUS.snapshotAgeMs must be null while pending");
+    }
+  } else {
+    assertDecimal(message.snapshotAgeMs, "ENGINE_STATUS.snapshotAgeMs");
+  }
+  if (!new Set(["normalized-row-v1", "packed-facts-v1"]).has(message.factStorageProfile)) {
+    throw invalidFrame("ENGINE_STATUS.factStorageProfile is invalid");
+  }
+
+  if (!Array.isArray(message.projections) ||
+      message.projections.length > MAX_ENGINE_STATUS_PROJECTIONS) {
+    throw invalidFrame("ENGINE_STATUS.projections exceeds its bounded limit");
+  }
+  let previous = null;
+  for (let index = 0; index < message.projections.length; index += 1) {
+    const projection = message.projections[index];
+    assertProjectionStatus(projection, `ENGINE_STATUS.projections[${index}]`);
+    if (previous !== null &&
+        (previous.name > projection.name ||
+         (previous.name === projection.name && previous.version >= projection.version))) {
+      throw invalidFrame("ENGINE_STATUS.projections must be name/version sorted and unique");
+    }
+    previous = projection;
+  }
+
+  assertExactKeys(message.changeLog, "ENGINE_STATUS.changeLog", [
+    "rows",
+    "payloadBytes",
+    "maxRows",
+    "maxPayloadBytes",
+    "state",
+  ]);
+  for (const field of ["rows", "payloadBytes", "maxRows", "maxPayloadBytes"]) {
+    assertDecimal(message.changeLog[field], `ENGINE_STATUS.changeLog.${field}`);
+  }
+  if (BigInt(message.changeLog.maxRows) !== CHANGE_LOG_MAX_ROWS ||
+      BigInt(message.changeLog.maxPayloadBytes) !== CHANGE_LOG_MAX_PAYLOAD_BYTES) {
+    throw invalidFrame("ENGINE_STATUS.changeLog caps are invalid");
+  }
+  const exceeded = BigInt(message.changeLog.rows) > BigInt(message.changeLog.maxRows) ||
+    BigInt(message.changeLog.payloadBytes) > BigInt(message.changeLog.maxPayloadBytes);
+  if (message.changeLog.state !== (exceeded ? "cap-exceeded" : "within-cap")) {
+    throw invalidFrame("ENGINE_STATUS.changeLog.state is inconsistent");
+  }
+
+  assertExactKeys(message.purge, "ENGINE_STATUS.purge", [
+    "state", "pendingFacts", "pendingMaintenance", "purged",
+  ]);
+  assertPurgeStatusFields(message.purge, "ENGINE_STATUS.purge");
+
+  assertExactKeys(message.storage, "ENGINE_STATUS.storage", [
+    "databaseBytes", "walBytes", "walPressureAction", "recentDiagnostic",
+  ]);
+  assertDecimal(message.storage.databaseBytes, "ENGINE_STATUS.storage.databaseBytes");
+  assertDecimal(message.storage.walBytes, "ENGINE_STATUS.storage.walBytes");
+  const walBytes = BigInt(message.storage.walBytes);
+  const expectedAction = walBytes >= WAL_BACKPRESSURE_BYTES
+    ? "backpressure"
+    : walBytes >= WAL_PASSIVE_CHECKPOINT_BYTES
+      ? "passive-checkpoint"
+      : "none";
+  if (message.storage.walPressureAction !== expectedAction) {
+    throw invalidFrame("ENGINE_STATUS.storage.walPressureAction is inconsistent");
+  }
+  const expectedDiagnostic = expectedAction === "backpressure"
+    ? "TS_INSIGHTS_WAL_BACKPRESSURE"
+    : null;
+  if (message.storage.recentDiagnostic !== expectedDiagnostic) {
+    throw invalidFrame("ENGINE_STATUS.storage.recentDiagnostic is inconsistent");
+  }
+
+  assertExactKeys(message.integrity, "ENGINE_STATUS.integrity", ["quickCheck", "fts"]);
+  if (message.integrity.quickCheck !== "ok" || message.integrity.fts !== "ok") {
+    throw invalidFrame("ENGINE_STATUS.integrity must report successful checks");
   }
 }
 
@@ -386,7 +843,9 @@ function assertSessionAborted(message) {
 function assertErrorMessage(message) {
   assertEnvelope(message, "ERROR", ["code", "category", "message", "retryable", "fatal"]);
   assertNonEmptyString(message.code, "ERROR.code");
-  if (!new Set(["protocol", "compatibility", "validation", "conflict", "storage"]).has(
+  if (!new Set([
+    "protocol", "compatibility", "validation", "conflict", "storage", "maintenance",
+  ]).has(
     message.category,
   )) {
     throw invalidFrame("ERROR.category is invalid");
@@ -426,6 +885,21 @@ export function assertProtocolMessage(message) {
   } else if (message.type === "BATCH_ACCEPTED") assertBatchAccepted(message);
   else if (message.type === "COMMIT_SESSION") assertCommitSession(message);
   else if (message.type === "SESSION_COMMITTED") assertSessionCommitted(message);
+  else if (message.type === "LIST_SOURCE_STATES") assertListSourceStates(message);
+  else if (message.type === "SOURCE_STATES") assertSourceStates(message);
+  else if (message.type === "READ_SOURCE_CHECKPOINT") assertReadSourceCheckpoint(message);
+  else if (message.type === "SOURCE_CHECKPOINT") assertSourceCheckpoint(message);
+  else if (message.type === "REMOVE_SOURCE" || message.type === "EXCLUDE_SOURCE") {
+    assertSourceLifecycleRequest(message, message.type);
+  }
+  else if (message.type === "SOURCE_REMOVED") assertSourceRemoved(message);
+  else if (message.type === "SOURCE_EXCLUDED") assertSourceExcluded(message);
+  else if (message.type === "READ_PURGE_STATUS") assertReadPurgeStatus(message);
+  else if (message.type === "PURGE_STATUS") assertPurgeStatus(message);
+  else if (message.type === "RUN_PURGE_MAINTENANCE") assertRunPurgeMaintenance(message);
+  else if (message.type === "PURGE_MAINTENANCE_STATUS") assertPurgeMaintenanceStatus(message);
+  else if (message.type === "READ_ENGINE_STATUS") assertReadEngineStatus(message);
+  else if (message.type === "ENGINE_STATUS") assertEngineStatus(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
   else if (message.type === "ERROR") assertErrorMessage(message);
@@ -625,13 +1099,54 @@ export function createBatchAcceptedMessage({ requestId, sequence }) {
   return assertProtocolMessage(envelope("BATCH_ACCEPTED", requestId, { sequence }));
 }
 
-export function createCommitSessionMessage(delta, { requestId, nextSequence }) {
+function sourceStateForCommit(delta, sourceState) {
+  if (sourceState === undefined || sourceState === null) return null;
+  const publicFields = SOURCE_STATE_FIELDS.map((field) =>
+    field === "fileUtf8Hex" ? "file" : field);
+  assertExactKeys(sourceState, "sourceState", [...publicFields, "checkpoint"]);
+  if (canonicalJson(sourceState.checkpoint) !== canonicalJson(delta.checkpoint)) {
+    throw invalidFrame("sourceState.checkpoint must equal delta.checkpoint");
+  }
+  const { checkpoint: _checkpoint, file, ...publicState } = sourceState;
+  assertPortableAbsolutePath(file, "sourceState.file");
+  const state = { ...publicState, fileUtf8Hex: encodeSourceLocator(file) };
+  assertSourceState(state, "sourceState");
+  if (state.sessionKey !== delta.session.sessionKey ||
+      state.provider !== delta.session.provider ||
+      state.projectKey !== (delta.session.projectKey ?? null) ||
+      state.metadata.size !== delta.checkpoint.sourceSize ||
+      state.metadata.mtimeNs !== delta.checkpoint.sourceMtimeNs ||
+      state.contract.factSchemaVersion !== delta.factSchemaVersion ||
+      state.contract.providerAdapterVersion !== delta.providerAdapterVersion ||
+      state.contract.privacyPolicyVersion !== delta.privacyPolicyVersion ||
+      state.contract.duplicatePolicyVersion !== delta.duplicatePolicyVersion ||
+      state.contract.originSecretEpoch !== delta.originSecretEpoch) {
+    throw invalidFrame("sourceState must match the committed delta");
+  }
+  const completeOffset = BigInt(delta.checkpoint.completeOffset);
+  const sourceSize = BigInt(delta.checkpoint.sourceSize);
+  const head = state.fingerprints.head;
+  const boundary = state.fingerprints.boundary;
+  if (head.offset !== "0" ||
+      BigInt(head.length) !== (sourceSize < 4096n ? sourceSize : 4096n) ||
+      BigInt(boundary.length) !== (completeOffset < 4096n ? completeOffset : 4096n) ||
+      BigInt(boundary.offset) + BigInt(boundary.length) !== completeOffset) {
+    throw invalidFrame("sourceState fingerprints must match the committed checkpoint");
+  }
+  return state;
+}
+
+export function createCommitSessionMessage(
+  delta,
+  { requestId, nextSequence, sourceState = null },
+) {
   return assertProtocolMessage(
     envelope("COMMIT_SESSION", requestId, {
       nextSequence,
       checkpoint: delta.checkpoint,
       diagnostics: delta.diagnostics,
       coverage: delta.coverage,
+      sourceState: sourceStateForCommit(delta, sourceState),
     }),
   );
 }
@@ -651,6 +1166,88 @@ export function createSessionCommittedMessage({
       idempotent,
     }),
   );
+}
+
+export function createListSourceStatesMessage({ requestId, cursor = null, limit = 256 }) {
+  return assertProtocolMessage(
+    envelope("LIST_SOURCE_STATES", requestId, { cursor, limit }),
+  );
+}
+
+export function createSourceStatesMessage({ requestId, states, nextCursor = null }) {
+  return assertProtocolMessage(
+    envelope("SOURCE_STATES", requestId, { states, nextCursor }),
+  );
+}
+
+export function createReadSourceCheckpointMessage({ requestId, sessionKey }) {
+  return assertProtocolMessage(
+    envelope("READ_SOURCE_CHECKPOINT", requestId, { sessionKey }),
+  );
+}
+
+export function createSourceCheckpointMessage({ requestId, sessionKey, checkpoint }) {
+  return assertProtocolMessage(
+    envelope("SOURCE_CHECKPOINT", requestId, { sessionKey, checkpoint }),
+  );
+}
+
+export function createRemoveSourceMessage({ requestId, sessionKey }) {
+  return assertProtocolMessage(envelope("REMOVE_SOURCE", requestId, { sessionKey }));
+}
+
+export function createSourceRemovedMessage({ requestId, sessionKey, removed }) {
+  return assertProtocolMessage(
+    envelope("SOURCE_REMOVED", requestId, { sessionKey, removed }),
+  );
+}
+
+export function createExcludeSourceMessage({ requestId, sessionKey }) {
+  return assertProtocolMessage(envelope("EXCLUDE_SOURCE", requestId, { sessionKey }));
+}
+
+export function createSourceExcludedMessage({ requestId, sessionKey, excluded, purgeState }) {
+  return assertProtocolMessage(
+    envelope("SOURCE_EXCLUDED", requestId, { sessionKey, excluded, purgeState }),
+  );
+}
+
+export function createReadPurgeStatusMessage({ requestId, sessionKey = null }) {
+  return assertProtocolMessage(envelope("READ_PURGE_STATUS", requestId, { sessionKey }));
+}
+
+export function createPurgeStatusMessage({ requestId, sessionKey = null, status }) {
+  return assertProtocolMessage(envelope("PURGE_STATUS", requestId, {
+    sessionKey,
+    state: status.state,
+    pendingFacts: status.pendingFacts,
+    pendingMaintenance: status.pendingMaintenance,
+    purged: status.purged,
+  }));
+}
+
+export function createRunPurgeMaintenanceMessage({ requestId, limit = 64 }) {
+  return assertProtocolMessage(envelope("RUN_PURGE_MAINTENANCE", requestId, { limit }));
+}
+
+export function createPurgeMaintenanceStatusMessage({ requestId, outcome }) {
+  return assertProtocolMessage(envelope("PURGE_MAINTENANCE_STATUS", requestId, {
+    processedSessions: outcome.processedSessions,
+    purgedSessions: outcome.purgedSessions,
+    state: outcome.state,
+    pendingFacts: outcome.pendingFacts,
+    pendingMaintenance: outcome.pendingMaintenance,
+    purged: outcome.purged,
+  }));
+}
+
+export function createReadEngineStatusMessage({ requestId }) {
+  return assertProtocolMessage(envelope("READ_ENGINE_STATUS", requestId, {}));
+}
+
+export function createEngineStatusMessage({ requestId, status }) {
+  assertPlainObject(status, "status");
+  return assertProtocolMessage(envelope("ENGINE_STATUS", requestId, { ...status }));
 }
 
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {
@@ -881,6 +1478,7 @@ export async function* createSessionDeltaMessages(
     projectionVersions = [],
     analyzerCapabilities = [],
     rankerVersion,
+    sourceState = null,
     maxPayloadBytes = MAX_PROTOCOL_PAYLOAD_BYTES,
   },
 ) {
@@ -971,6 +1569,7 @@ export async function* createSessionDeltaMessages(
   const commit = createCommitSessionMessage(delta, {
     requestId,
     nextSequence: sequence.toString(),
+    sourceState,
   });
   assertFits(commit, maxPayloadBytes);
   yield commit;

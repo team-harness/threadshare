@@ -149,6 +149,46 @@ function sampleDelta({
   });
 }
 
+function sourceStateForDelta(delta, overrides = {}) {
+  const size = BigInt(delta.checkpoint.sourceSize);
+  const completeOffset = BigInt(delta.checkpoint.completeOffset);
+  const headLength = Number(size < 4096n ? size : 4096n);
+  const boundaryLength = Number(completeOffset < 4096n ? completeOffset : 4096n);
+  return {
+    provider: delta.session.provider,
+    sessionId: overrides.sessionId ?? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    file: overrides.file ?? "/tmp/threadshare/codex-session.jsonl",
+    sessionKey: delta.session.sessionKey,
+    projectKey: delta.session.projectKey ?? null,
+    metadata: {
+      dev: "1",
+      ino: "2",
+      size: delta.checkpoint.sourceSize,
+      mtimeNs: delta.checkpoint.sourceMtimeNs,
+    },
+    fingerprints: {
+      head: {
+        offset: "0",
+        length: headLength,
+        sha256: "e".repeat(64),
+      },
+      boundary: {
+        offset: String(completeOffset - BigInt(boundaryLength)),
+        length: boundaryLength,
+        sha256: "f".repeat(64),
+      },
+    },
+    checkpoint: structuredClone(delta.checkpoint),
+    contract: {
+      factSchemaVersion: delta.factSchemaVersion,
+      providerAdapterVersion: delta.providerAdapterVersion,
+      privacyPolicyVersion: delta.privacyPolicyVersion,
+      duplicatePolicyVersion: delta.duplicatePolicyVersion,
+      originSecretEpoch: delta.originSecretEpoch,
+    },
+  };
+}
+
 function clientOptions(databasePath, overrides = {}) {
   return {
     runtimeOptions: {
@@ -364,6 +404,163 @@ test("real Rust sidecar commits a delta and replays it idempotently after restar
     sessionKey: SESSION_KEY,
     idempotent: true,
   });
+});
+
+test("real Rust sidecar reports bounded content-free engine status", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+
+  const pending = await client.readEngineStatus();
+  assert.equal(pending.snapshotSeq, "0");
+  assert.equal(pending.snapshotAgeMs, null);
+  assert.equal(pending.snapshotPending, true);
+  assert.equal(pending.factStorageProfile, "normalized-row-v1");
+  assert.deepEqual(pending.projections, []);
+  assert.deepEqual(pending.changeLog, {
+    rows: "0",
+    payloadBytes: "0",
+    maxRows: "1000000",
+    maxPayloadBytes: "67108864",
+    state: "within-cap",
+  });
+  assert.deepEqual(pending.integrity, { quickCheck: "ok", fts: "ok" });
+  assert.ok(Object.isFrozen(pending));
+  assert.ok(Object.isFrozen(pending.storage));
+
+  const delta = sampleDelta();
+  await client.applySessionFacts(delta);
+  const ready = await client.readEngineStatus();
+  assert.equal(ready.snapshotSeq, "1");
+  assert.equal(ready.snapshotPending, false);
+  assert.match(ready.snapshotAgeMs, /^(?:0|[1-9][0-9]*)$/u);
+  assert.equal(JSON.stringify(ready).includes(delta.session.sessionKey), false);
+  assert.equal(JSON.stringify(ready).includes("pendingState"), false);
+});
+
+test("source state commits atomically and reads summaries separately from parser checkpoints", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const delta = sampleDelta();
+  const decomposedFile = "/tmp/threadshare/cafe\u0301/codex-session.jsonl";
+  assert.notEqual(decomposedFile.normalize("NFC"), decomposedFile);
+  const sourceState = sourceStateForDelta(delta, { file: decomposedFile });
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+
+  assert.deepEqual(await client.commitSourceDelta({ delta, sourceState }), {
+    snapshotSeq: "1",
+    sessionKey: SESSION_KEY,
+    idempotent: false,
+  });
+  assert.deepEqual(await client.commitSourceDelta({ delta, sourceState }), {
+    snapshotSeq: "1",
+    sessionKey: SESSION_KEY,
+    idempotent: true,
+  });
+
+  const states = await client.readSourceStates();
+  assert.equal(states.length, 1);
+  assert.deepEqual(states[0], {
+    ...structuredClone(sourceState),
+    checkpoint: {
+      completeOffset: delta.checkpoint.completeOffset,
+      sourceSnapshotStable: true,
+      generation: delta.checkpoint.generation,
+    },
+  });
+  assert.equal(JSON.stringify(states).includes("pendingState"), false);
+  assert.deepEqual(await client.readSourceCheckpoint(SESSION_KEY), delta.checkpoint);
+  assert.equal(await client.readSourceCheckpoint("f".repeat(64)), null);
+
+  const conflicting = structuredClone(sourceState);
+  conflicting.file = "/tmp/threadshare/different-session.jsonl";
+  await assert.rejects(
+    client.commitSourceDelta({ delta, sourceState: conflicting }),
+    { code: "TS_INSIGHTS_SOURCE_STATE_CONFLICT", category: "conflict" },
+  );
+  assert.equal((await client.readSourceStates())[0].file, sourceState.file);
+});
+
+test("missing removal and exclusion purge are explicit atomic lifecycle states", {
+  timeout: 30_000,
+}, async (t) => {
+  const databasePath = await temporaryDatabase(t);
+  const delta = sampleDelta();
+  const sourceState = sourceStateForDelta(delta);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+  await client.commitSourceDelta({ delta, sourceState });
+
+  assert.deepEqual(await client.removeSource({
+    source: { file: "/must/not/enter/the/protocol" },
+    previous: { sessionKey: SESSION_KEY },
+    reason: "missing",
+  }), { sessionKey: SESSION_KEY, removed: true });
+  assert.deepEqual(await client.readSourceStates(), []);
+  assert.equal(await client.readSourceCheckpoint(SESSION_KEY), null);
+  assert.deepEqual(await client.readPurgeStatus(SESSION_KEY), {
+    state: "idle",
+    pendingFacts: "0",
+    pendingMaintenance: "0",
+    purged: "0",
+  });
+  assert.equal((await client.removeSource({ previous: { sessionKey: SESSION_KEY } })).removed, false);
+
+  await client.commitSourceDelta({ delta, sourceState });
+  assert.deepEqual(await client.excludeSource({
+    source: { file: "/must/not/enter/the/protocol" },
+    previous: { sessionKey: SESSION_KEY },
+    reason: "project-excluded",
+  }), {
+    sessionKey: SESSION_KEY,
+    excluded: true,
+    purgeState: "pending-purge",
+  });
+  assert.equal((await client.readSourceStates()).length, 1);
+  assert.equal((await client.readPurgeStatus(SESSION_KEY)).state, "pending-purge");
+
+  await client.close();
+  const recoveryClient = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => recoveryClient.close());
+  assert.equal((await recoveryClient.readPurgeStatus(SESSION_KEY)).state, "pending-purge");
+
+  assert.deepEqual(await recoveryClient.runPurgeMaintenance({ limit: 1 }), {
+    processedSessions: "1",
+    purgedSessions: "1",
+    state: "purged",
+    pendingFacts: "0",
+    pendingMaintenance: "0",
+    purged: "1",
+  });
+  assert.deepEqual(await recoveryClient.readSourceStates(), []);
+  assert.equal((await recoveryClient.readPurgeStatus(SESSION_KEY)).state, "purged");
+  assert.deepEqual(await recoveryClient.excludeSource({ previous: { sessionKey: SESSION_KEY } }), {
+    sessionKey: SESSION_KEY,
+    excluded: false,
+    purgeState: "purged",
+  });
+});
+
+test("a rejected Fact delta cannot publish its staged source state", {
+  timeout: 30_000,
+}, async (t) => {
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+  const delta = { ...sampleDelta(), deltaId: "f".repeat(64) };
+  const sourceState = sourceStateForDelta(delta);
+  await assert.rejects(
+    client.commitSourceDelta({ delta, sourceState }),
+    { code: "TS_INSIGHTS_INVALID_DELTA_ID" },
+  );
+  assert.deepEqual(await client.readSourceStates(), []);
+  assert.equal(await client.readSourceCheckpoint(SESSION_KEY), null);
 });
 
 test("remote ERROR is mapped and a rejected commit leaves the database reusable", {

@@ -1,0 +1,150 @@
+{
+  "format": "threadshare-insights-raw-backfill-benchmark@v1",
+  "measuredScope": "item-4-raw-provider-adapter-worker-engine-backfill",
+  "sourceRevision": "170f29952b2354f5a896cf2091584644cf6ca837",
+  "sourceWorktreeDirty": true,
+  "benchmarkScriptSha256": "e86f6cf6a4a20721476ffa6d296bdb9d85e2652d43ed22e5be674f11d30161fe",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 8.32666015625,
+        "fiveMinutes": 15.2353515625,
+        "fifteenMinutes": 28.15771484375,
+        "oneMinutePerLogicalCpu": 0.832666015625
+      },
+      "atReport": {
+        "oneMinute": 13.736328125,
+        "fiveMinutes": 12.927734375,
+        "fifteenMinutes": 22.85400390625,
+        "oneMinutePerLogicalCpu": 1.3736328125
+      }
+    }
+  },
+  "corpus": {
+    "seed": "threadshare-insights-benchmark-v1",
+    "sessions": 10000,
+    "providers": {
+      "codex": 5000,
+      "claude": 5000
+    },
+    "rawTextCharacters": 262144,
+    "rawBytes": 2965275222,
+    "uniqueSessionIds": 10000
+  },
+  "backfill": {
+    "wallMs": 304734.999833,
+    "rawMiBPerSecond": 9.279888499341993,
+    "physicalBytesRead": 4775864537,
+    "latestSessions": {
+      "target": 100,
+      "committed": 100,
+      "allCommittedMs": 3178.459749999998
+    },
+    "adapter": {
+      "count": 10000,
+      "totalMs": 196655.53392300056,
+      "p50Ms": 18.20549999998184,
+      "p95Ms": 30.315583000017796,
+      "maxMs": 212.3316670000204
+    },
+    "commitAck": {
+      "count": 10000,
+      "totalMs": 998960.575601002,
+      "p50Ms": 97.79300000000512,
+      "p95Ms": 125.44029199995566,
+      "maxMs": 371.46595799998613
+    },
+    "uniqueCommittedSources": 10000,
+    "report": {
+      "format": "threadshare-insights-index-benchmark-summary@v1",
+      "cycles": 1,
+      "reasons": [
+        [
+          "startup"
+        ]
+      ],
+      "discoveredPerCycle": [
+        10000
+      ],
+      "uniqueDiscoveredPerCycle": [
+        10000
+      ],
+      "planned": 10000,
+      "unchanged": 0,
+      "excluded": 0,
+      "missing": 0,
+      "committed": 10000,
+      "failed": 0,
+      "discoveryDiagnostics": [],
+      "indexDiagnostics": []
+    }
+  },
+  "appendFreshness": {
+    "wallMs": 2052.4517079999787,
+    "committedMs": 2045.0024170000106,
+    "physicalBytesRead": 303277,
+    "adapter": {
+      "count": 1,
+      "totalMs": 24.444707999995444,
+      "p50Ms": 24.444707999995444,
+      "p95Ms": 24.444707999995444,
+      "maxMs": 24.444707999995444
+    },
+    "commitAck": {
+      "count": 1,
+      "totalMs": 32.005540999991354,
+      "p50Ms": 32.005540999991354,
+      "p95Ms": 32.005540999991354,
+      "maxMs": 32.005540999991354
+    },
+    "target": {
+      "provider": "claude",
+      "sessionId": "225b04c4-dcc2-4472-8c34-0b317b6ea114",
+      "committed": true
+    },
+    "searchableMatches": 1,
+    "report": {
+      "reasons": [
+        "filesystem"
+      ],
+      "discovered": 10000,
+      "uniqueDiscovered": 10000,
+      "committedTarget": true,
+      "report": {
+        "format": "threadshare-insights-index-report@v1",
+        "planned": 10000,
+        "unchanged": 9999,
+        "excluded": 0,
+        "missing": 0,
+        "committed": 1,
+        "failed": 0,
+        "diagnostics": []
+      },
+      "discoveryDiagnostics": []
+    }
+  },
+  "facts": {
+    "sessions": 10000,
+    "turns": 10001,
+    "ftsDocuments": 10001,
+    "sourceStates": 10000,
+    "appendMatches": 1
+  },
+  "gates": {
+    "rawBackfillCorpusComplete": true,
+    "discoveryComplete": true,
+    "commitComplete": true,
+    "persistedCorpusComplete": true,
+    "rawBackfillAtLeast10MiBPerSecond": false,
+    "newest100Within30Seconds": true,
+    "appendedTurnWithin2Seconds": false
+  }
+}

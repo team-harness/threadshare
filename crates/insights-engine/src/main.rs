@@ -11,7 +11,7 @@ use threadshare_insights_engine::protocol::{
     accepted_contract_from_hello, bounded_message, read_frame, request_id,
     validate_begin_against_contract, validate_protocol_message, write_frame,
 };
-use threadshare_insights_engine::storage::EngineStorage;
+use threadshare_insights_engine::storage::{EngineStorage, StorageError};
 
 const ENGINE_VERSION: &str = match option_env!("THREADSHARE_RELEASE_VERSION") {
     Some(version) => version,
@@ -185,32 +185,218 @@ impl EngineServer {
             }
             State::Ready { accepted_contract } => {
                 let result = (|| {
-                    if kind != MessageKind::BeginSession {
-                        return Err(EngineError::new(
+                    let request_id = request_id(&message)?.to_owned();
+                    match kind {
+                        MessageKind::BeginSession => {
+                            validate_begin_against_contract(&message, &accepted_contract)?;
+                            let session_key = message["session"]["sessionKey"].clone();
+                            let delta_id = message["deltaId"].clone();
+                            let accumulator = SessionAccumulator::begin(message)?;
+                            Ok((
+                                State::InSession {
+                                    accepted_contract: accepted_contract.clone(),
+                                    accumulator,
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "SESSION_ACCEPTED",
+                                    "requestId": request_id,
+                                    "sessionKey": session_key,
+                                    "deltaId": delta_id,
+                                    "nextSequence": "0",
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadEngineStatus => {
+                            let status = self.storage.read_engine_status()?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "ENGINE_STATUS",
+                                    "requestId": request_id,
+                                    "snapshotSeq": status.snapshot_seq,
+                                    "snapshotAgeMs": status.snapshot_age_ms,
+                                    "snapshotPending": status.snapshot_pending,
+                                    "factStorageProfile": status.fact_storage_profile,
+                                    "projections": status.projections,
+                                    "changeLog": status.change_log,
+                                    "purge": status.purge,
+                                    "storage": status.storage,
+                                    "integrity": status.integrity,
+                                }),
+                            ))
+                        }
+                        MessageKind::ListSourceStates => {
+                            let cursor = if message["cursor"].is_null() {
+                                None
+                            } else {
+                                Some(serde_json::from_value(message["cursor"].clone()).map_err(
+                                    |_| {
+                                        EngineError::new(
+                                            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                            "protocol",
+                                            "LIST_SOURCE_STATES cursor is invalid",
+                                        )
+                                    },
+                                )?)
+                            };
+                            let limit = u16::try_from(
+                                message["limit"]
+                                    .as_u64()
+                                    .expect("validated source-state limit"),
+                            )
+                            .expect("validated source-state limit fits u16");
+                            let page = self.storage.list_source_states(cursor, limit)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "SOURCE_STATES",
+                                    "requestId": request_id,
+                                    "states": page.states,
+                                    "nextCursor": page.next_cursor,
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadSourceCheckpoint => {
+                            let session_key = serde_json::from_value(message["sessionKey"].clone())
+                                .map_err(|_| {
+                                    EngineError::new(
+                                        "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                        "protocol",
+                                        "READ_SOURCE_CHECKPOINT sessionKey is invalid",
+                                    )
+                                })?;
+                            let checkpoint = self.storage.read_source_checkpoint(session_key)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "SOURCE_CHECKPOINT",
+                                    "requestId": request_id,
+                                    "sessionKey": message["sessionKey"],
+                                    "checkpoint": checkpoint,
+                                }),
+                            ))
+                        }
+                        MessageKind::RemoveSource => {
+                            let session_key = serde_json::from_value(message["sessionKey"].clone())
+                                .map_err(|_| {
+                                    EngineError::new(
+                                        "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                        "protocol",
+                                        "REMOVE_SOURCE sessionKey is invalid",
+                                    )
+                                })?;
+                            let outcome = self.storage.remove_source(session_key)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "SOURCE_REMOVED",
+                                    "requestId": request_id,
+                                    "sessionKey": outcome.session_key,
+                                    "removed": outcome.removed,
+                                }),
+                            ))
+                        }
+                        MessageKind::ExcludeSource => {
+                            let session_key = serde_json::from_value(message["sessionKey"].clone())
+                                .map_err(|_| {
+                                    EngineError::new(
+                                        "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                        "protocol",
+                                        "EXCLUDE_SOURCE sessionKey is invalid",
+                                    )
+                                })?;
+                            let outcome = self.storage.exclude_source(session_key)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "SOURCE_EXCLUDED",
+                                    "requestId": request_id,
+                                    "sessionKey": outcome.session_key,
+                                    "excluded": outcome.excluded,
+                                    "purgeState": outcome.purge_state,
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadPurgeStatus => {
+                            let session_key = if message["sessionKey"].is_null() {
+                                None
+                            } else {
+                                Some(
+                                    serde_json::from_value(message["sessionKey"].clone()).map_err(
+                                        |_| {
+                                            EngineError::new(
+                                                "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                                "protocol",
+                                                "READ_PURGE_STATUS sessionKey is invalid",
+                                            )
+                                        },
+                                    )?,
+                                )
+                            };
+                            let status = self.storage.read_purge_status(session_key)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "PURGE_STATUS",
+                                    "requestId": request_id,
+                                    "sessionKey": message["sessionKey"],
+                                    "state": status.state,
+                                    "pendingFacts": status.pending_facts,
+                                    "pendingMaintenance": status.pending_maintenance,
+                                    "purged": status.purged,
+                                }),
+                            ))
+                        }
+                        MessageKind::RunPurgeMaintenance => {
+                            let limit = u16::try_from(
+                                message["limit"]
+                                    .as_u64()
+                                    .expect("validated purge maintenance limit"),
+                            )
+                            .expect("validated purge maintenance limit fits u16");
+                            let outcome = self.storage.run_purge_maintenance(limit)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "PURGE_MAINTENANCE_STATUS",
+                                    "requestId": request_id,
+                                    "processedSessions": outcome.processed_sessions,
+                                    "purgedSessions": outcome.purged_sessions,
+                                    "state": outcome.status.state,
+                                    "pendingFacts": outcome.status.pending_facts,
+                                    "pendingMaintenance": outcome.status.pending_maintenance,
+                                    "purged": outcome.status.purged,
+                                }),
+                            ))
+                        }
+                        _ => Err(EngineError::new(
                             "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
                             "protocol",
-                            "READY state requires BEGIN_SESSION",
-                        ));
+                            "unexpected frame in READY state",
+                        )),
                     }
-                    validate_begin_against_contract(&message, &accepted_contract)?;
-                    let request_id = request_id(&message)?.to_owned();
-                    let session_key = message["session"]["sessionKey"].clone();
-                    let delta_id = message["deltaId"].clone();
-                    let accumulator = SessionAccumulator::begin(message)?;
-                    Ok((
-                        State::InSession {
-                            accepted_contract: accepted_contract.clone(),
-                            accumulator,
-                        },
-                        json!({
-                            "format": PROTOCOL_FORMAT,
-                            "type": "SESSION_ACCEPTED",
-                            "requestId": request_id,
-                            "sessionKey": session_key,
-                            "deltaId": delta_id,
-                            "nextSequence": "0",
-                        }),
-                    ))
                 })();
                 match result {
                     Ok((state, response)) => {
@@ -254,7 +440,28 @@ impl EngineServer {
                             ))
                         }
                         MessageKind::CommitSession => {
-                            let outcome = accumulator.finish(&message, &mut self.storage)?;
+                            let source_state = if message["sourceState"].is_null() {
+                                None
+                            } else {
+                                Some(
+                                    serde_json::from_value(message["sourceState"].clone())
+                                        .map_err(|_| {
+                                            EngineError::new(
+                                                "TS_INSIGHTS_INVALID_SOURCE_STATE",
+                                                "validation",
+                                                "COMMIT_SESSION source state is invalid",
+                                            )
+                                        })?,
+                                )
+                            };
+                            self.storage.stage_source_state(source_state);
+                            let outcome = match accumulator.finish(&message, &mut self.storage) {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    self.storage.clear_staged_source_state();
+                                    return Err(error);
+                                }
+                            };
                             Ok((
                                 State::Ready {
                                     accepted_contract: accepted_contract.clone(),
@@ -370,6 +577,19 @@ fn run_server(storage: EngineStorage) -> Result<(), ProtocolError> {
     run_server_stream(&mut reader, &mut writer, storage)
 }
 
+fn report_storage_initialization_error(error: StorageError) -> Result<(), ProtocolError> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut writer = BufWriter::new(stdout.lock());
+    let Some(message) = read_frame(&mut reader)? else {
+        return Ok(());
+    };
+    let message_request_id = request_id(&message).unwrap_or("0").to_owned();
+    let response = engine_error_response(&fatal(error.into()), &message_request_id);
+    write_frame(&mut writer, &response)
+}
+
 fn main() {
     let (show_version, database) = match parse_arguments() {
         Ok(value) => value,
@@ -384,7 +604,10 @@ fn main() {
     };
     let storage = match storage {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            if !show_version {
+                let _ = report_storage_initialization_error(error);
+            }
             eprintln!("Insights Engine storage initialization failed");
             std::process::exit(1);
         }
@@ -455,6 +678,30 @@ mod tests {
 
         let accepted = server.handle_message(message("begin-session")).unwrap();
         assert_eq!(accepted["type"], "SESSION_ACCEPTED");
+    }
+
+    #[test]
+    fn engine_status_is_content_free_and_keeps_the_server_ready() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+        let response = server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "READ_ENGINE_STATUS",
+                "requestId": "2",
+            }))
+            .unwrap();
+
+        assert_eq!(response["type"], "ENGINE_STATUS");
+        assert_eq!(response["snapshotSeq"], "0");
+        assert_eq!(response["snapshotAgeMs"], Value::Null);
+        assert_eq!(response["snapshotPending"], true);
+        assert_eq!(response["factStorageProfile"], "normalized-row-v1");
+        assert_eq!(response["integrity"]["quickCheck"], "ok");
+        assert_eq!(response["integrity"]["fts"], "ok");
+        assert!(response.get("sessions").is_none());
+        assert!(response.get("facts").is_none());
+        assert!(matches!(server.state, State::Ready { .. }));
     }
 
     #[test]

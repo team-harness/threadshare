@@ -1,0 +1,211 @@
+{
+  "format": "threadshare-insights-fact-mutations@v1",
+  "initial": {
+    "format": "session-facts-delta@v1",
+    "factSchemaVersion": 1,
+    "providerAdapterVersion": "codex@1",
+    "privacyPolicyVersion": 1,
+    "originSecretEpoch": "11111111-2222-4333-8444-555555555555",
+    "duplicatePolicyVersion": 1,
+    "expectedGeneration": "0",
+    "targetGeneration": "1",
+    "mode": "append",
+    "deltaId": "9999999999999999999999999999999999999999999999999999999999999999",
+    "session": {
+      "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider": "codex",
+      "sessionScope": "main",
+      "eligibility": "eligible",
+      "projectKey": null,
+      "observedStart": "2026-08-10T01:00:00.000Z",
+      "observedEnd": "2026-08-10T01:00:01.000Z",
+      "originatorVersion": "0.6.1",
+      "duplicateGroupKey": null,
+      "dedupeFingerprint": null,
+      "dedupeCorroborationFingerprint": null,
+      "duplicateMethod": null,
+      "duplicateConfidence": null,
+      "dedupeClosure": null,
+      "dedupeEvidenceEventKeys": [],
+      "duplicatePolicyVersion": 1,
+      "factTruncation": []
+    },
+    "retractions": {
+      "turnKeys": [],
+      "orphanEventKeys": [],
+      "authoritativeTurnKeys": [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    },
+    "turns": [
+      {
+        "turnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "turnStartOffset": "18446744073709551615",
+        "problemText": "How is the normalized fact store structured?",
+        "finalAnswerExcerpt": "It stores typed facts in related rows.",
+        "observedTimestamp": "2026-08-10T01:00:00.000Z",
+        "rawClosure": {
+          "nextUserBoundary": false,
+          "providerTerminal": "completed",
+          "observedEofClosed": false
+        },
+        "providerVisibility": "active",
+        "factTruncation": []
+      }
+    ],
+    "sourceRecords": [
+      {
+        "sourceRecordKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "startOffset": "18446744073709551614",
+        "endOffset": "18446744073709551615",
+        "recordSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "providerRecordClass": "response_item:message"
+      },
+      {
+        "sourceRecordKey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "startOffset": "18446744073709551615",
+        "endOffset": "18446744073709551615",
+        "recordSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "providerRecordClass": "response_item:function_call"
+      }
+    ],
+    "evidenceEvents": [
+      {
+        "eventKey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "occurredTurnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceRecordKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sourceOrder": {
+          "recordStartOffset": "18446744073709551614",
+          "contentIndex": 0,
+          "eventOrdinal": 0
+        },
+        "pointer": {
+          "pointerKind": "response-item-content",
+          "contentIndex": 0,
+          "eventOrdinal": 0
+        },
+        "originScope": "main",
+        "observedTimestamp": "2026-08-10T01:00:00.000Z",
+        "kind": "visible-message",
+        "role": "user"
+      },
+      {
+        "eventKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "occurredTurnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceRecordKey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "sourceOrder": {
+          "recordStartOffset": "18446744073709551615",
+          "contentIndex": -1,
+          "eventOrdinal": 1
+        },
+        "pointer": {
+          "pointerKind": "response-item",
+          "contentIndex": -1,
+          "eventOrdinal": 1
+        },
+        "originScope": "main",
+        "observedTimestamp": "2026-08-10T01:00:01.000Z",
+        "kind": "capability-invocation",
+        "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "correlationDigest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "inputFingerprint": "6666666666666666666666666666666666666666666666666666666666666666"
+      }
+    ],
+    "turnEvidence": [
+      {
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "turnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "eventKey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "role": "boundary"
+      }
+    ],
+    "capabilities": [
+      {
+        "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "provider": "codex",
+        "kind": "tool",
+        "canonicalName": "Read",
+        "identityVersion": 1
+      }
+    ],
+    "capabilityUses": [
+      {
+        "useKey": "2222222222222222222222222222222222222222222222222222222222222222",
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "turnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "turnOrdinal": 0,
+        "exactObservedName": "Read",
+        "originScope": "main",
+        "originFingerprint": null,
+        "inputFingerprint": "6666666666666666666666666666666666666666666666666666666666666666",
+        "providerTerminalState": "pending",
+        "strength": "observed",
+        "correlationDigest": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    ],
+    "capabilityUseEvidence": [
+      {
+        "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "useKey": "2222222222222222222222222222222222222222222222222222222222222222",
+        "eventKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "role": "invocation"
+      }
+    ],
+    "checkpoint": {
+      "completeOffset": "18446744073709551615",
+      "eofObserved": true,
+      "partialTailLength": "0",
+      "partialTailDigest": "7777777777777777777777777777777777777777777777777777777777777777",
+      "sourceSize": "18446744073709551615",
+      "sourceMtimeNs": "18446744073709551615",
+      "sourceSnapshotStable": true,
+      "originSecretEpoch": "11111111-2222-4333-8444-555555555555",
+      "generation": "1",
+      "pendingState": {
+        "currentTurnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "replayFromOffset": "18446744073709551614",
+        "pendingStarted": [],
+        "pendingUses": [
+          {
+            "correlationDigest": "5555555555555555555555555555555555555555555555555555555555555555",
+            "useKey": "2222222222222222222222222222222222222222222222222222222222222222",
+            "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "sessionState": {
+          "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sessionScope": "main",
+          "eligibility": "eligible",
+          "originatorVersion": "0.6.1",
+          "projectKey": null,
+          "observedStart": "2026-08-10T01:00:00.000Z",
+          "observedEnd": "2026-08-10T01:00:01.000Z",
+          "firstTurnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "secondTurnKey": null,
+          "factTruncation": [],
+          "dedupe": null
+        },
+        "catalogEntries": [],
+        "seenClaudeUuids": []
+      }
+    },
+    "diagnostics": [
+      {
+        "code": "fixture-observed",
+        "count": 1,
+        "firstOffset": "18446744073709551615",
+        "digest": "8888888888888888888888888888888888888888888888888888888888888888"
+      }
+    ],
+    "coverage": {
+      "records": 2,
+      "turns": 1
+    }
+  }
+}

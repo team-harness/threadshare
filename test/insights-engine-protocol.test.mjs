@@ -18,16 +18,32 @@ import {
   createAbortSessionMessage,
   createBatchAcceptedMessage,
   createBeginSessionMessage,
+  createExcludeSourceMessage,
+  createEngineStatusMessage,
   createHelloMessage,
+  createListSourceStatesMessage,
   createProtocolErrorMessage,
+  createPurgeMaintenanceStatusMessage,
+  createPurgeStatusMessage,
+  createReadPurgeStatusMessage,
+  createReadEngineStatusMessage,
+  createReadSourceCheckpointMessage,
+  createRemoveSourceMessage,
   createReadyMessage,
   createRetractionBatchMessage,
   createSessionAbortedMessage,
   createSessionAcceptedMessage,
   createSessionCommittedMessage,
   createSessionDeltaMessages,
+  createSourceCheckpointMessage,
+  createSourceExcludedMessage,
+  createSourceRemovedMessage,
+  createSourceStatesMessage,
+  createRunPurgeMaintenanceMessage,
   createUpsertBatchMessage,
+  decodeSourceLocator,
   decodeProtocolFrames,
+  encodeSourceLocator,
   encodeProtocolFrame,
   protocolPayloadByteLength,
 } from "../src/insights-engine-protocol.mjs";
@@ -128,6 +144,68 @@ function rawFrame(payload) {
   return Buffer.concat([header, bytes]);
 }
 
+function sourceSummary(sessionKey, file = "/tmp/threadshare/session.jsonl") {
+  return {
+    provider: "codex",
+    sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    fileUtf8Hex: encodeSourceLocator(file),
+    sessionKey,
+    projectKey: null,
+    metadata: { dev: "1", ino: "2", size: "1", mtimeNs: "3" },
+    fingerprints: {
+      head: { offset: "0", length: 1, sha256: "e".repeat(64) },
+      boundary: { offset: "0", length: 1, sha256: "f".repeat(64) },
+    },
+    contract: {
+      factSchemaVersion: 1,
+      providerAdapterVersion: "codex@1",
+      privacyPolicyVersion: 1,
+      duplicatePolicyVersion: 1,
+      originSecretEpoch: EPOCH,
+    },
+    checkpoint: { completeOffset: "1", sourceSnapshotStable: true, generation: "1" },
+  };
+}
+
+function engineStatus() {
+  return {
+    snapshotSeq: "17",
+    snapshotAgeMs: "1234",
+    snapshotPending: false,
+    factStorageProfile: "normalized-row-v1",
+    projections: [{
+      name: "turn-summary",
+      version: 1,
+      inputFactSchemaVersion: 1,
+      rootKind: "turn",
+      baseSnapshotSeq: "5",
+      watermark: "17",
+      status: "active",
+      errorDigest: null,
+    }],
+    changeLog: {
+      rows: "2",
+      payloadBytes: "234",
+      maxRows: "1000000",
+      maxPayloadBytes: "67108864",
+      state: "within-cap",
+    },
+    purge: {
+      state: "pending-purge",
+      pendingFacts: "1",
+      pendingMaintenance: "0",
+      purged: "0",
+    },
+    storage: {
+      databaseBytes: "4096",
+      walBytes: "0",
+      walPressureAction: "none",
+      recentDiagnostic: null,
+    },
+    integrity: { quickCheck: "ok", fts: "ok" },
+  };
+}
+
 async function collect(iterable) {
   const values = [];
   for await (const value of iterable) values.push(value);
@@ -167,6 +245,156 @@ test("protocol constants and shared frame vectors stay byte-for-byte stable", as
       vector.name,
     );
   }
+});
+
+test("engine status protocol is bounded, read-only, and rejects inconsistent state", () => {
+  const request = createReadEngineStatusMessage({ requestId: "9" });
+  assert.deepEqual(request, {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "READ_ENGINE_STATUS",
+    requestId: "9",
+  });
+
+  const response = createEngineStatusMessage({ requestId: "9", status: engineStatus() });
+  assert.equal(assertProtocolMessage(response), response);
+  assert.ok(protocolPayloadByteLength(response) < MAX_PROTOCOL_PAYLOAD_BYTES);
+
+  assert.throws(
+    () => assertProtocolMessage({
+      ...structuredClone(response),
+      snapshotPending: true,
+    }),
+    (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+  assert.throws(
+    () => assertProtocolMessage({
+      ...structuredClone(response),
+      projections: [{ ...response.projections[0], status: "stale" }],
+    }),
+    (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+  assert.throws(
+    () => assertProtocolMessage({
+      ...structuredClone(response),
+      storage: {
+        ...response.storage,
+        walBytes: "134217728",
+      },
+    }),
+    (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+});
+
+test("source-state pages preserve locator bytes and safe pages fit the 4 MiB frame", () => {
+  assert.deepEqual(createListSourceStatesMessage({ requestId: "3" }), {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "LIST_SOURCE_STATES",
+    requestId: "3",
+    cursor: null,
+    limit: 256,
+  });
+  assert.deepEqual(createReadSourceCheckpointMessage({
+    requestId: "4",
+    sessionKey: SESSION_KEY,
+  }), {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "READ_SOURCE_CHECKPOINT",
+    requestId: "4",
+    sessionKey: SESSION_KEY,
+  });
+  assert.equal(createSourceCheckpointMessage({
+    requestId: "4",
+    sessionKey: SESSION_KEY,
+    checkpoint: null,
+  }).checkpoint, null);
+
+  const locator = `/${"x".repeat(12 * 1_024 - 1)}`;
+  const decomposedLocator = "/tmp/threadshare/cafe\u0301/session.jsonl";
+  assert.equal(decodeSourceLocator(encodeSourceLocator(decomposedLocator)), decomposedLocator);
+  assert.notEqual(decomposedLocator.normalize("NFC"), decomposedLocator);
+
+  const states = Array.from({ length: 128 }, (_, index) =>
+    sourceSummary(index.toString(16).padStart(64, "0"), locator));
+  const page = createSourceStatesMessage({ requestId: "3", states });
+  assert.ok(protocolPayloadByteLength(page) < MAX_PROTOCOL_PAYLOAD_BYTES);
+  assert.doesNotThrow(() => encodeProtocolFrame(page));
+  assert.throws(
+    () => createSourceStatesMessage({
+      requestId: "3",
+      states: Array.from({ length: 257 }, (_, index) =>
+        sourceSummary(index.toString(16).padStart(64, "0"))),
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createListSourceStatesMessage({ requestId: "3", limit: 257 }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("source lifecycle and purge maintenance frames are strict and path-free", () => {
+  assert.deepEqual(createRemoveSourceMessage({ requestId: "5", sessionKey: SESSION_KEY }), {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "REMOVE_SOURCE",
+    requestId: "5",
+    sessionKey: SESSION_KEY,
+  });
+  assert.equal(createSourceRemovedMessage({
+    requestId: "5",
+    sessionKey: SESSION_KEY,
+    removed: true,
+  }).removed, true);
+  assert.equal(createExcludeSourceMessage({
+    requestId: "6",
+    sessionKey: SESSION_KEY,
+  }).sessionKey, SESSION_KEY);
+  assert.equal(createSourceExcludedMessage({
+    requestId: "6",
+    sessionKey: SESSION_KEY,
+    excluded: true,
+    purgeState: "pending-purge",
+  }).purgeState, "pending-purge");
+  assert.equal(createReadPurgeStatusMessage({ requestId: "7" }).sessionKey, null);
+  assert.equal(createPurgeStatusMessage({
+    requestId: "7",
+    status: {
+      state: "pending-purge",
+      pendingFacts: "1",
+      pendingMaintenance: "0",
+      purged: "0",
+    },
+  }).state, "pending-purge");
+  assert.equal(createRunPurgeMaintenanceMessage({ requestId: "8" }).limit, 64);
+  assert.equal(createPurgeMaintenanceStatusMessage({
+    requestId: "8",
+    outcome: {
+      processedSessions: "1",
+      purgedSessions: "1",
+      state: "purged",
+      pendingFacts: "0",
+      pendingMaintenance: "0",
+      purged: "1",
+    },
+  }).state, "purged");
+  assert.throws(
+    () => createRunPurgeMaintenanceMessage({ requestId: "8", limit: 257 }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createSourceExcludedMessage({
+      requestId: "6",
+      sessionKey: SESSION_KEY,
+      excluded: true,
+      purgeState: "done",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  const lifecycleFrame = JSON.stringify(createExcludeSourceMessage({
+    requestId: "6",
+    sessionKey: SESSION_KEY,
+  }));
+  assert.equal(lifecycleFrame.includes("file"), false);
+  assert.equal(lifecycleFrame.includes("reason"), false);
 });
 
 test("decoder accepts fragmented prefix/payload and coalesced canonical frames", async () => {

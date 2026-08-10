@@ -2,8 +2,8 @@
 epic: ../epics/local-session-insights.md
 phase: executing
 approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
-current_item: ITEM-4
-next_action: execute ITEM-4 transactional normalized Fact repository, recovery, and incremental indexing
+current_item: ITEM-5
+next_action: execute ITEM-5 Rust analyzer, bounded query protocol, ranked search, and Tool evidence paths
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -15,7 +15,7 @@ remote_publish: final
 - [x] ITEM-1：Provider Session Evidence
 - [x] ITEM-2：Turn Analysis 与单 Session 报告
 - [x] ITEM-3：Rust Insights Engine 与原生交付
-- [ ] ITEM-4：事务化可恢复增量索引
+- [x] ITEM-4：事务化可恢复增量索引
 - [ ] ITEM-5：历史问题检索与证据路径
 - [ ] ITEM-6：本地 Insights Dashboard
 
@@ -89,3 +89,8 @@ remote_publish: final
 - 2026-08-10：ITEM-3 staged-diff review 使用 Paseo reviewer `4c386900-c6ff-4da9-acf9-4121a6647c74`；首轮报告 2 blocking、5 important，修复首次平台包发布判定、CI clean-tree 零依赖入口、registry race/tarball 回补、DB/sidecar 0600 与 secure-delete、batch 内存上界、benchmark 证据口径和真实 DSSE provenance。round 2 无 blocking，新增的 canonical-domain panic 泄漏与 truncate 回归锁由 follow-up reviewer `4b9ee730-4892-4776-bce0-99261a1c2d09` 对冻结 hash `de88e4324cd4058cdf8a9a9a3ec9c90f4fc7d4b78697e1c0c9d8ea617c64d858` 复核为全部 resolved，无新 blocking/important，结论“可合入”。
 - 2026-08-10：ITEM-3 最终验证通过：Rust/Engine 41/41、CLI 152/152、release 37/37、Skill validation、Cloudflare build、29-file pinned npm 12.0.2 dry-run pack 与 diff check；pack integrity 为 `sha512-qRJiJxRb7DOTMmXnS05uJH+gJJiRdgnfruphSTxLLtcZlUo6GNWyEvLWFd9FkkKeKMOdklBVnj+spsA8QsjOPw==`。精确已审 diff 以 milestone commit `968e297` 合入，未 push。
 - 2026-08-10：在 Paseo 托管的 clean worktree 对 commit `968e297b27c906cc3a7cc74dcda885db09aa0b04` 串行运行三次 25,000 Turn benchmark，三次 `sourceWorktreeDirty=false`；Rust commit wall 中位数 17.901 秒、1,396.6 Turn/s、0.708 canonical MiB/s、warm open 9.397 ms、sidecar RSS 11.453 MiB、point lookup P95 0.387 ms。证据已写入 `docs/insights-engine-benchmark.md`，work cursor 连续进入 ITEM-4。
+- 2026-08-10：ITEM-4 实现 normalized Fact repository、同事务 FTS/rollup/retry Projection、source checkpoint/CAS、增量 reconciliation worker、writer lock、exclude/purge/reindex/reset/status，以及 commit/ACK、projection、purge、reindex swap 的崩溃恢复；Fact/Projection/checkpoint 只在一次 SQLite WAL commit 后共同可见。
+- 2026-08-10：大规模验证数据整理为 `docs/benchmarks/local-session-insights/2026-08-10/`：提交 seed、参数、corpus/output digest、环境与 gate 结果，不提交多 GiB synthetic JSONL/SQLite 或任何真实 session。10,000 synthetic session 原始回填为 12.736 MiB/s、10,000/10,000、单 startup cycle、最新 100 个 session 2.441 秒、append 0.975 秒；保留 9.280 MiB/s/append 2.045 秒的竞争失败样本作为负证据。
+- 2026-08-10：250,000 Turn / 2,500 session mutation benchmark 达到 221.376 Turn/s、35.5M postings、1.542M field terms、2.721 GiB 稳态派生状态、2.811 GiB 峰值、约 52 MiB Engine RSS；Fact/FTS/Projection 分项分别约 2.507 GiB/146.3 MiB/66.3 MiB，全部 ITEM-4 可测 gate 通过。现有 query 数字只是 Node 直接 SQLite commit-point lookup，不代表 Engine BM25/ranker；真实 Top-20 P95/P99、Recall@300、Recall/NDCG 与消融明确保留为 ITEM-5 强制 gate，不能以前者替代。
+- 2026-08-10：ITEM-4 staged-diff review 使用 Paseo reviewer `491edd32-421a-46fc-b725-e03c34cba388`。首轮冻结 hash `fb1bad0fbccb31c2d772be3a40cdbd4d1cbaba3d9df6468a4b714ef57d25a8d3`，报告 0 blocking、2 important；修复 reindex swap 崩溃后旧 backup 无限驻留与状态不可见，后台 reconciliation 在 writer lock 内先恢复，status 只发 content-free `TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED`，并补 pre/post-install real-sidecar 测试。
+- 2026-08-10：ITEM-4 follow-up hash `f1f5d185d77cf043f41a47c398e0b8489454daf5e0365c1d272b82373ab8db32` 确认隐私恢复 finding resolved；最终窄审冻结 hash `85558339070c3131eda5538bf411df4f5756261eceadd33afba5903e4dd09e4a`，`visibility.scanned > 0` 与 recovery 后缺 origin secret 的稳定错误分类均通过变异杀伤，0 blocking / 0 new important，结论“可合入”。最终验证包括 Rust lib 58、bin 4、crash 6、normalized 11、purge 1、Node Insights 116、CLI 156、release 40，以及 Viewer/API/Cloudflare/FC/Skill/37-file pinned npm pack；未执行 npm bootstrap、registry 写入或 remote push，work cursor 连续进入 ITEM-5。

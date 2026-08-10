@@ -31,6 +31,10 @@ export const OPTION_DEFINITIONS = Object.freeze({
     type: "boolean",
     description: "Show help without reading user files, starting Paseo, or accessing the network.",
   },
+  "regenerate-secret": {
+    type: "boolean",
+    description: "Rebuild keyed Facts with a newly generated origin secret after interactive confirmation.",
+  },
   json: {
     type: "boolean",
     description: "Write the command's documented one-line JSON success result.",
@@ -160,6 +164,48 @@ export const COMMAND_SPECS = Object.freeze({
     agentNotes: ["Use JSON when another agent will inspect or extend the analysis."],
     security: [
       "Analysis stays local and omits source paths, Tool arguments and output, Skill bodies, system prompts, and thinking.",
+    ],
+  }),
+  insights: command({
+    summary: "Inspect and maintain the local Session Insights index.",
+    usage: "threadshare insights <status|reindex|reset|exclude> [subcommand] [options]",
+    arguments: [
+      argument("action", "<status|reindex|reset|exclude>", "Insights maintenance action."),
+      argument("operation", "[add|remove|list]", "Required only after exclude.", true),
+      argument("kind", "[provider|project|session]", "Required for exclusion add or remove.", true),
+      argument("value", "[value]", "Provider, project path, or session ID to exclude.", true),
+    ],
+    options: ["format", "regenerate-secret"],
+    optionDetails: {
+      format: "Use text (default) for people or json for agents.",
+      "regenerate-secret": "Only for reindex. Requires an interactive typed confirmation and atomically replaces the complete index.",
+    },
+    defaults: ["--format text", "A normal reindex preserves the origin secret and stable keyed Facts."],
+    output: [
+      "status: content-free index state and storage footprint.",
+      "reindex/reset/exclude: bounded text or one-line JSON result.",
+    ],
+    constraints: [
+      "exclude uses: exclude list, or exclude <add|remove> <provider|project|session> <value>.",
+      "reset removes derived state and the origin secret but preserves the external config file.",
+      "--regenerate-secret fails closed without a TTY and the exact typed confirmation.",
+    ],
+    examples: [
+      "threadshare insights status --format json",
+      "threadshare insights reindex",
+      "threadshare insights exclude add project /work/private",
+      "threadshare insights exclude list",
+      "threadshare insights reset",
+    ],
+    agentNotes: [
+      "Do not use --regenerate-secret as routine repair; it intentionally changes all keyed identities.",
+    ],
+    security: [
+      "Status and diagnostics never print the local state path or origin secret.",
+      "Exclusion values remain local and are never uploaded.",
+    ],
+    environment: [
+      "THREADSHARE_INSIGHTS_HOME overrides derived state; THREADSHARE_CONFIG overrides persistent config.",
     ],
   }),
   messages: command({
@@ -396,6 +442,13 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   "TS_QUERY_TOO_BROAD",
   "TS_INSIGHTS_ENGINE_UNAVAILABLE",
   "TS_INSIGHTS_ENGINE_INVALID",
+  "TS_INSIGHTS_STORAGE_FAILED",
+  "TS_INSIGHTS_STORAGE_CORRUPT",
+  "TS_INSIGHTS_WAL_BACKPRESSURE",
+  "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
+  "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
+  "TS_INSIGHTS_EXCLUSION_APPLY_FAILED",
+  "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
   "TS_INSIGHTS_PURGE_PENDING",
   "TS_OPERATION_FAILED",
 ]);
@@ -569,7 +622,7 @@ export function preflightHelp(args) {
 }
 
 function optionNotAllowedNext(commandName, optionName) {
-  if (optionName === "json" && ["sessions", "analyze", "messages", "read"].includes(commandName)) {
+  if (optionName === "json" && ["sessions", "analyze", "insights", "messages", "read"].includes(commandName)) {
     return `Use --format json instead. Run \`threadshare ${commandName} --help\`.`;
   }
   if (optionName === "format" && ["publish", "share", "revoke"].includes(commandName)) {

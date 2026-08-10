@@ -1,0 +1,773 @@
+{
+  "format": "threadshare-insights-capacity-benchmark@v1",
+  "measuredScope": "item-4-normalized-fact-fts-projection-capacity",
+  "sourceRevision": "170f29952b2354f5a896cf2091584644cf6ca837",
+  "sourceWorktreeDirty": true,
+  "benchmarkScriptSha256": "e86f6cf6a4a20721476ffa6d296bdb9d85e2652d43ed22e5be674f11d30161fe",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 11.5322265625,
+        "fiveMinutes": 12.67138671875,
+        "fifteenMinutes": 21.83056640625,
+        "oneMinutePerLogicalCpu": 1.15322265625
+      },
+      "atReport": {
+        "oneMinute": 11.44970703125,
+        "fiveMinutes": 12.529296875,
+        "fifteenMinutes": 21.4599609375,
+        "oneMinutePerLogicalCpu": 1.144970703125
+      }
+    }
+  },
+  "corpus": {
+    "corpusVersion": 2,
+    "seed": "threadshare-insights-benchmark-v1",
+    "identityDigest": "e5c06a84098990bf73b86850b875701f3d620824f440e5ff4d8c499baf52fa17",
+    "contentDigest": "e3c412dd7a1419b6ce1440096e588d3675dde9e4809b4967b1658794c040b306",
+    "turns": 5000,
+    "sessions": 50,
+    "turnsPerSession": 100,
+    "density": {
+      "sourceRecordsPerTurn": 9,
+      "evidenceEventsPerTurn": 9,
+      "turnEvidencePerTurn": 3,
+      "capabilityUsesPerTurn": 3,
+      "capabilityUseEvidencePerTurn": 6,
+      "capabilitiesPerProvider": 12,
+      "naturalTermsPerTurn": 135,
+      "uniqueNaturalTermsPerTurn": 6,
+      "problemTextCharacters": 1600,
+      "finalAnswerCharacters": 1100
+    },
+    "canonicalBytes": 86657694,
+    "maxSessionCanonicalBytes": 1733407,
+    "boundedMemoryModel": "one generated SessionFactsDeltaV1 plus one protocol batch"
+  },
+  "rustSidecar": {
+    "engine": "rust-sidecar",
+    "engineVersion": "0.0.0",
+    "target": "development",
+    "sqliteVersion": "3.53.2",
+    "startup": {
+      "emptyDatabase": {
+        "readyMs": 9.716624999999965
+      },
+      "populatedDatabase": {
+        "readyMs": 8.059999999997672,
+        "statusReadMs": 154.81441600000107,
+        "readyAndStatusMs": 163.04958200000328,
+        "status": {
+          "changeLog": {
+            "maxPayloadBytes": "67108864",
+            "maxRows": "1000000",
+            "payloadBytes": "9341",
+            "rows": "113",
+            "state": "within-cap"
+          },
+          "factStorageProfile": "normalized-row-v1",
+          "format": "threadshare-insights-protocol@v1",
+          "integrity": {
+            "fts": "ok",
+            "quickCheck": "ok"
+          },
+          "projections": [
+            {
+              "baseSnapshotSeq": "0",
+              "errorDigest": null,
+              "inputFactSchemaVersion": 1,
+              "name": "turn-search",
+              "rootKind": "turn",
+              "status": "active",
+              "version": 1,
+              "watermark": "50"
+            },
+            {
+              "baseSnapshotSeq": "0",
+              "errorDigest": null,
+              "inputFactSchemaVersion": 1,
+              "name": "turn-summary",
+              "rootKind": "turn",
+              "status": "active",
+              "version": 1,
+              "watermark": "50"
+            }
+          ],
+          "purge": {
+            "pendingFacts": "0",
+            "pendingMaintenance": "0",
+            "purged": "0",
+            "state": "idle"
+          },
+          "requestId": "2",
+          "snapshotAgeMs": "427",
+          "snapshotPending": false,
+          "snapshotSeq": "50",
+          "storage": {
+            "databaseBytes": "56938496",
+            "recentDiagnostic": null,
+            "walBytes": "12392",
+            "walPressureAction": "none"
+          },
+          "type": "ENGINE_STATUS"
+        },
+        "sampleCount": 3,
+        "samples": [
+          {
+            "readyMs": 7.2242089999999735,
+            "statusReadMs": 265.0798340000001,
+            "readyAndStatusMs": 272.3040430000001
+          },
+          {
+            "readyMs": 8.23516600000221,
+            "statusReadMs": 154.81441600000107,
+            "readyAndStatusMs": 163.04958200000328
+          },
+          {
+            "readyMs": 8.059999999997672,
+            "statusReadMs": 142.62245899999834,
+            "readyAndStatusMs": 150.68245899999602
+          }
+        ],
+        "gate": {
+          "limitMs": 500,
+          "medianReadyUnder500Ms": true
+        }
+      }
+    },
+    "corpusDigest": "e3c412dd7a1419b6ce1440096e588d3675dde9e4809b4967b1658794c040b306",
+    "canonicalBytes": 86657694,
+    "maxSessionCanonicalBytes": 1733407,
+    "backfill": {
+      "wallMs": 26420.63125,
+      "corpusGenerationMs": 2904.708827999998,
+      "protocolPreparationMs": 2709.779882000015,
+      "engineBackfillMs": 20806.142539999986,
+      "endToEndTurnsPerSecond": 189.2460461178421,
+      "engineTurnsPerSecond": 240.31364729850608,
+      "endToEndCanonicalMiBPerSecond": 3.1279804144267747,
+      "engineCanonicalMiBPerSecond": 3.9720585845218404
+    },
+    "protocol": {
+      "requestFrames": 451,
+      "responseFrames": 451,
+      "requestBytes": 86727464,
+      "responseBytes": 65167,
+      "protocolPreparationMs": 2709.779882000015,
+      "totalWireBytes": 86792631,
+      "wireAmplification": 1.0015571265951295
+    },
+    "rss": {
+      "samplingMode": "darwin-500ms",
+      "peakSampled": true,
+      "sidecarPeakBytes": 51527680,
+      "nodeHarnessPeakBytes": 169951232,
+      "combinedPeakBytes": 221364224
+    },
+    "query": {
+      "kind": "session-commit-point-lookup",
+      "implementation": "node:sqlite direct database read",
+      "queryCount": 1000,
+      "warmupCount": 100,
+      "wallMs": 12.819374999999127,
+      "p50Ms": 0.007250000002386514,
+      "p95Ms": 0.009083000000828179,
+      "p99Ms": 0.014250000000174623,
+      "resultDigest": "a0bb22578639190f3364a31279b5bb72f5715791e273ab3b875d275b500423be",
+      "committedSessions": 50,
+      "measurementPhase": "before-vacuum-capacity-maintenance"
+    },
+    "capacity": {
+      "measurement": "pre-maintenance persistent peak plus bounded staging for the 8 GiB gate; VACUUM then dbstat for category attribution",
+      "vacuumMs": 291.8445839999986,
+      "preVacuumPersistentBytes": 56938496,
+      "postVacuumPersistentBytes": 54775808,
+      "dbstatBytes": 54775808,
+      "dbstatAccountedPageBytes": 54775808,
+      "databasePageBytes": 54775808,
+      "pageCount": 13373,
+      "pageSize": 4096,
+      "freelistCount": 0,
+      "fileFormatPages": {
+        "lockBytePageBytes": 0,
+        "freelistBytes": 0,
+        "totalBytes": 0
+      },
+      "stagingUpperBoundBytes": 1733407,
+      "stagingMeasurement": "maximum canonical SessionFactsDeltaV1 bytes",
+      "observedPersistentPeakBytes": 56938496,
+      "compactedSteadyStateBytes": 56509215,
+      "observedDerivedStatePeakBytes": 58671903,
+      "engineRss": {
+        "limitBytes": 100663296,
+        "sidecarPeakBytes": 51527680,
+        "nodeHarnessPeakBytes": 169951232,
+        "combinedPeakBytes": 221364224,
+        "withinLimit": true
+      },
+      "categories": {
+        "fact": {
+          "bytes": 49377280,
+          "rows": 200274,
+          "objects": 57
+        },
+        "fts": {
+          "bytes": 3960832,
+          "rows": 5003,
+          "objects": 6
+        },
+        "projection": {
+          "bytes": 1388544,
+          "rows": 5115,
+          "objects": 11
+        },
+        "sourceState": {
+          "bytes": 12288,
+          "rows": 0,
+          "objects": 3
+        },
+        "sqliteInternal": {
+          "bytes": 32768,
+          "rows": 0,
+          "objects": 1
+        },
+        "engineOther": {
+          "bytes": 4096,
+          "rows": 0,
+          "objects": 1
+        },
+        "unclassified": {
+          "bytes": 0,
+          "rows": 0,
+          "objects": 0
+        }
+      },
+      "byObject": {
+        "capabilities": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "capability_invocation_events": {
+          "bytes": 1159168,
+          "category": "fact"
+        },
+        "capability_invocation_events_capability": {
+          "bytes": 143360,
+          "category": "fact"
+        },
+        "capability_result_events": {
+          "bytes": 1179648,
+          "category": "fact"
+        },
+        "capability_retry_contributions": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "capability_retry_summary_lookup": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "capability_use_evidence": {
+          "bytes": 643072,
+          "category": "fact"
+        },
+        "capability_use_evidence_event": {
+          "bytes": 581632,
+          "category": "fact"
+        },
+        "capability_use_evidence_session": {
+          "bytes": 643072,
+          "category": "fact"
+        },
+        "capability_uses": {
+          "bytes": 2375680,
+          "category": "fact"
+        },
+        "capability_uses_capability": {
+          "bytes": 139264,
+          "category": "fact"
+        },
+        "capability_uses_session_key": {
+          "bytes": 638976,
+          "category": "fact"
+        },
+        "capability_uses_turn": {
+          "bytes": 155648,
+          "category": "fact"
+        },
+        "checkpoint_capability_pins": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_capability_pins_capability": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_event_pins": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_event_pins_event": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_turn_pins": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_turn_pins_turn": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_use_pins": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "checkpoint_use_pins_use": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "engine_metadata": {
+          "bytes": 4096,
+          "category": "engineOther"
+        },
+        "evidence_events": {
+          "bytes": 6578176,
+          "category": "fact"
+        },
+        "evidence_events_occurred_turn": {
+          "bytes": 466944,
+          "category": "fact"
+        },
+        "evidence_events_session_order": {
+          "bytes": 1114112,
+          "category": "fact"
+        },
+        "evidence_events_source_record": {
+          "bytes": 479232,
+          "category": "fact"
+        },
+        "fact_coverage": {
+          "bytes": 12288,
+          "category": "fact"
+        },
+        "fact_diagnostics": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "field_stats": {
+          "bytes": 4096,
+          "category": "fts"
+        },
+        "projection_change_log": {
+          "bytes": 16384,
+          "category": "projection"
+        },
+        "projection_change_log_owner": {
+          "bytes": 16384,
+          "category": "projection"
+        },
+        "projection_state": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "projection_state_build_watermark": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "projection_state_one_active": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "provider_status_events": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "retry_projection_build_cursor": {
+          "bytes": 4096,
+          "category": "projection"
+        },
+        "session_commits": {
+          "bytes": 12288,
+          "category": "fact"
+        },
+        "session_dedupe_evidence": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "session_dedupe_evidence_event": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "session_fact_truncation": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sessions": {
+          "bytes": 16384,
+          "category": "fact"
+        },
+        "skill_catalog_entry_events": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "skill_catalog_entry_events_capability": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "skill_load_events": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "skill_load_events_capability": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "source_checkpoints": {
+          "bytes": 36864,
+          "category": "fact"
+        },
+        "source_ingestion_staging": {
+          "bytes": 4096,
+          "category": "sourceState"
+        },
+        "source_ingestion_states": {
+          "bytes": 4096,
+          "category": "sourceState"
+        },
+        "source_purge_states": {
+          "bytes": 4096,
+          "category": "sourceState"
+        },
+        "source_records": {
+          "bytes": 5435392,
+          "category": "fact"
+        },
+        "source_records_session_order": {
+          "bytes": 983040,
+          "category": "fact"
+        },
+        "sqlite_autoindex_capabilities_1": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_capability_uses_1": {
+          "bytes": 610304,
+          "category": "fact"
+        },
+        "sqlite_autoindex_checkpoint_capability_pins_2": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_checkpoint_event_pins_2": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_checkpoint_turn_pins_2": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_checkpoint_use_pins_2": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_evidence_events_1": {
+          "bytes": 1835008,
+          "category": "fact"
+        },
+        "sqlite_autoindex_session_dedupe_evidence_2": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_sessions_1": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "sqlite_autoindex_source_records_1": {
+          "bytes": 1835008,
+          "category": "fact"
+        },
+        "sqlite_autoindex_turns_1": {
+          "bytes": 204800,
+          "category": "fact"
+        },
+        "sqlite_schema": {
+          "bytes": 32768,
+          "category": "sqliteInternal"
+        },
+        "turn_evidence": {
+          "bytes": 319488,
+          "category": "fact"
+        },
+        "turn_evidence_event": {
+          "bytes": 290816,
+          "category": "fact"
+        },
+        "turn_evidence_session_role": {
+          "bytes": 319488,
+          "category": "fact"
+        },
+        "turn_fact_truncation": {
+          "bytes": 4096,
+          "category": "fact"
+        },
+        "turn_fts_documents": {
+          "bytes": 57344,
+          "category": "fts"
+        },
+        "turn_lifecycle_events": {
+          "bytes": 262144,
+          "category": "fact"
+        },
+        "turn_rollup_by_turn": {
+          "bytes": 438272,
+          "category": "projection"
+        },
+        "turn_rollup_contributions": {
+          "bytes": 454656,
+          "category": "projection"
+        },
+        "turn_rollup_lookup": {
+          "bytes": 438272,
+          "category": "projection"
+        },
+        "turns": {
+          "bytes": 20529152,
+          "category": "fact"
+        },
+        "turns_fts_config": {
+          "bytes": 4096,
+          "category": "fts"
+        },
+        "turns_fts_data": {
+          "bytes": 3788800,
+          "category": "fts"
+        },
+        "turns_fts_docsize": {
+          "bytes": 81920,
+          "category": "fts"
+        },
+        "turns_fts_idx": {
+          "bytes": 24576,
+          "category": "fts"
+        },
+        "turns_session_order": {
+          "bytes": 110592,
+          "category": "fact"
+        },
+        "visible_message_events": {
+          "bytes": 159744,
+          "category": "fact"
+        }
+      },
+      "unclassifiedObjects": [],
+      "rowCounts": {
+        "capabilities": 24,
+        "capability_invocation_events": 15000,
+        "capability_result_events": 15000,
+        "capability_retry_contributions": 0,
+        "capability_use_evidence": 30000,
+        "capability_uses": 15000,
+        "checkpoint_capability_pins": 0,
+        "checkpoint_event_pins": 0,
+        "checkpoint_turn_pins": 0,
+        "checkpoint_use_pins": 0,
+        "evidence_events": 45000,
+        "fact_coverage": 100,
+        "fact_diagnostics": 0,
+        "field_stats": 3,
+        "projection_change_log": 113,
+        "projection_state": 2,
+        "provider_status_events": 0,
+        "retry_projection_build_cursor": 0,
+        "session_commits": 50,
+        "session_dedupe_evidence": 0,
+        "session_fact_truncation": 0,
+        "sessions": 50,
+        "skill_catalog_entry_events": 0,
+        "skill_load_events": 0,
+        "source_checkpoints": 50,
+        "source_ingestion_staging": 0,
+        "source_ingestion_states": 0,
+        "source_purge_states": 0,
+        "source_records": 45000,
+        "turn_evidence": 15000,
+        "turn_fact_truncation": 0,
+        "turn_fts_documents": 5000,
+        "turn_lifecycle_events": 5000,
+        "turn_rollup_contributions": 5000,
+        "turns": 5000,
+        "visible_message_events": 10000
+      },
+      "ftsMetrics": {
+        "documents": 5000,
+        "fieldTerms": 45112,
+        "postings": 710000,
+        "occurrences": 710000,
+        "byField": [
+          {
+            "field": "natural",
+            "fieldTerms": 45100,
+            "postings": 695000,
+            "occurrences": 695000
+          },
+          {
+            "field": "code",
+            "fieldTerms": 0,
+            "postings": 0,
+            "occurrences": 0
+          },
+          {
+            "field": "capability",
+            "fieldTerms": 12,
+            "postings": 15000,
+            "occurrences": 15000
+          }
+        ],
+        "density": {
+          "natural": {
+            "minimumFieldTerms": 30000,
+            "minimumPostings": 675000,
+            "actualFieldTerms": 45100,
+            "actualPostings": 695000,
+            "meetsExpectedDensity": true
+          },
+          "code": {
+            "expectedPostings": 0,
+            "actualFieldTerms": 0,
+            "actualPostings": 0,
+            "meetsExpectedDensity": true
+          },
+          "capability": {
+            "minimumPostings": 15000,
+            "actualFieldTerms": 12,
+            "actualPostings": 15000,
+            "meetsExpectedDensity": true
+          }
+        },
+        "detailFullBytes": 3960832,
+        "backendReevaluationLimitBytes": 419430400,
+        "backendReevaluationRequired": false
+      },
+      "integrity": [
+        "ok"
+      ],
+      "foreignKeyViolations": 0,
+      "gates": {
+        "normalizedFactLimitBytes": 6442450944,
+        "steadyStateLimitBytes": 8589934592,
+        "normalizedFactExceeded": false,
+        "steadyStateExceeded": false,
+        "packedFactsRequired": false,
+        "decision": "normalized-row-v1-within-capacity-gates",
+        "storageClassificationComplete": true,
+        "dbstatMatchesPageBytes": true,
+        "engineRssWithinLimit": true,
+        "ftsDensityMatchesCorpus": true,
+        "ftsBackendWithinLimit": true,
+        "allMeasuredCapacityGatesPassed": true,
+        "populatedWarmOpenUnder500Ms": true
+      }
+    }
+  },
+  "mutations": {
+    "format": "threadshare-insights-capacity-mutation-trace@v1",
+    "corpus": {
+      "turns": 5000,
+      "sessions": 50,
+      "seed": "threadshare-insights-benchmark-v1"
+    },
+    "steps": [
+      {
+        "kind": "replace-session",
+        "wallMs": 489.30670800000007,
+        "outcome": {
+          "committed": true,
+          "snapshotSeq": "51"
+        }
+      },
+      {
+        "kind": "delete-source",
+        "wallMs": 28.57166700000016,
+        "outcome": {
+          "removed": true
+        }
+      },
+      {
+        "kind": "exclude-source",
+        "wallMs": 4.3779170000016165,
+        "outcome": {
+          "excluded": true,
+          "purgeState": "pending-purge"
+        }
+      },
+      {
+        "kind": "purge-maintenance",
+        "wallMs": 435.3062499999978,
+        "outcome": {
+          "processedSessions": "1",
+          "purgedSessions": "1",
+          "state": "purged"
+        }
+      }
+    ],
+    "finalState": {
+      "remainingSessions": 48,
+      "remainingTurns": 4800,
+      "remainingFtsDocuments": 4800,
+      "remainingRollups": 4800,
+      "replacementFtsDocuments": 1,
+      "fieldStats": {
+        "capability": 4800,
+        "code": 0,
+        "natural": 4800
+      },
+      "changeLogRows": 113,
+      "replacementGeneration": "0000000000000002",
+      "purgedState": "purged",
+      "integrity": [
+        "ok"
+      ],
+      "foreignKeyViolations": 0
+    },
+    "verified": {
+      "replace": true,
+      "delete": true,
+      "purge": true,
+      "expectedRemainingFacts": true,
+      "projectionCleanup": true,
+      "replacementSearchable": true,
+      "boundedChangeLog": true,
+      "integrity": true
+    }
+  },
+  "packedFactsDecision": {
+    "normalizedFactLimitBytes": 6442450944,
+    "steadyStateLimitBytes": 8589934592,
+    "normalizedFactExceeded": false,
+    "steadyStateExceeded": false,
+    "packedFactsRequired": false,
+    "decision": "normalized-row-v1-within-capacity-gates",
+    "storageClassificationComplete": true,
+    "dbstatMatchesPageBytes": true,
+    "engineRssWithinLimit": true,
+    "ftsDensityMatchesCorpus": true,
+    "ftsBackendWithinLimit": true,
+    "allMeasuredCapacityGatesPassed": true,
+    "populatedWarmOpenUnder500Ms": true
+  },
+  "notMeasured": [
+    "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
+    "Top-20 BM25/ranker latency and Recall@300; those are ITEM-5 query gates",
+    "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
+    "crash injection and projection shadow rebuild, which have dedicated integration suites"
+  ]
+}

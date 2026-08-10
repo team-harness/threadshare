@@ -567,6 +567,86 @@ test("Codex append replays only the open Turn while preserving Fact identities",
   }
 });
 
+test("Codex append reads only the replay window regardless of sealed history size", async () => {
+  const sealedHistory = Array.from({ length: 64 }, (_, index) => [
+    { type: "event_msg", payload: { type: "task_started", turn_id: `sealed-${index}` } },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `Sealed prompt ${index} ${"x".repeat(128)}` }],
+      },
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: `Sealed answer ${index} ${"y".repeat(128)}` }],
+      },
+    },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: `sealed-${index}` } },
+  ]).flat();
+  const initialRaw = jsonl([
+    { type: "session_meta", payload: { id: IDS.codex, cwd: "/private/work/incremental" } },
+    ...sealedHistory,
+    { type: "event_msg", payload: { type: "task_started", turn_id: "open-tail" } },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Read only this open tail" }],
+      },
+    },
+  ]);
+  const appendedRaw = jsonl([
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "The tail is complete." }],
+      },
+    },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: "open-tail" } },
+  ]);
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, initialRaw);
+  try {
+    const initial = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+    });
+    const replayFromOffset = Number(initial.checkpoint.pendingState.replayFromOffset);
+    assert.equal(Number.isSafeInteger(replayFromOffset), true);
+    assert.equal(replayFromOffset > Buffer.byteLength(initialRaw) * 0.9, true);
+
+    await appendFile(fixture.file, appendedRaw);
+    const reads = [];
+    const resumed = await readProviderSessionDelta("codex", fixture.file, {
+      checkpoint: initial.checkpoint,
+      privacyContext: privacyContext(),
+      chunkSize: 37,
+      onBytesRead: (read) => reads.push(read),
+    });
+    const totalSize = Buffer.byteLength(initialRaw) + Buffer.byteLength(appendedRaw);
+    const bytesRead = reads.reduce((sum, read) => sum + read.bytesRead, 0);
+
+    assert.equal(bytesRead, totalSize - replayFromOffset);
+    assert.equal(bytesRead < totalSize / 10, true);
+    assert.equal(reads.every((read) => read.phase === "records"), true);
+    assert.equal(
+      reads.every((read) => Number(read.startOffset) >= replayFromOffset),
+      true,
+    );
+    assert.equal(resumed.turns.length, 1);
+    assert.equal(resumed.turns[0].problemText, "Read only this open tail");
+    assert.equal(resumed.turns[0].finalAnswerExcerpt, "The tail is complete.");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Codex append replays the last sealed Turn so a new boundary emits follow-up evidence", async () => {
   const firstRecords = [
     { type: "session_meta", payload: { id: IDS.codex } },
@@ -769,6 +849,81 @@ test("provider records replace unpaired surrogates without dropping the session"
   }
 });
 
+test("bounded problem text truncates on UTF-8 character boundaries", async () => {
+  const question = `${"界".repeat(100_000)}xx`;
+  const fixture = await fixtureFile(
+    `rollout-${IDS.codex}.jsonl`,
+    jsonl([
+      { type: "session_meta", payload: { id: IDS.codex } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: question }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "done" }],
+        },
+      },
+    ]),
+  );
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+    });
+    const problemText = delta.turns[0].problemText;
+    assert.equal(Buffer.byteLength(problemText, "utf8") <= 64 * 1024, true);
+    assert.equal(problemText.includes("\ufffd"), false);
+    assert.equal(problemText.endsWith("xx"), true);
+    assert.deepEqual(delta.turns[0].factTruncation, ["problem-text"]);
+    assert.doesNotThrow(() => validateSessionFactsDelta(delta));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("replace-session advances the committed generation without resuming parser state", async () => {
+  const fixture = await fixtureFile(
+    `${IDS.claude}.jsonl`,
+    jsonl([
+      {
+        type: "user",
+        sessionId: IDS.claude,
+        uuid: "replace-user",
+        timestamp: "2026-08-01T01:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "Rebuild this session" }] },
+      },
+      {
+        type: "assistant",
+        sessionId: IDS.claude,
+        uuid: "replace-assistant",
+        timestamp: "2026-08-01T01:00:01.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Rebuilt." }] },
+      },
+    ]),
+  );
+  try {
+    const delta = await readProviderSessionDelta("claude", fixture.file, {
+      privacyContext: privacyContext(),
+      mode: "replace-session",
+      expectedGeneration: "7",
+    });
+    assert.equal(delta.mode, "replace-session");
+    assert.equal(delta.expectedGeneration, "7");
+    assert.equal(delta.targetGeneration, "8");
+    assert.equal(delta.checkpoint.generation, "8");
+    assert.equal(delta.turns[0].problemText, "Rebuild this session");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Claude adapter keeps tool-result-only records inside the current Turn and confirms Skill only on success", async () => {
   const records = [
     {
@@ -856,6 +1011,10 @@ test("Claude adapter keeps tool-result-only records inside the current Turn and 
     );
     assert.equal(delta.session.duplicateMethod, "exact-first-turn-prefix");
     assert.equal(delta.session.dedupeClosure, "observed-eof");
+    assert.equal(
+      new Set(delta.session.dedupeEvidenceEventKeys).size,
+      delta.session.dedupeEvidenceEventKeys.length,
+    );
     assert.doesNotMatch(JSON.stringify(delta), /secret command|secret output|\/secret/u);
     assert.deepEqual(exportClaudeJsonl(raw, { sessionId: IDS.claude, exportedAt: 0 }), before);
   } finally {
@@ -1364,6 +1523,37 @@ test("Claude evidence discovery reports unnamed subagent files instead of silent
     assert.deepEqual(result.diagnostics, [
       { code: "unnamed-subagent-file-skipped", count: 1 },
     ]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Claude evidence discovery scales across 10,000 real session files without reading bodies", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "threadshare-discovery-scale-"));
+  const project = path.join(home, ".claude", "projects", "fixture");
+  await mkdir(project, { recursive: true });
+  const sessionIds = Array.from(
+    { length: 10_000 },
+    (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  try {
+    for (let offset = 0; offset < sessionIds.length; offset += 250) {
+      await Promise.all(sessionIds.slice(offset, offset + 250).map((sessionId) =>
+        writeFile(
+          path.join(project, `${sessionId}.jsonl`),
+          "{}\n",
+          process.platform === "win32" ? undefined : { mode: 0o000 },
+        )
+      ));
+    }
+
+    const result = await discoverProviderEvidenceSources("claude", {
+      environment: { HOME: home },
+    });
+    assert.equal(result.sources.length, 10_000);
+    assert.deepEqual(result.diagnostics, []);
+    assert.equal(result.sources[0].sessionId, sessionIds[0]);
+    assert.equal(result.sources.at(-1).sessionId, sessionIds.at(-1));
   } finally {
     await rm(home, { recursive: true, force: true });
   }

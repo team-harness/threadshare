@@ -52,7 +52,13 @@ function checkpointError(message) {
   return new RangeError(`invalid session record checkpoint: ${message}`);
 }
 
-async function verifyPartialTail(file, offset, length, digest, chunkSize) {
+function observeRead(observer, phase, startOffset, bytesRead) {
+  if (observer === undefined) return;
+  if (typeof observer !== "function") throw new TypeError("onBytesRead must be a function");
+  observer({ phase, startOffset: String(startOffset), bytesRead });
+}
+
+async function verifyPartialTail(file, offset, length, digest, chunkSize, onBytesRead) {
   if (length === 0) {
     if (digest !== EMPTY_SHA256) throw checkpointError("partial tail digest does not match");
     return;
@@ -68,6 +74,7 @@ async function verifyPartialTail(file, offset, length, digest, chunkSize) {
       const bytesToRead = Math.min(buffer.length, remaining);
       const { bytesRead } = await handle.read(buffer, 0, bytesToRead, position);
       if (bytesRead === 0) throw checkpointError("partial tail is no longer readable");
+      observeRead(onBytesRead, "checkpoint-tail", position, bytesRead);
       hash.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
       remaining -= bytesRead;
@@ -78,7 +85,7 @@ async function verifyPartialTail(file, offset, length, digest, chunkSize) {
   if (hash.digest("hex") !== digest) throw checkpointError("partial tail digest does not match");
 }
 
-async function resumeOffset(file, checkpoint, fileSize, chunkSize) {
+async function resumeOffset(file, checkpoint, fileSize, chunkSize, onBytesRead) {
   if (checkpoint === undefined) return 0;
   if (checkpoint === null || typeof checkpoint !== "object" || Array.isArray(checkpoint)) {
     throw checkpointError("must be an object");
@@ -94,7 +101,14 @@ async function resumeOffset(file, checkpoint, fileSize, chunkSize) {
     throw checkpointError("is outside the current file bounds");
   }
 
-  await verifyPartialTail(file, offset, tailLength, checkpoint.partialTailDigest, chunkSize);
+  await verifyPartialTail(
+    file,
+    offset,
+    tailLength,
+    checkpoint.partialTailDigest,
+    chunkSize,
+    onBytesRead,
+  );
   return offset;
 }
 
@@ -212,7 +226,16 @@ export async function* streamSessionRecords(file, options = {}) {
   if (requestedStart !== null && options.checkpoint !== undefined) {
     throw new TypeError("startOffset and checkpoint cannot be combined");
   }
-  const startOffset = requestedStart ?? await resumeOffset(file, options.checkpoint, fileSize, chunkSize);
+  if (options.onBytesRead !== undefined && typeof options.onBytesRead !== "function") {
+    throw new TypeError("onBytesRead must be a function");
+  }
+  const startOffset = requestedStart ?? await resumeOffset(
+    file,
+    options.checkpoint,
+    fileSize,
+    chunkSize,
+    options.onBytesRead,
+  );
   const diagnostics = new Map();
   let completeOffset = startOffset;
   let lineStart = startOffset;
@@ -220,6 +243,7 @@ export async function* streamSessionRecords(file, options = {}) {
   let line = new LineAccumulator(maxRecordBytes);
 
   for await (const chunk of createReadStream(file, { start: startOffset, highWaterMark: chunkSize })) {
+    observeRead(options.onBytesRead, "records", position, chunk.length);
     let cursor = 0;
     while (cursor < chunk.length) {
       const newline = chunk.indexOf(0x0a, cursor);
@@ -287,7 +311,13 @@ export async function visitSessionRecords(file, options = {}, visitor) {
 export async function verifySessionRecordCheckpoint(file, checkpoint, options = {}) {
   const chunkSize = boundedSize(options.chunkSize, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, "chunkSize");
   const fileSize = (await stat(file)).size;
-  return String(await resumeOffset(file, checkpoint, fileSize, chunkSize));
+  return String(await resumeOffset(
+    file,
+    checkpoint,
+    fileSize,
+    chunkSize,
+    options.onBytesRead,
+  ));
 }
 
 export async function readSessionRecordBatch(file, options = {}) {

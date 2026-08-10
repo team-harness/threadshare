@@ -165,9 +165,13 @@ function truncateUtf8(value, headBytes, tailBytes = 0) {
   const normalized = toWellFormedUnicode(value);
   const buffer = Buffer.from(normalized, "utf8");
   if (buffer.length <= headBytes + tailBytes) return normalized;
-  const head = buffer.subarray(0, headBytes).toString("utf8").replace(/\uFFFD$/u, "");
+  let headEnd = headBytes;
+  while (headEnd > 0 && (buffer[headEnd] & 0xc0) === 0x80) headEnd -= 1;
+  const head = buffer.subarray(0, headEnd).toString("utf8");
   if (tailBytes === 0) return head;
-  const tail = buffer.subarray(buffer.length - tailBytes).toString("utf8").replace(/^\uFFFD/u, "");
+  let tailStart = buffer.length - tailBytes;
+  while (tailStart < buffer.length && (buffer[tailStart] & 0xc0) === 0x80) tailStart += 1;
+  const tail = buffer.subarray(tailStart).toString("utf8");
   return `${head}${tail}`;
 }
 
@@ -1656,9 +1660,14 @@ function deriveDedupe(builder, stableEof) {
     duplicateMethod: "exact-first-turn-prefix",
     duplicateConfidence: "weak",
     dedupeClosure: firstHardSealed ? "hard-sealed" : "observed-eof",
-    dedupeEvidenceEventKeys: [first.boundaryEventKey, ...builder.evidenceEvents
-      .filter((event) => event.occurredTurnKey === first.turnKey && event.kind === "visible-message")
-      .map((event) => event.eventKey)],
+    dedupeEvidenceEventKeys: [...new Set([
+      first.boundaryEventKey,
+      ...builder.evidenceEvents
+        .filter((event) =>
+          event.occurredTurnKey === first.turnKey && event.kind === "visible-message"
+        )
+        .map((event) => event.eventKey),
+    ])],
   };
   const second = builder.secondTurnKey ? builder.turnByKey.get(builder.secondTurnKey) : builder.turns[1];
   const secondHardSealed = second?.rawClosure.nextUserBoundary || second?.rawClosure.providerTerminal !== null;
@@ -1941,7 +1950,16 @@ function finalizeDelta(builder, sourceSnapshot) {
   }
   applyFactCaps(builder);
   const dedupe = builder.sessionScope === "main" ? deriveDedupe(builder, stableEof) : {};
-  const expectedGeneration = String(builder.options.checkpoint?.generation ?? "0");
+  const checkpointGeneration = builder.options.checkpoint?.generation;
+  const configuredGeneration = builder.options.expectedGeneration;
+  if (
+    checkpointGeneration !== undefined &&
+    configuredGeneration !== undefined &&
+    String(checkpointGeneration) !== String(configuredGeneration)
+  ) {
+    throw new TypeError("expectedGeneration must match checkpoint generation");
+  }
+  const expectedGeneration = String(configuredGeneration ?? checkpointGeneration ?? "0");
   if (!/^(?:0|[1-9][0-9]*)$/u.test(expectedGeneration)) {
     throw new TypeError("checkpoint generation must be a decimal string");
   }
@@ -2097,8 +2115,11 @@ export async function readProviderSessionDelta(provider, source, options = {}) {
   const readerOptions = {
     chunkSize: options.chunkSize,
     maxRecordBytes: options.maxRecordBytes ?? MAX_PROVIDER_RECORD_BYTES,
+    onBytesRead: options.onBytesRead,
   };
-  const metadataSummary = await scanMetadataSummary(provider, source, readerOptions);
+  const metadataSummary = options.checkpoint
+    ? createMetadataSummary()
+    : await scanMetadataSummary(provider, source, readerOptions);
   const metadata = inspectMetadata(
     provider,
     source,

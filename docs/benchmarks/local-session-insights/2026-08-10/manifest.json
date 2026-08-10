@@ -1,0 +1,176 @@
+{
+  "format": "threadshare-insights-benchmark-evidence@v1",
+  "capturedAt": "2026-08-10T08:47:27Z",
+  "epicItem": "ITEM-4",
+  "candidate": {
+    "baseHeadSha": "170f29952b2354f5a896cf2091584644cf6ca837",
+    "sourceWorktreeDirty": true,
+    "epicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
+    "benchmarkScriptSha256": "e86f6cf6a4a20721476ffa6d296bdb9d85e2652d43ed22e5be674f11d30161fe",
+    "note": "The outputs were captured before the ITEM-4 milestone commit. The script and output digests bind the measured candidate; the staged diff digest belongs to the review record and is intentionally not self-referenced here."
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "npmVersion": "10.9.7",
+    "rustcVersion": "1.94.1",
+    "cargoVersion": "1.94.1",
+    "bundledSqliteVersion": "3.53.2"
+  },
+  "generators": {
+    "capacity": {
+      "seed": "threadshare-insights-benchmark-v1",
+      "corpusVersion": 2,
+      "turnsPerSession": 100,
+      "density": {
+        "sourceRecordsPerTurn": 9,
+        "evidenceEventsPerTurn": 9,
+        "turnEvidencePerTurn": 3,
+        "capabilityUsesPerTurn": 3,
+        "capabilityUseEvidencePerTurn": 6,
+        "capabilitiesPerProvider": 12,
+        "naturalTermsPerTurn": 135,
+        "uniqueNaturalTermsPerTurn": 6,
+        "problemTextCharacters": 1600,
+        "finalAnswerCharacters": 1100
+      }
+    },
+    "rawBackfill": {
+      "seed": "threadshare-insights-benchmark-v1",
+      "sessions": 10000,
+      "providers": {
+        "codex": 5000,
+        "claude": 5000
+      },
+      "rawTextCharacters": 262144,
+      "rawBytes": 2965275222,
+      "temporaryRoot": "/tmp/threadshare-insights-bench.noindex"
+    }
+  },
+  "runs": [
+    {
+      "file": "raw-backfill-10k.acceptance.json",
+      "kind": "raw-backfill",
+      "accepted": true,
+      "command": "TMPDIR=/tmp/threadshare-insights-bench.noindex node scripts/benchmark-insights-engine.mjs --raw-backfill --sessions 10000 --raw-text-characters 262144 --output /tmp/threadshare-insights-raw-10k.json",
+      "outputSha256": "64e5b987fa99f2f967bf46226f5f3784357470d644bfff24f9968d6bd5fd3732",
+      "fileBytes": 3898,
+      "hostLoadOneMinute": {
+        "atStart": 7.00732421875,
+        "atReport": 7.005859375
+      },
+      "metrics": {
+        "rawMiBPerSecond": 12.736321709843581,
+        "latest100CommittedMs": 2440.519124999999,
+        "appendCommittedMs": 975.2350409999781,
+        "backfillCycles": 1,
+        "committedSources": 10000
+      },
+      "allGatesPassed": true
+    },
+    {
+      "file": "raw-backfill-10k.contended-failure.json",
+      "kind": "raw-backfill",
+      "accepted": false,
+      "command": "TMPDIR=/tmp/threadshare-insights-bench.noindex node scripts/benchmark-insights-engine.mjs --raw-backfill --sessions 10000 --raw-text-characters 262144 --output /tmp/threadshare-insights-raw-10k.json",
+      "outputSha256": "43d53ba77a3038d6f92404d3670c6b993928897f9b7e2c01dc4204e0e4b17c01",
+      "fileBytes": 3912,
+      "hostLoadOneMinute": {
+        "atStart": 8.32666015625,
+        "atReport": 13.736328125
+      },
+      "metrics": {
+        "rawMiBPerSecond": 9.279888499341993,
+        "latest100CommittedMs": 3178.459749999998,
+        "appendCommittedMs": 2045.0024170000106,
+        "backfillCycles": 1,
+        "committedSources": 10000
+      },
+      "failedGates": [
+        "rawBackfillAtLeast10MiBPerSecond",
+        "appendedTurnWithin2Seconds"
+      ]
+    },
+    {
+      "file": "capacity-5k.acceptance.json",
+      "kind": "capacity",
+      "accepted": true,
+      "command": "node scripts/benchmark-insights-engine.mjs --capacity --turns 5000 --turns-per-session 100 --output /tmp/threadshare-insights-capacity-5k.json",
+      "outputSha256": "be138b0ad38b244be55d6a6ee015241fb78d1d526f2a8a150c4eb1c47caee200",
+      "fileBytes": 22293,
+      "corpusIdentityDigest": "e5c06a84098990bf73b86850b875701f3d620824f440e5ff4d8c499baf52fa17",
+      "corpusContentDigest": "e3c412dd7a1419b6ce1440096e588d3675dde9e4809b4967b1658794c040b306",
+      "hostLoadOneMinute": {
+        "atStart": 11.5322265625,
+        "atReport": 11.44970703125
+      },
+      "metrics": {
+        "engineTurnsPerSecond": 240.31364729850608,
+        "steadyStateBytes": 56509215,
+        "sidecarPeakBytes": 51527680,
+        "ftsPostings": 710000
+      },
+      "allGatesPassed": true
+    },
+    {
+      "file": "capacity-25k.acceptance.json",
+      "kind": "capacity",
+      "accepted": true,
+      "command": "node scripts/benchmark-insights-engine.mjs --capacity --turns 25000 --turns-per-session 100 --output /tmp/threadshare-insights-capacity-25k.json",
+      "outputSha256": "0f043d416ad19f74746d1d9b92df9f441ccfb184df0e506a8ac2b463d22ab405",
+      "fileBytes": 22363,
+      "corpusIdentityDigest": "bf30c2758c8dd8926a5cab468f37aab254f75535c4f600394625ece1f1fc644f",
+      "corpusContentDigest": "75d70363a1f1a4e8f963051817f02558c91c7e9d53737d4b62c93f3fd34ecd99",
+      "hostLoadOneMinute": {
+        "atStart": 11.1591796875,
+        "atReport": 14.2431640625
+      },
+      "metrics": {
+        "engineTurnsPerSecond": 208.71344337999128,
+        "steadyStateBytes": 276103988,
+        "sidecarPeakBytes": 51838976,
+        "ftsPostings": 3550000
+      },
+      "allGatesPassed": true
+    },
+    {
+      "file": "capacity-250k.acceptance.json",
+      "kind": "capacity",
+      "accepted": true,
+      "command": "node scripts/benchmark-insights-engine.mjs --capacity --turns 250000 --turns-per-session 100 --output /tmp/threadshare-insights-capacity-250k.json",
+      "outputSha256": "150bbe01f6f8a1002f0dbfe09b0914919b1032c78728bd5cd03eaa25a73b4cad",
+      "fileBytes": 22485,
+      "corpusIdentityDigest": "a5a0fed04dd36196676bf11bb9c152149da24d0965ddf68009513f78a917ecde",
+      "corpusContentDigest": "74303dc2e9eb59472fb7322bf3863afc675344c6d5de8a48ae7efc633cbc1d71",
+      "hostLoadOneMinute": {
+        "atStart": 14.11669921875,
+        "atReport": 6.916015625
+      },
+      "metrics": {
+        "engineTurnsPerSecond": 221.376033185057,
+        "steadyStateBytes": 2721485638,
+        "observedDerivedStatePeakBytes": 2810770246,
+        "factBytes": 2507046912,
+        "ftsBytes": 146305024,
+        "projectionBytes": 66347008,
+        "sidecarPeakBytes": 52002816,
+        "ftsPostings": 35500000,
+        "lockBytePageBytes": 4096,
+        "freelistBytes": 0
+      },
+      "allGatesPassed": true
+    }
+  ],
+  "excludedArtifacts": [
+    "generated provider JSONL corpus",
+    "multi-GiB SQLite database and WAL/SHM files",
+    "Engine binaries and Cargo target directory",
+    "CPU profiles, heap dumps, and temporary .noindex directories",
+    "real sessions, raw prompts, local paths, and credentials"
+  ]
+}

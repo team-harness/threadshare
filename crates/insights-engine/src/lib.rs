@@ -4,7 +4,16 @@ use std::cmp::Ordering;
 use unicode_normalization::UnicodeNormalization;
 
 pub mod engine;
+pub mod engine_status;
+pub mod fact_model;
+mod fact_projection;
+pub mod fact_repository;
+pub mod fts_projection;
+pub mod normalized_repository;
+pub mod projection;
 pub mod protocol;
+pub mod retry_projection;
+pub mod source_state;
 pub mod storage;
 
 pub fn hash_key(domain: &str, parts: &[Vec<u8>]) -> String {

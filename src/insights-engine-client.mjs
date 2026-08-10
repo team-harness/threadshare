@@ -6,8 +6,16 @@ import {
   assertBeginSessionCompatible,
   assertHandshakeCompatible,
   createAbortSessionMessage,
+  createExcludeSourceMessage,
   createHelloMessage,
+  createListSourceStatesMessage,
+  createReadEngineStatusMessage,
+  createReadPurgeStatusMessage,
+  createReadSourceCheckpointMessage,
+  createRemoveSourceMessage,
+  createRunPurgeMaintenanceMessage,
   createSessionDeltaMessages,
+  decodeSourceStateFromProtocol,
   encodeProtocolFrame,
 } from "./insights-engine-protocol.mjs";
 import { resolveInsightsEngine } from "./insights-engine-runtime.mjs";
@@ -39,6 +47,30 @@ function assertPositiveInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) 
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new TypeError(`${label} must be a positive integer no greater than ${maximum}`);
   }
+}
+
+function lifecycleSessionKey(input, operation) {
+  if (!input || typeof input !== "object" ||
+      !input.previous || typeof input.previous !== "object" ||
+      typeof input.previous.sessionKey !== "string") {
+    throw new TypeError(`${operation} requires previous.sessionKey`);
+  }
+  return input.previous.sessionKey;
+}
+
+function freezeEngineStatus(response) {
+  return Object.freeze({
+    snapshotSeq: response.snapshotSeq,
+    snapshotAgeMs: response.snapshotAgeMs,
+    snapshotPending: response.snapshotPending,
+    factStorageProfile: response.factStorageProfile,
+    projections: Object.freeze(response.projections.map((projection) =>
+      Object.freeze({ ...projection }))),
+    changeLog: Object.freeze({ ...response.changeLog }),
+    purge: Object.freeze({ ...response.purge }),
+    storage: Object.freeze({ ...response.storage }),
+    integrity: Object.freeze({ ...response.integrity }),
+  });
 }
 
 function disconnectedError(stderr, cause) {
@@ -368,12 +400,161 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#applySessionFacts(delta, signal));
+    const operation = this.#tail.then(() => this.#applySessionFacts(delta, null, signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
 
-  async #applySessionFacts(delta, signal) {
+  commitSourceDelta(input, options = {}) {
+    if (!input || typeof input !== "object" || !input.delta || !input.sourceState) {
+      return Promise.reject(new TypeError("commitSourceDelta requires delta and sourceState"));
+    }
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#applySessionFacts(input.delta, input.sourceState, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readSourceStates(options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#readSourceStates(signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readSourceCheckpoint(sessionKey, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#readSourceCheckpoint(sessionKey, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  removeSource(input, options = {}) {
+    let sessionKey;
+    try {
+      sessionKey = lifecycleSessionKey(input, "removeSource");
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#removeSource(sessionKey, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  excludeSource(input, options = {}) {
+    let sessionKey;
+    try {
+      sessionKey = lifecycleSessionKey(input, "excludeSource");
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#excludeSource(sessionKey, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readPurgeStatus(sessionKey = null, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#readPurgeStatus(sessionKey, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readEngineStatus(options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#readEngineStatus(signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  runPurgeMaintenance(input = {}, options = {}) {
+    const limit = input.limit ?? 64;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      return Promise.reject(new TypeError("limit must be an integer between 1 and 256"));
+    }
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#runPurgeMaintenance(limit, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  async #applySessionFacts(delta, sourceState, signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) {
       throw disconnectedError(this.#transport.stderr);
@@ -386,6 +567,7 @@ class InsightsEngineClient {
       projectionVersions: this.#requiredContract.projectionVersions,
       analyzerCapabilities: this.#requiredContract.analyzerCapabilities,
       rankerVersion: this.#requiredContract.rankerVersion,
+      sourceState,
     };
     let began = false;
     let committed = false;
@@ -496,6 +678,158 @@ class InsightsEngineClient {
       }
       throw error;
     }
+  }
+
+  async #readSourceStates(signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw disconnectedError(this.#transport.stderr);
+    }
+    const states = [];
+    const seenCursors = new Set();
+    let cursor = null;
+    for (;;) {
+      throwIfAborted(signal, this.#transport.stderr);
+      const requestId = this.#nextRequestId();
+      const request = createListSourceStatesMessage({ requestId, cursor, limit: 256 });
+      await this.#transport.write(request, "sending LIST_SOURCE_STATES", this.#timeoutMs);
+      const response = await this.#expect(
+        "SOURCE_STATES",
+        requestId,
+        {},
+        "waiting for SOURCE_STATES",
+        this.#timeoutMs,
+      );
+      if (cursor !== null && response.states.some((state) => state.sessionKey <= cursor)) {
+        throw unexpectedResponse("SOURCE_STATES", response, this.#transport.stderr);
+      }
+      states.push(...response.states.map(decodeSourceStateFromProtocol));
+      if (response.nextCursor === null) return states;
+      if (seenCursors.has(response.nextCursor)) {
+        throw unexpectedResponse("SOURCE_STATES", response, this.#transport.stderr);
+      }
+      seenCursors.add(response.nextCursor);
+      cursor = response.nextCursor;
+    }
+  }
+
+  async #readSourceCheckpoint(sessionKey, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw disconnectedError(this.#transport.stderr);
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadSourceCheckpointMessage({ requestId, sessionKey });
+    await this.#transport.write(request, "sending READ_SOURCE_CHECKPOINT", this.#timeoutMs);
+    const response = await this.#expect(
+      "SOURCE_CHECKPOINT",
+      requestId,
+      { sessionKey },
+      "waiting for SOURCE_CHECKPOINT",
+      this.#timeoutMs,
+    );
+    return response.checkpoint;
+  }
+
+  async #removeSource(sessionKey, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    const requestId = this.#nextRequestId();
+    const request = createRemoveSourceMessage({ requestId, sessionKey });
+    await this.#transport.write(request, "sending REMOVE_SOURCE", this.#timeoutMs);
+    const response = await this.#expect(
+      "SOURCE_REMOVED",
+      requestId,
+      { sessionKey },
+      "waiting for SOURCE_REMOVED",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return Object.freeze({ sessionKey, removed: response.removed });
+  }
+
+  async #excludeSource(sessionKey, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    const requestId = this.#nextRequestId();
+    const request = createExcludeSourceMessage({ requestId, sessionKey });
+    await this.#transport.write(request, "sending EXCLUDE_SOURCE", this.#timeoutMs);
+    const response = await this.#expect(
+      "SOURCE_EXCLUDED",
+      requestId,
+      { sessionKey },
+      "waiting for SOURCE_EXCLUDED",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return Object.freeze({
+      sessionKey,
+      excluded: response.excluded,
+      purgeState: response.purgeState,
+    });
+  }
+
+  async #readPurgeStatus(sessionKey, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    const requestId = this.#nextRequestId();
+    const request = createReadPurgeStatusMessage({ requestId, sessionKey });
+    await this.#transport.write(request, "sending READ_PURGE_STATUS", this.#timeoutMs);
+    const response = await this.#expect(
+      "PURGE_STATUS",
+      requestId,
+      { sessionKey },
+      "waiting for PURGE_STATUS",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return Object.freeze({
+      state: response.state,
+      pendingFacts: response.pendingFacts,
+      pendingMaintenance: response.pendingMaintenance,
+      purged: response.purged,
+    });
+  }
+
+  async #readEngineStatus(signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    const requestId = this.#nextRequestId();
+    const request = createReadEngineStatusMessage({ requestId });
+    await this.#transport.write(request, "sending READ_ENGINE_STATUS", this.#timeoutMs);
+    const response = await this.#expect(
+      "ENGINE_STATUS",
+      requestId,
+      {},
+      "waiting for ENGINE_STATUS",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeEngineStatus(response);
+  }
+
+  async #runPurgeMaintenance(limit, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    const requestId = this.#nextRequestId();
+    const request = createRunPurgeMaintenanceMessage({ requestId, limit });
+    await this.#transport.write(request, "sending RUN_PURGE_MAINTENANCE", this.#timeoutMs);
+    const response = await this.#expect(
+      "PURGE_MAINTENANCE_STATUS",
+      requestId,
+      {},
+      "waiting for PURGE_MAINTENANCE_STATUS",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return Object.freeze({
+      processedSessions: response.processedSessions,
+      purgedSessions: response.purgedSessions,
+      state: response.state,
+      pendingFacts: response.pendingFacts,
+      pendingMaintenance: response.pendingMaintenance,
+      purged: response.purged,
+    });
   }
 
   async #expect(

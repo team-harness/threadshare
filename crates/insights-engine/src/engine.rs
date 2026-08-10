@@ -1,5 +1,6 @@
+use crate::fact_model::SessionFactsDeltaV1;
 use crate::protocol::{MessageKind, ProtocolError, validate_protocol_message};
-use crate::storage::{CommitOutcome, CommitRequest, EngineStorage, StorageError};
+use crate::storage::{CommitOutcome, EngineStorage, StorageError};
 use crate::{hash_key, try_canonical_json};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -52,11 +53,21 @@ impl std::error::Error for EngineError {}
 impl From<StorageError> for EngineError {
     fn from(error: StorageError) -> Self {
         let category = match error.code {
-            "TS_INSIGHTS_GENERATION_CONFLICT" | "TS_INSIGHTS_DELTA_ID_CONFLICT" => "conflict",
-            "TS_INSIGHTS_STORAGE_FAILED" => "storage",
+            "TS_INSIGHTS_GENERATION_CONFLICT"
+            | "TS_INSIGHTS_DELTA_ID_CONFLICT"
+            | "TS_INSIGHTS_SOURCE_STATE_CONFLICT" => "conflict",
+            "TS_INSIGHTS_STORAGE_FAILED"
+            | "TS_INSIGHTS_STORAGE_CORRUPT"
+            | "TS_INSIGHTS_WAL_BACKPRESSURE" => "storage",
+            "TS_INSIGHTS_PURGE_PENDING" => "maintenance",
             _ => "validation",
         };
-        Self::new(error.code, category, error.message)
+        let mut mapped = Self::new(error.code, category, error.message);
+        mapped.retryable = matches!(
+            mapped.code,
+            "TS_INSIGHTS_WAL_BACKPRESSURE" | "TS_INSIGHTS_PURGE_PENDING"
+        );
+        mapped
     }
 }
 
@@ -425,11 +436,6 @@ impl SessionAccumulator {
         let begin = object(&self.begin, "BEGIN_SESSION")?;
         let contract = object(field(begin, "contract")?, "contract")?;
         let session = field(begin, "session")?.clone();
-        let session_key = string(
-            field(object(&session, "session")?, "sessionKey")?,
-            "sessionKey",
-        )?
-        .to_owned();
         let delta_id = string(field(begin, "deltaId")?, "deltaId")?;
         let expected_generation =
             decimal(field(begin, "expectedGeneration")?, "expectedGeneration")?;
@@ -489,21 +495,17 @@ impl SessionAccumulator {
         );
         let delta = Value::Object(delta);
         verify_delta_id(&delta)?;
-        let canonical_delta = try_canonical_json(&delta).map_err(|_| {
+        try_canonical_json(&delta).map_err(|_| {
             EngineError::new(
                 "TS_INSIGHTS_INVALID_DELTA",
                 "validation",
                 "delta is outside the canonical JSON domain",
             )
         })?;
+        let typed_delta = SessionFactsDeltaV1::try_from(delta)
+            .map_err(|error| EngineError::new(error.code, "validation", error.message))?;
         storage
-            .commit_session(CommitRequest {
-                session_key,
-                delta_id: delta_id.to_owned(),
-                expected_generation,
-                target_generation,
-                canonical_delta,
-            })
+            .apply_session_facts(typed_delta)
             .map_err(EngineError::from)
     }
 }

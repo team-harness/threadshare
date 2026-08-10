@@ -107,6 +107,7 @@ test("renders a self-describing root and command help contract", () => {
   const expectedOptions = {
     sessions: ["format", "limit", "offset"],
     analyze: ["format"],
+    insights: ["format", "regenerate-secret"],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
     publish: ["expires", "json", "revoke", "url"],
@@ -158,6 +159,13 @@ test("renders a self-describing root and command help contract", () => {
     "TS_QUERY_TOO_BROAD",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_STORAGE_FAILED",
+    "TS_INSIGHTS_STORAGE_CORRUPT",
+    "TS_INSIGHTS_WAL_BACKPRESSURE",
+    "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
+    "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
+    "TS_INSIGHTS_EXCLUSION_APPLY_FAILED",
+    "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_PURGE_PENDING",
     "TS_OPERATION_FAILED",
   ];
@@ -199,6 +207,8 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("share"), /paseo ls --json/);
   assert.match(renderCommandHelp("share"), /invalid dry run.*exits 1.*stdout.*JSON.*stderr.*empty/is);
   assert.match(renderCommandHelp("sessions"), /does not list Paseo agents.*paseo ls --json/is);
+  assert.match(renderCommandHelp("insights"), /normal reindex preserves the origin secret/is);
+  assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
   assert.match(renderCommandHelp("publish"), /run `threadshare validate/);
   assert.match(renderCommandHelp("publish"), /revokeToken.*human mode.*stderr/is);
   assert.match(renderCommandHelp("share"), /revokeToken.*human mode.*stderr/is);
@@ -260,6 +270,13 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_QUERY_TOO_BROAD",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_STORAGE_FAILED",
+    "TS_INSIGHTS_STORAGE_CORRUPT",
+    "TS_INSIGHTS_WAL_BACKPRESSURE",
+    "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
+    "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
+    "TS_INSIGHTS_EXCLUSION_APPLY_FAILED",
+    "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_PURGE_PENDING",
   ]) {
     const reserved = {
@@ -278,7 +295,7 @@ test("returns deterministic help diagnostics that tell agents how to recover", (
     {
       args: ["bogus", "--help"],
       code: "TS_USAGE_UNKNOWN_COMMAND",
-      next: /Choose one of: sessions, analyze, messages, export, publish, share, read, revoke, validate/,
+      next: /Choose one of: sessions, analyze, insights, messages, export, publish, share, read, revoke, validate/,
     },
     {
       args: ["help", "bogus"],

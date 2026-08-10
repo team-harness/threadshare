@@ -178,12 +178,300 @@
         "nextSequence": "2",
         "checkpoint": { "generation": "1" },
         "diagnostics": [],
-        "coverage": { "records": 2 }
+        "coverage": { "records": 2 },
+        "sourceState": null
       },
-      "payloadByteLength": 178,
-      "payloadSha256": "b811e33128ea910e6ad224d07c40153d97245aa6b2835898df8307db4c8f2362",
-      "lengthPrefixHex": "000000b2",
-      "canonicalPayload": "{\"checkpoint\":{\"generation\":\"1\"},\"coverage\":{\"records\":2},\"diagnostics\":[],\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"2\",\"requestId\":\"2\",\"type\":\"COMMIT_SESSION\"}"
+      "payloadByteLength": 197,
+      "payloadSha256": "933795b1ccffeab54e05ea567ea84e793a96b019e4820de0ad0394f1ce6f18bc",
+      "lengthPrefixHex": "000000c5",
+      "canonicalPayload": "{\"checkpoint\":{\"generation\":\"1\"},\"coverage\":{\"records\":2},\"diagnostics\":[],\"format\":\"threadshare-insights-protocol@v1\",\"nextSequence\":\"2\",\"requestId\":\"2\",\"sourceState\":null,\"type\":\"COMMIT_SESSION\"}"
+    },
+    {
+      "name": "list-source-states",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "LIST_SOURCE_STATES",
+        "requestId": "3",
+        "cursor": null,
+        "limit": 256
+      },
+      "payloadByteLength": 115,
+      "payloadSha256": "4be8aa796ae1ca58305f03603b3f44626ded43337ed8f8dcb803de143ae6345b",
+      "lengthPrefixHex": "00000073",
+      "canonicalPayload": "{\"cursor\":null,\"format\":\"threadshare-insights-protocol@v1\",\"limit\":256,\"requestId\":\"3\",\"type\":\"LIST_SOURCE_STATES\"}"
+    },
+    {
+      "name": "source-states",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SOURCE_STATES",
+        "requestId": "3",
+        "states": [
+          {
+            "provider": "codex",
+            "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "fileUtf8Hex": "2f746d702f74687265616473686172652f636f6465782d73657373696f6e2e6a736f6e6c",
+            "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "projectKey": null,
+            "metadata": { "dev": "1", "ino": "2", "size": "1", "mtimeNs": "3" },
+            "fingerprints": {
+              "head": {
+                "offset": "0",
+                "length": 1,
+                "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              },
+              "boundary": {
+                "offset": "0",
+                "length": 1,
+                "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              }
+            },
+            "contract": {
+              "factSchemaVersion": 1,
+              "providerAdapterVersion": "codex@1",
+              "privacyPolicyVersion": 1,
+              "duplicatePolicyVersion": 1,
+              "originSecretEpoch": "11111111-2222-4333-8444-555555555555"
+            },
+            "checkpoint": {
+              "completeOffset": "1",
+              "sourceSnapshotStable": true,
+              "generation": "1"
+            }
+          }
+        ],
+        "nextCursor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "payloadByteLength": 993,
+      "payloadSha256": "ec31eda7f6dbb593f7ddf652bd32d523e2b2664f2604491bfd290f01bb6a4646",
+      "lengthPrefixHex": "000003e1",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"nextCursor\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"requestId\":\"3\",\"states\":[{\"checkpoint\":{\"completeOffset\":\"1\",\"generation\":\"1\",\"sourceSnapshotStable\":true},\"contract\":{\"duplicatePolicyVersion\":1,\"factSchemaVersion\":1,\"originSecretEpoch\":\"11111111-2222-4333-8444-555555555555\",\"privacyPolicyVersion\":1,\"providerAdapterVersion\":\"codex@1\"},\"fileUtf8Hex\":\"2f746d702f74687265616473686172652f636f6465782d73657373696f6e2e6a736f6e6c\",\"fingerprints\":{\"boundary\":{\"length\":1,\"offset\":\"0\",\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"head\":{\"length\":1,\"offset\":\"0\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"metadata\":{\"dev\":\"1\",\"ino\":\"2\",\"mtimeNs\":\"3\",\"size\":\"1\"},\"projectKey\":null,\"provider\":\"codex\",\"sessionId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"type\":\"SOURCE_STATES\"}"
+    },
+    {
+      "name": "read-source-checkpoint",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "READ_SOURCE_CHECKPOINT",
+        "requestId": "4",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "payloadByteLength": 173,
+      "payloadSha256": "2fab08faa538bb8d27601a1852a392cb6706cbd2c537b2e040caddc782ff3e95",
+      "lengthPrefixHex": "000000ad",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"4\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"READ_SOURCE_CHECKPOINT\"}"
+    },
+    {
+      "name": "source-checkpoint-missing",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SOURCE_CHECKPOINT",
+        "requestId": "4",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checkpoint": null
+      },
+      "payloadByteLength": 186,
+      "payloadSha256": "07e1e1775debe3cba78a2182f2aa5dfc4aedeae3883104aee755083180989892",
+      "lengthPrefixHex": "000000ba",
+      "canonicalPayload": "{\"checkpoint\":null,\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"4\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"SOURCE_CHECKPOINT\"}"
+    },
+    {
+      "name": "remove-source",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "REMOVE_SOURCE",
+        "requestId": "5",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "payloadByteLength": 164,
+      "payloadSha256": "0211de323cc3b6dba61cfd3a57a7265ebcca2cc7fd931c27ccfa343e4ec58d6c",
+      "lengthPrefixHex": "000000a4",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"5\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"REMOVE_SOURCE\"}"
+    },
+    {
+      "name": "source-removed",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SOURCE_REMOVED",
+        "requestId": "5",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "removed": true
+      },
+      "payloadByteLength": 180,
+      "payloadSha256": "d607a46c42bf6b5111888b985191949028afafb9f233f7705a75e176d9938a98",
+      "lengthPrefixHex": "000000b4",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"removed\":true,\"requestId\":\"5\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"SOURCE_REMOVED\"}"
+    },
+    {
+      "name": "exclude-source",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "EXCLUDE_SOURCE",
+        "requestId": "6",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "payloadByteLength": 165,
+      "payloadSha256": "c82585de96c13429b6d350be62684550efe6a23f5707b7385e88da5fbb51eb6e",
+      "lengthPrefixHex": "000000a5",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"6\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"EXCLUDE_SOURCE\"}"
+    },
+    {
+      "name": "source-excluded",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "SOURCE_EXCLUDED",
+        "requestId": "6",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "excluded": true,
+        "purgeState": "pending-purge"
+      },
+      "payloadByteLength": 211,
+      "payloadSha256": "8837a37f1fa7fdd9e9bc0c8bb641878758ef62b439c04b2e9293b52c61eef5a9",
+      "lengthPrefixHex": "000000d3",
+      "canonicalPayload": "{\"excluded\":true,\"format\":\"threadshare-insights-protocol@v1\",\"purgeState\":\"pending-purge\",\"requestId\":\"6\",\"sessionKey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"SOURCE_EXCLUDED\"}"
+    },
+    {
+      "name": "read-purge-status",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "READ_PURGE_STATUS",
+        "requestId": "7",
+        "sessionKey": null
+      },
+      "payloadByteLength": 106,
+      "payloadSha256": "1ddb26e717d91ada47a160ab0bc96f8bed137027da4dc836d00722cdf646e867",
+      "lengthPrefixHex": "0000006a",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"7\",\"sessionKey\":null,\"type\":\"READ_PURGE_STATUS\"}"
+    },
+    {
+      "name": "purge-status",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "PURGE_STATUS",
+        "requestId": "7",
+        "sessionKey": null,
+        "state": "pending-purge",
+        "pendingFacts": "1",
+        "pendingMaintenance": "0",
+        "purged": "0"
+      },
+      "payloadByteLength": 182,
+      "payloadSha256": "a37930f9cd0807882f18d78304e2f9ae38fbfd8e4ad29781fc121dec6b8c60ee",
+      "lengthPrefixHex": "000000b6",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"pendingFacts\":\"1\",\"pendingMaintenance\":\"0\",\"purged\":\"0\",\"requestId\":\"7\",\"sessionKey\":null,\"state\":\"pending-purge\",\"type\":\"PURGE_STATUS\"}"
+    },
+    {
+      "name": "run-purge-maintenance",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "RUN_PURGE_MAINTENANCE",
+        "requestId": "8",
+        "limit": 64
+      },
+      "payloadByteLength": 103,
+      "payloadSha256": "c59975a81bd7726730212e38fe6e38edcb0a51988b94c047d281494e2db1d04e",
+      "lengthPrefixHex": "00000067",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"limit\":64,\"requestId\":\"8\",\"type\":\"RUN_PURGE_MAINTENANCE\"}"
+    },
+    {
+      "name": "purge-maintenance-status",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "PURGE_MAINTENANCE_STATUS",
+        "requestId": "8",
+        "processedSessions": "1",
+        "purgedSessions": "1",
+        "state": "purged",
+        "pendingFacts": "0",
+        "pendingMaintenance": "0",
+        "purged": "1"
+      },
+      "payloadByteLength": 214,
+      "payloadSha256": "f9ce1d9e6fffd362f9452b035681dfda38e10e5791e8dce69af351b7ea2067c2",
+      "lengthPrefixHex": "000000d6",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"pendingFacts\":\"0\",\"pendingMaintenance\":\"0\",\"processedSessions\":\"1\",\"purged\":\"1\",\"purgedSessions\":\"1\",\"requestId\":\"8\",\"state\":\"purged\",\"type\":\"PURGE_MAINTENANCE_STATUS\"}"
+    },
+    {
+      "name": "read-engine-status",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "READ_ENGINE_STATUS",
+        "requestId": "9"
+      },
+      "payloadByteLength": 89,
+      "payloadSha256": "4bcaa15d40d602871bb49e704578e04bac59f8635c9d37799d25fb16fe4088b0",
+      "lengthPrefixHex": "00000059",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"requestId\":\"9\",\"type\":\"READ_ENGINE_STATUS\"}"
+    },
+    {
+      "name": "engine-status",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "ENGINE_STATUS",
+        "requestId": "9",
+        "snapshotSeq": "17",
+        "snapshotAgeMs": "250",
+        "snapshotPending": false,
+        "factStorageProfile": "normalized-row-v1",
+        "projections": [
+          {
+            "name": "capability-retry-summary",
+            "version": 1,
+            "inputFactSchemaVersion": 1,
+            "rootKind": "capability",
+            "baseSnapshotSeq": "12",
+            "watermark": "17",
+            "status": "active",
+            "errorDigest": null
+          },
+          {
+            "name": "turn-search",
+            "version": 2,
+            "inputFactSchemaVersion": 1,
+            "rootKind": "turn",
+            "baseSnapshotSeq": "17",
+            "watermark": "17",
+            "status": "building",
+            "errorDigest": null
+          },
+          {
+            "name": "turn-search",
+            "version": 3,
+            "inputFactSchemaVersion": 1,
+            "rootKind": "turn",
+            "baseSnapshotSeq": "17",
+            "watermark": "17",
+            "status": "failed",
+            "errorDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "changeLog": {
+          "rows": "42",
+          "payloadBytes": "4096",
+          "maxRows": "1000000",
+          "maxPayloadBytes": "67108864",
+          "state": "within-cap"
+        },
+        "purge": {
+          "state": "pending-purge",
+          "pendingFacts": "1",
+          "pendingMaintenance": "2",
+          "purged": "3"
+        },
+        "storage": {
+          "databaseBytes": "1048576",
+          "walBytes": "134217728",
+          "walPressureAction": "backpressure",
+          "recentDiagnostic": "TS_INSIGHTS_WAL_BACKPRESSURE"
+        },
+        "integrity": {
+          "quickCheck": "ok",
+          "fts": "ok"
+        }
+      },
+      "payloadByteLength": 1158,
+      "payloadSha256": "75740e796a1adc69d4d35a944e0447309027efb2a8092421381e28f198860cc5",
+      "lengthPrefixHex": "00000486",
+      "canonicalPayload": "{\"changeLog\":{\"maxPayloadBytes\":\"67108864\",\"maxRows\":\"1000000\",\"payloadBytes\":\"4096\",\"rows\":\"42\",\"state\":\"within-cap\"},\"factStorageProfile\":\"normalized-row-v1\",\"format\":\"threadshare-insights-protocol@v1\",\"integrity\":{\"fts\":\"ok\",\"quickCheck\":\"ok\"},\"projections\":[{\"baseSnapshotSeq\":\"12\",\"errorDigest\":null,\"inputFactSchemaVersion\":1,\"name\":\"capability-retry-summary\",\"rootKind\":\"capability\",\"status\":\"active\",\"version\":1,\"watermark\":\"17\"},{\"baseSnapshotSeq\":\"17\",\"errorDigest\":null,\"inputFactSchemaVersion\":1,\"name\":\"turn-search\",\"rootKind\":\"turn\",\"status\":\"building\",\"version\":2,\"watermark\":\"17\"},{\"baseSnapshotSeq\":\"17\",\"errorDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"inputFactSchemaVersion\":1,\"name\":\"turn-search\",\"rootKind\":\"turn\",\"status\":\"failed\",\"version\":3,\"watermark\":\"17\"}],\"purge\":{\"pendingFacts\":\"1\",\"pendingMaintenance\":\"2\",\"purged\":\"3\",\"state\":\"pending-purge\"},\"requestId\":\"9\",\"snapshotAgeMs\":\"250\",\"snapshotPending\":false,\"snapshotSeq\":\"17\",\"storage\":{\"databaseBytes\":\"1048576\",\"recentDiagnostic\":\"TS_INSIGHTS_WAL_BACKPRESSURE\",\"walBytes\":\"134217728\",\"walPressureAction\":\"backpressure\"},\"type\":\"ENGINE_STATUS\"}"
     },
     {
       "name": "session-committed",

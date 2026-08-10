@@ -1,10 +1,66 @@
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const BUNDLED_SQLITE_VERSION: &str = "3.53.2";
 const FTS5_SEEK_PARAMETER_TIERS: [usize; 4] = [8, 32, 128, 256];
+pub(crate) const WAL_PASSIVE_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const WAL_BACKPRESSURE_BYTES: u64 = 128 * 1024 * 1024;
+
+#[cfg(debug_assertions)]
+const TEST_CRASH_FAILPOINT_ENV: &str = "THREADSHARE_INSIGHTS_TEST_CRASH_AT";
+#[cfg(debug_assertions)]
+const TEST_CRASH_MARKER_ENV: &str = "THREADSHARE_INSIGHTS_TEST_CRASH_MARKER";
+
+#[cfg(debug_assertions)]
+fn test_crash_failpoint_enabled(name: &str) -> bool {
+    std::env::var(TEST_CRASH_FAILPOINT_ENV).as_deref() == Ok(name)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn test_crash_failpoint(name: &str) {
+    if test_crash_failpoint_enabled(name) {
+        if let Some(path) = std::env::var_os(TEST_CRASH_MARKER_ENV)
+            && let Ok(mut marker) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+        {
+            let _ = std::io::Write::write_all(&mut marker, name.as_bytes());
+        }
+        std::process::abort();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn arm_session_fact_commit_failpoint(connection: &Connection) -> Result<bool, StorageError> {
+    if !test_crash_failpoint_enabled("before-session-fact-transaction-commit") {
+        return Ok(false);
+    }
+    connection.commit_hook(Some(|| {
+        test_crash_failpoint("before-session-fact-transaction-commit");
+        false
+    }))?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalPressureAction {
+    None,
+    PassiveCheckpoint,
+    Backpressure,
+}
+
+impl WalPressureAction {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PassiveCheckpoint => "passive-checkpoint",
+            Self::Backpressure => "backpressure",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageError {
@@ -13,7 +69,7 @@ pub struct StorageError {
 }
 
 impl StorageError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -31,6 +87,20 @@ impl std::error::Error for StorageError {}
 
 impl From<rusqlite::Error> for StorageError {
     fn from(error: rusqlite::Error) -> Self {
+        if matches!(
+            &error,
+            rusqlite::Error::SqliteFailure(failure, _)
+                if matches!(
+                    failure.code,
+                    rusqlite::ffi::ErrorCode::DatabaseCorrupt
+                        | rusqlite::ffi::ErrorCode::NotADatabase
+                )
+        ) {
+            return Self::new(
+                "TS_INSIGHTS_STORAGE_CORRUPT",
+                "the Insights database is corrupt or is not a SQLite database",
+            );
+        }
         Self::new("TS_INSIGHTS_STORAGE_FAILED", error.to_string())
     }
 }
@@ -119,6 +189,8 @@ pub struct CommitOutcome {
 
 pub struct EngineStorage {
     connection: Connection,
+    staged_source_state: Option<crate::source_state::SourceState>,
+    database_path: Option<PathBuf>,
 }
 
 fn valid_decimal(value: &str) -> bool {
@@ -155,21 +227,44 @@ fn fts5_virtual_table_index(detail: &str) -> Option<u16> {
     std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
+pub(crate) fn wal_pressure_action(
+    wal_bytes: u64,
+    passive_checkpoint_bytes: u64,
+    backpressure_bytes: u64,
+) -> WalPressureAction {
+    if wal_bytes >= backpressure_bytes {
+        WalPressureAction::Backpressure
+    } else if wal_bytes >= passive_checkpoint_bytes {
+        WalPressureAction::PassiveCheckpoint
+    } else {
+        WalPressureAction::None
+    }
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
 impl EngineStorage {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         persistent_file_permissions::prepare(path)?;
         let connection = Connection::open(path)?;
-        let storage = Self::configure(connection, true)?;
+        let storage = Self::configure(connection, Some(path.to_path_buf()))?;
         persistent_file_permissions::enforce(path)?;
         Ok(storage)
     }
 
     pub fn open_in_memory() -> Result<Self, StorageError> {
         let connection = Connection::open_in_memory()?;
-        Self::configure(connection, false)
+        Self::configure(connection, None)
     }
 
-    fn configure(connection: Connection, persistent: bool) -> Result<Self, StorageError> {
+    fn configure(
+        mut connection: Connection,
+        database_path: Option<PathBuf>,
+    ) -> Result<Self, StorageError> {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -185,7 +280,7 @@ impl EngineStorage {
                 "SQLite did not enable secure_delete",
             ));
         }
-        if persistent {
+        if database_path.is_some() {
             let journal_mode: String =
                 connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
             if !journal_mode.eq_ignore_ascii_case("wal") {
@@ -194,6 +289,7 @@ impl EngineStorage {
                     "SQLite did not enable WAL mode",
                 ));
             }
+            connection.execute_batch("PRAGMA wal_autocheckpoint=0;")?;
         }
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS engine_metadata (
@@ -201,15 +297,65 @@ impl EngineStorage {
                value TEXT NOT NULL
              ) WITHOUT ROWID;
              INSERT OR IGNORE INTO engine_metadata(key, value) VALUES ('snapshot_seq', '0');
-             CREATE TABLE IF NOT EXISTS session_commits (
-               session_key BLOB PRIMARY KEY,
-               generation TEXT NOT NULL,
-               delta_id BLOB NOT NULL,
-               canonical_delta TEXT NOT NULL,
-               snapshot_seq INTEGER NOT NULL
-             ) WITHOUT ROWID;",
+             CREATE TRIGGER IF NOT EXISTS engine_snapshot_timestamp
+             AFTER UPDATE OF value ON engine_metadata
+             WHEN NEW.key='snapshot_seq' AND NEW.value<>OLD.value
+             BEGIN
+               INSERT INTO engine_metadata(key,value)
+               VALUES(
+                 'snapshot_committed_at_ms',
+                 CAST(unixepoch('subsec') * 1000 AS INTEGER)
+               )
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+             END;",
         )?;
-        Ok(Self { connection })
+        crate::normalized_repository::initialize_schema(&mut connection)?;
+        crate::source_state::initialize_schema(&connection)?;
+        Ok(Self {
+            connection,
+            staged_source_state: None,
+            database_path,
+        })
+    }
+
+    fn maintain_wal_after_commit(&self) -> Result<WalPressureAction, StorageError> {
+        self.maintain_wal_after_commit_with_thresholds(
+            WAL_PASSIVE_CHECKPOINT_BYTES,
+            WAL_BACKPRESSURE_BYTES,
+        )
+    }
+
+    fn maintain_wal_after_commit_with_thresholds(
+        &self,
+        passive_checkpoint_bytes: u64,
+        backpressure_bytes: u64,
+    ) -> Result<WalPressureAction, StorageError> {
+        let Some(database_path) = &self.database_path else {
+            return Ok(WalPressureAction::None);
+        };
+        let wal_path = sqlite_sidecar_path(database_path, "-wal");
+        let wal_bytes = match std::fs::metadata(wal_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let action = wal_pressure_action(wal_bytes, passive_checkpoint_bytes, backpressure_bytes);
+        let checkpoint_mode = match action {
+            WalPressureAction::None => return Ok(action),
+            WalPressureAction::PassiveCheckpoint => "PASSIVE",
+            WalPressureAction::Backpressure => "TRUNCATE",
+        };
+        let sql = format!("PRAGMA wal_checkpoint({checkpoint_mode})");
+        let (busy, _, _): (i64, i64, i64) = self
+            .connection
+            .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        if action == WalPressureAction::Backpressure && busy != 0 {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_WAL_BACKPRESSURE",
+                "the Insights writer is waiting for readers to release the WAL snapshot",
+            ));
+        }
+        Ok(action)
     }
 
     pub fn sqlite_version(&self) -> String {
@@ -389,44 +535,74 @@ impl EngineStorage {
         })?;
         let delta_id = hex::decode(&request.delta_id)
             .map_err(|_| StorageError::new("TS_INSIGHTS_INVALID_DELTA_ID", "invalid deltaId"))?;
+        let canonical_digest = Sha256::digest(request.canonical_delta.as_bytes()).to_vec();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO sessions(
+               session_key,provider,session_scope,eligibility,duplicate_policy_version
+             ) VALUES (?1,'legacy','unknown','unknown',1)",
+            params![&session_key],
+        )?;
+        let session_id: i64 = transaction.query_row(
+            "SELECT session_id FROM sessions WHERE session_key=?1",
+            params![&session_key],
+            |row| row.get(0),
+        )?;
         let current = transaction
             .query_row(
-                "SELECT generation, delta_id, canonical_delta, snapshot_seq
-                 FROM session_commits WHERE session_key=?1",
-                params![&session_key],
+                "SELECT generation, delta_id, canonical_digest, snapshot_seq
+                 FROM session_commits WHERE session_id=?1",
+                [session_id],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?;
 
-        if let Some((_, committed_delta_id, canonical_delta, snapshot_seq)) = &current
+        if let Some((_, committed_delta_id, committed_digest, snapshot_seq)) = &current
             && committed_delta_id == &delta_id
         {
-            if canonical_delta != &request.canonical_delta {
+            if committed_digest != &canonical_digest {
                 return Err(StorageError::new(
                     "TS_INSIGHTS_DELTA_ID_CONFLICT",
                     "the committed deltaId belongs to different canonical bytes",
                 ));
             }
-            return Ok(CommitOutcome {
+            let outcome = CommitOutcome {
                 snapshot_seq: snapshot_seq.to_string(),
                 session_key: request.session_key,
                 delta_id: request.delta_id,
                 idempotent: true,
-            });
+            };
+            drop(transaction);
+            self.maintain_wal_after_commit()?;
+            return Ok(outcome);
         }
 
-        let actual_generation = current.as_ref().map(|item| item.0.as_str()).unwrap_or("0");
-        if actual_generation != request.expected_generation {
+        let actual_generation = current
+            .as_ref()
+            .map(|item| {
+                item.0
+                    .as_slice()
+                    .try_into()
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| {
+                        StorageError::new(
+                            "TS_INSIGHTS_STORAGE_CORRUPT",
+                            "stored generation is not an 8-byte BLOB",
+                        )
+                    })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if actual_generation.to_string() != request.expected_generation {
             return Err(StorageError::new(
                 "TS_INSIGHTS_GENERATION_CONFLICT",
                 format!(
@@ -446,28 +622,35 @@ impl EngineStorage {
         )?;
         transaction.execute(
             "INSERT INTO session_commits(
-               session_key, generation, delta_id, canonical_delta, snapshot_seq
+               session_id, generation, delta_id, canonical_digest, snapshot_seq
              ) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(session_key) DO UPDATE SET
+             ON CONFLICT(session_id) DO UPDATE SET
                generation=excluded.generation,
                delta_id=excluded.delta_id,
-               canonical_delta=excluded.canonical_delta,
+               canonical_digest=excluded.canonical_digest,
                snapshot_seq=excluded.snapshot_seq",
             params![
-                &session_key,
-                &request.target_generation,
+                session_id,
+                request
+                    .target_generation
+                    .parse::<u64>()
+                    .unwrap()
+                    .to_be_bytes()
+                    .to_vec(),
                 &delta_id,
-                &request.canonical_delta,
+                &canonical_digest,
                 snapshot_seq
             ],
         )?;
         transaction.commit()?;
-        Ok(CommitOutcome {
+        let outcome = CommitOutcome {
             snapshot_seq: snapshot_seq.to_string(),
             session_key: request.session_key,
             delta_id: request.delta_id,
             idempotent: false,
-        })
+        };
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
     }
 
     pub fn committed_session_count(&self) -> Result<u64, StorageError> {
@@ -481,11 +664,133 @@ impl EngineStorage {
             )
         })
     }
+
+    pub fn apply_session_facts(
+        &mut self,
+        delta: crate::fact_model::SessionFactsDeltaV1,
+    ) -> Result<CommitOutcome, StorageError> {
+        let source_state = self.staged_source_state.take();
+        let staged_digest =
+            crate::source_state::stage_for_delta(&self.connection, &delta, source_state.as_ref())?;
+        #[cfg(debug_assertions)]
+        let commit_failpoint_armed = arm_session_fact_commit_failpoint(&self.connection)?;
+        let outcome =
+            crate::normalized_repository::apply_session_facts(&mut self.connection, &delta);
+        #[cfg(debug_assertions)]
+        if commit_failpoint_armed {
+            self.connection.commit_hook(None::<fn() -> bool>)?;
+        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                crate::source_state::discard_staged(&self.connection, delta.session.session_key);
+                return Err(error);
+            }
+        };
+        crate::source_state::finish_staged_commit(
+            &self.connection,
+            delta.session.session_key,
+            staged_digest,
+            outcome.idempotent,
+        )?;
+        #[cfg(debug_assertions)]
+        if !outcome.idempotent {
+            test_crash_failpoint("after-session-fact-commit-before-ack");
+        }
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
+    pub fn stage_source_state(&mut self, state: Option<crate::source_state::SourceState>) {
+        self.staged_source_state = state;
+    }
+
+    pub fn clear_staged_source_state(&mut self) {
+        self.staged_source_state = None;
+    }
+
+    pub fn list_source_states(
+        &self,
+        cursor: Option<crate::fact_model::StableKey>,
+        limit: u16,
+    ) -> Result<crate::source_state::SourceStatePage, StorageError> {
+        crate::source_state::list_source_states(&self.connection, cursor, limit)
+    }
+
+    pub fn read_source_checkpoint(
+        &self,
+        session_key: crate::fact_model::StableKey,
+    ) -> Result<Option<crate::fact_model::Checkpoint>, StorageError> {
+        crate::source_state::read_source_checkpoint(&self.connection, session_key)
+    }
+
+    pub fn remove_source(
+        &mut self,
+        session_key: crate::fact_model::StableKey,
+    ) -> Result<crate::source_state::SourceRemovalOutcome, StorageError> {
+        let outcome = crate::source_state::remove_source(&mut self.connection, session_key)?;
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
+    pub fn exclude_source(
+        &mut self,
+        session_key: crate::fact_model::StableKey,
+    ) -> Result<crate::source_state::SourceExclusionOutcome, StorageError> {
+        let outcome = crate::source_state::exclude_source(&mut self.connection, session_key)?;
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
+    pub fn read_purge_status(
+        &self,
+        session_key: Option<crate::fact_model::StableKey>,
+    ) -> Result<crate::source_state::PurgeStatus, StorageError> {
+        crate::source_state::read_purge_status(&self.connection, session_key)
+    }
+
+    pub fn read_engine_status(&self) -> Result<crate::engine_status::EngineStatus, StorageError> {
+        crate::engine_status::read_engine_status(&self.connection, self.database_path.as_deref())
+    }
+
+    pub fn run_purge_maintenance(
+        &mut self,
+        limit: u16,
+    ) -> Result<crate::source_state::PurgeMaintenanceOutcome, StorageError> {
+        crate::source_state::run_purge_maintenance(&mut self.connection, limit)
+    }
+
+    pub fn read_committed_session(
+        &self,
+        session_key: &crate::fact_model::StableKey,
+    ) -> Result<Option<crate::fact_repository::CommittedSessionFacts>, StorageError> {
+        crate::normalized_repository::read_committed_session(&self.connection, session_key)
+    }
+}
+
+impl crate::fact_repository::FactRepository for EngineStorage {
+    fn apply_session_facts(
+        &mut self,
+        delta: crate::fact_model::SessionFactsDeltaV1,
+    ) -> Result<CommitOutcome, StorageError> {
+        EngineStorage::apply_session_facts(self, delta)
+    }
+
+    fn read_committed_session(
+        &self,
+        session_key: &crate::fact_model::StableKey,
+    ) -> Result<Option<crate::fact_repository::CommittedSessionFacts>, StorageError> {
+        EngineStorage::read_committed_session(self, session_key)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitRequest, EngineStorage};
+    use super::{
+        CommitRequest, EngineStorage, WAL_BACKPRESSURE_BYTES, WAL_PASSIVE_CHECKPOINT_BYTES,
+        WalPressureAction, wal_pressure_action,
+    };
+    use rusqlite::params;
 
     #[cfg(unix)]
     use std::fs;
@@ -565,6 +870,99 @@ mod tests {
         assert_eq!(enabled, 1);
     }
 
+    #[test]
+    fn applies_the_fixed_wal_pressure_thresholds() {
+        assert_eq!(WAL_PASSIVE_CHECKPOINT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(WAL_BACKPRESSURE_BYTES, 128 * 1024 * 1024);
+        assert_eq!(
+            wal_pressure_action(
+                WAL_PASSIVE_CHECKPOINT_BYTES - 1,
+                WAL_PASSIVE_CHECKPOINT_BYTES,
+                WAL_BACKPRESSURE_BYTES,
+            ),
+            WalPressureAction::None
+        );
+        assert_eq!(
+            wal_pressure_action(
+                WAL_PASSIVE_CHECKPOINT_BYTES,
+                WAL_PASSIVE_CHECKPOINT_BYTES,
+                WAL_BACKPRESSURE_BYTES,
+            ),
+            WalPressureAction::PassiveCheckpoint
+        );
+        assert_eq!(
+            wal_pressure_action(
+                WAL_BACKPRESSURE_BYTES,
+                WAL_PASSIVE_CHECKPOINT_BYTES,
+                WAL_BACKPRESSURE_BYTES,
+            ),
+            WalPressureAction::Backpressure
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoints_a_persistent_wal_at_transaction_boundaries() {
+        let database = TemporaryDatabase::new();
+        let storage = EngineStorage::open(&database.path).unwrap();
+        let autocheckpoint: i64 = storage
+            .connection
+            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(autocheckpoint, 0);
+
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TABLE wal_pressure_fixture(value BLOB NOT NULL);
+                 INSERT INTO wal_pressure_fixture(value) VALUES (zeroblob(262144));",
+            )
+            .unwrap();
+        let wal_path = sidecar_path(&database.path, "-wal");
+        assert!(fs::metadata(&wal_path).unwrap().len() > 0);
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(1, u64::MAX)
+                .unwrap(),
+            WalPressureAction::PassiveCheckpoint
+        );
+
+        storage
+            .connection
+            .execute(
+                "INSERT INTO wal_pressure_fixture(value) VALUES (zeroblob(4096))",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(1, 2)
+                .unwrap(),
+            WalPressureAction::Backpressure
+        );
+        assert_eq!(fs::metadata(wal_path).unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_content_free_engine_status_from_persistent_storage() {
+        let database = TemporaryDatabase::new();
+        let storage = EngineStorage::open(&database.path).unwrap();
+        let status = storage.read_engine_status().unwrap();
+
+        assert_eq!(status.snapshot_seq, "0");
+        assert!(status.snapshot_pending);
+        assert_eq!(status.snapshot_age_ms, None);
+        assert_eq!(status.fact_storage_profile, "normalized-row-v1");
+        assert!(status.projections.is_empty());
+        assert_eq!(status.change_log.rows, "0");
+        assert_eq!(status.purge.state, crate::source_state::PurgeState::Idle);
+        assert_eq!(status.storage.wal_pressure_action, "none");
+        assert_eq!(status.storage.recent_diagnostic, None);
+        assert_eq!(status.integrity.quick_check, "ok");
+        assert_eq!(status.integrity.fts, "ok");
+    }
+
     #[cfg(unix)]
     #[test]
     fn persistent_database_and_sidecars_are_owner_only() {
@@ -593,6 +991,130 @@ mod tests {
         assert_private_mode(&sidecar_path(path, "-wal"));
         assert_private_mode(&sidecar_path(path, "-shm"));
         drop(storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_sqlite_state_with_a_stable_corruption_diagnostic() {
+        let database = TemporaryDatabase::new();
+        fs::write(&database.path, b"not a sqlite database").unwrap();
+
+        let error = match EngineStorage::open(&database.path) {
+            Ok(_) => panic!("garbage state must not open as SQLite"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "TS_INSIGHTS_STORAGE_CORRUPT");
+        assert!(
+            !error
+                .message
+                .contains(database.path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_write_replays_after_a_reader_releases_wal_backpressure() {
+        let database = TemporaryDatabase::new();
+        let mut storage = EngineStorage::open(&database.path).unwrap();
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TABLE wal_backpressure_fixture(value BLOB NOT NULL);
+                 INSERT INTO wal_backpressure_fixture(value) VALUES (x'00');
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+
+        let mut reader = rusqlite::Connection::open(&database.path).unwrap();
+        reader.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let reader_snapshot = reader.transaction().unwrap();
+        let observed: i64 = reader_snapshot
+            .query_row("SELECT COUNT(*) FROM wal_backpressure_fixture", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(observed, 1);
+
+        let payload_bytes = i64::try_from(WAL_BACKPRESSURE_BYTES + 4 * 1024 * 1024).unwrap();
+        storage
+            .connection
+            .execute(
+                "INSERT INTO wal_backpressure_fixture(value) VALUES (zeroblob(?1))",
+                [payload_bytes],
+            )
+            .unwrap();
+        let wal_path = sidecar_path(&database.path, "-wal");
+        assert!(fs::metadata(&wal_path).unwrap().len() >= WAL_BACKPRESSURE_BYTES);
+
+        let error = storage
+            .commit_session(request('b', "0", "1", "{\"a\":1}"))
+            .unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_WAL_BACKPRESSURE");
+        assert_eq!(storage.committed_session_count().unwrap(), 1);
+
+        drop(reader_snapshot);
+        drop(reader);
+        let replay = storage
+            .commit_session(request('b', "0", "1", "{\"a\":1}"))
+            .unwrap();
+        assert!(replay.idempotent);
+        assert_eq!(replay.snapshot_seq, "1");
+        assert_eq!(fs::metadata(wal_path).unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrates_legacy_commit_receipts_to_bounded_digests() {
+        let database = TemporaryDatabase::new();
+        let connection = rusqlite::Connection::open(&database.path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_commits (
+                   session_key BLOB PRIMARY KEY,
+                   generation TEXT NOT NULL,
+                   delta_id BLOB NOT NULL,
+                   canonical_delta TEXT NOT NULL,
+                   snapshot_seq INTEGER NOT NULL
+                 ) WITHOUT ROWID;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_commits(
+                   session_key,generation,delta_id,canonical_delta,snapshot_seq
+                 ) VALUES (?1,'1',?2,'{\"a\":1}',1)",
+                params![vec![0xaau8; 32], vec![0xbbu8; 32]],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut storage = EngineStorage::open(&database.path).unwrap();
+        assert_eq!(storage.committed_session_count().unwrap(), 1);
+        let columns = storage
+            .connection
+            .prepare("SELECT name FROM pragma_table_info('session_commits') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "canonical_delta"));
+        assert!(columns.iter().any(|column| column == "canonical_digest"));
+        let digest_length: i64 = storage
+            .connection
+            .query_row(
+                "SELECT length(canonical_digest) FROM session_commits",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest_length, 32);
+        assert!(
+            storage
+                .commit_session(request('b', "0", "1", "{\"a\":1}"))
+                .unwrap()
+                .idempotent
+        );
     }
 
     #[test]

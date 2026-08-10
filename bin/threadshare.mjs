@@ -690,6 +690,84 @@ async function pickStartMessage(history) {
   }
 }
 
+async function confirmInsightsSecretRegeneration(confirmation) {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw cliDiagnostic(
+      "TS_TTY_REQUIRED",
+      "Secret regeneration requires an interactive terminal.",
+      {
+        command: "insights",
+        next: "Run `threadshare insights reindex --regenerate-secret` in an interactive terminal, or omit --regenerate-secret to preserve keyed identities.",
+      },
+    );
+  }
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    process.stderr.write(
+      "This replaces the origin secret and every keyed local Insight only after a complete atomic rebuild.\n",
+    );
+    const answer = await prompt.question(`Type ${confirmation} to continue: `);
+    if (answer !== confirmation) {
+      throw cliDiagnostic(
+        "TS_USAGE_INVALID_VALUE",
+        "Secret regeneration confirmation did not match.",
+        {
+          command: "insights",
+          next: "Retry only when you intend to replace all keyed local Insights, and type the exact confirmation shown.",
+        },
+      );
+    }
+  } finally {
+    prompt.close();
+  }
+}
+
+function insightsFailure(error, action) {
+  if (typeof error?.code === "string" && error.code.startsWith("TS_USAGE_")) {
+    return cliDiagnostic(error.code, error instanceof Error ? error.message : String(error), {
+      command: "insights",
+      next: "Run `threadshare insights --help` and correct the command arguments.",
+    });
+  }
+  if (error?.code === "TS_INSIGHTS_ENGINE_UNAVAILABLE" ||
+      error?.code === "TS_INSIGHTS_ENGINE_INVALID") {
+    return cliDiagnostic(error.code, "The local Insights Engine is unavailable or invalid.", {
+      command: "insights",
+      next: "Install or repair the matching Threadshare platform package, then retry `threadshare insights status`.",
+    });
+  }
+  if (error?.code === "TS_INSIGHTS_ORIGIN_SECRET_MISSING" ||
+      error?.code === "TS_INSIGHTS_ORIGIN_SECRET_INVALID") {
+    return cliDiagnostic(
+      error.code,
+      "The local Insights origin secret is missing or invalid while indexed state exists.",
+      {
+        command: "insights",
+        next: "Run `threadshare insights reindex --regenerate-secret` interactively to perform a complete keyed rebuild.",
+      },
+    );
+  }
+  if (error?.code === "TS_INSIGHTS_PURGE_PENDING") {
+    return cliDiagnostic(error.code, "Excluded Insight facts are hidden but secure purge is still pending.", {
+      command: "insights",
+      next: "Run `threadshare insights status`, then retry maintenance after the current writer finishes.",
+    });
+  }
+  if (error?.code === "TS_INSIGHTS_EXCLUSION_APPLY_FAILED") {
+    return cliDiagnostic(error.code, "Not all configured Insight exclusions could be hidden.", {
+      command: "insights",
+      next: "Retry the same `threadshare insights exclude add` command; the operation is idempotent.",
+    });
+  }
+  const next = action === "reset"
+    ? "Resolve the reported local state or writer-lock problem, then retry `threadshare insights reset`."
+    : "Run `threadshare insights status`, resolve its diagnostic, then retry the requested action.";
+  return cliDiagnostic("TS_OPERATION_FAILED", "Unable to complete local Insights maintenance.", {
+    command: "insights",
+    next,
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const help = preflightHelp(args);
@@ -799,6 +877,35 @@ async function main() {
     }
     process.stdout.write(formatReport(report));
     return;
+  }
+  if (command === "insights") {
+    validateCommandInvocation(command, positionals, options);
+    let invocation;
+    try {
+      const {
+        REGENERATE_SECRET_CONFIRMATION,
+        executeInsightsCommand,
+        formatInsightsCommandResult,
+        parseInsightsInvocation,
+      } = await import("../src/insights-command.mjs");
+      invocation = parseInsightsInvocation(positionals, {
+        ...options,
+        "regenerate-secret": options["regenerate-secret"],
+      });
+      if (invocation.regenerateSecret) {
+        await confirmInsightsSecretRegeneration(REGENERATE_SECRET_CONFIRMATION);
+      }
+      const result = await executeInsightsCommand(invocation, {
+        regenerationConfirmation: invocation.regenerateSecret
+          ? REGENERATE_SECRET_CONFIRMATION
+          : undefined,
+      });
+      process.stdout.write(formatInsightsCommandResult(result, invocation.format));
+      return;
+    } catch (error) {
+      if (error?.name === "CliDiagnostic") throw error;
+      throw insightsFailure(error, invocation?.action ?? positionals[1]);
+    }
   }
   if (command === "messages") {
     const { provider, session } = sessionCommand(command, positionals, options);
