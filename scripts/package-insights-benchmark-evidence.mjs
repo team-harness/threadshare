@@ -163,6 +163,81 @@ function reportIdentity(report, name) {
   return { sourceRevision, identity };
 }
 
+function validateDigestEquality(value, name) {
+  const pair = plainObject(value, name);
+  requireHex(pair.incremental, `${name}.incremental`);
+  requireHex(pair.cleanRebuild, `${name}.cleanRebuild`);
+  requireGate(pair.equal, `${name}.equal`);
+  if (pair.incremental !== pair.cleanRebuild) {
+    fail(`${name} differs between incremental and clean-rebuild snapshots`);
+  }
+}
+
+function validateMutationQueryEquivalence(value, turns) {
+  const equivalence = plainObject(value, `capacity ${turns} mutation query equivalence`);
+  if (equivalence.count !== 100) {
+    fail(`capacity ${turns} mutation query equivalence must contain exactly 100 queries`);
+  }
+  if (equivalence.pathLimit !== 10) {
+    fail(`capacity ${turns} mutation query equivalence must use pathLimit=10`);
+  }
+  validateDigestEquality(
+    equivalence.clockIdentity,
+    `capacity ${turns} mutation query clock identity`,
+  );
+  const coverage = plainObject(
+    equivalence.coverage,
+    `capacity ${turns} mutation query coverage`,
+  );
+  const expectedCoverageNames = [
+    "distinctQueryCount",
+    "resultQueryCount",
+    "toolPathFamilyQueryCount",
+  ];
+  if (
+    JSON.stringify(Object.keys(coverage).sort()) !==
+    JSON.stringify([...expectedCoverageNames].sort())
+  ) {
+    fail(`capacity ${turns} mutation query coverage is incomplete`);
+  }
+  for (const name of expectedCoverageNames) {
+    const pair = plainObject(coverage[name], `capacity ${turns} mutation query ${name}`);
+    if (
+      pair.incremental !== equivalence.count ||
+      pair.cleanRebuild !== equivalence.count ||
+      pair.equal !== true
+    ) {
+      fail(`capacity ${turns} mutation query ${name} did not exercise every query`);
+    }
+  }
+  const digests = plainObject(
+    equivalence.digests,
+    `capacity ${turns} mutation query digests`,
+  );
+  const expectedDigestNames = [
+    "candidateTurnKeys",
+    "resultTurnOrder",
+    "toolPathFamilies",
+  ];
+  if (
+    JSON.stringify(Object.keys(digests).sort()) !==
+    JSON.stringify([...expectedDigestNames].sort())
+  ) {
+    fail(`capacity ${turns} mutation query digests are incomplete`);
+  }
+  for (const name of expectedDigestNames) {
+    validateDigestEquality(
+      digests[name],
+      `capacity ${turns} mutation query ${name} digest`,
+    );
+  }
+  requireGate(
+    equivalence.allQueriesExercised,
+    `capacity ${turns} mutation query coverage`,
+  );
+  requireGate(equivalence.allEqual, `capacity ${turns} mutation query equivalence`);
+}
+
 function validateCapacity(report, turns, expected) {
   if (report.format !== "threadshare-insights-query-benchmark@v1") fail(`capacity ${turns} format is invalid`);
   if (report.corpus?.turns !== turns || report.corpus?.turnsPerSession !== 100) {
@@ -218,6 +293,14 @@ function validateCapacity(report, turns, expected) {
     report.formalEvidenceContext?.mutations?.corpus?.sessions !== turns / 100
   ) {
     fail(`capacity ${turns} mutation trace did not use the formal corpus`);
+  }
+  if (turns === 25_000) {
+    validateMutationQueryEquivalence(
+      report.formalEvidenceContext?.mutations?.queryEquivalence,
+      turns,
+    );
+  } else if (report.formalEvidenceContext?.mutations?.queryEquivalence !== undefined) {
+    fail(`capacity ${turns} must not contain a partial mutation query equivalence report`);
   }
 }
 
@@ -448,6 +531,12 @@ export async function packageFormalEvidence({
         warmupsPerPathMode: 100,
         pathLimits: [0, 10],
         seeds: FORMAL_QUERY_SEEDS,
+      },
+      mutationQueryEquivalence: {
+        turns: 25_000,
+        queries: 100,
+        pathLimit: 10,
+        comparison: ["candidateTurnKeys", "resultTurnOrder", "toolPathFamilies"],
       },
       candidate: {
         distractorTurns: FORMAL_CANDIDATE_DISTRACTOR_TURNS,

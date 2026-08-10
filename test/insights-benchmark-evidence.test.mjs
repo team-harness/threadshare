@@ -78,6 +78,44 @@ function dedupeCounts(overrides = {}) {
   };
 }
 
+function mutationQueryEquivalence(overrides = {}) {
+  const digest = (character) => character.repeat(64);
+  return {
+    count: 100,
+    pathLimit: 10,
+    clockIdentity: {
+      incremental: digest("1"),
+      cleanRebuild: digest("1"),
+      equal: true,
+    },
+    coverage: {
+      distinctQueryCount: { incremental: 100, cleanRebuild: 100, equal: true },
+      resultQueryCount: { incremental: 100, cleanRebuild: 100, equal: true },
+      toolPathFamilyQueryCount: { incremental: 100, cleanRebuild: 100, equal: true },
+    },
+    digests: {
+      candidateTurnKeys: {
+        incremental: digest("2"),
+        cleanRebuild: digest("2"),
+        equal: true,
+      },
+      resultTurnOrder: {
+        incremental: digest("3"),
+        cleanRebuild: digest("3"),
+        equal: true,
+      },
+      toolPathFamilies: {
+        incremental: digest("4"),
+        cleanRebuild: digest("4"),
+        equal: true,
+      },
+    },
+    allQueriesExercised: true,
+    allEqual: true,
+    ...overrides,
+  };
+}
+
 function formalReports({
   sourceRevision = "a".repeat(40),
   identity = engineIdentity(),
@@ -122,6 +160,9 @@ function formalReports({
           boundedChangeLog: true,
           integrity: true,
         },
+        ...(turns === 25_000
+          ? { queryEquivalence: mutationQueryEquivalence() }
+          : {}),
       },
     },
   });
@@ -251,6 +292,58 @@ test("formal evidence validation rejects every acceptance bypass", () => {
     }],
     ["empty mutation proof", (reports) => {
       reports["capacity-25k-query.acceptance.json"].formalEvidenceContext.mutations.verified = {};
+    }],
+    ["missing mutation query equivalence", (reports) => {
+      delete reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence;
+    }],
+    ["wrong mutation query count", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence.count = 99;
+    }],
+    ["mutation query clock drift", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence.clockIdentity.cleanRebuild = "5".repeat(64);
+    }],
+    ["duplicate mutation queries", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence
+        .coverage.distinctQueryCount.cleanRebuild = 99;
+    }],
+    ["empty mutation query snapshots", (reports) => {
+      const coverage = reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence.coverage;
+      coverage.resultQueryCount.incremental = 0;
+      coverage.resultQueryCount.cleanRebuild = 0;
+      coverage.toolPathFamilyQueryCount.incremental = 0;
+      coverage.toolPathFamilyQueryCount.cleanRebuild = 0;
+    }],
+    ["mutation candidate drift", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence
+        .digests.candidateTurnKeys.cleanRebuild = "5".repeat(64);
+    }],
+    ["mutation result ordering drift", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence
+        .digests.resultTurnOrder.cleanRebuild = "5".repeat(64);
+    }],
+    ["mutation Tool path grouping drift", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence
+        .digests.toolPathFamilies.cleanRebuild = "5".repeat(64);
+    }],
+    ["mutation query allEqual false", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence.allEqual = false;
+    }],
+    ["mutation query coverage gate false", (reports) => {
+      reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence.allQueriesExercised = false;
+    }],
+    ["unexpected long-term mutation query proof", (reports) => {
+      reports["capacity-250k-query.acceptance.json"]
+        .formalEvidenceContext.mutations.queryEquivalence = mutationQueryEquivalence();
     }],
     ["wrong runner hash", (reports) => {
       reports["quality.acceptance.json"].execution.runnerScriptSha256 = "0".repeat(64);

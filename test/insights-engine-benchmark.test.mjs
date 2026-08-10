@@ -251,18 +251,20 @@ test("small benchmark compares the real Rust commit protocol with node:sqlite", 
 });
 
 test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle mutations", {
-  timeout: 120_000,
+  timeout: 180_000,
   skip: Number(process.versions.node.split(".")[0]) < 22 || !existsSync(DEBUG_ENGINE_PATH)
     ? "requires Node 22.5+ and a debug Insights Engine build"
     : false,
 }, async (t) => {
+  const turnCount = 800;
   const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-capacity-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const report = await runInsightsCapacityBenchmark({
-    turnCount: 12,
-    turnsPerSession: 4,
+    turnCount,
+    turnsPerSession: 100,
     queryCount: 8,
     warmupCount: 2,
+    mutationQueryEquivalenceCount: 8,
     seed: "capacity-e2e-test",
     binaryPath: DEBUG_ENGINE_PATH,
     workingDirectory: directory,
@@ -272,16 +274,16 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(report.measuredScope, "item-4-normalized-fact-fts-projection-capacity");
   assert.equal(report.environment.hostLoad.atStart.oneMinute >= 0, true);
   assert.equal(report.environment.hostLoad.atReport.oneMinute >= 0, true);
-  assert.equal(report.corpus.turns, 12);
+  assert.equal(report.corpus.turns, turnCount);
   assert.equal(report.corpus.density.evidenceEventsPerTurn, 9);
   const audit = report.rustSidecar.capacity;
-  assert.equal(audit.rowCounts.turns, 12);
-  assert.equal(audit.rowCounts.source_records, 12 * 9);
-  assert.equal(audit.rowCounts.evidence_events, 12 * 9);
-  assert.equal(audit.rowCounts.capability_uses, 12 * 3);
-  assert.equal(audit.rowCounts.turn_fts_documents, 12);
-  assert.equal(audit.rowCounts.turn_rollup_contributions >= 12, true);
-  assert.equal(audit.ftsMetrics.documents, 12);
+  assert.equal(audit.rowCounts.turns, turnCount);
+  assert.equal(audit.rowCounts.source_records, turnCount * 9);
+  assert.equal(audit.rowCounts.evidence_events, turnCount * 9);
+  assert.equal(audit.rowCounts.capability_uses, turnCount * 3);
+  assert.equal(audit.rowCounts.turn_fts_documents, turnCount);
+  assert.equal(audit.rowCounts.turn_rollup_contributions >= turnCount, true);
+  assert.equal(audit.ftsMetrics.documents, turnCount);
   const naturalFts = audit.ftsMetrics.byField.find(({ field }) => field === "natural");
   const codeFts = audit.ftsMetrics.byField.find(({ field }) => field === "code");
   const capabilityFts = audit.ftsMetrics.byField.find(({ field }) => field === "capability");
@@ -370,7 +372,10 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   );
   assert.equal(search.rss.sidecarPeakBytes > 0, true);
   assert.equal(search.storage.detailFullFtsBytes, audit.categories.fts.bytes);
-  assert.equal(search.gates.toolPathWorkloadComplete, false);
+  assert.equal(search.gates.toolPathWorkloadComplete, true);
+  assert.equal(search.gates.acceptanceCorpusExact, false);
+  assert.equal(search.gates.queryCountAtLeast1000, false);
+  assert.equal(search.gates.warmupCountAtLeast100, false);
   assert.equal(search.gates.allMeasuredQueryGatesPassed, false);
   assert.equal(report.rustSidecar.startup.emptyDatabase.readyMs >= 0, true);
   const populatedStartup = report.rustSidecar.startup.populatedDatabase;
@@ -399,6 +404,27 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   });
   assert.equal(report.mutations.corpus.turns, report.corpus.turns);
   assert.equal(report.mutations.corpus.sessions, report.corpus.sessions);
+  assert.deepEqual(
+    {
+      count: report.mutations.queryEquivalence.count,
+      pathLimit: report.mutations.queryEquivalence.pathLimit,
+      allEqual: report.mutations.queryEquivalence.allEqual,
+    },
+    { count: 8, pathLimit: 10, allEqual: true },
+  );
+  assert.equal(report.mutations.queryEquivalence.clockIdentity.equal, true);
+  assert.deepEqual(report.mutations.queryEquivalence.coverage, {
+    distinctQueryCount: { incremental: 8, cleanRebuild: 8, equal: true },
+    resultQueryCount: { incremental: 8, cleanRebuild: 8, equal: true },
+    toolPathFamilyQueryCount: { incremental: 8, cleanRebuild: 8, equal: true },
+  });
+  assert.equal(report.mutations.queryEquivalence.allQueriesExercised, true);
+  assert.equal(
+    Object.values(report.mutations.queryEquivalence.digests)
+      .every(({ incremental, cleanRebuild, equal }) =>
+        equal && incremental === cleanRebuild && /^[0-9a-f]{64}$/u.test(incremental)),
+    true,
+  );
 });
 
 test("small ITEM-5 benchmark measures real Rust search with and without Tool paths", {

@@ -698,7 +698,7 @@ fn query_candidates(
         (
             "bm25(turns_fts, 8.0, 4.0, 2.0)",
             format!("turns_fts MATCH {match_parameter}"),
-            "bm25(turns_fts, 8.0, 4.0, 2.0) ASC, turns_fts.rowid ASC",
+            "bm25(turns_fts, 8.0, 4.0, 2.0) ASC, t.turn_key ASC",
             MAX_FTS_CANDIDATES,
         )
     } else {

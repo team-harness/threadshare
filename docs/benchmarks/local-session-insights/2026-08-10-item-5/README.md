@@ -8,7 +8,8 @@
 ## 必需报告
 
 1. `capacity-25k-query.acceptance.json`：25,000 Turn，预热后至少测量 1,000 次
-   查询，同时覆盖 `pathLimit=0` 和 `pathLimit=10`。
+   查询，同时覆盖 `pathLimit=0` 和 `pathLimit=10`；mutation 后另用同源 clean
+   rebuild 跑 100 个同钟确定性查询，逐项比较 candidate、最终顺序和 Tool family。
 2. `capacity-250k-query.acceptance.json`：250,000 Turn，同样覆盖两组查询，且每组
    至少测量 1,000 次。
 3. `quality.acceptance.json`：冻结的去敏 evaluation set Recall@300、Top-20 Recall
@@ -72,6 +73,16 @@ runner 会通过真实 `SEARCH_TURNS` 协议测量两轮：一轮关闭 Tool pat
 <96 MiB、全部派生状态 <1 GiB；250k 要求 P95 <200 ms、P99 <500 ms、RSS
 <128 MiB、全部派生状态 <8 GiB。两者都要求 detail-full FTS <400 MiB。25k/250k
 验收若每组不足 1,000 次测量，会在生成通过 gate 之前被拒绝。
+
+25k mutation trace 还会把 replace/delete/exclude/purge 后的增量库与同源 clean
+rebuild 库置于同一 `nowUnixMs` 和 quiescence 配置下，固定执行 100 个互不重复的
+`pathLimit=10` 双 term 查询。报告要求两侧 100/100 查询都有结果和非空 Tool family，
+只保存 candidate turn key 序列、公开结果 turn key 顺序和 Tool family
+fingerprint/medoid/member 分组的聚合 SHA-256，不保存任何 key；覆盖计数或三类摘要任一
+不符合都会让正式 gate 与 packager 失败。`clockIdentity` 是同一注入时钟的可审计记录，
+不是对墙钟漂移的采样。此处等价性只覆盖 Epic 要求的 candidate、公开结果顺序与 Tool
+family 三轴，不声称 generation、revision、score 或 snapshot 坐标逐字段相等。250k
+继续承担长期容量和延迟门槛，避免为同一正确性断言额外构建第二份 2 GiB 以上数据库。
 
 质量 runner 的正式排名报告只加载 fixture 中的 `real-acceptance` 数据集：先把去标识
 文档作为 Fact 提交到一次性临时数据库，再逐条调用真实 Rust sidecar 的

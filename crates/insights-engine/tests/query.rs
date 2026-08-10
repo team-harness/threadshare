@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use threadshare_insights_engine::fact_model::SessionFactsDeltaV1;
 use threadshare_insights_engine::query::{QueryError, SearchRequest};
@@ -9,6 +11,75 @@ fn fixture_delta() -> SessionFactsDeltaV1 {
     ))
     .unwrap();
     SessionFactsDeltaV1::try_from(fixture["initial"].clone()).unwrap()
+}
+
+fn remap_fixture_value(value: &mut Value, replacements: &BTreeMap<String, String>) {
+    match value {
+        Value::String(current) => {
+            if let Some(replacement) = replacements.get(current) {
+                *current = replacement.clone();
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                remap_fixture_value(item, replacements);
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values_mut() {
+                remap_fixture_value(item, replacements);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn independent_fixture_delta() -> SessionFactsDeltaV1 {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../test/fixtures/insights-fact-mutations/v1-basic.json"
+    ))
+    .unwrap();
+    let mut value = fixture["initial"].clone();
+    // Every target starts with 0, so this single-pass remap cannot cascade into a source key.
+    let replacements = [
+        ('9', "08"),
+        ('a', "01"),
+        ('b', "02"),
+        ('c', "03"),
+        ('1', "04"),
+        ('d', "05"),
+        ('f', "06"),
+        ('2', "07"),
+        ('5', "09"),
+        ('6', "0a"),
+    ]
+    .into_iter()
+    .map(|(source, target)| (source.to_string().repeat(64), target.repeat(32)))
+    .collect::<BTreeMap<_, _>>();
+    remap_fixture_value(&mut value, &replacements);
+    SessionFactsDeltaV1::try_from(value).unwrap()
+}
+
+fn tied_candidate_order(deltas: Vec<SessionFactsDeltaV1>) -> (Vec<String>, Vec<String>) {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    for delta in deltas {
+        storage.apply_session_facts(delta).unwrap();
+    }
+    let (response, trace) = storage
+        .search_with_trace(SearchRequest {
+            query: "normalized fact store".to_owned(),
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    (
+        trace.candidate_turn_keys,
+        response
+            .results
+            .into_iter()
+            .map(|result| result.turn_key)
+            .collect(),
+    )
 }
 
 #[test]
@@ -172,4 +243,16 @@ fn evaluation_trace_preserves_the_production_candidate_order() {
     assert_eq!(trace.candidate_turn_keys, vec!["b".repeat(64)]);
     assert_eq!(response.results[0].turn_key, trace.candidate_turn_keys[0]);
     assert_eq!(trace.path_micros, response.diagnostic.path_micros);
+}
+
+#[test]
+fn equal_bm25_candidates_are_stable_across_ingestion_histories() {
+    let first = fixture_delta();
+    let second = independent_fixture_delta();
+    let forward = tied_candidate_order(vec![first.clone(), second.clone()]);
+    let reverse = tied_candidate_order(vec![second, first]);
+
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.0, vec!["02".repeat(32), "b".repeat(64)]);
+    assert_eq!(forward.1, forward.0);
 }

@@ -82,6 +82,7 @@ const QUERY_BENCHMARK_FORMAT = "threadshare-insights-query-benchmark@v1";
 export const FORMAL_QUERY_BENCHMARK_TURN_COUNTS = Object.freeze([25_000, 250_000]);
 export const FORMAL_QUERY_BENCHMARK_QUERY_COUNT = 1_000;
 export const FORMAL_QUERY_BENCHMARK_WARMUP_COUNT = 100;
+export const FORMAL_MUTATION_QUERY_EQUIVALENCE_COUNT = 100;
 export const FORMAL_QUERY_BENCHMARK_SEEDS = Object.freeze({
   25000: "threadshare-insights-query-25k-v1",
   250000: "threadshare-insights-query-250k-v1",
@@ -1704,6 +1705,148 @@ function capacitySearchText(plan, queryIndex) {
   return `topic${alphabeticOrdinal(topicIndex)}`;
 }
 
+function mutationCapacitySearchText(plan, queryIndex) {
+  const topic = capacitySearchText(plan, queryIndex);
+  const uniqueTerm = `unique${alphabeticOrdinal(queryIndex)}xa`;
+  return `${topic} ${uniqueTerm}`;
+}
+
+function mutationQueryClock(plan) {
+  return Object.freeze({
+    nowUnixMs: String(BASE_TIME_MS + (plan.turnCount + 3_600) * 1_000),
+    quiescenceSeconds: 300,
+  });
+}
+
+function normalizedToolPathFamilies(evidencePaths) {
+  return {
+    pathsTruncated: evidencePaths.pathsTruncated,
+    families: evidencePaths.families.map((family) => ({
+      fingerprint: family.fingerprint,
+      medoid: family.nodes.map((node) => ({
+        providerScopedName: node.providerScopedName,
+        repeatBucket: node.repeatBucket,
+      })),
+      members: [...family.evidenceTurnKeys],
+    })),
+  };
+}
+
+async function collectMutationQuerySnapshot({
+  runtime,
+  plan,
+  count,
+  clock,
+  requestIdStart,
+}) {
+  const digests = {
+    candidateTurnKeys: [],
+    resultTurnOrder: [],
+    toolPathFamilies: [],
+  };
+  const distinctQueries = new Set();
+  let resultQueryCount = 0;
+  let toolPathFamilyQueryCount = 0;
+  for (let index = 0; index < count; index += 1) {
+    const query = mutationCapacitySearchText(plan, index);
+    distinctQueries.add(query);
+    const response = await sendCapacityRequest(
+      runtime,
+      createSearchTurnsMessage({
+        requestId: String(requestIdStart + index),
+        query,
+        filters: capacitySearchFilters(),
+        limit: 20,
+        pathLimit: 10,
+        nowUnixMs: clock.nowUnixMs,
+        quiescenceSeconds: clock.quiescenceSeconds,
+      }),
+      "TURN_SEARCH_RESULTS",
+    );
+    if (response.results.length > 0) resultQueryCount += 1;
+    if (response.evidencePaths.families.length > 0) toolPathFamilyQueryCount += 1;
+    digests.candidateTurnKeys.push(sha256(canonicalJson({
+      index,
+      query,
+      candidateTurnKeys: response.searchTrace.candidateTurnKeys,
+    })));
+    digests.resultTurnOrder.push(sha256(canonicalJson({
+      index,
+      query,
+      results: response.results.map(({ turnKey }) => turnKey),
+    })));
+    digests.toolPathFamilies.push(sha256(canonicalJson({
+      index,
+      query,
+      ...normalizedToolPathFamilies(response.evidencePaths),
+    })));
+  }
+  return {
+    count,
+    distinctQueryCount: distinctQueries.size,
+    resultQueryCount,
+    toolPathFamilyQueryCount,
+    clockIdentity: sha256(canonicalJson(clock)),
+    digests,
+  };
+}
+
+function mutationQueryEquivalence(incremental, cleanRebuild) {
+  const equality = (incrementalValues, cleanRebuildValues) => ({
+    incremental: sha256(canonicalJson(incrementalValues)),
+    cleanRebuild: sha256(canonicalJson(cleanRebuildValues)),
+    equal:
+      incrementalValues.length === cleanRebuildValues.length &&
+      incrementalValues.every((value, index) => value === cleanRebuildValues[index]),
+  });
+  const clockIdentity = {
+    incremental: incremental.clockIdentity,
+    cleanRebuild: cleanRebuild.clockIdentity,
+    equal: incremental.clockIdentity === cleanRebuild.clockIdentity,
+  };
+  const countEquality = (name) => ({
+    incremental: incremental[name],
+    cleanRebuild: cleanRebuild[name],
+    equal: incremental[name] === cleanRebuild[name],
+  });
+  const coverage = {
+    distinctQueryCount: countEquality("distinctQueryCount"),
+    resultQueryCount: countEquality("resultQueryCount"),
+    toolPathFamilyQueryCount: countEquality("toolPathFamilyQueryCount"),
+  };
+  const allQueriesExercised = Object.values(coverage).every(
+    ({ incremental: value, cleanRebuild: clean, equal }) =>
+      equal && value === incremental.count && clean === cleanRebuild.count,
+  );
+  const digests = {
+    candidateTurnKeys: equality(
+      incremental.digests.candidateTurnKeys,
+      cleanRebuild.digests.candidateTurnKeys,
+    ),
+    resultTurnOrder: equality(
+      incremental.digests.resultTurnOrder,
+      cleanRebuild.digests.resultTurnOrder,
+    ),
+    toolPathFamilies: equality(
+      incremental.digests.toolPathFamilies,
+      cleanRebuild.digests.toolPathFamilies,
+    ),
+  };
+  return {
+    count: incremental.count,
+    pathLimit: 10,
+    clockIdentity,
+    coverage,
+    digests,
+    allQueriesExercised,
+    allEqual:
+      incremental.count === cleanRebuild.count &&
+      clockIdentity.equal &&
+      allQueriesExercised &&
+      Object.values(digests).every(({ equal }) => equal),
+  };
+}
+
 async function benchmarkCapacitySearchGroup({
   runtime,
   plan,
@@ -2045,12 +2188,65 @@ async function benchmarkCapacitySidecar({
   };
 }
 
-async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
+async function removeDatabaseGroup(databasePath) {
+  await Promise.all(
+    ["", "-wal", "-shm"].map((suffix) => rm(`${databasePath}${suffix}`, { force: true })),
+  );
+}
+
+async function collectCleanMutationQuerySnapshot({
+  binaryPath,
+  databasePath,
+  plan,
+  count,
+  clock,
+}) {
+  const cleanDatabasePath = `${databasePath}.query-equivalence-clean`;
+  await removeDatabaseGroup(cleanDatabasePath);
+  const runtime = await openCapacitySidecar(binaryPath, cleanDatabasePath, { sampleRss: false });
+  try {
+    let requestId = 1_000;
+    for (let sessionIndex = 0; sessionIndex < plan.sessionCount; sessionIndex += 1) {
+      if (sessionIndex === 1 || sessionIndex === 2) continue;
+      const session = sessionIndex === 0
+        ? plan.sessionAt(0, { generation: 1, replacement: true })
+        : plan.sessionAt(sessionIndex);
+      await sendCapacityDelta(runtime, session.delta, String(requestId));
+      requestId += 1;
+    }
+    const snapshot = await collectMutationQuerySnapshot({
+      runtime,
+      plan,
+      count,
+      clock,
+      requestIdStart: 1_000_000,
+    });
+    await closeCapacitySidecar(runtime);
+    return snapshot;
+  } catch (error) {
+    runtime.child.kill();
+    throw new Error(`${error.message}${runtime.stderr() ? `; engine stderr: ${runtime.stderr()}` : ""}`);
+  } finally {
+    await removeDatabaseGroup(cleanDatabasePath);
+  }
+}
+
+async function runCapacityMutationTrace({
+  binaryPath,
+  databasePath,
+  plan,
+  queryEquivalenceCount = 0,
+}) {
   if (plan.sessionCount < 3) {
     throw new RangeError("capacity mutation trace requires at least three sessions");
   }
+  if (!Number.isSafeInteger(queryEquivalenceCount) || queryEquivalenceCount < 0) {
+    throw new RangeError("capacity mutation query count must be a non-negative safe integer");
+  }
   const runtime = await openCapacitySidecar(binaryPath, databasePath, { sampleRss: false });
   const steps = [];
+  const clock = mutationQueryClock(plan);
+  let incrementalQuerySnapshot = null;
   const time = async (kind, action) => {
     const started = performance.now();
     const outcome = await action();
@@ -2091,6 +2287,15 @@ async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
         state: response.state,
       };
     });
+    if (queryEquivalenceCount > 0) {
+      incrementalQuerySnapshot = await collectMutationQuerySnapshot({
+        runtime,
+        plan,
+        count: queryEquivalenceCount,
+        clock,
+        requestIdStart: 100_000,
+      });
+    }
     await closeCapacitySidecar(runtime);
   } catch (error) {
     runtime.child.kill();
@@ -2134,6 +2339,18 @@ async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
   const removedTurns =
     plan.sessionAt(1).delta.turns.length + plan.sessionAt(2).delta.turns.length;
   const expectedRemainingTurns = plan.turnCount - removedTurns;
+  const cleanQuerySnapshot = incrementalQuerySnapshot === null
+    ? null
+    : await collectCleanMutationQuerySnapshot({
+      binaryPath,
+      databasePath,
+      plan,
+      count: queryEquivalenceCount,
+      clock,
+    });
+  const queryEquivalence = incrementalQuerySnapshot === null
+    ? null
+    : mutationQueryEquivalence(incrementalQuerySnapshot, cleanQuerySnapshot);
   return {
     format: "threadshare-insights-capacity-mutation-trace@v1",
     corpus: { turns: plan.turnCount, sessions: plan.sessionCount, seed: plan.seed },
@@ -2167,6 +2384,7 @@ async function runCapacityMutationTrace({ binaryPath, databasePath, plan }) {
       boundedChangeLog: changeLogRows <= plan.turnsPerSession + 16,
       integrity: integrity.length === 1 && integrity[0] === "ok" && foreignKeyViolations === 0,
     },
+    ...(queryEquivalence === null ? {} : { queryEquivalence }),
   };
 }
 
@@ -2342,12 +2560,19 @@ export async function runInsightsCapacityBenchmark({
   binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
   workingDirectory,
   mutationTrace = true,
+  mutationQueryEquivalenceCount = 0,
 } = {}) {
   const hostLoadAtStart = hostLoad();
   positiveInteger(turnCount, "turnCount");
   positiveInteger(turnsPerSession, "turnsPerSession");
   positiveInteger(queryCount, "queryCount");
   positiveInteger(warmupCount, "warmupCount");
+  if (
+    !Number.isSafeInteger(mutationQueryEquivalenceCount) ||
+    mutationQueryEquivalenceCount < 0
+  ) {
+    throw new RangeError("mutationQueryEquivalenceCount must be a non-negative safe integer");
+  }
   const ownsDirectory = workingDirectory === undefined;
   const directory = workingDirectory ?? await mkdtemp(
     path.join(tmpdir(), "threadshare-insights-capacity-benchmark-"),
@@ -2367,6 +2592,7 @@ export async function runInsightsCapacityBenchmark({
         binaryPath: path.resolve(binaryPath),
         databasePath: capacityDatabasePath,
         plan,
+        queryEquivalenceCount: mutationQueryEquivalenceCount,
       })
       : null;
     return {
@@ -2444,6 +2670,10 @@ export async function runInsightsQueryBenchmark({
     binaryPath,
     workingDirectory,
     mutationTrace: formal,
+    mutationQueryEquivalenceCount:
+      formal && turnCount === 25_000
+        ? FORMAL_MUTATION_QUERY_EQUIVALENCE_COUNT
+        : 0,
   });
   const formalEvidenceContext = formal ? {
     startup: capacity.rustSidecar.startup,
@@ -2457,7 +2687,8 @@ export async function runInsightsQueryBenchmark({
       capacity.rustSidecar.startup.populatedDatabase.gate.medianReadyUnder500Ms,
     mutationTracePassed:
       Object.keys(capacity.mutations.verified).length > 0 &&
-      Object.values(capacity.mutations.verified).every((passed) => passed === true),
+      Object.values(capacity.mutations.verified).every((passed) => passed === true) &&
+      (turnCount !== 25_000 || capacity.mutations.queryEquivalence?.allEqual === true),
   } : null;
   if (formalEvidenceGates) {
     formalEvidenceGates.allFormalEvidenceGatesPassed = Object.values(formalEvidenceGates)

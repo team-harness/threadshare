@@ -149,12 +149,57 @@ function sampleDelta({
   });
 }
 
-async function queryFixtureDelta() {
+async function queryFixtureDelta({ withLifecycle = true } = {}) {
   const fixture = JSON.parse(await readFile(new URL(
     "./fixtures/insights-fact-mutations/v1-basic.json",
     import.meta.url,
   ), "utf8"));
   const delta = structuredClone(fixture.initial);
+  if (withLifecycle) {
+    const lifecycleSourceKey = createHash("sha256")
+      .update("query-fixture-lifecycle-source")
+      .digest("hex");
+    const lifecycleEventKey = createHash("sha256")
+      .update("query-fixture-lifecycle-event")
+      .digest("hex");
+    delta.sourceRecords.push({
+      sourceRecordKey: lifecycleSourceKey,
+      ownerSessionKey: delta.session.sessionKey,
+      startOffset: delta.checkpoint.completeOffset,
+      endOffset: delta.checkpoint.completeOffset,
+      recordSha256: createHash("sha256")
+        .update("query-fixture-lifecycle-record")
+        .digest("hex"),
+      providerRecordClass: "event_msg:task_complete",
+    });
+    delta.evidenceEvents.push({
+      eventKey: lifecycleEventKey,
+      ownerSessionKey: delta.session.sessionKey,
+      occurredTurnKey: null,
+      sourceRecordKey: lifecycleSourceKey,
+      sourceOrder: {
+        recordStartOffset: delta.checkpoint.completeOffset,
+        contentIndex: -1,
+        eventOrdinal: 2,
+      },
+      pointer: {
+        pointerKind: "codex:event_msg:task_complete",
+        contentIndex: -1,
+        eventOrdinal: 2,
+      },
+      originScope: "main",
+      observedTimestamp: delta.session.observedEnd,
+      kind: "turn-lifecycle",
+      lifecycleState: "completed",
+      providerTurnDigest: null,
+    });
+    delta.turnEvidence.push({
+      ownerSessionKey: delta.session.sessionKey,
+      turnKey: delta.turns[0].turnKey,
+      eventKey: lifecycleEventKey,
+      role: "lifecycle",
+    });
+  }
   delta.originSecretEpoch = ORIGIN_SECRET_EPOCH;
   delta.checkpoint.originSecretEpoch = ORIGIN_SECRET_EPOCH;
   return finalizeDelta(delta);
@@ -572,6 +617,7 @@ test("real Rust sidecar searches committed Turns and pages their bounded evidenc
   });
   assert.equal(search.results.length, 1);
   assert.equal(search.results[0].turnKey, delta.turns[0].turnKey);
+  assert.equal(search.results[0].closureState, "hard-sealed");
   assert.deepEqual(search.searchTrace.candidateTurnKeys, [delta.turns[0].turnKey]);
   assert.equal(search.scoringTerms.some((term) => term.logicalTerm === "normalized"), true);
   assert.equal(search.results[0].score.matchedTermIndexes.length > 0, true);
@@ -608,6 +654,39 @@ test("real Rust sidecar searches committed Turns and pages their bounded evidenc
   assert.equal(evidence.nextCursor === null || typeof evidence.nextCursor === "string", true);
   assert.equal(JSON.stringify(evidence).includes("recordStartOffset"), false);
   assert.equal(Object.isFrozen(evidence.turn), true);
+});
+
+test("real Rust sidecar keeps open Turns searchable but out of Tool path evidence", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+  const delta = await queryFixtureDelta({ withLifecycle: false });
+  await client.applySessionFacts(delta);
+
+  const search = await client.searchTurns({
+    query: "normalized fact store",
+    filters: {
+      providers: ["codex"],
+      projectKeys: [],
+      observedAtOrAfterUnixMs: null,
+      observedBeforeUnixMs: null,
+      toolCapabilityKeys: [],
+      skillCapabilityKeys: [],
+      resultEvidence: [],
+      closureStates: [],
+    },
+    limit: 20,
+    pathLimit: 10,
+    nowUnixMs: "1786323723000",
+  });
+  assert.equal(search.results.length, 1);
+  assert.equal(search.results[0].closureState, "open");
+  assert.equal(search.evidencePaths.rawMatchCount, 1);
+  assert.equal(search.evidencePaths.eligibleTurnCount, 0);
+  assert.deepEqual(search.evidencePaths.families, []);
 });
 
 test("source state commits atomically and reads summaries separately from parser checkpoints", {
