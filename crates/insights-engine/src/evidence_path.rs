@@ -924,7 +924,7 @@ fn read_safe_turn(
         )
         .map_err(evidence_failed)?;
     turn.fact_truncation = connection
-        .prepare("SELECT flag FROM turn_fact_truncation WHERE turn_id=?1 ORDER BY ordinal")
+        .prepare("SELECT flag FROM turn_fact_truncation WHERE turn_id=?1 ORDER BY flag")
         .and_then(|mut statement| {
             statement
                 .query_map([turn_id], |row| row.get(0))?

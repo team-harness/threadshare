@@ -193,6 +193,33 @@ fn turn_evidence_is_revision_checked_paginated_and_privacy_safe() {
 }
 
 #[test]
+fn turn_evidence_sorts_multiple_fact_truncation_flags_for_the_wire_contract() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut delta = fixture_delta();
+    delta.turns[0].fact_truncation =
+        vec!["evidence-events".to_owned(), "capability-uses".to_owned()];
+    storage.apply_session_facts(delta).unwrap();
+    let result = storage
+        .search(SearchRequest {
+            providers: vec!["codex".to_owned()],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap()
+        .results
+        .remove(0);
+
+    let page = storage
+        .read_turn_evidence(&result.turn_key, Some(&result.revision), None, 1)
+        .unwrap();
+
+    assert_eq!(
+        page.turn.fact_truncation,
+        ["capability-uses", "evidence-events"]
+    );
+}
+
+#[test]
 fn text_search_intersects_tool_filter_before_ranking() {
     let mut storage = EngineStorage::open_in_memory().unwrap();
     storage.apply_session_facts(fixture_delta()).unwrap();
