@@ -113,6 +113,7 @@ export async function verifyRegistryAttestations({
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
+        "--force",
         "--save-exact",
         `--registry=${REGISTRY}`,
       ],

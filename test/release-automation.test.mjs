@@ -946,6 +946,11 @@ test("published platform verification delegates cryptography to npm audit signat
     "@team-harness/threadshare-linux-x64@0.6.1",
     "--ignore-scripts",
   ]);
+  assert.equal(
+    calls[0].arguments_.includes("--force"),
+    true,
+    "registry attestation verification must install platform packages cross-platform",
+  );
   assert.deepEqual(calls[1].arguments_.slice(0, 4), [
     "audit",
     "signatures",
