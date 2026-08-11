@@ -522,6 +522,20 @@ test("validates the npm DSSE subject, workflow, tag, and resolved git commit", (
       workflow: "publish-npm.yml",
     },
   );
+  const npm12Statement = structuredClone(statement);
+  npm12Statement.predicate.buildDefinition.buildType =
+    "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1";
+  assert.deepEqual(
+    validateNpmProvenance(
+      { dsseEnvelope: { payload: Buffer.from(JSON.stringify(npm12Statement)).toString("base64url") } },
+      { integrity: realIntegrity, sourceSha, tag: "0.4.2" },
+    ),
+    {
+      gitCommit: sourceSha,
+      subjectIntegrity: realIntegrity,
+      workflow: "publish-npm.yml",
+    },
+  );
   const wrongCommit = structuredClone(statement);
   wrongCommit.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit = "b".repeat(64);
   const tampered = {

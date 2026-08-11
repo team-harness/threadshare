@@ -22,6 +22,10 @@ import {
 const execFileAsync = promisify(execFile);
 const REGISTRY = "https://registry.npmjs.org";
 const SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1";
+const NPM_PROVENANCE_BUILD_TYPES = new Set([
+  "https://github.com/npm/cli/gha/v2",
+  "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1",
+]);
 
 function sha512HexFromIntegrity(integrity) {
   const encoded = integrity?.startsWith("sha512-") ? integrity.slice(7) : "";
@@ -60,7 +64,7 @@ export function validateNpmProvenance(document, { integrity, sourceSha, tag }) {
     const workflow = buildDefinition?.externalParameters?.workflow;
     const workflowMatches =
       statement._type === "https://in-toto.io/Statement/v1" &&
-      buildDefinition?.buildType === "https://github.com/npm/cli/gha/v2" &&
+      NPM_PROVENANCE_BUILD_TYPES.has(buildDefinition?.buildType) &&
       workflow?.path === ".github/workflows/publish-npm.yml" &&
       workflow?.ref === `refs/tags/${tag}`;
     if (subjectDigest && gitCommit && workflowMatches) {
