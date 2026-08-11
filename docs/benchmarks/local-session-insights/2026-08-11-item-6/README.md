@@ -9,27 +9,29 @@ Provider session 均未提交。
 
 | 规模 | 测量 / 预热 | P50 | P95 | P99 | 最大值 | P95 / P99 门槛 |
 |---:|---:|---:|---:|---:|---:|---:|
-| 25,000 Turn | 1,000 / 100 | 1.580 ms | 1.942 ms | 2.328 ms | 3.066 ms | <100 / <250 ms |
-| 250,000 Turn | 1,000 / 100 | 11.560 ms | 14.165 ms | 16.631 ms | 20.293 ms | <200 / <500 ms |
+| 25,000 Turn | 1,000 / 100 | 1.658 ms | 2.697 ms | 3.577 ms | 24.910 ms | <100 / <250 ms |
+| 250,000 Turn | 1,000 / 100 | 11.470 ms | 15.665 ms | 20.270 ms | 26.599 ms | <200 / <500 ms |
 
 两档运行的 1,100 次响应都保持同一 payload digest 与 snapshot，mismatch 为 0。
 250,000 Turn 的 post-VACUUM 数据库为 2,779,881,472 bytes，带有界 staging 的派生状态
 峰值为 2,893,485,692 bytes；Fact / FTS / Projection 分别为 2,543,841,280 /
-165,777,408 / 70,205,440 bytes，Engine sidecar peak RSS 为 50,708,480 bytes。
+165,777,408 / 70,205,440 bytes，Engine sidecar peak RSS 为 53,379,072 bytes。
 250k FTS 含 250,000 documents、1,544,274 field terms 与 36,010,640 postings；warm Engine
-READY 的 3 次样本中位数为 4.804 ms。全部 Overview、存储分类、容量、FTS、RSS 与完整性
-gate 通过。artifact 同时保留测量范围和四项 `notMeasured`，避免把未测维度读成已通过。
-`populatedWarmOpenUnder500Ms` 只约束 Engine READY；250k 的 STATUS 读取中位数 7,150.835 ms
-会保留作审计记录，但不属于该 gate，不能解读为完整 warm-open 链路小于 500 ms。
+从启动到首次真实 `READ_INSIGHTS_OVERVIEW` 返回的 3 次样本中位数为 19.357 ms。真实产品路径
+`createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS` 的 append-to-searchable
+为 25k 189.318 ms、250k 163.454 ms，且 probe 清理后 Fact/FTS baseline 精确恢复。全部 Overview、
+存储分类、容量、FTS、RSS、首次可用和 2 秒 freshness gate 通过。artifact 同时保留测量范围和
+四项 `notMeasured`，避免把未测维度读成已通过。250k 完整性 STATUS 读取中位数 7,909.163 ms
+仅作维护审计，不进入 500 ms 首次可用门槛。
 
 ## 来源链
 
-- 被测源码：clean commit `b70877b819787cebb18a9934903ee5be1f3d5d71`。
+- 被测源码：clean commit `e35020de008c6808b4b45376cee933e5eac9a13f`。
 - 批准 Epic SHA-256：`46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582`。
-- benchmark script SHA-256：`96f3af5395bf57878253df4ea5d9bd60c424d48d094150c38f5aeabb39e3fe73`。
-- packager script SHA-256：`a313c2b7a3d39ca980b958d54bbbf5b06aed36c2db6607a534e8e53774e575c1`。
-- raw 25k report：30,694 bytes，SHA-256 `4091faab93bfe4fa27b9006005d523226763d893dd484724bee1f5ea52462345`。
-- raw 250k report：30,852 bytes，SHA-256 `3c15bd405a372241173626165f594b88c61103fd6544d15343fbd388c7fa999c`。
+- benchmark script SHA-256：`c2a0cbdf7761779c5d0cfcabff6636af7854e6f086ae5cfe39e038354c04a05d`。
+- packager script SHA-256：`d31f8d2943969d89a3cd2ebba4528bd28f20b3874476c4086065adb041241f0a`。
+- raw 25k report：32,121 bytes，SHA-256 `6f30190ee4a6ae4c7d1237288ad082cf3c00e748040e0dcabc1c2da7818451e3`。
+- raw 250k report：32,311 bytes，SHA-256 `da0eee5c6ef7b81850e48fde2f0cedd456a82dce930a991f818a5eb1673fa5b0`。
 
 Engine 是该 clean source commit 的 Cargo `--release` 本地构建，binary SHA-256 为
 `3dc78d8dd8fecf6b35924eae43dfeb37772838d283b2dd4d69bdbc74da18b938`。其 version document
@@ -45,7 +47,7 @@ profile，不是 npm stable release provenance；当前 version document 不携�
 ```bash
 ITEM6_SOURCE_WORKTREE="$(mktemp -d)"
 git worktree add --detach "$ITEM6_SOURCE_WORKTREE" \
-  b70877b819787cebb18a9934903ee5be1f3d5d71
+  e35020de008c6808b4b45376cee933e5eac9a13f
 cd "$ITEM6_SOURCE_WORKTREE"
 npm ci --ignore-scripts
 cargo build --locked --release \
@@ -79,9 +81,10 @@ node scripts/package-insights-dashboard-evidence.mjs \
 npm run verify:insights-evidence
 ```
 
-packager 重新计算严格延迟、warm READY、FTS density、6 GiB Fact、8 GiB 派生状态、400 MiB
-FTS 和 96/128 MiB Engine RSS 门槛，不只信任报告中的布尔值；任一缺测、mismatch、dirty
-source、来源哈希漂移、未分类存储或隐私形状都会失败。输出只白名单保留测量边界、环境、
-corpus、Overview、容量聚合与哈希，不会复制 request id、SQLite 对象明细或任何 stable key。
+packager 重新计算严格延迟、warm 首次 Overview、真实产品路径 2 秒 freshness、FTS density、
+6 GiB Fact、8 GiB 派生状态、400 MiB FTS 和 96/128 MiB Engine RSS 门槛，不只信任报告中的
+布尔值；任一缺测、mismatch、dirty source、来源哈希漂移、未分类存储或隐私形状都会失败。
+输出只白名单保留测量边界、环境、corpus、Overview、容量聚合与哈希，不会复制 request id、
+SQLite 对象明细或任何 stable key。
 artifact 与 manifest 交叉记录 packager digest；验证历史证据不依赖未来工作树中的 packager
 仍保持同一字节，避免一次正常的验证器维护让旧证据失效。

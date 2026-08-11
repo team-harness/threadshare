@@ -1,5 +1,5 @@
 {
-  "format": "threadshare-insights-item6-overview-evidence@v1",
+  "format": "threadshare-insights-item6-overview-evidence@v2",
   "measuredScope": "item-4-normalized-fact-fts-projection-capacity",
   "notMeasured": [
     "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
@@ -7,14 +7,14 @@
     "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
     "crash injection and projection shadow rebuild, which have dedicated integration suites"
   ],
-  "sourceRevision": "b70877b819787cebb18a9934903ee5be1f3d5d71",
+  "sourceRevision": "e35020de008c6808b4b45376cee933e5eac9a13f",
   "sourceWorktreeDirty": false,
   "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
-  "benchmarkScriptSha256": "96f3af5395bf57878253df4ea5d9bd60c424d48d094150c38f5aeabb39e3fe73",
-  "packagerScriptSha256": "a313c2b7a3d39ca980b958d54bbbf5b06aed36c2db6607a534e8e53774e575c1",
+  "benchmarkScriptSha256": "c2a0cbdf7761779c5d0cfcabff6636af7854e6f086ae5cfe39e038354c04a05d",
+  "packagerScriptSha256": "d31f8d2943969d89a3cd2ebba4528bd28f20b3874476c4086065adb041241f0a",
   "sourceReport": {
-    "bytes": 30852,
-    "sha256": "3c15bd405a372241173626165f594b88c61103fd6544d15343fbd388c7fa999c"
+    "bytes": 32311,
+    "sha256": "da0eee5c6ef7b81850e48fde2f0cedd456a82dce930a991f818a5eb1673fa5b0"
   },
   "environment": {
     "platform": "darwin",
@@ -27,16 +27,16 @@
     "v8Version": "12.4.254.21-node.39",
     "hostLoad": {
       "atStart": {
-        "oneMinute": 6.427734375,
-        "fiveMinutes": 6.904296875,
-        "fifteenMinutes": 6.560546875,
-        "oneMinutePerLogicalCpu": 0.6427734375
+        "oneMinute": 6.2431640625,
+        "fiveMinutes": 7.12060546875,
+        "fifteenMinutes": 6.8427734375,
+        "oneMinutePerLogicalCpu": 0.62431640625
       },
       "atReport": {
-        "oneMinute": 6.28271484375,
-        "fiveMinutes": 6.61962890625,
-        "fifteenMinutes": 6.68408203125,
-        "oneMinutePerLogicalCpu": 0.628271484375
+        "oneMinute": 8.2822265625,
+        "fiveMinutes": 7.41064453125,
+        "fifteenMinutes": 7.1240234375,
+        "oneMinutePerLogicalCpu": 0.82822265625
       }
     }
   },
@@ -77,31 +77,67 @@
   "engineBuildProvenance": "local-cargo-release-profile-unverifiable",
   "startup": {
     "populatedDatabase": {
-      "readyMs": 4.804165999870747,
-      "statusReadMs": 7150.835124999983,
-      "readyAndStatusMs": 7155.639290999854,
+      "readyMs": 4.987500000046566,
+      "firstOverviewReadMs": 14.369167000055313,
+      "readyAndFirstOverviewMs": 19.35666700010188,
+      "integrityStatusReadMs": 7909.163249999983,
+      "readyOverviewAndIntegrityStatusMs": 7928.583040999947,
       "sampleCount": 3,
       "samples": [
         {
-          "readyMs": 6.476624999893829,
-          "statusReadMs": 12534.366874999832,
-          "readyAndStatusMs": 12540.843499999726
+          "readyMs": 5.550625000149012,
+          "firstOverviewReadMs": 11.773833999875933,
+          "readyAndFirstOverviewMs": 17.324459000024945,
+          "integrityStatusReadMs": 18501.881582999835,
+          "readyOverviewAndIntegrityStatusMs": 18519.20604199986
         },
         {
-          "readyMs": 4.804165999870747,
-          "statusReadMs": 7150.835124999983,
-          "readyAndStatusMs": 7155.639290999854
+          "readyMs": 4.396582999965176,
+          "firstOverviewReadMs": 15.023207999998704,
+          "readyAndFirstOverviewMs": 19.41979099996388,
+          "integrityStatusReadMs": 7909.163249999983,
+          "readyOverviewAndIntegrityStatusMs": 7928.583040999947
         },
         {
-          "readyMs": 4.495374999940395,
-          "statusReadMs": 6823.591042000102,
-          "readyAndStatusMs": 6828.086417000042
+          "readyMs": 4.987500000046566,
+          "firstOverviewReadMs": 14.369167000055313,
+          "readyAndFirstOverviewMs": 19.35666700010188,
+          "integrityStatusReadMs": 7521.356541999849,
+          "readyOverviewAndIntegrityStatusMs": 7540.71320899995
         }
       ],
       "gate": {
         "limitMs": 500,
-        "medianReadyUnder500Ms": true
+        "medianReadyAndFirstOverviewUnder500Ms": true
       }
+    }
+  },
+  "productAppendFreshness": {
+    "measurement": "createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS",
+    "corpusTurnCount": 250000,
+    "baseline": {
+      "sessions": 2500,
+      "turns": 250000,
+      "ftsDocuments": 250000
+    },
+    "append": {
+      "commitAckMs": 144.80275000003166,
+      "appendToSearchableMs": 163.45370800001547,
+      "committed": 1,
+      "searchResultCount": 1
+    },
+    "cleanup": {
+      "missing": 1,
+      "searchResultCount": 0,
+      "restored": true
+    },
+    "gate": {
+      "limitMs": 2000,
+      "productPathUsed": true,
+      "commitAcknowledged": true,
+      "markerUniquelySearchable": true,
+      "cleanupRestored": true,
+      "appendedTurnWithin2Seconds": true
     }
   },
   "overview": {
@@ -115,11 +151,11 @@
     "roundTripMs": {
       "unit": "ms",
       "count": 1000,
-      "total": 11928.18945200229,
-      "p50": 11.560250000096858,
-      "p95": 14.164542000042275,
-      "p99": 16.631125000072643,
-      "max": 20.293416999978945
+      "total": 12171.975528000155,
+      "p50": 11.469583000056446,
+      "p95": 15.665208999998868,
+      "p99": 20.269791999831796,
+      "max": 26.59908299986273
     },
     "gates": {
       "budget": "long-term-250k",
@@ -234,9 +270,9 @@
     },
     "engineRss": {
       "limitBytes": 134217728,
-      "sidecarPeakBytes": 50708480,
-      "nodeHarnessPeakBytes": 173522944,
-      "combinedPeakBytes": 222478336,
+      "sidecarPeakBytes": 53379072,
+      "nodeHarnessPeakBytes": 168591360,
+      "combinedPeakBytes": 221970432,
       "withinLimit": true
     },
     "gates": {
@@ -253,6 +289,7 @@
       "ftsBackendWithinLimit": true,
       "allMeasuredCapacityGatesPassed": true,
       "populatedWarmOpenUnder500Ms": true,
+      "productAppendWithin2Seconds": true,
       "overviewLatencyWithinLimit": true
     }
   }

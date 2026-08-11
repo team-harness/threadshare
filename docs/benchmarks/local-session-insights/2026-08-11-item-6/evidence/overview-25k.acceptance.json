@@ -1,5 +1,5 @@
 {
-  "format": "threadshare-insights-item6-overview-evidence@v1",
+  "format": "threadshare-insights-item6-overview-evidence@v2",
   "measuredScope": "item-4-normalized-fact-fts-projection-capacity",
   "notMeasured": [
     "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
@@ -7,14 +7,14 @@
     "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
     "crash injection and projection shadow rebuild, which have dedicated integration suites"
   ],
-  "sourceRevision": "b70877b819787cebb18a9934903ee5be1f3d5d71",
+  "sourceRevision": "e35020de008c6808b4b45376cee933e5eac9a13f",
   "sourceWorktreeDirty": false,
   "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
-  "benchmarkScriptSha256": "96f3af5395bf57878253df4ea5d9bd60c424d48d094150c38f5aeabb39e3fe73",
-  "packagerScriptSha256": "a313c2b7a3d39ca980b958d54bbbf5b06aed36c2db6607a534e8e53774e575c1",
+  "benchmarkScriptSha256": "c2a0cbdf7761779c5d0cfcabff6636af7854e6f086ae5cfe39e038354c04a05d",
+  "packagerScriptSha256": "d31f8d2943969d89a3cd2ebba4528bd28f20b3874476c4086065adb041241f0a",
   "sourceReport": {
-    "bytes": 30694,
-    "sha256": "4091faab93bfe4fa27b9006005d523226763d893dd484724bee1f5ea52462345"
+    "bytes": 32121,
+    "sha256": "6f30190ee4a6ae4c7d1237288ad082cf3c00e748040e0dcabc1c2da7818451e3"
   },
   "environment": {
     "platform": "darwin",
@@ -27,16 +27,16 @@
     "v8Version": "12.4.254.21-node.39",
     "hostLoad": {
       "atStart": {
-        "oneMinute": 8.3740234375,
-        "fiveMinutes": 6.6572265625,
-        "fifteenMinutes": 6.359375,
-        "oneMinutePerLogicalCpu": 0.83740234375
+        "oneMinute": 8.638671875,
+        "fiveMinutes": 7.7265625,
+        "fifteenMinutes": 6.896484375,
+        "oneMinutePerLogicalCpu": 0.8638671875
       },
       "atReport": {
-        "oneMinute": 6.90087890625,
-        "fiveMinutes": 7.0205078125,
-        "fifteenMinutes": 6.5908203125,
-        "oneMinutePerLogicalCpu": 0.690087890625
+        "oneMinute": 6.61328125,
+        "fiveMinutes": 7.23095703125,
+        "fifteenMinutes": 6.87646484375,
+        "oneMinutePerLogicalCpu": 0.661328125
       }
     }
   },
@@ -77,31 +77,67 @@
   "engineBuildProvenance": "local-cargo-release-profile-unverifiable",
   "startup": {
     "populatedDatabase": {
-      "readyMs": 4.7953749999869615,
-      "statusReadMs": 732.9763749999984,
-      "readyAndStatusMs": 737.7717499999853,
+      "readyMs": 6.6290830000070855,
+      "firstOverviewReadMs": 3.3720410000241827,
+      "readyAndFirstOverviewMs": 8.886291000031633,
+      "integrityStatusReadMs": 774.3923330000252,
+      "readyOverviewAndIntegrityStatusMs": 783.0524990000413,
       "sampleCount": 3,
       "samples": [
         {
-          "readyMs": 4.979707999998936,
-          "statusReadMs": 830.7766659999907,
-          "readyAndStatusMs": 835.7563739999896
+          "readyMs": 5.514250000007451,
+          "firstOverviewReadMs": 3.3720410000241827,
+          "readyAndFirstOverviewMs": 8.886291000031633,
+          "integrityStatusReadMs": 946.4027500000084,
+          "readyOverviewAndIntegrityStatusMs": 955.28904100004
         },
         {
-          "readyMs": 4.7953749999869615,
-          "statusReadMs": 732.9763749999984,
-          "readyAndStatusMs": 737.7717499999853
+          "readyMs": 7.315707999980077,
+          "firstOverviewReadMs": 3.640625,
+          "readyAndFirstOverviewMs": 10.956332999980077,
+          "integrityStatusReadMs": 763.094832999981,
+          "readyOverviewAndIntegrityStatusMs": 774.0511659999611
         },
         {
-          "readyMs": 4.681749999988824,
-          "statusReadMs": 724.4023340000131,
-          "readyAndStatusMs": 729.0840840000019
+          "readyMs": 6.6290830000070855,
+          "firstOverviewReadMs": 2.031083000008948,
+          "readyAndFirstOverviewMs": 8.660166000016034,
+          "integrityStatusReadMs": 774.3923330000252,
+          "readyOverviewAndIntegrityStatusMs": 783.0524990000413
         }
       ],
       "gate": {
         "limitMs": 500,
-        "medianReadyUnder500Ms": true
+        "medianReadyAndFirstOverviewUnder500Ms": true
       }
+    }
+  },
+  "productAppendFreshness": {
+    "measurement": "createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS",
+    "corpusTurnCount": 25000,
+    "baseline": {
+      "sessions": 250,
+      "turns": 25000,
+      "ftsDocuments": 25000
+    },
+    "append": {
+      "commitAckMs": 171.4091250000056,
+      "appendToSearchableMs": 189.31795799999963,
+      "committed": 1,
+      "searchResultCount": 1
+    },
+    "cleanup": {
+      "missing": 1,
+      "searchResultCount": 0,
+      "restored": true
+    },
+    "gate": {
+      "limitMs": 2000,
+      "productPathUsed": true,
+      "commitAcknowledged": true,
+      "markerUniquelySearchable": true,
+      "cleanupRestored": true,
+      "appendedTurnWithin2Seconds": true
     }
   },
   "overview": {
@@ -115,11 +151,11 @@
     "roundTripMs": {
       "unit": "ms",
       "count": 1000,
-      "total": 1635.6297590003524,
-      "p50": 1.579583000013372,
-      "p95": 1.9419579999812413,
-      "p99": 2.3275830000056885,
-      "max": 3.065792000008514
+      "total": 1862.4394510004786,
+      "p50": 1.6581250000162981,
+      "p95": 2.6973329999891575,
+      "p99": 3.5766249999869615,
+      "max": 24.910292000015033
     },
     "gates": {
       "budget": "current-25k",
@@ -234,9 +270,9 @@
     },
     "engineRss": {
       "limitBytes": 100663296,
-      "sidecarPeakBytes": 51855360,
-      "nodeHarnessPeakBytes": 172097536,
-      "combinedPeakBytes": 220643328,
+      "sidecarPeakBytes": 51396608,
+      "nodeHarnessPeakBytes": 169082880,
+      "combinedPeakBytes": 219627520,
       "withinLimit": true
     },
     "gates": {
@@ -253,6 +289,7 @@
       "ftsBackendWithinLimit": true,
       "allMeasuredCapacityGatesPassed": true,
       "populatedWarmOpenUnder500Ms": true,
+      "productAppendWithin2Seconds": true,
       "overviewLatencyWithinLimit": true
     }
   }

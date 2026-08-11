@@ -11,7 +11,7 @@ JSON、manifest、生成参数与哈希；原始 session、prompt/answer、真�
 |---|---|---:|---|
 | [`2026-08-10/`](2026-08-10/) | ITEM-4 回填、增量、事务、容量与隐私清除 | 10,000 session / 250,000 Turn | raw 回填 12.736 MiB/s；250k 派生状态约 2.53 GiB；全部正式 gate 通过 |
 | [`2026-08-10-item-5/`](2026-08-10-item-5/) | ITEM-5 查询质量、延迟、mutation 等价与真实样本外推 | 250,000 Turn / 本机约 30% 字节样本 | Recall@300 0.925；Top-20 Recall 0.925；NDCG@10 0.790453；250k P99 低于 144 ms |
-| [`2026-08-11-item-6/`](2026-08-11-item-6/) | ITEM-6 Dashboard Overview 聚合读取与容量复核 | 250,000 Turn / 1,000 次测量 | 25k P95/P99 1.942/2.328 ms；250k P95/P99 14.165/16.631 ms；全部 Overview/容量 gate 通过 |
+| [`2026-08-11-item-6/`](2026-08-11-item-6/) | ITEM-6 Dashboard Overview、首次可用与产品路径 freshness | 250,000 Turn / 1,000 次测量 | 25k P95/P99 2.697/3.577 ms；250k P95/P99 15.665/20.270 ms；append-to-searchable 163.454 ms；全部 gate 通过 |
 
 ITEM-4 目录另外保留一份受主机竞争影响的失败运行，证明吞吐和 freshness 门槛会真实
 失败，而不是只保存通过样本。ITEM-5 的 `evidence/manifest.json` 绑定 source commit、
@@ -24,10 +24,11 @@ ITEM-4 是里程碑提交前捕获的历史证据，manifest 因而如实记录
 worktree 生成并由 packager 拒绝 dirty source。
 
 ITEM-6 复用同一 capacity runner，并新增 `READ_INSIGHTS_OVERVIEW` 的响应完整性、
-snapshot/payload 稳定性和 25k/250k P95/P99 gate；不复制多 GiB corpus。正式报告由 clean
-commit `b70877b819787cebb18a9934903ee5be1f3d5d71` 生成，独立 manifest 记录 raw report、
-benchmark、packager、Engine 与批准 Epic 的哈希。仓库测试中的 800 Turn real-sidecar
-运行只证明 gate 和协议可执行，不替代这份 250,000 Turn 正式证据。
+snapshot/payload 稳定性、首次真实 Overview 和产品路径 append-to-searchable gate；不复制多
+GiB corpus。正式报告由 clean commit `e35020de008c6808b4b45376cee933e5eac9a13f` 生成，
+独立 manifest 记录 raw report、benchmark、packager、Engine 与批准 Epic 的哈希。该 25k/250k
+产品路径 gate 取代 ITEM-4 历史 10k freshness 数字作为最终 2 秒验收依据；仓库中的 800 Turn
+real-sidecar 运行只证明 gate 和协议可执行，不替代这份正式证据。
 
 ## 数据边界
 

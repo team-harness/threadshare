@@ -75,8 +75,25 @@ test("ITEM-6 verifier rejects rehashed numeric gate bypasses", async (context) =
     ["sidecar RSS", REPORT_250K, (value) => {
       value.capacity.engineRss.sidecarPeakBytes = value.capacity.engineRss.limitBytes + 1;
     }],
-    ["warm Engine ready median", REPORT_25K, (value) => {
-      value.startup.populatedDatabase.readyMs = 500;
+    ["warm Engine first Overview despite a fast READY", REPORT_25K, (value) => {
+      const populated = value.startup.populatedDatabase;
+      populated.firstOverviewReadMs = 550;
+      populated.readyAndFirstOverviewMs = populated.readyMs + populated.firstOverviewReadMs;
+      populated.readyOverviewAndIntegrityStatusMs =
+        populated.readyAndFirstOverviewMs + populated.integrityStatusReadMs;
+      populated.samples = populated.samples.map((sample) => ({
+        ...sample,
+        firstOverviewReadMs: 550,
+        readyAndFirstOverviewMs: sample.readyMs + 550,
+        readyOverviewAndIntegrityStatusMs:
+          sample.readyMs + 550 + sample.integrityStatusReadMs,
+      }));
+    }],
+    ["committed product append is not searchable", REPORT_25K, (value) => {
+      value.productAppendFreshness.append.searchResultCount = 0;
+    }],
+    ["product append cleanup drift", REPORT_250K, (value) => {
+      value.productAppendFreshness.cleanup.restored = false;
     }],
   ];
   for (const [name, file, mutate] of cases) {
@@ -87,6 +104,47 @@ test("ITEM-6 verifier rejects rehashed numeric gate bypasses", async (context) =
       });
     });
   }
+});
+
+test("ITEM-6 verifier keeps integrity STATUS outside the 500 ms first-Overview gate", async () => {
+  await withEvidenceCopy(async (directory) => {
+    await mutateArtifact(directory, REPORT_25K, (value) => {
+      const populated = value.startup.populatedDatabase;
+      populated.readyMs = 4;
+      populated.firstOverviewReadMs = 20;
+      populated.readyAndFirstOverviewMs = 24;
+      populated.integrityStatusReadMs = 7_000;
+      populated.readyOverviewAndIntegrityStatusMs = 7_024;
+      populated.samples = [
+        {
+          readyMs: 3,
+          firstOverviewReadMs: 19,
+          readyAndFirstOverviewMs: 22,
+          integrityStatusReadMs: 6_900,
+          readyOverviewAndIntegrityStatusMs: 6_922,
+        },
+        {
+          readyMs: 4,
+          firstOverviewReadMs: 20,
+          readyAndFirstOverviewMs: 24,
+          integrityStatusReadMs: 7_000,
+          readyOverviewAndIntegrityStatusMs: 7_024,
+        },
+        {
+          readyMs: 5,
+          firstOverviewReadMs: 21,
+          readyAndFirstOverviewMs: 26,
+          integrityStatusReadMs: 7_100,
+          readyOverviewAndIntegrityStatusMs: 7_126,
+        },
+      ];
+      populated.gate = {
+        limitMs: 500,
+        medianReadyAndFirstOverviewUnder500Ms: true,
+      };
+    });
+    assert.equal(await verifyItem6Evidence({ directory }), 2);
+  });
 });
 
 test("ITEM-6 verifier rejects rehashed self-described capacity contracts", async (context) => {
@@ -116,7 +174,7 @@ test("ITEM-6 verifier rejects rehashed self-described capacity contracts", async
 });
 
 test("ITEM-6 verifier rejects missing scope and omitted-measurement disclosure", async (context) => {
-  for (const field of ["measuredScope", "notMeasured", "startup"]) {
+  for (const field of ["measuredScope", "notMeasured", "startup", "productAppendFreshness"]) {
     await context.test(field, async () => {
       await withEvidenceCopy(async (directory) => {
         await mutateArtifact(directory, REPORT_25K, (value) => delete value[field]);

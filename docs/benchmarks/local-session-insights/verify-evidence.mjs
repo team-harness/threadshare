@@ -18,6 +18,8 @@ import {
   ITEM6_NORMALIZED_FACT_LIMIT_BYTES,
   ITEM6_OVERVIEW_EVIDENCE_FORMAT,
   ITEM6_OVERVIEW_MANIFEST_FORMAT,
+  ITEM6_PRODUCT_APPEND_FRESHNESS_MEASUREMENT,
+  ITEM6_PRODUCT_APPEND_LIMIT_MS,
   ITEM6_STEADY_STATE_LIMIT_BYTES,
   ITEM6_WARM_OPEN_LIMIT_MS,
 } from "../../../scripts/package-insights-dashboard-evidence.mjs";
@@ -242,9 +244,32 @@ function validateFtsMetrics(value, corpus, categoryBytes, file) {
 
 function validateStartup(value, file) {
   const startup = object(value, `${file}.startup`);
+  equal(
+    Object.keys(startup).sort(),
+    ["populatedDatabase"],
+    `${file}.startup field set drifted`,
+  );
   const populated = object(startup.populatedDatabase, `${file}.startup.populatedDatabase`);
+  equal(
+    Object.keys(populated).sort(),
+    [
+      "readyMs",
+      "firstOverviewReadMs",
+      "readyAndFirstOverviewMs",
+      "integrityStatusReadMs",
+      "readyOverviewAndIntegrityStatusMs",
+      "sampleCount",
+      "samples",
+      "gate",
+    ].sort(),
+    `${file}.startup.populatedDatabase field set drifted`,
+  );
   const gate = object(populated.gate, `${file}.startup.populatedDatabase.gate`);
-  finiteNumber(populated.readyMs, `${file}.startup.populatedDatabase.readyMs`);
+  equal(
+    Object.keys(gate).sort(),
+    ["limitMs", "medianReadyAndFirstOverviewUnder500Ms"].sort(),
+    `${file}.startup.populatedDatabase.gate field set drifted`,
+  );
   assert(populated.sampleCount === 3, `${file} warm startup sample count drifted`);
   assert(
     Array.isArray(populated.samples) && populated.samples.length === populated.sampleCount,
@@ -252,37 +277,175 @@ function validateStartup(value, file) {
   );
   const samples = populated.samples.map((value, index) => {
     const sample = object(value, `${file}.startup.populatedDatabase.samples[${index}]`);
+    equal(
+      Object.keys(sample).sort(),
+      [
+        "readyMs",
+        "firstOverviewReadMs",
+        "readyAndFirstOverviewMs",
+        "integrityStatusReadMs",
+        "readyOverviewAndIntegrityStatusMs",
+      ].sort(),
+      `${file}.startup.populatedDatabase.samples[${index}] field set drifted`,
+    );
     const readyMs = finiteNumber(
       sample.readyMs,
       `${file}.startup.populatedDatabase.samples[${index}].readyMs`,
     );
-    const statusReadMs = finiteNumber(
-      sample.statusReadMs,
-      `${file}.startup.populatedDatabase.samples[${index}].statusReadMs`,
+    const firstOverviewReadMs = finiteNumber(
+      sample.firstOverviewReadMs,
+      `${file}.startup.populatedDatabase.samples[${index}].firstOverviewReadMs`,
     );
-    const readyAndStatusMs = finiteNumber(
-      sample.readyAndStatusMs,
-      `${file}.startup.populatedDatabase.samples[${index}].readyAndStatusMs`,
+    const readyAndFirstOverviewMs = finiteNumber(
+      sample.readyAndFirstOverviewMs,
+      `${file}.startup.populatedDatabase.samples[${index}].readyAndFirstOverviewMs`,
     );
-    assert(readyMs > 0 && statusReadMs > 0, `${file} warm startup sample must be positive`);
+    const integrityStatusReadMs = finiteNumber(
+      sample.integrityStatusReadMs,
+      `${file}.startup.populatedDatabase.samples[${index}].integrityStatusReadMs`,
+    );
+    const readyOverviewAndIntegrityStatusMs = finiteNumber(
+      sample.readyOverviewAndIntegrityStatusMs,
+      `${file}.startup.populatedDatabase.samples[${index}].readyOverviewAndIntegrityStatusMs`,
+    );
     assert(
-      Math.abs(readyAndStatusMs - readyMs - statusReadMs) <= 1e-6,
-      `${file} warm startup sample arithmetic drifted`,
+      readyMs > 0 && firstOverviewReadMs > 0 && integrityStatusReadMs > 0,
+      `${file} warm startup sample must be positive`,
     );
-    return { readyMs, statusReadMs, readyAndStatusMs };
+    assert(
+      Math.abs(readyAndFirstOverviewMs - readyMs - firstOverviewReadMs) <= 1e-6,
+      `${file} warm startup first-Overview arithmetic drifted`,
+    );
+    assert(
+      Math.abs(
+        readyOverviewAndIntegrityStatusMs - readyAndFirstOverviewMs - integrityStatusReadMs
+      ) <= 1e-6,
+      `${file} warm startup integrity-status arithmetic drifted`,
+    );
+    return {
+      readyMs,
+      firstOverviewReadMs,
+      readyAndFirstOverviewMs,
+      integrityStatusReadMs,
+      readyOverviewAndIntegrityStatusMs,
+    };
   });
-  for (const key of ["readyMs", "statusReadMs", "readyAndStatusMs"]) {
+  for (const key of [
+    "readyMs",
+    "firstOverviewReadMs",
+    "readyAndFirstOverviewMs",
+    "integrityStatusReadMs",
+    "readyOverviewAndIntegrityStatusMs",
+  ]) {
     const values = samples.map((sample) => sample[key]).sort((left, right) => left - right);
     const median = values[Math.floor(values.length / 2)];
     finiteNumber(populated[key], `${file}.startup.populatedDatabase.${key}`);
     assert(populated[key] === median, `${file} warm startup ${key} was not recomputed from samples`);
   }
   assert(gate.limitMs === ITEM6_WARM_OPEN_LIMIT_MS, `${file} warm startup limit drifted`);
-  assert(populated.readyMs < gate.limitMs, `${file} warm Engine ready median exceeded 500 ms`);
-  assert(gate.medianReadyUnder500Ms === true, `${file} warm Engine ready gate did not pass`);
+  assert(
+    populated.readyAndFirstOverviewMs < gate.limitMs,
+    `${file} warm Engine first-Overview median exceeded 500 ms`,
+  );
+  assert(
+    gate.medianReadyAndFirstOverviewUnder500Ms === true,
+    `${file} warm Engine first-Overview gate did not pass`,
+  );
 }
 
-function validateCapacity(value, corpus, scale, file) {
+function validateProductAppendFreshness(value, corpus, scale, file) {
+  const freshness = object(value, `${file}.productAppendFreshness`);
+  equal(
+    Object.keys(freshness).sort(),
+    ["measurement", "corpusTurnCount", "baseline", "append", "cleanup", "gate"].sort(),
+    `${file}.productAppendFreshness field set drifted`,
+  );
+  assert(
+    freshness.measurement === ITEM6_PRODUCT_APPEND_FRESHNESS_MEASUREMENT,
+    `${file} product append freshness did not use the product path`,
+  );
+  assert(
+    freshness.corpusTurnCount === corpus.turns,
+    `${file} product append freshness corpus size drifted`,
+  );
+
+  const baseline = object(freshness.baseline, `${file}.productAppendFreshness.baseline`);
+  equal(
+    Object.keys(baseline).sort(),
+    ["sessions", "turns", "ftsDocuments"].sort(),
+    `${file}.productAppendFreshness.baseline field set drifted`,
+  );
+  equal(
+    baseline,
+    { sessions: scale.sessions, turns: corpus.turns, ftsDocuments: corpus.turns },
+    `${file} product append freshness baseline is not the formal corpus`,
+  );
+
+  const append = object(freshness.append, `${file}.productAppendFreshness.append`);
+  equal(
+    Object.keys(append).sort(),
+    ["commitAckMs", "appendToSearchableMs", "committed", "searchResultCount"].sort(),
+    `${file}.productAppendFreshness.append field set drifted`,
+  );
+  finiteNumber(append.commitAckMs, `${file}.productAppendFreshness.append.commitAckMs`);
+  finiteNumber(
+    append.appendToSearchableMs,
+    `${file}.productAppendFreshness.append.appendToSearchableMs`,
+  );
+  assert(append.commitAckMs > 0, `${file} product append lacks a commit acknowledgement`);
+  assert(
+    append.commitAckMs <= append.appendToSearchableMs,
+    `${file} product append search completed before its commit acknowledgement`,
+  );
+  assert(
+    append.appendToSearchableMs > 0 &&
+      append.appendToSearchableMs <= ITEM6_PRODUCT_APPEND_LIMIT_MS,
+    `${file} product append did not become searchable within two seconds`,
+  );
+  assert(append.committed === 1, `${file} product append did not commit exactly once`);
+  assert(
+    append.searchResultCount === 1,
+    `${file} product append marker was not uniquely searchable`,
+  );
+
+  const cleanup = object(freshness.cleanup, `${file}.productAppendFreshness.cleanup`);
+  equal(
+    Object.keys(cleanup).sort(),
+    ["missing", "searchResultCount", "restored"].sort(),
+    `${file}.productAppendFreshness.cleanup field set drifted`,
+  );
+  equal(
+    cleanup,
+    { missing: 1, searchResultCount: 0, restored: true },
+    `${file} product append cleanup did not restore the baseline`,
+  );
+
+  const gate = object(freshness.gate, `${file}.productAppendFreshness.gate`);
+  equal(
+    Object.keys(gate).sort(),
+    [
+      "limitMs",
+      "productPathUsed",
+      "commitAcknowledged",
+      "markerUniquelySearchable",
+      "cleanupRestored",
+      "appendedTurnWithin2Seconds",
+    ].sort(),
+    `${file}.productAppendFreshness.gate field set drifted`,
+  );
+  assert(gate.limitMs === ITEM6_PRODUCT_APPEND_LIMIT_MS, `${file} product append limit drifted`);
+  for (const key of [
+    "productPathUsed",
+    "commitAcknowledged",
+    "markerUniquelySearchable",
+    "cleanupRestored",
+    "appendedTurnWithin2Seconds",
+  ]) {
+    assert(gate[key] === true, `${file}.productAppendFreshness.gate.${key} did not pass`);
+  }
+}
+
+function validateCapacity(value, corpus, startup, productAppendFreshness, scale, file) {
   const capacity = object(value, `${file}.capacity`);
   safeInteger(capacity.observedDerivedStatePeakBytes, `${file}.capacity.observedDerivedStatePeakBytes`, 1);
   assert(
@@ -364,10 +527,21 @@ function validateCapacity(value, corpus, scale, file) {
     "ftsBackendWithinLimit",
     "allMeasuredCapacityGatesPassed",
     "populatedWarmOpenUnder500Ms",
+    "productAppendWithin2Seconds",
     "overviewLatencyWithinLimit",
   ]) {
     assert(gates[key] === true, `${file}.capacity.gates.${key} did not pass`);
   }
+  assert(
+    gates.populatedWarmOpenUnder500Ms ===
+      startup.populatedDatabase.gate.medianReadyAndFirstOverviewUnder500Ms,
+    `${file} capacity warm startup gate contradicts the startup measurement`,
+  );
+  assert(
+    gates.productAppendWithin2Seconds ===
+      productAppendFreshness.gate.appendedTurnWithin2Seconds,
+    `${file} capacity product append gate contradicts the product measurement`,
+  );
 }
 
 function validateCorpus(value, scale, file) {
@@ -522,9 +696,17 @@ export async function verifyItem6Evidence({
       `${file} notMeasured must explicitly list omitted measurements`,
     );
     const corpus = validateCorpus(value.corpus, scale, file);
-    validateOverview(value.overview, scale, file);
-    validateCapacity(value.capacity, corpus, scale, file);
     validateStartup(value.startup, file);
+    validateProductAppendFreshness(value.productAppendFreshness, corpus, scale, file);
+    validateOverview(value.overview, scale, file);
+    validateCapacity(
+      value.capacity,
+      corpus,
+      value.startup,
+      value.productAppendFreshness,
+      scale,
+      file,
+    );
     assertAggregateArtifactPrivacy(value, file);
   }
   assertAggregateArtifactPrivacy(manifest, "ITEM-6 manifest");

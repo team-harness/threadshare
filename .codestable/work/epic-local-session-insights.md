@@ -3,7 +3,7 @@ epic: ../epics/local-session-insights.md
 phase: acceptance
 approved_revision: 46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582
 current_item: null
-next_action: run a fresh Epic final acceptance review against the committed evidence milestone
+next_action: run the same reviewer's round-3 final acceptance against refreshed v2 evidence
 blocked_by: null
 item_progression: continuous
 milestone_commit: authorized
@@ -119,3 +119,7 @@ remote_publish: final
 - 2026-08-11：ITEM-6 evidence 首轮独立审查冻结 staged hash `b8efc19800c7d976d1922ae62eff025ad6183f4b468431e6308be2e4e4ce9a44`，0 blocking / 3 important：根 verifier 只信 gate 布尔、Cargo release profile 不可由 Engine identity 验证、artifact 丢失 `measuredScope/notMeasured`；定向预检另指出 FTS density 与 populated warm-open 缺实际测量字段。修订后根 verifier 会独立重算严格延迟、完整 startup 中位数、6/8 GiB、400 MiB FTS、96/128 MiB RSS、存储算术、FTS density、目录白名单与来源链；Engine 降级口径机器可读，缺测边界与实际 FTS/startup 样本均进入 artifact，21/21 正负测试通过。
 - 2026-08-11：ITEM-6 evidence follow-up 对冻结 staged hash `b05f65975fa1852c2e9019262a1c17d5236a96773208b9591c29e922c7f89390` 报告 0 blocking / 3 important：容量类别可通过新增 key 拆分 Fact、FTS density 下限可随 artifact 自描述下调、派生峰值在 packager/verifier 使用两个公式。修订后类别与 10 项合成 density 均由导出的 v1 冻结常量精确校验，派生峰值统一为 `max(preVacuum, postVacuum) + maxSessionCanonicalBytes`，并补 impossible latency total 负例；同一原始报告重打包后定向证据测试 25/25 通过。warm READY 的 500 ms gate 与 STATUS 读取审计值已明确分栏，不声称完整 warm-open 链路小于 500 ms。
 - 2026-08-11：ITEM-6 evidence 最终候选验证通过 Rust 123、Insights Node 195、release 53、定向 evidence 25、43-file npm dry-run pack、ITEM-4/5/6 artifact verifier 5/6/2 与 `git diff --check`；独立遍历归档 JSON 的 475 个 key 与 99 个字符串叶子，未发现绝对路径、URL/email、credential、stable key 或 SQLite/WAL/SHM 形状。正式原始 report 与 4.44 GiB 合成输入仍只保留在临时/clean workspace，不进入仓库或 npm 包。
+- 2026-08-11：Epic 最终验收 reviewer `ad8ea91b-fb60-4093-9f1d-f9d5444a493c` 首轮确认后台 `reconcileActiveInsights` 每 cycle 两次完整 `ENGINE_STATUS` 会在 250k 产生约 14 秒前置成本，同时旧 warm gate 只量 READY、旧 10k freshness 绕过产品路径。修订让所有后台/排除状态探测显式 `includeEngineStatus=false`，首次可用改量真实 `READ_INSIGHTS_OVERVIEW`，freshness 改走 `createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS`，并在 clone 上精确核对/恢复 formal baseline。
+- 2026-08-11：同一 reviewer round 2 对 staged hash `e7b4501bfcb029028dd96c006b0ec56fbc685d4658b54f7b1f68f4a71665f51d` 判定 B-1 resolved、B-2 测量方法正确但 formal gate 字段链有两处 blocking；修复 benchmark、ITEM-5 packager 与负例 fixture 的字段名，加入 capacity baseline 硬断言和 filesystem watcher 行为证据，定向验证 benchmark 10/10、command/evidence 15/15、CLI 157/157、release 53/53。代码 checkpoint 为 `e35020de008c6808b4b45376cee933e5eac9a13f`，未 push。
+- 2026-08-11：从 Paseo 托管 clean worktree 和 commit `e35020de008c6808b4b45376cee933e5eac9a13f` 串行重跑 25k/250k。首次可用 Overview 中位数为 8.886/19.357 ms；真实产品路径 append-to-searchable 为 189.318/163.454 ms，commit、唯一搜索命中和清理恢复全部通过。25k Overview P95/P99 为 2.697/3.577 ms；250k 为 15.665/20.270 ms，250k Tool-path 查询 P95/P99 为 196.917/319.442 ms，全部正式门槛通过。
+- 2026-08-11：刷新后的 ITEM-6 v2 证据仍只保存 2 份去标识 aggregate JSON 与 manifest，总计 21,556 bytes；manifest SHA-256 为 `caa7d87c5d5e9cbec76f6c3c2394340125051ece600f7cfc7e54e85127eee8cd`。raw 25k/250k report SHA-256 分别为 `6f30190ee4a6ae4c7d1237288ad082cf3c00e748040e0dcabc1c2da7818451e3` / `da0eee5c6ef7b81850e48fde2f0cedd456a82dce930a991f818a5eb1673fa5b0`，只保留在临时目录，不提交数据库、WAL/SHM、多 GiB corpus、raw session、prompt/answer、真实路径或 stable key。

@@ -64,6 +64,7 @@ function capacityGates() {
     ftsBackendWithinLimit: true,
     allMeasuredCapacityGatesPassed: true,
     populatedWarmOpenUnder500Ms: true,
+    productAppendWithin2Seconds: true,
     overviewLatencyWithinLimit: true,
   };
 }
@@ -84,16 +85,67 @@ function startup() {
   return {
     populatedDatabase: {
       readyMs: 4,
-      statusReadMs: 20,
-      readyAndStatusMs: 24,
+      firstOverviewReadMs: 20,
+      readyAndFirstOverviewMs: 24,
+      integrityStatusReadMs: 7_000,
+      readyOverviewAndIntegrityStatusMs: 7_024,
       status: { type: "ENGINE_STATUS" },
       sampleCount: 3,
       samples: [
-        { readyMs: 3, statusReadMs: 19, readyAndStatusMs: 22 },
-        { readyMs: 4, statusReadMs: 20, readyAndStatusMs: 24 },
-        { readyMs: 5, statusReadMs: 21, readyAndStatusMs: 26 },
+        {
+          readyMs: 3,
+          firstOverviewReadMs: 19,
+          readyAndFirstOverviewMs: 22,
+          integrityStatusReadMs: 6_900,
+          readyOverviewAndIntegrityStatusMs: 6_922,
+        },
+        {
+          readyMs: 4,
+          firstOverviewReadMs: 20,
+          readyAndFirstOverviewMs: 24,
+          integrityStatusReadMs: 7_000,
+          readyOverviewAndIntegrityStatusMs: 7_024,
+        },
+        {
+          readyMs: 5,
+          firstOverviewReadMs: 21,
+          readyAndFirstOverviewMs: 26,
+          integrityStatusReadMs: 7_100,
+          readyOverviewAndIntegrityStatusMs: 7_126,
+        },
       ],
-      gate: { limitMs: 500, medianReadyUnder500Ms: true },
+      gate: { limitMs: 500, medianReadyAndFirstOverviewUnder500Ms: true },
+    },
+  };
+}
+
+function productAppendFreshness(turns) {
+  return {
+    measurement: "createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS",
+    corpusTurnCount: turns,
+    baseline: {
+      sessions: turns / 100,
+      turns,
+      ftsDocuments: turns,
+    },
+    append: {
+      commitAckMs: 750,
+      appendToSearchableMs: 1_000,
+      committed: 1,
+      searchResultCount: 1,
+    },
+    cleanup: {
+      missing: 1,
+      searchResultCount: 0,
+      restored: true,
+    },
+    gate: {
+      limitMs: 2_000,
+      productPathUsed: true,
+      commitAcknowledged: true,
+      markerUniquelySearchable: true,
+      cleanupRestored: true,
+      appendedTurnWithin2Seconds: true,
     },
   };
 }
@@ -213,6 +265,7 @@ function rawReport(turns, {
       canonicalBytes: turns * 1_000,
       maxSessionCanonicalBytes: 100_000,
       startup: startup(),
+      productAppendFreshness: productAppendFreshness(turns),
       overview: {
         measurement: "Rust sidecar READ_INSIGHTS_OVERVIEW over transactional rollups",
         measuredRequestCount: 1_000,
@@ -314,6 +367,9 @@ test("Dashboard evidence validation rejects identity, scale, gate, and privacy b
   assert.equal(evidence[250_000].capacity.categories.fact.bytes, 900);
   assert.equal(evidence[250_000].capacity.ftsMetrics.documents, 250_000);
   assert.equal(evidence[250_000].startup.populatedDatabase.readyMs, 4);
+  assert.equal(evidence[250_000].startup.populatedDatabase.firstOverviewReadMs, 20);
+  assert.equal(evidence[250_000].startup.populatedDatabase.integrityStatusReadMs, 7_000);
+  assert.equal(evidence[250_000].productAppendFreshness.append.searchResultCount, 1);
   assert.deepEqual(evidence[250_000].notMeasured, [
     "raw provider parsing is outside this capacity fixture",
   ]);
@@ -349,8 +405,25 @@ test("Dashboard evidence validation rejects identity, scale, gate, and privacy b
     ["missing populated startup measurements", ({ reports }) => {
       delete reports[250_000].rustSidecar.startup.populatedDatabase;
     }],
-    ["warm-open sample contradicts median", ({ reports }) => {
-      reports[250_000].rustSidecar.startup.populatedDatabase.readyMs = 499;
+    ["warm first Overview exceeds 500 ms despite a fast READY", ({ reports }) => {
+      const populated = reports[250_000].rustSidecar.startup.populatedDatabase;
+      populated.firstOverviewReadMs = 550;
+      populated.readyAndFirstOverviewMs = populated.readyMs + populated.firstOverviewReadMs;
+      populated.readyOverviewAndIntegrityStatusMs =
+        populated.readyAndFirstOverviewMs + populated.integrityStatusReadMs;
+      populated.samples = populated.samples.map((sample) => ({
+        ...sample,
+        firstOverviewReadMs: 550,
+        readyAndFirstOverviewMs: sample.readyMs + 550,
+        readyOverviewAndIntegrityStatusMs:
+          sample.readyMs + 550 + sample.integrityStatusReadMs,
+      }));
+    }],
+    ["committed product append is not searchable", ({ reports }) => {
+      reports[25_000].rustSidecar.productAppendFreshness.append.searchResultCount = 0;
+    }],
+    ["product append cleanup drift", ({ reports }) => {
+      reports[250_000].rustSidecar.productAppendFreshness.cleanup.restored = false;
     }],
     ["empty notMeasured", ({ reports }) => { reports[25_000].notMeasured = []; }],
     ["capacity arithmetic drift", ({ reports }) => { reports[25_000].rustSidecar.capacity.compactedSteadyStateBytes += 1; }],

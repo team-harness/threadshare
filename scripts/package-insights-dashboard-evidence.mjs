@@ -19,9 +19,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertAggregateArtifactPrivacy } from "./package-insights-benchmark-evidence.mjs";
 
 export const ITEM6_OVERVIEW_EVIDENCE_FORMAT =
-  "threadshare-insights-item6-overview-evidence@v1";
+  "threadshare-insights-item6-overview-evidence@v2";
 export const ITEM6_OVERVIEW_MANIFEST_FORMAT =
-  "threadshare-insights-item6-overview-evidence-manifest@v1";
+  "threadshare-insights-item6-overview-evidence-manifest@v2";
 export const ITEM6_APPROVED_EPIC_SHA256 =
   "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582";
 export const ITEM6_ENGINE_BUILD_PROVENANCE =
@@ -47,10 +47,13 @@ const OVERVIEW_MEASUREMENT =
   "Rust sidecar READ_INSIGHTS_OVERVIEW over transactional rollups";
 const CAPACITY_MEASUREMENT =
   "pre-maintenance persistent peak plus bounded staging for the 8 GiB gate; VACUUM then dbstat for category attribution";
+export const ITEM6_PRODUCT_APPEND_FRESHNESS_MEASUREMENT =
+  "createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS";
 export const ITEM6_NORMALIZED_FACT_LIMIT_BYTES = 6 * 1024 ** 3;
 export const ITEM6_STEADY_STATE_LIMIT_BYTES = 8 * 1024 ** 3;
 export const ITEM6_FTS_LIMIT_BYTES = 400 * 1024 ** 2;
 export const ITEM6_WARM_OPEN_LIMIT_MS = 500;
+export const ITEM6_PRODUCT_APPEND_LIMIT_MS = 2_000;
 
 export const ITEM6_FORMAL_SCALES = Object.freeze({
   25_000: Object.freeze({
@@ -111,6 +114,7 @@ const CAPACITY_GATE_KEYS = Object.freeze([
   "ftsBackendWithinLimit",
   "allMeasuredCapacityGatesPassed",
   "populatedWarmOpenUnder500Ms",
+  "productAppendWithin2Seconds",
   "overviewLatencyWithinLimit",
 ]);
 
@@ -440,8 +444,10 @@ function sanitizePopulatedStartup(value, turns) {
   const startup = plainObject(value, `capacity ${turns} populated startup`);
   exactKeys(startup, [
     "readyMs",
-    "statusReadMs",
-    "readyAndStatusMs",
+    "firstOverviewReadMs",
+    "readyAndFirstOverviewMs",
+    "integrityStatusReadMs",
+    "readyOverviewAndIntegrityStatusMs",
     "status",
     "sampleCount",
     "samples",
@@ -458,27 +464,49 @@ function sanitizePopulatedStartup(value, turns) {
   }
   const samples = startup.samples.map((value, index) => {
     const sample = plainObject(value, `capacity ${turns} populated startup sample ${index}`);
-    exactKeys(sample, ["readyMs", "statusReadMs", "readyAndStatusMs"],
+    exactKeys(sample, [
+      "readyMs",
+      "firstOverviewReadMs",
+      "readyAndFirstOverviewMs",
+      "integrityStatusReadMs",
+      "readyOverviewAndIntegrityStatusMs",
+    ],
       `capacity ${turns} populated startup sample ${index}`);
     const sanitized = {
       readyMs: requireFiniteNumber(
         sample.readyMs,
         `capacity ${turns} populated startup sample ${index}.readyMs`,
       ),
-      statusReadMs: requireFiniteNumber(
-        sample.statusReadMs,
-        `capacity ${turns} populated startup sample ${index}.statusReadMs`,
+      firstOverviewReadMs: requireFiniteNumber(
+        sample.firstOverviewReadMs,
+        `capacity ${turns} populated startup sample ${index}.firstOverviewReadMs`,
       ),
-      readyAndStatusMs: requireFiniteNumber(
-        sample.readyAndStatusMs,
-        `capacity ${turns} populated startup sample ${index}.readyAndStatusMs`,
+      readyAndFirstOverviewMs: requireFiniteNumber(
+        sample.readyAndFirstOverviewMs,
+        `capacity ${turns} populated startup sample ${index}.readyAndFirstOverviewMs`,
+      ),
+      integrityStatusReadMs: requireFiniteNumber(
+        sample.integrityStatusReadMs,
+        `capacity ${turns} populated startup sample ${index}.integrityStatusReadMs`,
+      ),
+      readyOverviewAndIntegrityStatusMs: requireFiniteNumber(
+        sample.readyOverviewAndIntegrityStatusMs,
+        `capacity ${turns} populated startup sample ${index}.readyOverviewAndIntegrityStatusMs`,
       ),
     };
     if (
       sanitized.readyMs <= 0 ||
-      sanitized.statusReadMs <= 0 ||
+      sanitized.firstOverviewReadMs <= 0 ||
+      sanitized.integrityStatusReadMs <= 0 ||
       Math.abs(
-        sanitized.readyAndStatusMs - sanitized.readyMs - sanitized.statusReadMs
+        sanitized.readyAndFirstOverviewMs -
+          sanitized.readyMs -
+          sanitized.firstOverviewReadMs
+      ) > 1e-6 ||
+      Math.abs(
+        sanitized.readyOverviewAndIntegrityStatusMs -
+          sanitized.readyAndFirstOverviewMs -
+          sanitized.integrityStatusReadMs
       ) > 1e-6
     ) {
       fail(`capacity ${turns} populated startup sample ${index} is inconsistent`);
@@ -487,13 +515,21 @@ function sanitizePopulatedStartup(value, turns) {
   });
   const summary = {
     readyMs: requireFiniteNumber(startup.readyMs, `capacity ${turns} populated startup readyMs`),
-    statusReadMs: requireFiniteNumber(
-      startup.statusReadMs,
-      `capacity ${turns} populated startup statusReadMs`,
+    firstOverviewReadMs: requireFiniteNumber(
+      startup.firstOverviewReadMs,
+      `capacity ${turns} populated startup firstOverviewReadMs`,
     ),
-    readyAndStatusMs: requireFiniteNumber(
-      startup.readyAndStatusMs,
-      `capacity ${turns} populated startup readyAndStatusMs`,
+    readyAndFirstOverviewMs: requireFiniteNumber(
+      startup.readyAndFirstOverviewMs,
+      `capacity ${turns} populated startup readyAndFirstOverviewMs`,
+    ),
+    integrityStatusReadMs: requireFiniteNumber(
+      startup.integrityStatusReadMs,
+      `capacity ${turns} populated startup integrityStatusReadMs`,
+    ),
+    readyOverviewAndIntegrityStatusMs: requireFiniteNumber(
+      startup.readyOverviewAndIntegrityStatusMs,
+      `capacity ${turns} populated startup readyOverviewAndIntegrityStatusMs`,
     ),
   };
   for (const key of Object.keys(summary)) {
@@ -502,12 +538,13 @@ function sanitizePopulatedStartup(value, turns) {
     }
   }
   const gate = plainObject(startup.gate, `capacity ${turns} populated startup gate`);
-  exactKeys(gate, ["limitMs", "medianReadyUnder500Ms"],
+  exactKeys(gate, ["limitMs", "medianReadyAndFirstOverviewUnder500Ms"],
     `capacity ${turns} populated startup gate`);
   if (
     gate.limitMs !== ITEM6_WARM_OPEN_LIMIT_MS ||
-    gate.medianReadyUnder500Ms !== (summary.readyMs < ITEM6_WARM_OPEN_LIMIT_MS) ||
-    gate.medianReadyUnder500Ms !== true
+    gate.medianReadyAndFirstOverviewUnder500Ms !==
+      (summary.readyAndFirstOverviewMs < ITEM6_WARM_OPEN_LIMIT_MS) ||
+    gate.medianReadyAndFirstOverviewUnder500Ms !== true
   ) {
     fail(`capacity ${turns} populated startup gate is invalid`);
   }
@@ -515,6 +552,168 @@ function sanitizePopulatedStartup(value, turns) {
     ...summary,
     sampleCount,
     samples,
+    gate: { ...gate },
+  };
+}
+
+function sanitizeProductAppendFreshness(value, turns, scale) {
+  const freshness = plainObject(value, `capacity ${turns} product append freshness`);
+  exactKeys(freshness, [
+    "measurement",
+    "corpusTurnCount",
+    "baseline",
+    "append",
+    "cleanup",
+    "gate",
+  ], `capacity ${turns} product append freshness`);
+  if (
+    freshness.measurement !== ITEM6_PRODUCT_APPEND_FRESHNESS_MEASUREMENT ||
+    freshness.corpusTurnCount !== turns
+  ) {
+    fail(`capacity ${turns} product append freshness identity is invalid`);
+  }
+
+  const baseline = plainObject(
+    freshness.baseline,
+    `capacity ${turns} product append freshness baseline`,
+  );
+  exactKeys(baseline, ["sessions", "turns", "ftsDocuments"],
+    `capacity ${turns} product append freshness baseline`);
+  const sanitizedBaseline = {
+    sessions: requireSafeInteger(
+      baseline.sessions,
+      `capacity ${turns} product append freshness baseline.sessions`,
+    ),
+    turns: requireSafeInteger(
+      baseline.turns,
+      `capacity ${turns} product append freshness baseline.turns`,
+    ),
+    ftsDocuments: requireSafeInteger(
+      baseline.ftsDocuments,
+      `capacity ${turns} product append freshness baseline.ftsDocuments`,
+    ),
+  };
+  if (
+    sanitizedBaseline.sessions !== scale.sessions ||
+    sanitizedBaseline.turns !== turns ||
+    sanitizedBaseline.ftsDocuments !== turns
+  ) {
+    fail(`capacity ${turns} product append freshness baseline is not the formal corpus`);
+  }
+
+  const append = plainObject(
+    freshness.append,
+    `capacity ${turns} product append freshness append`,
+  );
+  exactKeys(append, [
+    "commitAckMs",
+    "appendToSearchableMs",
+    "committed",
+    "searchResultCount",
+  ], `capacity ${turns} product append freshness append`);
+  const sanitizedAppend = {
+    commitAckMs: requireFiniteNumber(
+      append.commitAckMs,
+      `capacity ${turns} product append freshness append.commitAckMs`,
+    ),
+    appendToSearchableMs: requireFiniteNumber(
+      append.appendToSearchableMs,
+      `capacity ${turns} product append freshness append.appendToSearchableMs`,
+    ),
+    committed: requireSafeInteger(
+      append.committed,
+      `capacity ${turns} product append freshness append.committed`,
+    ),
+    searchResultCount: requireSafeInteger(
+      append.searchResultCount,
+      `capacity ${turns} product append freshness append.searchResultCount`,
+    ),
+  };
+  if (
+    sanitizedAppend.commitAckMs <= 0 ||
+    sanitizedAppend.appendToSearchableMs <= 0 ||
+    sanitizedAppend.commitAckMs > sanitizedAppend.appendToSearchableMs ||
+    sanitizedAppend.appendToSearchableMs > ITEM6_PRODUCT_APPEND_LIMIT_MS ||
+    sanitizedAppend.committed !== 1 ||
+    sanitizedAppend.searchResultCount !== 1
+  ) {
+    fail(`capacity ${turns} product append did not become uniquely searchable in time`);
+  }
+
+  const cleanup = plainObject(
+    freshness.cleanup,
+    `capacity ${turns} product append freshness cleanup`,
+  );
+  exactKeys(cleanup, ["missing", "searchResultCount", "restored"],
+    `capacity ${turns} product append freshness cleanup`);
+  const sanitizedCleanup = {
+    missing: requireSafeInteger(
+      cleanup.missing,
+      `capacity ${turns} product append freshness cleanup.missing`,
+    ),
+    searchResultCount: requireSafeInteger(
+      cleanup.searchResultCount,
+      `capacity ${turns} product append freshness cleanup.searchResultCount`,
+    ),
+    restored: cleanup.restored,
+  };
+  if (
+    sanitizedCleanup.missing !== 1 ||
+    sanitizedCleanup.searchResultCount !== 0 ||
+    sanitizedCleanup.restored !== true
+  ) {
+    fail(`capacity ${turns} product append cleanup did not restore the baseline`);
+  }
+
+  const gate = plainObject(freshness.gate, `capacity ${turns} product append freshness gate`);
+  exactKeys(gate, [
+    "limitMs",
+    "productPathUsed",
+    "commitAcknowledged",
+    "markerUniquelySearchable",
+    "cleanupRestored",
+    "appendedTurnWithin2Seconds",
+  ], `capacity ${turns} product append freshness gate`);
+  if (gate.limitMs !== ITEM6_PRODUCT_APPEND_LIMIT_MS) {
+    fail(`capacity ${turns} product append freshness limit drifted`);
+  }
+  for (const key of [
+    "productPathUsed",
+    "commitAcknowledged",
+    "markerUniquelySearchable",
+    "cleanupRestored",
+    "appendedTurnWithin2Seconds",
+  ]) {
+    requireGate(gate[key], `capacity ${turns} product append freshness gate.${key}`);
+  }
+  if (
+    gate.commitAcknowledged !== (sanitizedAppend.commitAckMs > 0) ||
+    gate.markerUniquelySearchable !== (sanitizedAppend.searchResultCount === 1) ||
+    gate.cleanupRestored !== (
+      sanitizedCleanup.missing === 1 &&
+      sanitizedCleanup.searchResultCount === 0 &&
+      sanitizedCleanup.restored === true
+    ) ||
+    gate.appendedTurnWithin2Seconds !== (
+      sanitizedAppend.commitAckMs > 0 &&
+      sanitizedAppend.commitAckMs <= sanitizedAppend.appendToSearchableMs &&
+      sanitizedAppend.appendToSearchableMs <= ITEM6_PRODUCT_APPEND_LIMIT_MS &&
+      sanitizedAppend.committed === 1 &&
+      sanitizedAppend.searchResultCount === 1 &&
+      sanitizedCleanup.missing === 1 &&
+      sanitizedCleanup.searchResultCount === 0 &&
+      sanitizedCleanup.restored === true
+    )
+  ) {
+    fail(`capacity ${turns} product append freshness gate contradicts its measurements`);
+  }
+
+  return {
+    measurement: freshness.measurement,
+    corpusTurnCount: freshness.corpusTurnCount,
+    baseline: sanitizedBaseline,
+    append: sanitizedAppend,
+    cleanup: sanitizedCleanup,
     gate: { ...gate },
   };
 }
@@ -656,6 +855,7 @@ function sanitizeCapacity(
   packedFactsDecision,
   maxSessionCanonicalBytes,
   startup,
+  productAppendFreshness,
   turns,
   scale,
 ) {
@@ -826,6 +1026,7 @@ function sanitizeCapacity(
     "ftsBackendWithinLimit",
     "allMeasuredCapacityGatesPassed",
     "populatedWarmOpenUnder500Ms",
+    "productAppendWithin2Seconds",
     "overviewLatencyWithinLimit",
   ]) {
     requireGate(gates[key], `capacity ${turns} storage gates.${key}`);
@@ -834,9 +1035,12 @@ function sanitizeCapacity(
     gates.ftsDensityMatchesCorpus !== Object.values(ftsMetrics.density)
       .every((field) => field.meetsExpectedDensity === true) ||
     gates.ftsBackendWithinLimit !== !ftsMetrics.backendReevaluationRequired ||
-    gates.populatedWarmOpenUnder500Ms !== startup.gate.medianReadyUnder500Ms
+    gates.populatedWarmOpenUnder500Ms !==
+      startup.gate.medianReadyAndFirstOverviewUnder500Ms ||
+    gates.productAppendWithin2Seconds !==
+      productAppendFreshness.gate.appendedTurnWithin2Seconds
   ) {
-    fail(`capacity ${turns} storage gates do not match measured FTS/startup values`);
+    fail(`capacity ${turns} storage gates do not match measured FTS/startup/product values`);
   }
   if (stableIdentity(plainObject(packedFactsDecision, `capacity ${turns} packedFactsDecision`)) !== stableIdentity(gates)) {
     fail(`capacity ${turns} packed-facts decision differs from capacity gates`);
@@ -905,6 +1109,11 @@ function validateOneReport(report, turns, expected) {
     plainObject(sidecar.startup, `capacity ${turns} Rust sidecar startup`).populatedDatabase,
     turns,
   );
+  const productAppendFreshness = sanitizeProductAppendFreshness(
+    sidecar.productAppendFreshness,
+    turns,
+    scale,
+  );
   const evidence = {
     format: ITEM6_OVERVIEW_EVIDENCE_FORMAT,
     measuredScope: report.measuredScope,
@@ -920,12 +1129,14 @@ function validateOneReport(report, turns, expected) {
     engineIdentity,
     engineBuildProvenance: ITEM6_ENGINE_BUILD_PROVENANCE,
     startup: { populatedDatabase: startup },
+    productAppendFreshness,
     overview: sanitizeOverview(sidecar.overview, turns, scale),
     capacity: sanitizeCapacity(
       sidecar.capacity,
       report.packedFactsDecision,
       corpus.maxSessionCanonicalBytes,
       startup,
+      productAppendFreshness,
       turns,
       scale,
     ),

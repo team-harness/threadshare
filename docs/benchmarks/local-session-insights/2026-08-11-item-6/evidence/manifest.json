@@ -1,17 +1,17 @@
 {
-  "format": "threadshare-insights-item6-overview-evidence-manifest@v1",
-  "sourceRevision": "b70877b819787cebb18a9934903ee5be1f3d5d71",
+  "format": "threadshare-insights-item6-overview-evidence-manifest@v2",
+  "sourceRevision": "e35020de008c6808b4b45376cee933e5eac9a13f",
   "approvedEpicSha256": "46e2cc8fdc974dac26a67ab3f448bcc0df458b5ae33a28da4e2f469fe8daf582",
   "scripts": {
     "scripts/benchmark-insights-engine.mjs": {
       "source": "git-object-at-source-revision",
-      "bytes": 122008,
-      "sha256": "96f3af5395bf57878253df4ea5d9bd60c424d48d094150c38f5aeabb39e3fe73"
+      "bytes": 134633,
+      "sha256": "c2a0cbdf7761779c5d0cfcabff6636af7854e6f086ae5cfe39e038354c04a05d"
     },
     "scripts/package-insights-dashboard-evidence.mjs": {
       "source": "packaging-worktree",
-      "bytes": 41906,
-      "sha256": "a313c2b7a3d39ca980b958d54bbbf5b06aed36c2db6607a534e8e53774e575c1"
+      "bytes": 49358,
+      "sha256": "d31f8d2943969d89a3cd2ebba4528bd28f20b3874476c4086065adb041241f0a"
     }
   },
   "formalConfiguration": {
@@ -53,22 +53,22 @@
   "engineBuildProvenance": "local-cargo-release-profile-unverifiable",
   "sourceReports": {
     "overview-25k.acceptance.json": {
-      "bytes": 30694,
-      "sha256": "4091faab93bfe4fa27b9006005d523226763d893dd484724bee1f5ea52462345"
+      "bytes": 32121,
+      "sha256": "6f30190ee4a6ae4c7d1237288ad082cf3c00e748040e0dcabc1c2da7818451e3"
     },
     "overview-250k.acceptance.json": {
-      "bytes": 30852,
-      "sha256": "3c15bd405a372241173626165f594b88c61103fd6544d15343fbd388c7fa999c"
+      "bytes": 32311,
+      "sha256": "da0eee5c6ef7b81850e48fde2f0cedd456a82dce930a991f818a5eb1673fa5b0"
     }
   },
   "artifacts": {
     "overview-25k.acceptance.json": {
-      "bytes": 8094,
-      "sha256": "f33b9dddf51d1791e20cd6ac13726434ae0bf69eae638f8fafc481753e5cde65"
+      "bytes": 9408,
+      "sha256": "1727afb016b084018815b884c807e93be9afb6304a05354e3aa86b5dab481bb6"
     },
     "overview-250k.acceptance.json": {
-      "bytes": 8136,
-      "sha256": "0638a4ca8fd90c8c713612ea0d2ec2e48f51b9db01010f519e782b6dc3094314"
+      "bytes": 9473,
+      "sha256": "e4028b1b93dd9585b67e26038280c4094bdc1259c388e138f7a44dda1f44b11a"
     }
   },
   "privacy": {
