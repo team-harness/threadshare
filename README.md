@@ -151,6 +151,21 @@ surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filter
 capability discovery, and revision-checked evidence pages. Responses include the committed snapshot
 identity needed to cite results and detect an atomic reindex between pages.
 
+High-value questions for an agent include:
+
+- **Reuse a previous solution:** "Have we handled a similar database timeout before, and what did we
+  try?" Search finds related Turns; revision-checked evidence grounds the answer in the visible problem
+  and final outcome instead of making the agent rediscover the same path.
+- **Choose a Skill or Tool:** "Which Skills have I used most recently, in what situations, and which
+  Tools show repeated failed invocations?" Usage ranks recorded activity; Search and Evidence add the
+  surrounding problem and outcome needed to make the ranking actionable.
+- **Find recurring engineering friction:** "Which failures, retries, or abandoned tasks keep
+  recurring?" Filtered Search connects repeated symptoms across sessions so an agent can identify
+  brittle tests, environment problems, and repeated rework.
+- **Measure a workflow change:** "After introducing a new Skill, what changed compared with the
+  previous period?" Usage comparison windows and UTC Activity buckets show changes in invocation and
+  work patterns without uploading the underlying sessions.
+
 Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
 core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
 available in the 0.7.x release line while the owner-only Windows ACL adapter remains unimplemented.

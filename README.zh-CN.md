@@ -150,6 +150,18 @@ threadshare insights activity --request activity.json --format json
 Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录，以及带 revision
 校验的证据分页。响应包含用于引用结果、检测分页期间原子 reindex 的 committed snapshot 身份。
 
+适合交给 Agent 的高价值问题包括：
+
+- **复用过去的解决方案：**“以前处理过类似的数据库超时吗？当时尝试了什么？”Search 找到相关
+  Turn，带 revision 校验的 Evidence 用可见问题和最终结果支撑回答，避免 Agent 重复探索同一路径。
+- **选择 Skill 或 Tool：**“最近最常用哪些 Skill，分别用在什么情况下？哪些 Tool 反复出现失败
+  invocation？”Usage 给出已记录活动的排行，Search 与 Evidence 补充问题背景和结果，让排行可以转化
+  为实际选择。
+- **发现反复出现的工程阻力：**“哪些失败、retry 或中止任务一直重复出现？”带过滤条件的 Search
+  串联跨 Session 的重复症状，帮助 Agent 识别脆弱测试、环境问题和重复返工。
+- **衡量工作流调整：**“引入一个新 Skill 后，与上一周期相比发生了什么变化？”Usage 的对比窗口
+  和 UTC Activity 分桶展示 invocation 与工作模式的变化，同时不上传底层 Session。
+
 本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
 `share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，
 0.7.x 不提供本地 Insights。
