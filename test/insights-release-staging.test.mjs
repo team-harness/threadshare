@@ -225,6 +225,10 @@ test("staging produces one isolated root and four minimal Engine packages", asyn
       assert.deepEqual(platformManifest.os, [target.os]);
       assert.deepEqual(platformManifest.cpu, [target.cpu]);
       assert.equal(platformManifest.version, version);
+      assert.deepEqual(platformManifest.repository, {
+        type: "git",
+        url: "git+https://github.com/team-harness/threadshare.git",
+      });
       const rawBuildManifest = await readFile(path.join(directory, "build-manifest.json"), "utf8");
       const buildManifest = JSON.parse(rawBuildManifest);
       assert.equal(rawBuildManifest, canonicalJson(buildManifest));

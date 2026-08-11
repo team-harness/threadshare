@@ -28,6 +28,10 @@ const ENGINE_BASENAME = "threadshare-insights-engine";
 const STABLE_VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+const REPOSITORY = Object.freeze({
+  type: "git",
+  url: "git+https://github.com/team-harness/threadshare.git",
+});
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -90,6 +94,7 @@ export function createPlatformManifest(target, version) {
     cpu: [target.cpu],
     files: ["bin/", "build-manifest.json", "LICENSE"],
     publishConfig: { access: "public" },
+    repository: { ...REPOSITORY },
   };
 }
 
