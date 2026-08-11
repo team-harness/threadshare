@@ -7,8 +7,10 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
+import { createInsightsRequiredContract } from "../src/insights-engine-protocol.mjs";
 
 const execFileAsync = promisify(execFile);
+const SMOKE_ORIGIN_SECRET_EPOCH = "11111111-1111-4111-8111-111111111111";
 
 function parseArguments(argv) {
   const options = {};
@@ -26,24 +28,15 @@ function parseArguments(argv) {
   return options;
 }
 
-function requiredContract() {
-  return {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
-    originSecretEpoch: "11111111-1111-4111-8111-111111111111",
-    duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
-    rankerVersion: 1,
-  };
-}
-
-export async function smokeInsightsEngine({ binary, target, version }) {
+export async function smokeInsightsEngine({
+  binary,
+  target,
+  version,
+  execFile: runBinary = execFileAsync,
+  createEngineClient = createInsightsEngineClient,
+}) {
   const binaryPath = path.resolve(binary);
-  const { stdout } = await execFileAsync(binaryPath, ["--version", "--json"], {
+  const { stdout } = await runBinary(binaryPath, ["--version", "--json"], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
   });
@@ -59,8 +52,8 @@ export async function smokeInsightsEngine({ binary, target, version }) {
   ) {
     throw new Error("Insights Engine version document does not match the release target");
   }
-  const client = await createInsightsEngineClient({
-    requiredContract: requiredContract(),
+  const client = await createEngineClient({
+    requiredContract: createInsightsRequiredContract(SMOKE_ORIGIN_SECRET_EPOCH),
     runtimeOptions: {
       env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
     },

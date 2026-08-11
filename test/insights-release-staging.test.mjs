@@ -14,6 +14,8 @@ import {
   verifyReleaseArtifacts,
 } from "../scripts/package-insights-release.mjs";
 import { createInsightsSbom } from "../scripts/generate-insights-sbom.mjs";
+import { smokeInsightsEngine } from "../scripts/smoke-insights-engine.mjs";
+import { smokeInstalledInsights } from "../scripts/smoke-installed-insights.mjs";
 import { EXPECTED_PACKAGE_FILES } from "../scripts/verify-release.mjs";
 import {
   INSIGHTS_ENGINE_TARGETS,
@@ -354,6 +356,93 @@ test("release reruns preserve a verified registry platform tarball byte for byte
       runAttempt: "2",
     });
   } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("source Engine smoke negotiates the current analyzer and projection contract", async () => {
+  let requiredContract;
+  const target = "darwin-arm64";
+  const document = {
+    format: "threadshare-insights-engine-version@v1",
+    engineVersion: version,
+    protocolVersion: 1,
+    target,
+    sqliteVersion: "3.53.2",
+    sqliteCompileOptionsDigest: "b".repeat(64),
+    buildManifestDigest: "c".repeat(64),
+  };
+
+  await smokeInsightsEngine({
+    binary: "/not-used/threadshare-insights-engine",
+    target,
+    version,
+    execFile: async () => ({ stdout: JSON.stringify(document) }),
+    createEngineClient: async (options) => {
+      requiredContract = options.requiredContract;
+      return { close: async () => {} };
+    },
+  });
+
+  assert.deepEqual(requiredContract.projectionVersions, ["turn-search@2", "turn-summary@1"]);
+  assert.deepEqual(requiredContract.analyzerCapabilities, ["mixed-cjk-code@1"]);
+});
+
+test("installed smoke obtains the current contract from the installed root package", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-installed-smoke-"));
+  const scope = path.join(fixture, "node_modules", "@team-harness");
+  const root = path.join(scope, "threadshare");
+  const platform = path.join(scope, "threadshare-darwin-arm64");
+  const contractCapture = Symbol.for("threadshare.test.installed-smoke-contract");
+  const protocolCapture = Symbol.for("threadshare.test.installed-smoke-protocol-calls");
+  try {
+    await Promise.all([
+      mkdir(path.join(root, "src"), { recursive: true }),
+      mkdir(platform, { recursive: true }),
+    ]);
+    await writeFile(path.join(root, "package.json"), `${JSON.stringify({
+      name: "@team-harness/threadshare",
+      version,
+    })}\n`);
+    await writeFile(path.join(root, "src", "insights-engine-client.mjs"), `
+export async function createInsightsEngineClient(options) {
+  globalThis[Symbol.for("threadshare.test.installed-smoke-contract")] = options.requiredContract;
+  return { close: async () => {} };
+}
+`);
+    await writeFile(path.join(root, "src", "insights-engine-runtime.mjs"), `
+export function insightsEngineTarget() { return { target: "darwin-arm64" }; }
+export function insightsEnginePackageName() { return "@team-harness/threadshare-darwin-arm64"; }
+`);
+    await writeFile(path.join(root, "src", "insights-engine-protocol.mjs"), `
+export function createInsightsRequiredContract(originSecretEpoch) {
+  globalThis[Symbol.for("threadshare.test.installed-smoke-protocol-calls")] = 1;
+  return {
+    factSchemaVersion: 1,
+    providerAdapterVersions: ["claude@1", "codex@1"],
+    privacyPolicyVersion: 1,
+    originSecretEpoch,
+    duplicatePolicyVersion: 1,
+    factStorageProfile: "normalized-row-v1",
+    storageSchemaVersion: 1,
+    projectionVersions: ["turn-search@2", "turn-summary@1"],
+    analyzerCapabilities: ["mixed-cjk-code@1"],
+    rankerVersion: 1,
+  };
+}
+`);
+
+    await smokeInstalledInsights({ prefix: fixture, version });
+
+    assert.equal(globalThis[protocolCapture], 1);
+    assert.deepEqual(globalThis[contractCapture].projectionVersions, [
+      "turn-search@2",
+      "turn-summary@1",
+    ]);
+    assert.deepEqual(globalThis[contractCapture].analyzerCapabilities, ["mixed-cjk-code@1"]);
+  } finally {
+    delete globalThis[contractCapture];
+    delete globalThis[protocolCapture];
     await rm(fixture, { recursive: true, force: true });
   }
 });

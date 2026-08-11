@@ -948,6 +948,21 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
     "win32-x64",
   ]);
   assert.deepEqual(consumerTargets, buildTargets);
+  const buildMatrixByTarget = new Map(
+    build.strategy.matrix.include.map((entry) => [entry.target, entry]),
+  );
+  for (const target of ["darwin-arm64", "darwin-x64"]) {
+    assert.equal(
+      buildMatrixByTarget.get(target).rustflags,
+      "",
+      `${target} must preserve the LC_UUID load command required by dyld`,
+    );
+  }
+  const uuidBuildCommands = build.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(uuidBuildCommands, /\/usr\/bin\/otool -l/);
+  assert.match(uuidBuildCommands, /\/usr\/bin\/grep -q "cmd LC_UUID"/);
+  assert.match(uuidBuildCommands, /assert_macho_uuid .*engine-build-a/);
+  assert.match(uuidBuildCommands, /assert_macho_uuid .*engine-build-b/);
 
   for (const invalidValue of [
     "${{ runner.temp }}",
@@ -1149,9 +1164,23 @@ test("Engine CI gates all six reproducible target builds on the contract suite",
       "win32-x64",
     ],
   );
+  const engineMatrixByTarget = new Map(
+    workflow.jobs.engine.strategy.matrix.include.map((entry) => [entry.target, entry]),
+  );
+  for (const target of ["darwin-arm64", "darwin-x64"]) {
+    assert.equal(
+      engineMatrixByTarget.get(target).rustflags,
+      "",
+      `${target} must preserve the LC_UUID load command required by dyld`,
+    );
+  }
   const commands = workflow.jobs.engine.steps.map((step) => step.run ?? "").join("\n");
   assert.match(commands, /engine-build-a/);
   assert.match(commands, /engine-build-b/);
+  assert.match(commands, /\/usr\/bin\/otool -l/);
+  assert.match(commands, /\/usr\/bin\/grep -q "cmd LC_UUID"/);
+  assert.match(commands, /assert_macho_uuid .*engine-build-a/);
+  assert.match(commands, /assert_macho_uuid .*engine-build-b/);
   assert.match(commands, /MACOSX_DEPLOYMENT_TARGET="13\.0"/);
   assert.match(commands, /> "engine\/\$\{\{ matrix\.target \}\}\/version\.json"/);
   assert.doesNotMatch(source, /secrets\s*(?:\.|\[)|npm publish/i);

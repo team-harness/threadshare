@@ -15,6 +15,7 @@ import {
   assertBeginSessionCompatible,
   assertHandshakeCompatible,
   assertProtocolMessage,
+  createInsightsRequiredContract,
   createAbortSessionMessage,
   createBatchAcceptedMessage,
   createBeginSessionMessage,
@@ -92,6 +93,37 @@ function sessionOptions(overrides = {}) {
     ...overrides,
   };
 }
+
+test("required contract builder owns every active Engine contract axis", () => {
+  const contract = createInsightsRequiredContract(EPOCH);
+  assert.deepEqual(contract, {
+    factSchemaVersion: 1,
+    providerAdapterVersions: ["claude@1", "codex@1"],
+    privacyPolicyVersion: 1,
+    originSecretEpoch: EPOCH,
+    duplicatePolicyVersion: 1,
+    factStorageProfile: "normalized-row-v1",
+    storageSchemaVersion: 1,
+    projectionVersions: ["turn-search@2", "turn-summary@1"],
+    analyzerCapabilities: ["mixed-cjk-code@1"],
+    rankerVersion: 1,
+  });
+  assert.equal(Object.isFrozen(contract), true);
+  assert.equal(Object.isFrozen(contract.providerAdapterVersions), true);
+  assert.equal(Object.isFrozen(contract.projectionVersions), true);
+  assert.equal(Object.isFrozen(contract.analyzerCapabilities), true);
+});
+
+test("benchmark entry points use the canonical required contract builder", async () => {
+  const sources = await Promise.all([
+    readFile(new URL("../scripts/benchmark-insights-engine.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/run-insights-query-quality.mjs", import.meta.url), "utf8"),
+  ]);
+  for (const source of sources) {
+    assert.match(source, /createInsightsRequiredContract\(ORIGIN_SECRET_EPOCH\)/u);
+    assert.doesNotMatch(source, /function requiredContract\(/u);
+  }
+});
 
 function sampleDelta(overrides = {}) {
   return {

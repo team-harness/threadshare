@@ -17,10 +17,7 @@ import {
   queryJudgmentDigest,
 } from "./insights-query-evaluation.mjs";
 import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
-import {
-  ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
-  ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
-} from "../src/insights-engine-protocol.mjs";
+import { createInsightsRequiredContract } from "../src/insights-engine-protocol.mjs";
 import { assertSessionFactsDelta, canonicalJson, hashKey } from "../src/session-facts.mjs";
 import { createBenchmarkCorpus } from "./benchmark-insights-engine.mjs";
 
@@ -239,21 +236,6 @@ export function createQueryQualityDelta(fixture, { dataset = "real-acceptance" }
   });
 }
 
-function requiredContract() {
-  return {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
-    originSecretEpoch: ORIGIN_SECRET_EPOCH,
-    duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
-    projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
-    analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
-    rankerVersion: 1,
-  };
-}
-
 function emptyFilters() {
   return {
     providers: [],
@@ -298,7 +280,7 @@ async function runEngineQueryOutcomes({
   try {
     client = await createInsightsEngineClient({
       databasePath,
-      requiredContract: requiredContract(),
+      requiredContract: createInsightsRequiredContract(ORIGIN_SECRET_EPOCH),
       runtimeOptions: {
         env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
       },

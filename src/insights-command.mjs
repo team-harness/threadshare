@@ -1,9 +1,6 @@
 import { loadInsightsConfig, updateInsightsExclusion } from "./insights-config.mjs";
 import { createInsightsEngineClient } from "./insights-engine-client.mjs";
-import {
-  ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
-  ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
-} from "./insights-engine-protocol.mjs";
+import { createInsightsRequiredContract } from "./insights-engine-protocol.mjs";
 import {
   createInsightsIndexWorker,
   hideConfiguredInsightsSources,
@@ -150,18 +147,7 @@ export function parseInsightsInvocation(positionals, options = {}) {
 }
 
 export function insightsRequiredContract(originSecretEpoch) {
-  return Object.freeze({
-    factSchemaVersion: 1,
-    providerAdapterVersions: Object.freeze(["claude@1", "codex@1"]),
-    privacyPolicyVersion: 1,
-    originSecretEpoch,
-    duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
-    projectionVersions: ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
-    analyzerCapabilities: ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
-    rankerVersion: 1,
-  });
+  return createInsightsRequiredContract(originSecretEpoch);
 }
 
 async function discoverSources(options) {

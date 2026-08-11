@@ -33,6 +33,7 @@ import {
   ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
   ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
   assertHandshakeCompatible,
+  createInsightsRequiredContract,
   createExcludeSourceMessage,
   createHelloMessage,
   createReadEngineStatusMessage,
@@ -775,21 +776,6 @@ export function createCapacityBenchmarkPlan({
   return Object.freeze(plan);
 }
 
-function requiredContract() {
-  return {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
-    originSecretEpoch: ORIGIN_SECRET_EPOCH,
-    duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
-    projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
-    analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
-    rankerVersion: 1,
-  };
-}
-
 async function writeEncodedFrame(stream, frame) {
   if (!stream.write(frame)) await once(stream, "drain");
 }
@@ -1527,7 +1513,7 @@ async function benchmarkRustSidecar({
   const hello = createHelloMessage({
     requestId: "1",
     clientVersion: "threadshare-benchmark@1",
-    requiredContract: requiredContract(),
+    requiredContract: createInsightsRequiredContract(ORIGIN_SECRET_EPOCH),
   });
   const helloFrame = encodeProtocolFrame(hello);
   await writeEncodedFrame(child.stdin, helloFrame);
@@ -1651,7 +1637,7 @@ async function openCapacitySidecar(binaryPath, databasePath, { sampleRss = true 
   const hello = createHelloMessage({
     requestId: "1",
     clientVersion: "threadshare-capacity-benchmark@1",
-    requiredContract: requiredContract(),
+    requiredContract: createInsightsRequiredContract(ORIGIN_SECRET_EPOCH),
   });
   const helloFrame = encodeProtocolFrame(hello);
   await writeEncodedFrame(child.stdin, helloFrame);

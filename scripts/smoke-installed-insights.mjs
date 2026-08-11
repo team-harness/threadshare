@@ -6,21 +6,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const ROOT_PACKAGE = "@team-harness/threadshare";
-
-function requiredContract() {
-  return {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
-    originSecretEpoch: "11111111-1111-4111-8111-111111111111",
-    duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
-    projectionVersions: [],
-    analyzerCapabilities: [],
-    rankerVersion: 1,
-  };
-}
+const SMOKE_ORIGIN_SECRET_EPOCH = "11111111-1111-4111-8111-111111111111";
 
 export async function smokeInstalledInsights({ prefix, version }) {
   const scopeDirectory = path.join(path.resolve(prefix), "node_modules", "@team-harness");
@@ -34,9 +20,10 @@ export async function smokeInstalledInsights({ prefix, version }) {
   if (platformPackages.length !== 1) {
     throw new Error("consumer install must resolve exactly one platform Insights Engine");
   }
-  const [{ createInsightsEngineClient }, runtime] = await Promise.all([
+  const [{ createInsightsEngineClient }, runtime, protocol] = await Promise.all([
     import(pathToFileURL(path.join(rootDirectory, "src", "insights-engine-client.mjs")).href),
     import(pathToFileURL(path.join(rootDirectory, "src", "insights-engine-runtime.mjs")).href),
+    import(pathToFileURL(path.join(rootDirectory, "src", "insights-engine-protocol.mjs")).href),
   ]);
   const target = runtime.insightsEngineTarget();
   if (
@@ -46,7 +33,7 @@ export async function smokeInstalledInsights({ prefix, version }) {
     throw new Error("consumer install resolved the wrong platform Insights Engine");
   }
   const client = await createInsightsEngineClient({
-    requiredContract: requiredContract(),
+    requiredContract: protocol.createInsightsRequiredContract(SMOKE_ORIGIN_SECRET_EPOCH),
     timeoutMs: 5_000,
   });
   await client.close();

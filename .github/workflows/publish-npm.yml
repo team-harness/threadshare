@@ -97,12 +97,12 @@ jobs:
             rust_target: aarch64-apple-darwin
             runner: macos-15
             binary: threadshare-insights-engine
-            rustflags: -C link-arg=-Wl,-no_uuid
+            rustflags: ""
           - target: darwin-x64
             rust_target: x86_64-apple-darwin
             runner: macos-15-intel
             binary: threadshare-insights-engine
-            rustflags: -C link-arg=-Wl,-no_uuid
+            rustflags: ""
           - target: linux-arm64
             rust_target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
@@ -198,6 +198,16 @@ jobs:
           export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$GITHUB_WORKSPACE=/workspace"
           CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-a" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
           CARGO_TARGET_DIR="$RUNNER_TEMP/engine-build-b" cargo build --manifest-path crates/insights-engine/Cargo.toml --locked --release --target "${{ matrix.rust_target }}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            assert_macho_uuid() {
+              local binary="$1"
+              local load_commands="$2"
+              /usr/bin/otool -l "$binary" > "$load_commands"
+              /usr/bin/grep -q "cmd LC_UUID" "$load_commands"
+            }
+            assert_macho_uuid "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" "$RUNNER_TEMP/engine-build-a-load-commands.txt"
+            assert_macho_uuid "$RUNNER_TEMP/engine-build-b/${{ matrix.rust_target }}/release/${{ matrix.binary }}" "$RUNNER_TEMP/engine-build-b-load-commands.txt"
+          fi
           cmp \
             "$RUNNER_TEMP/engine-build-a/${{ matrix.rust_target }}/release/${{ matrix.binary }}" \
             "$RUNNER_TEMP/engine-build-b/${{ matrix.rust_target }}/release/${{ matrix.binary }}"

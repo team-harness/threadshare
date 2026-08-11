@@ -12,6 +12,22 @@ export const ACTIVE_INSIGHTS_PROJECTION_VERSIONS = Object.freeze([
 export const ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES = Object.freeze([
   "mixed-cjk-code@1",
 ]);
+const ACTIVE_INSIGHTS_PROVIDER_ADAPTER_VERSIONS = Object.freeze(["claude@1", "codex@1"]);
+
+export function createInsightsRequiredContract(originSecretEpoch) {
+  return Object.freeze({
+    factSchemaVersion: 1,
+    providerAdapterVersions: ACTIVE_INSIGHTS_PROVIDER_ADAPTER_VERSIONS,
+    privacyPolicyVersion: 1,
+    originSecretEpoch,
+    duplicatePolicyVersion: 1,
+    factStorageProfile: "normalized-row-v1",
+    storageSchemaVersion: 1,
+    projectionVersions: ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
+    analyzerCapabilities: ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
+    rankerVersion: 1,
+  });
+}
 
 export const RETRACTION_COLLECTION_ORDER = Object.freeze([
   "turnKeys",
