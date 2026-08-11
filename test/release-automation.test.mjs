@@ -1249,6 +1249,10 @@ test("Engine CI gates all six reproducible target builds on the contract suite",
   const workflow = parseYaml(source);
   assert.deepEqual(workflow.on, { pull_request: null, push: { branches: ["main"] } });
   assert.equal(workflow.jobs.engine.needs, "contract");
+  const contractCheckout = workflow.jobs.contract.steps.find(
+    (step) => step.name === "Checkout source",
+  );
+  assert.equal(contractCheckout.with["fetch-depth"], 0);
   assert.match(
     workflow.jobs.contract.steps.map((step) => step.run ?? "").join("\n"),
     /npm run test:insights-engine/,
