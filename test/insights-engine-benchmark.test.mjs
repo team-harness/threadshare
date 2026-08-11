@@ -360,6 +360,7 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(audit.gates.ftsDensityMatchesCorpus, true);
   assert.equal(audit.gates.ftsBackendWithinLimit, true);
   assert.equal(audit.gates.populatedWarmOpenUnder500Ms, true);
+  assert.equal(audit.gates.productAppendWithin2Seconds, true);
   assert.equal(audit.gates.overviewLatencyWithinLimit, true);
   assert.equal(audit.gates.allMeasuredCapacityGatesPassed, true);
   assert.equal(audit.engineRss.sidecarPeakBytes, report.rustSidecar.rss.sidecarPeakBytes);
@@ -413,9 +414,15 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(report.rustSidecar.startup.emptyDatabase.readyMs >= 0, true);
   const populatedStartup = report.rustSidecar.startup.populatedDatabase;
   assert.equal(populatedStartup.readyMs >= 0, true);
-  assert.equal(populatedStartup.statusReadMs >= 0, true);
+  assert.equal(populatedStartup.firstOverviewReadMs > 0, true);
   assert.equal(
-    populatedStartup.readyAndStatusMs >= populatedStartup.readyMs,
+    populatedStartup.readyAndFirstOverviewMs >= populatedStartup.readyMs,
+    true,
+  );
+  assert.equal(populatedStartup.integrityStatusReadMs > 0, true);
+  assert.equal(
+    populatedStartup.readyOverviewAndIntegrityStatusMs >=
+      populatedStartup.readyAndFirstOverviewMs,
     true,
   );
   assert.equal(populatedStartup.status.type, "ENGINE_STATUS");
@@ -424,7 +431,30 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(BigInt(populatedStartup.status.changeLog.rows) > 0n, true);
   assert.equal(populatedStartup.sampleCount, 3);
   assert.equal(populatedStartup.samples.length, 3);
-  assert.equal(populatedStartup.gate.medianReadyUnder500Ms, true);
+  assert.equal(populatedStartup.gate.medianReadyAndFirstOverviewUnder500Ms, true);
+  const productFreshness = report.rustSidecar.productAppendFreshness;
+  assert.match(productFreshness.measurement, /reconcileActiveInsights.*SEARCH_TURNS/u);
+  assert.equal(productFreshness.corpusTurnCount, turnCount);
+  assert.deepEqual(productFreshness.baseline, {
+    sessions: turnCount / 100,
+    turns: turnCount,
+    ftsDocuments: turnCount,
+  });
+  assert.equal(productFreshness.append.committed, 1);
+  assert.equal(productFreshness.append.commitAckMs !== null, true);
+  assert.equal(productFreshness.append.searchResultCount, 1);
+  assert.equal(productFreshness.append.appendToSearchableMs <= 2_000, true);
+  assert.equal(productFreshness.cleanup.missing, 1);
+  assert.equal(productFreshness.cleanup.searchResultCount, 0);
+  assert.equal(productFreshness.cleanup.restored, true);
+  assert.deepEqual(productFreshness.gate, {
+    limitMs: 2_000,
+    productPathUsed: true,
+    commitAcknowledged: true,
+    markerUniquelySearchable: true,
+    cleanupRestored: true,
+    appendedTurnWithin2Seconds: true,
+  });
   assert.deepEqual(report.mutations.verified, {
     replace: true,
     delete: true,
@@ -539,11 +569,14 @@ test("small raw benchmark crosses discovery, Adapter, worker, Engine, and append
   assert.equal(report.backfill.adapter.count, 4);
   assert.equal(report.backfill.commitAck.count, 4);
   assert.equal(report.backfill.physicalBytesRead >= report.corpus.rawBytes, true);
+  assert.equal(report.appendFreshness.productPath, "reconcileActiveInsights");
   assert.equal(report.appendFreshness.report.report.committed, 1);
   assert.deepEqual(report.appendFreshness.report.reasons, ["filesystem"]);
   assert.equal(report.appendFreshness.commitAck.count, 1);
   assert.equal(report.appendFreshness.target.committed, true);
   assert.equal(report.appendFreshness.searchableMatches, 1);
+  assert.equal(report.appendFreshness.engineSearchResultCount, 1);
+  assert.equal(report.appendFreshness.wallMs <= 2_000, true);
   assert.equal(report.facts.sessions, 4);
   assert.equal(report.facts.turns, 5);
   assert.equal(report.facts.ftsDocuments, 5);
@@ -552,4 +585,5 @@ test("small raw benchmark crosses discovery, Adapter, worker, Engine, and append
   assert.equal(report.gates.commitComplete, true);
   assert.equal(report.gates.persistedCorpusComplete, true);
   assert.equal(report.gates.rawBackfillCorpusComplete, true);
+  assert.equal(report.gates.appendedTurnWithin2Seconds, true);
 });

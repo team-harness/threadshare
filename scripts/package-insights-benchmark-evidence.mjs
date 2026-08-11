@@ -277,7 +277,8 @@ function validateCapacity(report, turns, expected) {
     `capacity ${turns} measured capacity gates`,
   );
   requireGate(
-    report.formalEvidenceContext?.startup?.populatedDatabase?.gate?.medianReadyUnder500Ms,
+    report.formalEvidenceContext?.startup?.populatedDatabase?.gate
+      ?.medianReadyAndFirstOverviewUnder500Ms,
     `capacity ${turns} populated startup gate`,
   );
   const mutationChecks = report.formalEvidenceContext?.mutations?.verified;

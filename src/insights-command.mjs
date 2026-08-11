@@ -218,7 +218,11 @@ function assertLockedInsightsState(status, stateChangedMessage) {
 }
 
 async function hideActiveExclusions(config, options, paths) {
-  const status = await inspectInsightsState({ ...options.lifecycleOptions, paths });
+  const status = await inspectInsightsState({
+    ...options.lifecycleOptions,
+    paths,
+    includeEngineStatus: false,
+  });
   const recoveryRequired = status.diagnostics.includes(
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
   );
@@ -237,7 +241,11 @@ async function hideActiveExclusions(config, options, paths) {
   }
   return withInsightsWriterLock(paths, async () => {
     await recoverInsightsReindexSwap({ ...options.reindexOptions, paths });
-    const lockedStatus = await inspectInsightsState({ ...options.lifecycleOptions, paths });
+    const lockedStatus = await inspectInsightsState({
+      ...options.lifecycleOptions,
+      paths,
+      includeEngineStatus: false,
+    });
     assertLockedInsightsState(
       lockedStatus,
       "Insights state changed before exclusions could be applied",
@@ -332,7 +340,11 @@ export async function reconcileInsights(options = {}) {
 
 export async function reconcileActiveInsights(options = {}) {
   const paths = options.paths ?? resolveInsightsPaths(options);
-  const status = await inspectInsightsState({ ...options.lifecycleOptions, paths });
+  const status = await inspectInsightsState({
+    ...options.lifecycleOptions,
+    paths,
+    includeEngineStatus: false,
+  });
   if (!status.databasePresent) return reconcileInsights({ ...options, paths });
   if (
     !status.originSecretPresent &&
@@ -345,7 +357,11 @@ export async function reconcileActiveInsights(options = {}) {
   }
   return withInsightsWriterLock(paths, async () => {
     await recoverInsightsReindexSwap({ ...options.reindexOptions, paths });
-    const lockedStatus = await inspectInsightsState({ ...options.lifecycleOptions, paths });
+    const lockedStatus = await inspectInsightsState({
+      ...options.lifecycleOptions,
+      paths,
+      includeEngineStatus: false,
+    });
     assertLockedInsightsState(
       lockedStatus,
       "Insights state changed before reconciliation could start",
@@ -356,7 +372,8 @@ export async function reconcileActiveInsights(options = {}) {
       discoverSources(options),
     ]);
     const requiredContract = insightsRequiredContract(state.originSecretEpoch);
-    const engine = await createInsightsEngineClient({
+    const createEngineClient = options.createEngineClient ?? createInsightsEngineClient;
+    const engine = await createEngineClient({
       databasePath: paths.databaseFile,
       requiredContract,
       runtimeOptions: options.runtimeOptions,
@@ -435,6 +452,7 @@ function defaultServices(options) {
     shouldReconcile: async () => (await inspectInsightsState({
       ...options.lifecycleOptions,
       paths,
+      includeEngineStatus: false,
     })).databasePresent,
     reindex: (input) => reconcileInsights({
       ...options,

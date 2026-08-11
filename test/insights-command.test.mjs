@@ -391,9 +391,19 @@ test("background reconciliation finishes an installed reindex swap before indexi
     regenerateSecret: false,
   })}\n`, { mode: 0o600 });
 
-  const result = await reconcileActiveInsights(fixture.reconcileOptions);
+  let statusEngineClientCreations = 0;
+  const result = await reconcileActiveInsights({
+    ...fixture.reconcileOptions,
+    lifecycleOptions: {
+      createEngineClient() {
+        statusEngineClientCreations += 1;
+        throw new Error("background reconciliation must not run full integrity checks");
+      },
+    },
+  });
 
   assert.equal(result.report.failed, 0);
+  assert.equal(statusEngineClientCreations, 0);
   assert.equal(existsSync(backup), false);
   assert.equal(existsSync(manifest), false);
 });
@@ -443,11 +453,22 @@ test("exclusion updates recover a pre-install reindex swap before applying visib
     regenerateSecret: false,
   })}\n`, { mode: 0o600 });
 
+  let statusEngineClientCreations = 0;
   const result = await executeInsightsCommand(
     parseInsightsInvocation(["insights", "exclude", "add", "provider", "claude"]),
-    fixture.reconcileOptions,
+    {
+      ...fixture.reconcileOptions,
+      lifecycleOptions: {
+        ...fixture.reconcileOptions.lifecycleOptions,
+        createEngineClient() {
+          statusEngineClientCreations += 1;
+          throw new Error("exclusion updates must not run full integrity checks");
+        },
+      },
+    },
   );
 
+  assert.equal(statusEngineClientCreations, 0);
   assert.equal(result.visibility.scanned > 0, true);
   assert.equal(result.visibility.hidden, 0);
   assert.equal(result.reconciliation.report.failed, 0);

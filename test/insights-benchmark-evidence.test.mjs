@@ -146,7 +146,11 @@ function formalReports({
       allFormalEvidenceGatesPassed: true,
     },
     formalEvidenceContext: {
-      startup: { populatedDatabase: { gate: { medianReadyUnder500Ms: true } } },
+      startup: {
+        populatedDatabase: {
+          gate: { medianReadyAndFirstOverviewUnder500Ms: true },
+        },
+      },
       capacityGates: { allMeasuredCapacityGatesPassed: true },
       mutations: {
         corpus: { turns, sessions: turns / 100 },
@@ -265,6 +269,12 @@ test("formal evidence validation rejects every acceptance bypass", () => {
     }],
     ["missing measured query", (reports) => {
       reports["capacity-25k-query.acceptance.json"].query.groups[1].queryCount = 999;
+    }],
+    ["legacy populated startup gate shape", (reports) => {
+      const gate = reports["capacity-25k-query.acceptance.json"]
+        .formalEvidenceContext.startup.populatedDatabase.gate;
+      delete gate.medianReadyAndFirstOverviewUnder500Ms;
+      gate.medianReadyUnder500Ms = true;
     }],
     ["duplicate path mode", (reports) => {
       reports["capacity-25k-query.acceptance.json"].query.groups[1].pathLimit = 0;

@@ -3,9 +3,11 @@
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
+import { constants as fsConstants } from "node:fs";
 import {
   access,
   appendFile,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -53,7 +55,12 @@ import {
   createInsightsIndexWorker,
   runInsightsIndexer,
 } from "../src/insights-indexer.mjs";
-import { insightsRequiredContract } from "../src/insights-command.mjs";
+import {
+  createInsightsBackgroundWorker,
+  insightsRequiredContract,
+  reconcileActiveInsights,
+} from "../src/insights-command.mjs";
+import { INSIGHTS_ORIGIN_SECRET_FORMAT } from "../src/insights-state.mjs";
 import {
   discoverProviderEvidenceSources,
   readProviderSessionDelta,
@@ -2055,16 +2062,38 @@ async function closeCapacitySidecar(runtime) {
   return rss;
 }
 
-async function measurePopulatedCapacityStartupOnce(binaryPath, databasePath, expectedSnapshotSeq) {
+async function measurePopulatedCapacityStartupOnce(
+  binaryPath,
+  databasePath,
+  plan,
+  expectedSnapshotSeq,
+) {
   const runtime = await openCapacitySidecar(binaryPath, databasePath, { sampleRss: false });
-  const statusStarted = performance.now();
+  const overviewStarted = performance.now();
   try {
+    const overview = await sendCapacityRequest(
+      runtime,
+      createReadInsightsOverviewMessage({
+        requestId: "2",
+        nowUnixMs: String(BASE_TIME_MS + (plan.turnCount + 3_600) * 1_000),
+        quiescenceSeconds: 300,
+      }),
+      "INSIGHTS_OVERVIEW",
+    );
+    const firstOverviewReadMs = performance.now() - overviewStarted;
+    if (overview.snapshotSeq !== expectedSnapshotSeq) {
+      throw new Error(
+        `populated capacity overview reopened at snapshot ${overview.snapshotSeq}; ` +
+        `expected committed snapshot ${expectedSnapshotSeq}`,
+      );
+    }
+    const statusStarted = performance.now();
     const status = await sendCapacityRequest(
       runtime,
-      createReadEngineStatusMessage({ requestId: "2" }),
+      createReadEngineStatusMessage({ requestId: "3" }),
       "ENGINE_STATUS",
     );
-    const statusReadMs = performance.now() - statusStarted;
+    const integrityStatusReadMs = performance.now() - statusStarted;
     if (status.snapshotSeq !== expectedSnapshotSeq || status.snapshotPending !== false) {
       throw new Error(
         `populated capacity database reopened at snapshot ${status.snapshotSeq}; ` +
@@ -2074,8 +2103,11 @@ async function measurePopulatedCapacityStartupOnce(binaryPath, databasePath, exp
     await closeCapacitySidecar(runtime);
     return {
       readyMs: runtime.warmOpenMs,
-      statusReadMs,
-      readyAndStatusMs: runtime.warmOpenMs + statusReadMs,
+      firstOverviewReadMs,
+      readyAndFirstOverviewMs: runtime.warmOpenMs + firstOverviewReadMs,
+      integrityStatusReadMs,
+      readyOverviewAndIntegrityStatusMs:
+        runtime.warmOpenMs + firstOverviewReadMs + integrityStatusReadMs,
       status,
     };
   } catch (error) {
@@ -2089,6 +2121,7 @@ async function measurePopulatedCapacityStartupOnce(binaryPath, databasePath, exp
 async function measurePopulatedCapacityStartup(
   binaryPath,
   databasePath,
+  plan,
   expectedSnapshotSeq,
   sampleCount = 3,
 ) {
@@ -2097,31 +2130,286 @@ async function measurePopulatedCapacityStartup(
     samples.push(await measurePopulatedCapacityStartupOnce(
       binaryPath,
       databasePath,
+      plan,
       expectedSnapshotSeq,
     ));
   }
   const readyMs = percentile(samples.map((sample) => sample.readyMs), 0.5);
-  const statusReadMs = percentile(samples.map((sample) => sample.statusReadMs), 0.5);
-  const readyAndStatusMs = percentile(
-    samples.map((sample) => sample.readyAndStatusMs),
+  const firstOverviewReadMs = percentile(
+    samples.map((sample) => sample.firstOverviewReadMs),
+    0.5,
+  );
+  const readyAndFirstOverviewMs = percentile(
+    samples.map((sample) => sample.readyAndFirstOverviewMs),
+    0.5,
+  );
+  const integrityStatusReadMs = percentile(
+    samples.map((sample) => sample.integrityStatusReadMs),
+    0.5,
+  );
+  const readyOverviewAndIntegrityStatusMs = percentile(
+    samples.map((sample) => sample.readyOverviewAndIntegrityStatusMs),
     0.5,
   );
   return {
     readyMs,
-    statusReadMs,
-    readyAndStatusMs,
+    firstOverviewReadMs,
+    readyAndFirstOverviewMs,
+    integrityStatusReadMs,
+    readyOverviewAndIntegrityStatusMs,
     status: samples[0].status,
     sampleCount: samples.length,
-    samples: samples.map(({ readyMs, statusReadMs, readyAndStatusMs }) => ({
+    samples: samples.map(({
       readyMs,
-      statusReadMs,
-      readyAndStatusMs,
+      firstOverviewReadMs,
+      readyAndFirstOverviewMs,
+      integrityStatusReadMs,
+      readyOverviewAndIntegrityStatusMs,
+    }) => ({
+      readyMs,
+      firstOverviewReadMs,
+      readyAndFirstOverviewMs,
+      integrityStatusReadMs,
+      readyOverviewAndIntegrityStatusMs,
     })),
     gate: {
       limitMs: 500,
-      medianReadyUnder500Ms: readyMs < 500,
+      medianReadyAndFirstOverviewUnder500Ms: readyAndFirstOverviewMs < 500,
     },
   };
+}
+
+async function productFreshnessFactCounts(databasePath) {
+  const database = await openNodeDatabase(databasePath);
+  try {
+    return {
+      sessions: Number(database.prepare("SELECT COUNT(*) AS value FROM sessions").get().value),
+      turns: Number(database.prepare("SELECT COUNT(*) AS value FROM turns").get().value),
+      ftsDocuments: Number(
+        database.prepare("SELECT COUNT(*) AS value FROM turn_fts_documents").get().value,
+      ),
+    };
+  } finally {
+    database.close();
+  }
+}
+
+async function searchProductFreshnessMarker({
+  binaryPath,
+  databasePath,
+  paths,
+  turnCount,
+  marker,
+}) {
+  const client = await createInsightsEngineClient({
+    databasePath,
+    requiredContract: insightsRequiredContract(ORIGIN_SECRET_EPOCH),
+    runtimeOptions: {
+      env: {
+        ...process.env,
+        THREADSHARE_INSIGHTS_ENGINE_PATH: path.resolve(binaryPath),
+      },
+    },
+    childEnv: {
+      ...process.env,
+      SQLITE_TMPDIR: paths.tempDirectory,
+      TMPDIR: paths.tempDirectory,
+      TEMP: paths.tempDirectory,
+      TMP: paths.tempDirectory,
+    },
+    timeoutMs: 120_000,
+  });
+  try {
+    return await client.searchTurns({
+      query: marker,
+      filters: capacitySearchFilters(),
+      limit: 20,
+      pathLimit: 0,
+      nowUnixMs: String(BASE_TIME_MS + (turnCount + 7_200) * 1_000),
+      quiescenceSeconds: 300,
+    });
+  } finally {
+    await client.close();
+  }
+}
+
+async function measureCapacityProductAppendFreshness({
+  binaryPath,
+  databasePath,
+  plan,
+}) {
+  const stateDirectory = `${databasePath}.product-freshness`;
+  const probeDatabasePath = path.join(stateDirectory, "insights.sqlite3");
+  const paths = {
+    stateDirectory,
+    configFile: path.join(stateDirectory, "config.json"),
+    databaseFile: probeDatabasePath,
+    originSecretFile: path.join(stateDirectory, "origin-secret.json"),
+    lockFile: path.join(stateDirectory, "insights.lock"),
+    tempDirectory: path.join(stateDirectory, "tmp"),
+  };
+  let worker = null;
+  try {
+    await rm(stateDirectory, { recursive: true, force: true });
+    await mkdir(paths.tempDirectory, { recursive: true, mode: 0o700 });
+    await copyFile(databasePath, probeDatabasePath, fsConstants.COPYFILE_FICLONE);
+    await writeFile(paths.originSecretFile, `${JSON.stringify({
+      format: INSIGHTS_ORIGIN_SECRET_FORMAT,
+      originSecretEpoch: ORIGIN_SECRET_EPOCH,
+      secret: Buffer.alloc(32, 0x52).toString("base64url"),
+    })}\n`, { mode: 0o600, flag: "wx" });
+    const corpus = await writeRawBackfillCorpus({
+      directory: path.join(stateDirectory, "corpus"),
+      sessionCount: 1,
+      textCharacters: 4_096,
+      seed: `${plan.seed}-product-freshness`,
+    });
+    const target = corpus.sessions[0];
+    const baseline = await productFreshnessFactCounts(probeDatabasePath);
+    if (
+      baseline.sessions !== plan.sessionCount ||
+      baseline.turns !== plan.turnCount ||
+      baseline.ftsDocuments !== plan.turnCount
+    ) {
+      throw new Error("product freshness clone does not match the formal capacity corpus");
+    }
+    const requiredContract = insightsRequiredContract(ORIGIN_SECRET_EPOCH);
+    const runtimeOptions = {
+      env: {
+        ...process.env,
+        THREADSHARE_INSIGHTS_ENGINE_PATH: path.resolve(binaryPath),
+      },
+    };
+    const reconciliationOptions = {
+      paths,
+      discoveryOptions: { environment: corpus.environment },
+      runtimeOptions,
+      timeoutMs: 120_000,
+      concurrency: 1,
+    };
+    const seeded = await reconcileActiveInsights(reconciliationOptions);
+    if (seeded.report.committed !== 1 || seeded.report.failed !== 0) {
+      throw new Error("product freshness baseline source did not commit exactly once");
+    }
+
+    let appendStarted = null;
+    let commitAckMs = null;
+    const createMeasuredEngineClient = async (options) => instrumentEngine(
+      await createInsightsEngineClient(options),
+      (input) => {
+        if (
+          appendStarted !== null &&
+          commitAckMs === null &&
+          input.sourceState.file === target.file
+        ) {
+          commitAckMs = performance.now() - appendStarted;
+        }
+      },
+    );
+    const observer = createWorkerCycleObserver();
+    worker = createInsightsBackgroundWorker({
+      ...reconciliationOptions,
+      createEngineClient: createMeasuredEngineClient,
+      workerOptions: {
+        watchRoots: corpus.watchRoots,
+        debounceMs: 100,
+        pollIntervalMs: 60_000,
+        onCycle({ reasons, report }) {
+          observer.onCycle({
+            report: Object.freeze({ reasons, report: report?.report }),
+          });
+        },
+        onError: observer.onError,
+      },
+    });
+    const startupCycle = observer.waitFor(
+      (report) => report?.report?.unchanged === 1 && report.report.failed === 0,
+      30_000,
+    );
+    worker.start();
+    await startupCycle;
+    await worker.whenIdle();
+
+    const marker = `capacityfresh${plan.turnCount.toString(36)}`;
+    const appendCycle = observer.waitFor(
+      (report) =>
+        report?.report?.committed === 1 &&
+        report.report.failed === 0 &&
+        report.reasons.includes("filesystem"),
+      30_000,
+    );
+    appendStarted = performance.now();
+    const appended = rawBenchmarkRecords(
+      target.provider,
+      target.sessionId,
+      target.index,
+      4_096,
+      marker,
+    ).filter((record) => record.type !== "session_meta");
+    await appendFile(target.file, jsonlBytes(appended));
+    const appendedReport = await appendCycle;
+    await worker.whenIdle();
+    const search = await searchProductFreshnessMarker({
+      binaryPath,
+      databasePath: probeDatabasePath,
+      paths,
+      turnCount: plan.turnCount,
+      marker,
+    });
+    const appendToSearchableMs = performance.now() - appendStarted;
+
+    const cleanupCycle = observer.waitFor(
+      (report) => report?.report?.missing === 1 && report.report.failed === 0,
+      30_000,
+    );
+    await rm(target.file);
+    const cleanupReport = await cleanupCycle;
+    await worker.whenIdle();
+    const cleanupSearch = await searchProductFreshnessMarker({
+      binaryPath,
+      databasePath: probeDatabasePath,
+      paths,
+      turnCount: plan.turnCount,
+      marker,
+    });
+    const afterCleanup = await productFreshnessFactCounts(probeDatabasePath);
+    const cleanupRestored = canonicalJson(afterCleanup) === canonicalJson(baseline) &&
+      cleanupSearch.results.length === 0;
+    const productPathUsed = appendedReport.reasons.includes("filesystem");
+    const gate = {
+      limitMs: 2_000,
+      productPathUsed,
+      commitAcknowledged: commitAckMs !== null,
+      markerUniquelySearchable: search.results.length === 1,
+      cleanupRestored,
+      appendedTurnWithin2Seconds:
+        commitAckMs !== null &&
+        search.results.length === 1 &&
+        cleanupRestored &&
+        appendToSearchableMs <= 2_000,
+    };
+    return {
+      measurement:
+        "createInsightsBackgroundWorker -> reconcileActiveInsights -> SEARCH_TURNS",
+      corpusTurnCount: plan.turnCount,
+      baseline,
+      append: {
+        commitAckMs,
+        appendToSearchableMs,
+        committed: appendedReport.report.committed,
+        searchResultCount: search.results.length,
+      },
+      cleanup: {
+        missing: cleanupReport.report.missing,
+        searchResultCount: cleanupSearch.results.length,
+        restored: cleanupRestored,
+      },
+      gate,
+    };
+  } finally {
+    await worker?.stop().catch(() => {});
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
 }
 
 async function benchmarkCapacitySidecar({
@@ -2193,6 +2481,7 @@ async function benchmarkCapacitySidecar({
   const populatedStartup = await measurePopulatedCapacityStartup(
     binaryPath,
     databasePath,
+    plan,
     lastCommittedSnapshotSeq,
   );
   const database = await openNodeDatabase(databasePath);
@@ -2203,17 +2492,25 @@ async function benchmarkCapacitySidecar({
     rss,
     turnCount: plan.turnCount,
   });
+  const productAppendFreshness = await measureCapacityProductAppendFreshness({
+    binaryPath,
+    databasePath,
+    plan,
+  });
   const populatedWarmOpenUnder500Ms =
-    populatedStartup.gate.medianReadyUnder500Ms;
+    populatedStartup.gate.medianReadyAndFirstOverviewUnder500Ms;
+  const productAppendWithin2Seconds =
+    productAppendFreshness.gate.appendedTurnWithin2Seconds;
   const capacity = {
     ...capacityAudit,
     gates: {
       ...capacityAudit.gates,
       populatedWarmOpenUnder500Ms,
+      productAppendWithin2Seconds,
       overviewLatencyWithinLimit: overview.gates.allMeasuredOverviewGatesPassed,
       allMeasuredCapacityGatesPassed:
         capacityAudit.gates.allMeasuredCapacityGatesPassed && populatedWarmOpenUnder500Ms &&
-        overview.gates.allMeasuredOverviewGatesPassed,
+        productAppendWithin2Seconds && overview.gates.allMeasuredOverviewGatesPassed,
     },
   };
   const searchWithGates = {
@@ -2253,6 +2550,7 @@ async function benchmarkCapacitySidecar({
       emptyDatabase: { readyMs: runtime.warmOpenMs },
       populatedDatabase: populatedStartup,
     },
+    productAppendFreshness,
     corpusDigest: digest.digest("hex"),
     canonicalBytes,
     maxSessionCanonicalBytes,
@@ -2784,7 +3082,8 @@ export async function runInsightsQueryBenchmark({
     queryGatesPassed: capacity.rustSidecar.search.gates.allMeasuredQueryGatesPassed,
     capacityGatesPassed: capacity.rustSidecar.capacity.gates.allMeasuredCapacityGatesPassed,
     populatedStartupPassed:
-      capacity.rustSidecar.startup.populatedDatabase.gate.medianReadyUnder500Ms,
+      capacity.rustSidecar.startup.populatedDatabase.gate
+        .medianReadyAndFirstOverviewUnder500Ms,
     mutationTracePassed:
       Object.keys(capacity.mutations.verified).length > 0 &&
       Object.values(capacity.mutations.verified).every((passed) => passed === true) &&
@@ -3110,6 +3409,14 @@ export async function runInsightsRawBackfillBenchmark({
     path.join(tmpdir(), "threadshare-insights-raw-backfill-"),
   );
   const databasePath = path.join(directory, "raw-backfill.sqlite3");
+  const paths = {
+    stateDirectory: directory,
+    configFile: path.join(directory, "config.json"),
+    databaseFile: databasePath,
+    originSecretFile: path.join(directory, "origin-secret.json"),
+    lockFile: path.join(directory, "insights.lock"),
+    tempDirectory: path.join(directory, "tmp"),
+  };
   const corpus = await writeRawBackfillCorpus({
     directory,
     sessionCount,
@@ -3255,11 +3562,83 @@ export async function runInsightsRawBackfillBenchmark({
     const backfillCycles = cycleReports.slice();
     const backfillReport = summarizeRawBackfillCycles(backfillCycles);
 
+    await worker.stop();
+    worker = null;
+    await engine.close();
+    engine = null;
+    await mkdir(paths.tempDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(paths.originSecretFile, `${JSON.stringify({
+      format: INSIGHTS_ORIGIN_SECRET_FORMAT,
+      originSecretEpoch,
+      secret: Buffer.alloc(32, 0x52).toString("base64url"),
+    })}\n`, { mode: 0o600, flag: "wx" });
+
     phase.name = "append";
     const appendTarget = corpus.sessions.at(-1);
     appendTargetFile = appendTarget.file;
     const appendMarker = `freshmarker${appendTarget.index.toString(36)}`;
-    const appendCycle = cycleObserver.waitFor(
+    const productCycleObserver = createWorkerCycleObserver();
+    const createMeasuredEngineClient = async (options) => instrumentEngine(
+      await createInsightsEngineClient(options),
+      (input, _response, wallMs) => {
+        phase.append.commit.push(wallMs);
+        if (input.sourceState.file === appendTargetFile && appendCommittedMs === null) {
+          appendCommittedMs = performance.now() - appendStarted;
+        }
+      },
+    );
+    worker = createInsightsBackgroundWorker({
+      paths,
+      discoveryOptions: { environment: corpus.environment },
+      runtimeOptions: {
+        env: {
+          ...process.env,
+          THREADSHARE_INSIGHTS_ENGINE_PATH: path.resolve(binaryPath),
+        },
+      },
+      timeoutMs: 120_000,
+      concurrency: 4,
+      createEngineClient: createMeasuredEngineClient,
+      adapterOptions: {
+        onBytesRead({ bytesRead }) {
+          phase.append.physicalBytes += bytesRead;
+        },
+      },
+      async readDelta(...arguments_) {
+        const started = performance.now();
+        try {
+          return await readProviderSessionDelta(...arguments_);
+        } finally {
+          phase.append.adapter.push(performance.now() - started);
+        }
+      },
+      workerOptions: {
+        watchRoots: corpus.watchRoots,
+        debounceMs: 100,
+        pollIntervalMs: 60_000,
+        onCycle({ reasons, report }) {
+          productCycleObserver.onCycle({
+            report: Object.freeze({
+              reasons,
+              committedTarget:
+                appendCommittedMs !== null && report?.report?.committed === 1,
+              productPath: "reconcileActiveInsights",
+              report: report?.report,
+            }),
+          });
+        },
+        onError: productCycleObserver.onError,
+      },
+    });
+    const productStartupCycle = productCycleObserver.waitFor(
+      (cycle) => cycle.reasons.includes("startup") &&
+        cycle.report.failed === 0 && cycle.report.unchanged === sessionCount,
+      120_000,
+    );
+    worker.start();
+    await productStartupCycle;
+    await worker.whenIdle();
+    const appendCycle = productCycleObserver.waitFor(
       (cycle) => cycle.reasons.includes("filesystem") &&
         cycle.report.committed === 1 && cycle.committedTarget,
       30_000,
@@ -3276,11 +3655,16 @@ export async function runInsightsRawBackfillBenchmark({
     const appendReport = await appendCycle;
     await worker.whenIdle();
     if (worker.status().lastError) throw worker.status().lastError;
-    const appendCycleWallMs = performance.now() - appendStarted;
+    const appendSearch = await searchProductFreshnessMarker({
+      binaryPath,
+      databasePath,
+      paths,
+      turnCount: sessionCount + 1,
+      marker: appendMarker,
+    });
+    const appendSearchableMs = performance.now() - appendStarted;
     await worker.stop();
     worker = null;
-    await engine.close();
-    engine = null;
 
     const database = await openNodeDatabase(databasePath);
     const facts = {
@@ -3348,7 +3732,8 @@ export async function runInsightsRawBackfillBenchmark({
         report: backfillReport,
       },
       appendFreshness: {
-        wallMs: appendCycleWallMs,
+        productPath: appendReport.productPath,
+        wallMs: appendSearchableMs,
         committedMs: appendCommittedMs,
         physicalBytesRead: phase.append.physicalBytes,
         adapter: phaseTimings(phase.append.adapter),
@@ -3359,6 +3744,7 @@ export async function runInsightsRawBackfillBenchmark({
           committed: appendReport.committedTarget,
         },
         searchableMatches: facts.appendMatches,
+        engineSearchResultCount: appendSearch.results.length,
         report: appendReport,
       },
       facts,
@@ -3373,7 +3759,8 @@ export async function runInsightsRawBackfillBenchmark({
           latestSessionsCommittedMs !== null && latestSessionsCommittedMs <= 30_000,
         appendedTurnWithin2Seconds:
           appendReport.committedTarget && appendCommittedMs !== null &&
-          appendCommittedMs <= 2_000 && facts.appendMatches > 0,
+          appendSearchableMs <= 2_000 && facts.appendMatches > 0 &&
+          appendSearch.results.length === 1,
       },
     };
   } finally {
