@@ -133,6 +133,30 @@ Paseo sharing requires the local `paseo` CLI and a reachable daemon. Threadshare
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
+### Query Local Insights with an Agent
+
+Build the local Insights index once, then use the JSON-only query actions to inspect committed,
+privacy-trimmed history without uploading it or rereading provider session files:
+
+```bash
+threadshare insights status
+threadshare insights reindex
+threadshare insights search --query 'database timeout' --format json
+threadshare insights usage skill --request usage.json --format json
+threadshare insights activity --request activity.json --format json
+```
+
+Use `threadshare insights --help` and each action's help for the canonical request shape. The query
+surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filtered Turn search,
+capability discovery, and revision-checked evidence pages. Responses include the committed snapshot
+identity needed to cite results and detect an atomic reindex between pages.
+
+Usage counts are recorded invocations, not inferred independent uses. Agents must report grouped and
+ungrouped invocations with the returned dedupe support, and must describe Capability terminal states
+separately from the outcome of the containing Turn. Co-occurrence is not evidence that a Tool or Skill
+caused a Turn to succeed or fail. Query responses may include bounded visible problem and final-answer
+excerpts, but never raw Tool payloads, system/thinking content, provider pointers, or local paths.
+
 ### Use Another Threadshare Server
 
 The hosted service is the default. Override it per command or for the current shell when you want to use a self-hosted deployment:

@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-usage.v1.schema.json",
+  "title": "Threadshare Insights Usage V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "kind", "orderBy", "window", "comparisonWindow", "closureEvaluatedAt", "quiescenceSeconds", "items", "totalCandidateCount", "truncated", "coverage", "nextCursor"],
+  "properties": {
+    "format": { "const": "threadshare-insights-usage@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "kind": { "enum": ["tool", "skill"] },
+    "orderBy": { "$ref": "#/$defs/orderBy" },
+    "window": { "$ref": "#/$defs/window" },
+    "comparisonWindow": { "anyOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
+    "closureEvaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "quiescenceSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/item" } },
+    "totalCandidateCount": { "$ref": "#/$defs/decimal" },
+    "truncated": { "type": "boolean" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "nextCursor": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "signedDecimal": { "type": "string", "pattern": "^(0|-?[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observedAtOrAfter", "observedBefore"],
+      "properties": {
+        "observedAtOrAfter": { "$ref": "#/$defs/timestamp" },
+        "observedBefore": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "orderBy": {
+      "enum": ["recorded-invocation-count", "recorded-failing-invocation-count", "distinct-turn-count", "distinct-session-count", "distinct-dedupe-group-count", "last-used", "absolute-recorded-invocation-change"]
+    },
+    "invocationTerminalCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invocationTotal", "pending", "completed", "failed", "cancelled", "unknown"],
+      "properties": {
+        "invocationTotal": { "$ref": "#/$defs/decimal" }, "pending": { "$ref": "#/$defs/decimal" },
+        "completed": { "$ref": "#/$defs/decimal" }, "failed": { "$ref": "#/$defs/decimal" },
+        "cancelled": { "$ref": "#/$defs/decimal" }, "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "containingTurnOutcomeCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctTurnTotal", "providerCompleted", "abandoned", "unknown"],
+      "properties": {
+        "distinctTurnTotal": { "$ref": "#/$defs/decimal" },
+        "providerCompleted": { "$ref": "#/$defs/decimal" },
+        "abandoned": { "$ref": "#/$defs/decimal" },
+        "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "support": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctDedupeGroupCount", "strongDedupeGroupCount", "weakDedupeGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount", "sessionDuplicateMethodCounts"],
+      "properties": {
+        "distinctDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "strongDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "weakDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "observedEofProvisionalGroupCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" },
+        "sessionDuplicateMethodCounts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["explicitLineage", "exactFirstTurnPrefix"],
+          "properties": {
+            "explicitLineage": { "$ref": "#/$defs/decimal" },
+            "exactFirstTurnPrefix": { "$ref": "#/$defs/decimal" }
+          }
+        }
+      }
+    },
+    "strengthCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed", "confirmed", "inferred"],
+      "properties": {
+        "observed": { "$ref": "#/$defs/decimal" },
+        "confirmed": { "$ref": "#/$defs/decimal" },
+        "inferred": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "retrySummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["failedCount", "sameInputRepeatCount", "retryAfterFailureCount"],
+      "properties": {
+        "failedCount": { "$ref": "#/$defs/decimal" },
+        "sameInputRepeatCount": { "$ref": "#/$defs/decimal" },
+        "retryAfterFailureCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "outOfWindow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope", "retrySummary"],
+      "properties": {
+        "scope": { "const": "all-indexed-history" },
+        "retrySummary": { "anyOf": [{ "$ref": "#/$defs/retrySummary" }, { "type": "null" }] }
+      }
+    },
+    "comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["baselineRecordedInvocationCount", "currentRecordedInvocationCount", "absoluteRecordedInvocationChange"],
+      "properties": {
+        "baselineRecordedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "currentRecordedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "absoluteRecordedInvocationChange": { "$ref": "#/$defs/signedDecimal" }
+      }
+    },
+    "item": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capabilityKey", "provider", "kind", "canonicalName", "recordedInvocationCount", "recordedFailingInvocationCount", "distinctTurnCount", "distinctSessionCount", "lastUsedAt", "invocationTerminalCounts", "containingTurnOutcomeCounts", "groupedInvocationCount", "ungroupedInvocationCount", "support", "strengthCounts", "outOfWindow", "comparison"],
+      "properties": {
+        "capabilityKey": { "$ref": "#/$defs/hex64" },
+        "provider": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["tool", "skill"] },
+        "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "recordedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "recordedFailingInvocationCount": { "$ref": "#/$defs/decimal" },
+        "distinctTurnCount": { "$ref": "#/$defs/decimal" },
+        "distinctSessionCount": { "$ref": "#/$defs/decimal" },
+        "lastUsedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "invocationTerminalCounts": { "$ref": "#/$defs/invocationTerminalCounts" },
+        "containingTurnOutcomeCounts": { "$ref": "#/$defs/containingTurnOutcomeCounts" },
+        "groupedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "ungroupedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "support": { "$ref": "#/$defs/support" },
+        "strengthCounts": { "$ref": "#/$defs/strengthCounts" },
+        "outOfWindow": { "$ref": "#/$defs/outOfWindow" },
+        "comparison": { "anyOf": [{ "$ref": "#/$defs/comparison" }, { "type": "null" }] }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap", "fullyExcludedCapabilityCount"],
+      "properties": {
+        "excludedUndatedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUndatedTurnCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedTurnCount": { "$ref": "#/$defs/decimal" },
+        "categoriesMayOverlap": { "const": true },
+        "fullyExcludedCapabilityCount": { "$ref": "#/$defs/decimal" }
+      }
+    }
+  }
+}

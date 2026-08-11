@@ -133,6 +133,28 @@ Viewer 链接不会公开列出，但它不带访问鉴权。任何获得链接�
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
+### 让 Agent 查询本地 Insights
+
+先构建一次本地 Insights 索引，再通过 JSON-only 查询动作分析已提交、经过隐私裁剪的历史；
+查询不会上传数据，也不会重新扫描 provider session 文件：
+
+```bash
+threadshare insights status
+threadshare insights reindex
+threadshare insights search --query 'database timeout' --format json
+threadshare insights usage skill --request usage.json --format json
+threadshare insights activity --request activity.json --format json
+```
+
+规范请求形状以 `threadshare insights --help` 和各 action 的 help 为准。查询面包括 Overview、
+Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录，以及带 revision
+校验的证据分页。响应包含用于引用结果、检测分页期间原子 reindex 的 committed snapshot 身份。
+
+Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 必须同时报告 grouped、
+ungrouped invocation 与返回的 dedupe support；Capability 调用终态和所在 Turn 的结果必须分开陈述，
+共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。查询结果可以包含有界的可见问题与最终
+回答摘录，但不会包含原始 Tool payload、system/thinking 内容、provider pointer 或本地路径。
+
 ### 使用其他 Threadshare 服务端
 
 CLI 默认连接托管服务。需要使用独立部署时，可以为单次命令或当前 shell 覆盖地址：

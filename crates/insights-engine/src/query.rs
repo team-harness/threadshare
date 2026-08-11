@@ -5,6 +5,7 @@ use std::fmt;
 use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::agent_query::canonical_timestamp;
 use crate::analyzer::{
     AnalyzerError, AnalyzerField, AnalyzerOriginScope, CapabilityInput, QueryTerm,
     SEARCH_PROJECTION_VERSION, analyze_document, analyze_query,
@@ -63,11 +64,29 @@ pub enum ClosureFilter {
     Open,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SearchOrderBy {
+    /// Blended bm25 + coverage + exactness ranking over a bounded candidate pool.
+    #[default]
+    Relevance,
+    /// True newest-first over the whole matching set, not just the ranked pool.
+    ObservedDesc,
+}
+
+/// `observed-desc` cannot lean on the ranked candidate cap, so a text query must name a
+/// window no wider than the supported retention horizon.
+pub const MAX_OBSERVED_DESC_WINDOW_MS: u64 = 366 * 86_400_000;
+/// One past the largest match set `observed-desc` will sort for a text query.
+pub const MAX_OBSERVED_DESC_MATCHES: usize = 10_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchRequest {
     #[serde(default)]
     pub query: String,
+    #[serde(default)]
+    pub order_by: SearchOrderBy,
     #[serde(default)]
     pub providers: Vec<String>,
     #[serde(default)]
@@ -76,6 +95,8 @@ pub struct SearchRequest {
     pub tool_capability_keys: Vec<String>,
     #[serde(default)]
     pub skill_capability_keys: Vec<String>,
+    #[serde(default)]
+    pub capability_terminal_states: Vec<CapabilityTerminalState>,
     pub after_unix_ms: Option<u64>,
     pub before_unix_ms: Option<u64>,
     #[serde(default)]
@@ -92,10 +113,12 @@ impl Default for SearchRequest {
     fn default() -> Self {
         Self {
             query: String::new(),
+            order_by: SearchOrderBy::Relevance,
             providers: Vec::new(),
             project_keys: Vec::new(),
             tool_capability_keys: Vec::new(),
             skill_capability_keys: Vec::new(),
+            capability_terminal_states: Vec::new(),
             after_unix_ms: None,
             before_unix_ms: None,
             result_evidence: Vec::new(),
@@ -173,6 +196,23 @@ impl SearchRequest {
                 "closure must contain at most 3 sorted unique values",
             ));
         }
+        if !sorted_unique_terminal_states(&self.capability_terminal_states) {
+            return Err(QueryError::new(
+                "QUERY_INVALID_FILTER",
+                "capabilityTerminalStates must contain at most 5 sorted unique values",
+            ));
+        }
+        if !self.capability_terminal_states.is_empty()
+            && self.tool_capability_keys.is_empty()
+            && self.skill_capability_keys.is_empty()
+        {
+            // The filter narrows a capability's own use rows, so without a capability key it
+            // would silently become "any capability in this turn reached this state".
+            return Err(QueryError::new(
+                "QUERY_INVALID_FILTER",
+                "capabilityTerminalStates requires toolCapabilityKeys or skillCapabilityKeys",
+            ));
+        }
         if self
             .after_unix_ms
             .zip(self.before_unix_ms)
@@ -221,6 +261,25 @@ impl SearchRequest {
                 "query requires text or a structured filter",
             ));
         }
+        if self.order_by == SearchOrderBy::ObservedDesc && !self.query.is_empty() {
+            // Relevance ordering can lean on a bounded candidate pool; true newest-first cannot,
+            // so a text query has to name a window we are willing to sort in full.
+            let Some((after, before)) = self.after_unix_ms.zip(self.before_unix_ms) else {
+                return Err(QueryError::new(
+                    "QUERY_TOO_BROAD",
+                    "observed-desc with a text query requires afterUnixMs and beforeUnixMs",
+                ));
+            };
+            if before.saturating_sub(after) > MAX_OBSERVED_DESC_WINDOW_MS {
+                return Err(QueryError::new(
+                    "QUERY_TOO_BROAD",
+                    format!(
+                        "observed-desc with a text query requires a window of at most {} days",
+                        MAX_OBSERVED_DESC_WINDOW_MS / 86_400_000
+                    ),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -229,6 +288,7 @@ impl SearchRequest {
             || !self.project_keys.is_empty()
             || !self.tool_capability_keys.is_empty()
             || !self.skill_capability_keys.is_empty()
+            || !self.capability_terminal_states.is_empty()
             || self.after_unix_ms.is_some()
             || self.before_unix_ms.is_some()
             || !self.result_evidence.is_empty()
@@ -236,14 +296,14 @@ impl SearchRequest {
     }
 }
 
-fn valid_stable_key(value: &str) -> bool {
+pub(crate) fn valid_stable_key(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn strictly_sorted<'a>(values: impl Iterator<Item = &'a String>) -> bool {
+pub(crate) fn strictly_sorted<'a>(values: impl Iterator<Item = &'a String>) -> bool {
     let values = values.collect::<Vec<_>>();
     values.windows(2).all(|pair| pair[0] < pair[1])
 }
@@ -256,12 +316,53 @@ fn result_filter_rank(value: ResultEvidenceFilter) -> u8 {
     }
 }
 
-fn closure_filter_rank(value: ClosureFilter) -> u8 {
+pub(crate) fn closure_filter_rank(value: ClosureFilter) -> u8 {
     match value {
         ClosureFilter::HardSealed => 0,
         ClosureFilter::Open => 1,
         ClosureFilter::Quiescent => 2,
     }
+}
+
+/// Ranked by wire spelling so the sorted-unique contract matches the JSON the caller sent.
+pub(crate) fn terminal_state_rank(value: CapabilityTerminalState) -> u8 {
+    match value {
+        CapabilityTerminalState::Cancelled => 0,
+        CapabilityTerminalState::Completed => 1,
+        CapabilityTerminalState::Failed => 2,
+        CapabilityTerminalState::Pending => 3,
+        CapabilityTerminalState::Unknown => 4,
+    }
+}
+
+pub(crate) fn terminal_state_text(value: CapabilityTerminalState) -> &'static str {
+    match value {
+        CapabilityTerminalState::Cancelled => "cancelled",
+        CapabilityTerminalState::Completed => "completed",
+        CapabilityTerminalState::Failed => "failed",
+        CapabilityTerminalState::Pending => "pending",
+        CapabilityTerminalState::Unknown => "unknown",
+    }
+}
+
+pub(crate) fn sorted_unique_terminal_states(values: &[CapabilityTerminalState]) -> bool {
+    values.len() <= 5
+        && values
+            .iter()
+            .map(|value| terminal_state_rank(*value))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+}
+
+pub(crate) fn sorted_unique_closure_filters(values: &[ClosureFilter]) -> bool {
+    values.len() <= 3
+        && values
+            .iter()
+            .map(|value| closure_filter_rank(*value))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -286,6 +387,7 @@ pub struct SearchResult {
     pub problem_truncated: bool,
     pub final_summary: Option<String>,
     pub final_truncated: bool,
+    pub dedupe: Option<SearchDedupe>,
     pub bm25_rank: Option<u16>,
     pub rank_component_ppm: u32,
     pub matched_field_terms: Vec<MatchedFieldTerm>,
@@ -293,6 +395,14 @@ pub struct SearchResult {
     pub coverage_ppm: u32,
     pub exact: bool,
     pub relevance_ppm: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchDedupe {
+    pub duplicate_group_key: String,
+    pub confidence: DedupeConfidence,
+    pub observed_eof_provisional: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -328,6 +438,11 @@ pub struct SearchResponse {
     pub projection_version: u32,
     pub analyzer_version: u32,
     pub ranker_version: u32,
+    pub order_by: SearchOrderBy,
+    /// Frozen clock the closure classifier ran at, echoed because results carry closure.
+    pub closure_evaluated_at: String,
+    pub quiescence_seconds: u32,
+    pub total_match_count: String,
     pub scoring_terms: Vec<ScoringTermSummary>,
     pub results: Vec<SearchResult>,
     pub evidence_paths: EvidencePathReport,
@@ -367,21 +482,22 @@ struct Candidate {
     result_evidence: ResultEvidenceFilter,
     session_key: String,
     duplicate_group_key: Option<String>,
+    duplicate_method: Option<String>,
     dedupe_closure: Option<String>,
 }
 
 #[derive(Default)]
-struct SqlParameters {
-    values: Vec<Value>,
+pub(crate) struct SqlParameters {
+    pub(crate) values: Vec<Value>,
 }
 
 impl SqlParameters {
-    fn bind(&mut self, value: Value) -> String {
+    pub(crate) fn bind(&mut self, value: Value) -> String {
         self.values.push(value);
         format!("?{}", self.values.len())
     }
 
-    fn bind_list(&mut self, values: impl IntoIterator<Item = Value>) -> String {
+    pub(crate) fn bind_list(&mut self, values: impl IntoIterator<Item = Value>) -> String {
         values
             .into_iter()
             .map(|value| self.bind(value))
@@ -414,6 +530,9 @@ pub fn search_with_trace(
             "Turn search projection is still building",
         ));
     }
+    // Frozen before any classification so every row in this response, and the echoed clock,
+    // describe the same instant.
+    let closure_evaluated_at = canonical_timestamp(request.now_unix_ms)?;
     let transaction = connection.unchecked_transaction().map_err(query_failed)?;
     let snapshot_seq = transaction
         .query_row(
@@ -436,7 +555,8 @@ pub fn search_with_trace(
                     "query exceeds 8192 UTF-8 bytes",
                 ));
             }
-            Err(AnalyzerError::QueryTooBroad) if request.has_structured_filter() => None,
+            // Never fall back to a filter-only scan: the caller typed text, and answering with
+            // recent turns that ignore it looks like a match when it is not one.
             Err(AnalyzerError::QueryTooBroad) => {
                 return Err(QueryError::new(
                     "QUERY_TOO_BROAD",
@@ -467,7 +587,7 @@ pub fn search_with_trace(
     diagnostic.scoring_term_count = saturating_u16(scoring_terms.len());
 
     let posting_started = Instant::now();
-    let candidates = query_candidates(
+    let (candidates, total_match_count) = query_candidates(
         &transaction,
         &request,
         analyzed.as_ref().map(|_| scoring_terms.as_slice()),
@@ -479,18 +599,36 @@ pub fn search_with_trace(
         .collect::<Vec<_>>();
 
     let rerank_started = Instant::now();
-    let mut ranked = rerank_candidates(&transaction, candidates, &request.query, &scoring_terms)?;
+    let mut ranked = rerank_candidates(&transaction, candidates, &request, &scoring_terms)?;
     diagnostic.rerank_micros = elapsed_micros(rerank_started);
     let path_started = Instant::now();
+    let dedupe_limit = if request.path_limit == 0 {
+        usize::from(request.limit)
+    } else {
+        MAX_SEARCH_RESULTS as usize
+    };
+    let group_keys = ranked
+        .iter()
+        .take(dedupe_limit)
+        .filter_map(|(_, candidate)| candidate.duplicate_group_key.clone())
+        .collect::<BTreeSet<_>>();
+    let group_confidences = read_group_confidences(&transaction, &group_keys)?;
+    for (result, candidate) in ranked.iter_mut().take(usize::from(request.limit)) {
+        result.dedupe = candidate
+            .duplicate_group_key
+            .as_ref()
+            .map(|group| SearchDedupe {
+                duplicate_group_key: group.clone(),
+                confidence: group_confidences
+                    .get(group)
+                    .copied()
+                    .unwrap_or(DedupeConfidence::Weak),
+                observed_eof_provisional: observed_eof_provisional(candidate),
+            });
+    }
     let path_turns = if request.path_limit == 0 {
         Vec::new()
     } else {
-        let group_keys = ranked
-            .iter()
-            .take(MAX_SEARCH_RESULTS as usize)
-            .filter_map(|(_, candidate)| candidate.duplicate_group_key.clone())
-            .collect::<BTreeSet<_>>();
-        let group_confidences = read_group_confidences(&transaction, &group_keys)?;
         ranked
             .iter()
             .take(MAX_SEARCH_RESULTS as usize)
@@ -529,6 +667,10 @@ pub fn search_with_trace(
             projection_version: SEARCH_PROJECTION_VERSION,
             analyzer_version: ANALYZER_WIRE_VERSION,
             ranker_version: RANKER_VERSION,
+            order_by: request.order_by,
+            closure_evaluated_at,
+            quiescence_seconds: request.quiescence_seconds,
+            total_match_count: total_match_count.to_string(),
             scoring_terms,
             results,
             evidence_paths,
@@ -653,9 +795,9 @@ fn query_candidates(
     connection: &Connection,
     request: &SearchRequest,
     scoring_terms: Option<&[ScoringTerm]>,
-) -> Result<Vec<Candidate>, QueryError> {
+) -> Result<(Vec<Candidate>, u64), QueryError> {
     if scoring_terms.is_some_and(<[ScoringTerm]>::is_empty) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let mut parameters = SqlParameters::default();
     let threshold_ns = request
@@ -686,6 +828,12 @@ fn query_candidates(
         result_evidence,
     )?;
 
+    let filter_only_limit = if request.path_limit == 0 {
+        usize::from(request.limit)
+    } else {
+        MAX_SEARCH_RESULTS as usize
+    };
+    let mut observed_desc_text = false;
     let (score_select, fts_filter, order, limit) = if let Some(terms) = scoring_terms {
         let expression = FtsMatchExpression::from_query_terms(
             &terms
@@ -695,25 +843,41 @@ fn query_candidates(
         )
         .map_err(query_failed)?;
         let match_parameter = parameters.bind(Value::Text(expression.as_str().to_owned()));
-        (
-            "bm25(turns_fts, 8.0, 4.0, 2.0)",
-            format!("turns_fts MATCH {match_parameter}"),
-            "bm25(turns_fts, 8.0, 4.0, 2.0) ASC, t.turn_key ASC",
-            MAX_FTS_CANDIDATES,
-        )
+        let fts_filter = format!("turns_fts MATCH {match_parameter}");
+        if request.order_by == SearchOrderBy::ObservedDesc {
+            // The ranked pool would silently drop older matches, so refuse to answer
+            // "newest first" at all unless the whole match set is small enough to sort.
+            observed_desc_text = true;
+            (
+                "0.0",
+                fts_filter,
+                "t.observed_timestamp DESC, t.turn_key ASC",
+                filter_only_limit,
+            )
+        } else {
+            (
+                "bm25(turns_fts, 8.0, 4.0, 2.0)",
+                fts_filter,
+                "bm25(turns_fts, 8.0, 4.0, 2.0) ASC, t.turn_key ASC",
+                MAX_FTS_CANDIDATES,
+            )
+        }
     } else {
         (
             "0.0",
             "1=1".to_owned(),
             "t.observed_timestamp DESC, t.turn_key ASC",
-            if request.path_limit == 0 {
-                usize::from(request.limit)
-            } else {
-                MAX_SEARCH_RESULTS as usize
-            },
+            filter_only_limit,
         )
     };
     filters.push(fts_filter);
+    let total_match_count = count_filtered_matches(
+        connection,
+        &filters,
+        &parameters,
+        scoring_terms.is_some(),
+        observed_desc_text.then_some(MAX_OBSERVED_DESC_MATCHES),
+    )?;
     let limit_parameter = parameters.bind(Value::Integer(limit as i64));
     let sql = format!(
         "SELECT t.turn_id,lower(hex(t.turn_key)),lower(hex(t.revision)),s.provider,
@@ -721,7 +885,7 @@ fn query_candidates(
                 t.observed_timestamp,
                 COALESCE(CAST(unixepoch(t.observed_timestamp,'subsec')*1000 AS INTEGER),0),
                 {closure},{result_evidence},lower(hex(s.session_key)),
-                lower(hex(s.duplicate_group_key)),s.dedupe_closure,
+                lower(hex(s.duplicate_group_key)),s.duplicate_method,s.dedupe_closure,
                 {score_select}
          FROM turns t
          JOIN sessions s ON s.session_id=t.session_id
@@ -738,7 +902,7 @@ fn query_candidates(
         filters.join(" AND ")
     );
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    statement
+    let candidates = statement
         .query_map(params_from_iter(parameters.values), |row| {
             let closure: String = row.get(9)?;
             let result: String = row.get(10)?;
@@ -756,12 +920,59 @@ fn query_candidates(
                 result_evidence: parse_result_evidence(&result),
                 session_key: row.get(11)?,
                 duplicate_group_key: empty_hex_to_none(row.get(12)?),
-                dedupe_closure: row.get(13)?,
+                duplicate_method: row.get(13)?,
+                dedupe_closure: row.get(14)?,
             })
         })
         .map_err(query_failed)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(query_failed)
+        .map_err(query_failed)?;
+    Ok((candidates, total_match_count))
+}
+
+/// Counts the complete filtered universe. `observed-desc` text queries retain their 10,001-row
+/// bounded probe: the count is exact only when it is small enough for true newest-first sorting.
+fn count_filtered_matches(
+    connection: &Connection,
+    filters: &[String],
+    parameters: &SqlParameters,
+    join_fts: bool,
+    bounded_cap: Option<usize>,
+) -> Result<u64, QueryError> {
+    let from = format!(
+        "FROM turns t
+         JOIN sessions s ON s.session_id=t.session_id
+         JOIN source_checkpoints sc ON sc.session_id=s.session_id
+         {}",
+        if join_fts {
+            "JOIN turns_fts ON turns_fts.rowid=t.turn_id"
+        } else {
+            ""
+        }
+    );
+    let predicate = filters.join(" AND ");
+    let sql = match bounded_cap {
+        Some(cap) => format!(
+            "SELECT COUNT(*) FROM (SELECT 1 {from} WHERE {predicate} LIMIT {})",
+            cap + 1
+        ),
+        None => format!("SELECT COUNT(*) {from} WHERE {predicate}"),
+    };
+    let matches: i64 = connection
+        .query_row(&sql, params_from_iter(parameters.values.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(query_failed)?;
+    if bounded_cap.is_some_and(|cap| matches as usize > cap) {
+        return Err(QueryError::new(
+            "QUERY_TOO_BROAD",
+            format!(
+                "observed-desc with a text query matches more than {MAX_OBSERVED_DESC_MATCHES} turns"
+            ),
+        ));
+    }
+    u64::try_from(matches)
+        .map_err(|_| query_failed(rusqlite::Error::IntegralValueOutOfRange(0, matches)))
 }
 
 fn append_structured_filters(
@@ -779,6 +990,20 @@ fn append_structured_filters(
         let values = parameters.bind_list(stable_key_values(&request.project_keys)?);
         filters.push(format!("s.project_key IN ({values})"));
     }
+    // The terminal-state predicate lives inside the same EXISTS as the capability key so it
+    // constrains the same use row; hoisting it out would match "this turn used X and, separately,
+    // something reached this state".
+    let terminal_clause = if request.capability_terminal_states.is_empty() {
+        String::new()
+    } else {
+        let values = parameters.bind_list(
+            request
+                .capability_terminal_states
+                .iter()
+                .map(|value| Value::Text(terminal_state_text(*value).to_owned())),
+        );
+        format!(" AND COALESCE(use_filter.provider_terminal_state,'unknown') IN ({values})")
+    };
     for (keys, kind) in [
         (&request.tool_capability_keys, "tool"),
         (&request.skill_capability_keys, "skill"),
@@ -790,21 +1015,19 @@ fn append_structured_filters(
                  JOIN capabilities capability_filter ON capability_filter.capability_id=use_filter.capability_id \
                  WHERE use_filter.turn_id=t.turn_id AND use_filter.origin_scope='main' \
                  AND capability_filter.capability_kind='{kind}' \
-                 AND capability_filter.capability_key IN ({values}))"
+                 AND capability_filter.capability_key IN ({values}){terminal_clause})"
             ));
         }
     }
+    // Compared as canonical RFC3339 millisecond UTC text so the range stays sargable against
+    // turns_query_filters; wrapping the column in unixepoch() would force a scan.
     if let Some(after) = request.after_unix_ms {
-        let value = parameters.bind(Value::Integer(after as i64));
-        filters.push(format!(
-            "unixepoch(t.observed_timestamp,'subsec')*1000>={value}"
-        ));
+        let value = parameters.bind(Value::Text(canonical_timestamp(after)?));
+        filters.push(format!("t.observed_timestamp>={value}"));
     }
     if let Some(before) = request.before_unix_ms {
-        let value = parameters.bind(Value::Integer(before as i64));
-        filters.push(format!(
-            "unixepoch(t.observed_timestamp,'subsec')*1000<{value}"
-        ));
+        let value = parameters.bind(Value::Text(canonical_timestamp(before)?));
+        filters.push(format!("t.observed_timestamp<{value}"));
     }
     if !request.result_evidence.is_empty() {
         let values = parameters.bind_list(
@@ -827,7 +1050,12 @@ fn append_structured_filters(
     Ok(())
 }
 
-fn hard_sealed_sql() -> &'static str {
+fn observed_eof_provisional(candidate: &Candidate) -> bool {
+    candidate.duplicate_method.as_deref() == Some("exact-first-turn-prefix")
+        && candidate.dedupe_closure.as_deref() == Some("observed-eof")
+}
+
+pub(crate) fn hard_sealed_sql() -> &'static str {
     "((t.next_user_boundary=1 AND EXISTS (
        SELECT 1 FROM turn_evidence seal_link
        JOIN evidence_events seal_event ON seal_event.event_id=seal_link.event_id
@@ -846,11 +1074,15 @@ fn hard_sealed_sql() -> &'static str {
 fn rerank_candidates(
     connection: &Connection,
     candidates: Vec<Candidate>,
-    raw_query: &str,
+    request: &SearchRequest,
     scoring_terms: &[ScoringTerm],
 ) -> Result<Vec<(SearchResult, Candidate)>, QueryError> {
+    // Under observed-desc the SQL already emitted true newest-first and skipped bm25, so the
+    // candidate index is a timeline position, not a rank.
+    let ranked_by_relevance =
+        !scoring_terms.is_empty() && request.order_by == SearchOrderBy::Relevance;
     let total_idf = scoring_terms.iter().map(|term| term.idf).sum::<f64>();
-    let normalized_query = normalize_exact(raw_query);
+    let normalized_query = normalize_exact(&request.query);
     let mut ranked = Vec::with_capacity(candidates.len());
     for (index, candidate) in candidates.into_iter().enumerate() {
         let capabilities = read_analyzer_capabilities(connection, candidate.turn_id)?;
@@ -880,10 +1112,10 @@ fn rerank_candidates(
         };
         let exact = !normalized_query.is_empty()
             && normalize_exact(&candidate.problem_text).contains(&normalized_query);
-        let rank_component = if scoring_terms.is_empty() {
-            0.0
-        } else {
+        let rank_component = if ranked_by_relevance {
             61.0 / (60.0 + (index + 1) as f64)
+        } else {
+            0.0
         };
         let relevance = 0.45 * rank_component + 0.40 * coverage + 0.15 * f64::from(exact);
         let result = SearchResult {
@@ -905,7 +1137,8 @@ fn rerank_candidates(
                 .final_excerpt
                 .as_ref()
                 .is_some_and(|value| value.len() > SUMMARY_BYTES),
-            bm25_rank: (!scoring_terms.is_empty()).then(|| saturating_u16(index + 1)),
+            dedupe: None,
+            bm25_rank: ranked_by_relevance.then(|| saturating_u16(index + 1)),
             rank_component_ppm: ppm(rank_component),
             matched_field_terms: matched
                 .iter()
@@ -924,7 +1157,7 @@ fn rerank_candidates(
         };
         ranked.push((result, candidate));
     }
-    if !scoring_terms.is_empty() {
+    if ranked_by_relevance {
         ranked.sort_by(|left, right| {
             right
                 .0
@@ -1029,12 +1262,15 @@ fn read_path_turn(
                 .copied()
                 .unwrap_or(DedupeConfidence::Weak)
         }),
-        observed_eof_provisional: candidate.dedupe_closure.as_deref() == Some("observed-eof"),
+        observed_eof_provisional: observed_eof_provisional(candidate),
         tools,
     })
 }
 
-fn read_group_confidences(
+/// Classifies whole duplicate groups, so it deliberately reads the global eligible/main/nonpurged
+/// population rather than the caller's filtered slice: a group's confidence must not change with
+/// the query that happened to surface it.
+pub(crate) fn read_group_confidences(
     connection: &Connection,
     group_keys: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, DedupeConfidence>, QueryError> {
@@ -1061,6 +1297,8 @@ fn read_group_confidences(
                   COUNT(*) AS member_count
            FROM sessions
            WHERE eligibility='eligible' AND session_scope='main'
+             AND NOT EXISTS (SELECT 1 FROM source_purge_states purge
+                             WHERE purge.session_key=sessions.session_key)
              AND duplicate_group_key IN ({placeholders})
            GROUP BY duplicate_group_key,dedupe_corroboration_fingerprint
          )
@@ -1085,7 +1323,7 @@ fn read_group_confidences(
         .map_err(query_failed)
 }
 
-fn stable_key_values(keys: &[String]) -> Result<Vec<Value>, QueryError> {
+pub(crate) fn stable_key_values(keys: &[String]) -> Result<Vec<Value>, QueryError> {
     keys.iter()
         .map(|key| {
             hex::decode(key).map(Value::Blob).map_err(|_| {
@@ -1115,7 +1353,7 @@ fn parse_result_evidence(value: &str) -> ResultEvidenceFilter {
     }
 }
 
-fn closure_text(value: ClosureFilter) -> &'static str {
+pub(crate) fn closure_text(value: ClosureFilter) -> &'static str {
     match value {
         ClosureFilter::HardSealed => "hard-sealed",
         ClosureFilter::Quiescent => "quiescent",
@@ -1176,7 +1414,7 @@ fn saturating_u16(value: usize) -> u16 {
     value.try_into().unwrap_or(u16::MAX)
 }
 
-fn query_failed(error: rusqlite::Error) -> QueryError {
+pub(crate) fn query_failed(error: rusqlite::Error) -> QueryError {
     QueryError::new("QUERY_FAILED", error.to_string())
 }
 
@@ -1201,7 +1439,11 @@ mod tests {
                  CREATE INDEX sessions_dedupe_support
                    ON sessions(duplicate_group_key,eligibility,session_scope,
                      duplicate_method,duplicate_confidence,
-                     dedupe_corroboration_fingerprint,session_id);",
+                     dedupe_corroboration_fingerprint,session_id);
+                 CREATE TABLE source_purge_states (
+                   session_key BLOB PRIMARY KEY,
+                   purge_state TEXT NOT NULL
+                 );",
             )
             .unwrap();
         connection

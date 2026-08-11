@@ -107,7 +107,7 @@ test("renders a self-describing root and command help contract", () => {
   const expectedOptions = {
     sessions: ["format", "limit", "offset"],
     analyze: ["format"],
-    insights: ["format", "regenerate-secret"],
+    insights: ["cursor", "format", "limit", "query", "regenerate-secret", "request", "revision"],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
     publish: ["expires", "json", "revoke", "url"],
@@ -157,6 +157,10 @@ test("renders a self-describing root and command help contract", () => {
     "TS_PUBLISH_POLICY_UNCONFIRMED",
     "TS_QUERY_TOO_LONG",
     "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_REQUEST_INVALID",
+    "TS_INSIGHTS_NOT_INDEXED",
+    "TS_INSIGHTS_CURSOR_STALE",
+    "TS_INSIGHTS_TURN_CHANGED",
     "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",
@@ -212,6 +216,8 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("sessions"), /does not list Paseo agents.*paseo ls --json/is);
   assert.match(renderCommandHelp("insights"), /normal reindex preserves the origin secret/is);
   assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
+  assert.match(renderCommandHelp("insights"), /overview.*search.*capabilities.*usage.*activity.*evidence/is);
+  assert.match(renderCommandHelp("insights"), /Queries require --format json/is);
   assert.match(renderCommandHelp("publish"), /run `threadshare validate/);
   assert.match(renderCommandHelp("publish"), /revokeToken.*human mode.*stderr/is);
   assert.match(renderCommandHelp("share"), /revokeToken.*human mode.*stderr/is);
@@ -250,6 +256,54 @@ test("prints root help without arguments and equivalent command help offline", (
   assert.equal(rescued.stderr, "");
 });
 
+test("Insights query CLI rejects invalid automation input before touching raw sessions", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-cli-insights-query-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateDirectory = path.join(directory, "state");
+  const environment = {
+    ...process.env,
+    THREADSHARE_INSIGHTS_HOME: stateDirectory,
+  };
+  const run = (args, input) => spawnSync(process.execPath, [cli, ...args], {
+    encoding: "utf8",
+    env: environment,
+    input,
+  });
+
+  assertDiagnosticCode(run(["insights", "overview"]), "TS_USAGE_OPTION_DEPENDENCY");
+  assertDiagnosticCode(
+    run(["insights", "overview", "--format", "json"]),
+    "TS_INSIGHTS_NOT_INDEXED",
+  );
+  assertDiagnosticCode(
+    run(["insights", "search", "--query", "界".repeat(3_000), "--format", "json"]),
+    "TS_QUERY_TOO_LONG",
+  );
+  assertDiagnosticCode(
+    run(["insights", "status", "--query", "ignored"]),
+    "TS_USAGE_OPTION_NOT_ALLOWED",
+  );
+
+  await mkdir(stateDirectory, { recursive: true });
+  await writeFile(path.join(stateDirectory, "insights.sqlite3"), "existing");
+  await writeFile(path.join(stateDirectory, "origin-secret.json"), `${JSON.stringify({
+    format: "threadshare-insights-origin-secret@v1",
+    originSecretEpoch: "11111111-2222-4333-8444-555555555555",
+    secret: Buffer.alloc(32, 4).toString("base64url"),
+  })}\n`);
+  assertDiagnosticCode(
+    run(["insights", "activity", "--request", "-", "--format", "json"], "{bad"),
+    "TS_INSIGHTS_REQUEST_INVALID",
+  );
+  assertDiagnosticCode(
+    run([
+      "insights", "capabilities", "tool", "--cursor", "tampered",
+      "--format", "json",
+    ]),
+    "TS_INSIGHTS_CURSOR_STALE",
+  );
+});
+
 test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
   const token = Buffer.alloc(32, 17).toString("base64url");
   const problem = sanitizeDiagnosticProblem(
@@ -271,6 +325,10 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
   for (const code of [
     "TS_QUERY_TOO_LONG",
     "TS_QUERY_TOO_BROAD",
+    "TS_INSIGHTS_REQUEST_INVALID",
+    "TS_INSIGHTS_NOT_INDEXED",
+    "TS_INSIGHTS_CURSOR_STALE",
+    "TS_INSIGHTS_TURN_CHANGED",
     "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ENGINE_INVALID",

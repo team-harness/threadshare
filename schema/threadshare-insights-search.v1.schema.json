@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-search.v1.schema.json",
+  "title": "Threadshare Insights Search V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "versions", "closureEvaluatedAt", "quiescenceSeconds", "orderBy", "totalMatchCount", "results", "evidencePaths"],
+  "properties": {
+    "format": { "const": "threadshare-insights-search@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "versions": { "$ref": "#/$defs/versions" },
+    "closureEvaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "quiescenceSeconds": { "type": "integer", "minimum": 0 },
+    "orderBy": { "enum": ["relevance", "observed-desc"] },
+    "totalMatchCount": { "$ref": "#/$defs/decimal" },
+    "results": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/result" } },
+    "evidencePaths": { "$ref": "#/$defs/evidencePaths" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "versions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["projection", "analyzer", "ranker"],
+      "properties": {
+        "projection": { "type": "integer", "minimum": 1 },
+        "analyzer": { "type": "integer", "minimum": 1 },
+        "ranker": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "dedupe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["duplicateGroupKey", "confidence", "observedEofProvisional"],
+      "properties": {
+        "duplicateGroupKey": { "$ref": "#/$defs/hex64" },
+        "confidence": { "enum": ["strong", "weak"] },
+        "observedEofProvisional": { "type": "boolean" }
+      }
+    },
+    "score": {
+      "type": "object", "additionalProperties": false, "required": ["relevancePpm"],
+      "properties": { "relevancePpm": { "type": "integer", "minimum": 0, "maximum": 1000000 } }
+    },
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turnKey", "sessionKey", "revision", "provider", "projectKey", "observedTimestamp", "problemExcerpt", "problemTruncated", "finalAnswerExcerpt", "finalAnswerTruncated", "closureState", "resultEvidence", "score"],
+      "properties": {
+        "turnKey": { "$ref": "#/$defs/hex64" },
+        "sessionKey": { "$ref": "#/$defs/hex64" },
+        "revision": { "$ref": "#/$defs/hex64" },
+        "provider": { "type": "string", "minLength": 1 },
+        "projectKey": { "anyOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+        "observedTimestamp": { "$ref": "#/$defs/timestamp" },
+        "problemExcerpt": { "type": "string" },
+        "problemTruncated": { "type": "boolean" },
+        "finalAnswerExcerpt": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "finalAnswerTruncated": { "type": "boolean" },
+        "closureState": { "enum": ["hard-sealed", "quiescent", "open"] },
+        "resultEvidence": { "enum": ["provider-completed", "abandoned", "unknown"] },
+        "score": { "anyOf": [{ "$ref": "#/$defs/score" }, { "type": "null" }] },
+        "dedupe": { "$ref": "#/$defs/dedupe" }
+      }
+    },
+    "stateCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pending", "completed", "failed", "cancelled", "unknown"],
+      "properties": {
+        "pending": { "$ref": "#/$defs/decimal" }, "completed": { "$ref": "#/$defs/decimal" },
+        "failed": { "$ref": "#/$defs/decimal" }, "cancelled": { "$ref": "#/$defs/decimal" },
+        "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "pathNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["providerScopedName", "repeatBucket"],
+      "properties": {
+        "providerScopedName": { "type": "string", "minLength": 1 },
+        "repeatBucket": { "enum": ["1", "2-3", "4+"] }
+      }
+    },
+    "pathFamily": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nodes", "truncated", "bestRelevancePpm", "turnCount", "rawSessionCount", "independentGroupCount", "strongGroupCount", "weakGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount", "latestAt", "toolStateCounts", "evidenceTurnKeys"],
+      "properties": {
+        "nodes": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/pathNode" } },
+        "truncated": { "type": "boolean" },
+        "bestRelevancePpm": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "turnCount": { "$ref": "#/$defs/decimal" },
+        "rawSessionCount": { "$ref": "#/$defs/decimal" },
+        "independentGroupCount": { "$ref": "#/$defs/decimal" },
+        "strongGroupCount": { "$ref": "#/$defs/decimal" },
+        "weakGroupCount": { "$ref": "#/$defs/decimal" },
+        "observedEofProvisionalGroupCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" },
+        "latestAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "toolStateCounts": { "$ref": "#/$defs/stateCounts" },
+        "evidenceTurnKeys": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/hex64" } }
+      }
+    },
+    "evidencePaths": {
+      "type": "object", "additionalProperties": false,
+      "required": ["insufficientSample", "rawMatchCount", "eligibleTurnCount", "rawSessionCount", "independentGroupCount", "strongGroupCount", "weakGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeCount", "unknownDedupeSessionCount", "pathsTruncated", "families"],
+      "properties": {
+        "insufficientSample": { "type": "boolean" },
+        "rawMatchCount": { "$ref": "#/$defs/decimal" }, "eligibleTurnCount": { "$ref": "#/$defs/decimal" },
+        "rawSessionCount": { "$ref": "#/$defs/decimal" }, "independentGroupCount": { "$ref": "#/$defs/decimal" },
+        "strongGroupCount": { "$ref": "#/$defs/decimal" }, "weakGroupCount": { "$ref": "#/$defs/decimal" },
+        "observedEofProvisionalGroupCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" },
+        "pathsTruncated": { "type": "boolean" },
+        "families": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/pathFamily" } }
+      }
+    }
+  }
+}

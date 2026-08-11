@@ -75,6 +75,10 @@ const MESSAGE_TYPES = new Set([
   "CAPABILITY_PAGE",
   "SEARCH_TURNS",
   "TURN_SEARCH_RESULTS",
+  "READ_CAPABILITY_USAGE",
+  "CAPABILITY_USAGE",
+  "READ_INSIGHTS_ACTIVITY",
+  "INSIGHTS_ACTIVITY",
   "READ_TURN_EVIDENCE",
   "TURN_EVIDENCE_PAGE",
   "ABORT_SESSION",
@@ -87,6 +91,7 @@ const HEX_64 = /^[0-9a-f]{64}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/u;
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const ASCII_NAME = /^[\x21-\x7e]+$/u;
+const CANONICAL_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/u;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_SOURCE_STATE_PAGE_SIZE = 256;
@@ -115,10 +120,26 @@ const MAX_SEARCH_EXCERPT_BYTES = 512;
 const MAX_TURN_PROBLEM_BYTES = 64 * 1_024;
 const MAX_TURN_ANSWER_BYTES = 8 * 1_024;
 const MAX_EVIDENCE_PAGE_ENTRIES = 128;
+const MAX_USAGE_ITEMS = 50;
+const MAX_ACTIVITY_BUCKETS = 366;
 const MAX_CURSOR_BYTES = 256;
 const MAX_PPM = 1_000_000;
 const SEARCH_RESULT_EVIDENCE = new Set(["abandoned", "provider-completed", "unknown"]);
 const SEARCH_CLOSURE_STATES = new Set(["hard-sealed", "open", "quiescent"]);
+const SEARCH_ORDER = new Set(["relevance", "observed-desc"]);
+const CAPABILITY_TERMINAL_STATES = new Set([
+  "pending", "completed", "failed", "cancelled", "unknown",
+]);
+const USAGE_ORDER = new Set([
+  "recorded-invocation-count",
+  "recorded-failing-invocation-count",
+  "distinct-turn-count",
+  "distinct-session-count",
+  "distinct-dedupe-group-count",
+  "last-used",
+  "absolute-recorded-invocation-change",
+]);
+const ACTIVITY_BUCKETS = new Set(["day", "week"]);
 const FTS_FIELDS = new Set(["capability", "code", "natural"]);
 
 export class InsightsProtocolError extends Error {
@@ -238,7 +259,10 @@ function assertNullableHex64(value, label) {
 
 function assertCanonicalTimestamp(value, label) {
   if (value === null) return;
-  assertBoundedString(value, label, 32, { allowEmpty: false, ascii: true });
+  assertBoundedString(value, label, 24, { allowEmpty: false, ascii: true });
+  if (!CANONICAL_TIMESTAMP.test(value)) {
+    throw invalidFrame(`${label} must be a canonical UTC timestamp`);
+  }
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== value) {
     throw invalidFrame(`${label} must be a canonical UTC timestamp`);
@@ -1032,10 +1056,15 @@ function assertReadInsightsOverview(message) {
 }
 
 function assertInsightsOverview(message) {
-  assertEnvelope(message, "INSIGHTS_OVERVIEW", [
+  const fields = [
     "snapshotSeq", "sessions", "scopes", "dedupe", "turns", "capabilities",
     "providers", "projects", "coverage", "diagnostics",
-  ]);
+  ];
+  if (Object.hasOwn(message, "databaseUuid")) fields.push("databaseUuid");
+  assertEnvelope(message, "INSIGHTS_OVERVIEW", fields);
+  if (Object.hasOwn(message, "databaseUuid")) {
+    assertUuid(message.databaseUuid, "INSIGHTS_OVERVIEW.databaseUuid");
+  }
   assertDecimal(message.snapshotSeq, "INSIGHTS_OVERVIEW.snapshotSeq");
   assertDecimalObject(message.sessions, "INSIGHTS_OVERVIEW.sessions", [
     "raw", "eligible", "excluded", "subagentExcluded", "unknown",
@@ -1087,7 +1116,10 @@ function assertListCapabilities(message) {
 }
 
 function assertCapabilityPage(message) {
-  assertEnvelope(message, "CAPABILITY_PAGE", ["snapshotSeq", "items", "nextCursor"]);
+  assertEnvelope(message, "CAPABILITY_PAGE", [
+    "databaseUuid", "snapshotSeq", "items", "nextCursor", "coverage",
+  ]);
+  assertUuid(message.databaseUuid, "CAPABILITY_PAGE.databaseUuid");
   assertDecimal(message.snapshotSeq, "CAPABILITY_PAGE.snapshotSeq");
   if (!Array.isArray(message.items) || message.items.length > MAX_CAPABILITY_PAGE_SIZE) {
     throw invalidFrame("CAPABILITY_PAGE.items exceeds its bounded limit");
@@ -1137,11 +1169,18 @@ function assertCapabilityPage(message) {
   if (message.nextCursor !== null && message.nextCursor !== previous) {
     throw invalidFrame("CAPABILITY_PAGE.nextCursor must equal the final capabilityKey");
   }
+  assertDecimalObject(message.coverage, "CAPABILITY_PAGE.coverage", [
+    "excludedUndatedInvocationCount",
+    "excludedUndatedTurnCount",
+    "excludedUnrevisionedInvocationCount",
+    "excludedUnrevisionedTurnCount",
+    "fullyExcludedCapabilityCount",
+  ]);
   assertMessagePayloadBound(message, "CAPABILITY_PAGE");
 }
 
 function assertSearchFilters(filters, label) {
-  assertExactKeys(filters, label, [
+  const fields = [
     "providers",
     "projectKeys",
     "observedAtOrAfterUnixMs",
@@ -1150,7 +1189,10 @@ function assertSearchFilters(filters, label) {
     "skillCapabilityKeys",
     "resultEvidence",
     "closureStates",
-  ]);
+  ];
+  const hasCapabilityTerminalStates = Object.hasOwn(filters, "capabilityTerminalStates");
+  if (hasCapabilityTerminalStates) fields.push("capabilityTerminalStates");
+  assertExactKeys(filters, label, fields);
   assertBoundedSortedArray(filters.providers, `${label}.providers`, MAX_FILTER_PROVIDERS,
     (value, itemLabel) => assertBoundedString(value, itemLabel, 64, {
       allowEmpty: false,
@@ -1173,19 +1215,35 @@ function assertSearchFilters(filters, label) {
     (value, itemLabel) => assertEnum(value, itemLabel, SEARCH_RESULT_EVIDENCE));
   assertBoundedSortedArray(filters.closureStates, `${label}.closureStates`, 3,
     (value, itemLabel) => assertEnum(value, itemLabel, SEARCH_CLOSURE_STATES));
+  if (hasCapabilityTerminalStates) {
+    assertBoundedSortedArray(
+      filters.capabilityTerminalStates,
+      `${label}.capabilityTerminalStates`,
+      5,
+      (value, itemLabel) => assertEnum(value, itemLabel, CAPABILITY_TERMINAL_STATES),
+    );
+    if (filters.capabilityTerminalStates.length > 0 &&
+        filters.toolCapabilityKeys.length === 0 && filters.skillCapabilityKeys.length === 0) {
+      throw invalidFrame(`${label}.capabilityTerminalStates requires a capability key filter`);
+    }
+  }
 }
 
 function hasStructuredSearchFilter(filters) {
   return filters.providers.length > 0 || filters.projectKeys.length > 0 ||
     filters.observedAtOrAfterUnixMs !== null || filters.observedBeforeUnixMs !== null ||
     filters.toolCapabilityKeys.length > 0 || filters.skillCapabilityKeys.length > 0 ||
-    filters.resultEvidence.length > 0 || filters.closureStates.length > 0;
+    filters.resultEvidence.length > 0 || filters.closureStates.length > 0 ||
+    (filters.capabilityTerminalStates?.length ?? 0) > 0;
 }
 
 function assertSearchTurns(message) {
-  assertEnvelope(message, "SEARCH_TURNS", [
+  const fields = [
     "query", "filters", "limit", "pathLimit", "nowUnixMs", "quiescenceSeconds",
-  ]);
+  ];
+  const hasOrderBy = Object.hasOwn(message, "orderBy");
+  if (hasOrderBy) fields.push("orderBy");
+  assertEnvelope(message, "SEARCH_TURNS", fields);
   assertBoundedString(message.query, "SEARCH_TURNS.query", MAX_PROTOCOL_PAYLOAD_BYTES);
   assertSearchFilters(message.filters, "SEARCH_TURNS.filters");
   assertSafeInteger(message.limit, "SEARCH_TURNS.limit", { min: 1, max: MAX_SEARCH_RESULTS });
@@ -1195,6 +1253,7 @@ function assertSearchTurns(message) {
     min: 60,
     max: 86_400,
   });
+  if (hasOrderBy) assertEnum(message.orderBy, "SEARCH_TURNS.orderBy", SEARCH_ORDER);
 }
 
 function assertSearchRequestDomain(message) {
@@ -1273,7 +1332,7 @@ function assertNullableBoundedString(value, label, maxBytes) {
 }
 
 function assertSearchResult(result, label, scoringTermCount) {
-  assertExactKeys(result, label, [
+  const fields = [
     "turnKey",
     "sessionKey",
     "revision",
@@ -1287,7 +1346,10 @@ function assertSearchResult(result, label, scoringTermCount) {
     "closureState",
     "resultEvidence",
     "score",
-  ]);
+  ];
+  const hasDedupe = Object.hasOwn(result, "dedupe");
+  if (hasDedupe) fields.push("dedupe");
+  assertExactKeys(result, label, fields);
   assertHex64(result.turnKey, `${label}.turnKey`);
   assertHex64(result.sessionKey, `${label}.sessionKey`);
   assertHex64(result.revision, `${label}.revision`);
@@ -1308,6 +1370,18 @@ function assertSearchResult(result, label, scoringTermCount) {
   assertEnum(result.closureState, `${label}.closureState`, SEARCH_CLOSURE_STATES);
   assertEnum(result.resultEvidence, `${label}.resultEvidence`, SEARCH_RESULT_EVIDENCE);
   assertSearchScore(result.score, `${label}.score`, scoringTermCount);
+  if (hasDedupe) {
+    assertExactKeys(result.dedupe, `${label}.dedupe`, [
+      "duplicateGroupKey", "confidence", "observedEofProvisional",
+    ]);
+    assertHex64(result.dedupe.duplicateGroupKey, `${label}.dedupe.duplicateGroupKey`);
+    assertEnum(
+      result.dedupe.confidence,
+      `${label}.dedupe.confidence`,
+      new Set(["strong", "weak"]),
+    );
+    assertBoolean(result.dedupe.observedEofProvisional, `${label}.dedupe.observedEofProvisional`);
+  }
 }
 
 function assertToolStateCounts(counts, label) {
@@ -1491,14 +1565,30 @@ function assertSearchTrace(trace, label) {
 }
 
 function assertTurnSearchResults(message) {
-  assertEnvelope(message, "TURN_SEARCH_RESULTS", [
+  const fields = [
     "snapshot",
     "scoringTerms",
     "results",
     "evidencePaths",
     "diagnostic",
     "searchTrace",
-  ]);
+  ];
+  const agentFields = ["orderBy", "totalMatchCount", "closureEvaluatedAt", "quiescenceSeconds"];
+  const hasAgentFields = agentFields.some((field) => Object.hasOwn(message, field));
+  if (hasAgentFields) fields.push(...agentFields);
+  if (Object.hasOwn(message, "databaseUuid")) fields.push("databaseUuid");
+  assertEnvelope(message, "TURN_SEARCH_RESULTS", fields);
+  if (Object.hasOwn(message, "databaseUuid")) {
+    assertUuid(message.databaseUuid, "TURN_SEARCH_RESULTS.databaseUuid");
+  }
+  if (hasAgentFields) {
+    assertEnum(message.orderBy, "TURN_SEARCH_RESULTS.orderBy", SEARCH_ORDER);
+    assertDecimal(message.totalMatchCount, "TURN_SEARCH_RESULTS.totalMatchCount");
+    requiredTimestamp(message.closureEvaluatedAt, "TURN_SEARCH_RESULTS.closureEvaluatedAt");
+    assertSafeInteger(message.quiescenceSeconds, "TURN_SEARCH_RESULTS.quiescenceSeconds", {
+      min: 60, max: 86_400,
+    });
+  }
   assertSearchSnapshot(message.snapshot, "TURN_SEARCH_RESULTS.snapshot");
   if (!Array.isArray(message.scoringTerms) || message.scoringTerms.length > MAX_SCORING_TERMS) {
     throw invalidFrame("TURN_SEARCH_RESULTS.scoringTerms exceeds its bounded limit");
@@ -1515,6 +1605,16 @@ function assertTurnSearchResults(message) {
       `TURN_SEARCH_RESULTS.results[${index}]`,
       message.scoringTerms.length,
     );
+    if (hasAgentFields && message.results[index].observedTimestamp === null) {
+      throw invalidFrame("TURN_SEARCH_RESULTS Agent results require observedTimestamp");
+    }
+    if (hasAgentFields && message.orderBy === "observed-desc" &&
+        message.results[index].score !== null) {
+      throw invalidFrame("TURN_SEARCH_RESULTS observed-desc results must not carry a score");
+    }
+  }
+  if (hasAgentFields && BigInt(message.totalMatchCount) < BigInt(message.results.length)) {
+    throw invalidFrame("TURN_SEARCH_RESULTS.totalMatchCount is inconsistent");
   }
   assertEvidencePathReport(message.evidencePaths, "TURN_SEARCH_RESULTS.evidencePaths");
   assertQueryDiagnostic(message.diagnostic, "TURN_SEARCH_RESULTS.diagnostic");
@@ -1536,12 +1636,343 @@ function assertReadTurnEvidence(message) {
     "turnKey", "expectedRevision", "cursor", "limit",
   ]);
   assertHex64(message.turnKey, "READ_TURN_EVIDENCE.turnKey");
-  assertNullableHex64(message.expectedRevision, "READ_TURN_EVIDENCE.expectedRevision");
+  assertHex64(message.expectedRevision, "READ_TURN_EVIDENCE.expectedRevision");
   assertOpaqueCursor(message.cursor, "READ_TURN_EVIDENCE.cursor");
   assertSafeInteger(message.limit, "READ_TURN_EVIDENCE.limit", {
     min: 1,
     max: MAX_EVIDENCE_PAGE_ENTRIES,
   });
+}
+
+function assertUsageWindow(value, label) {
+  assertExactKeys(value, label, ["observedAtOrAfterUnixMs", "observedBeforeUnixMs"]);
+  assertDecimal(value.observedAtOrAfterUnixMs, `${label}.observedAtOrAfterUnixMs`);
+  assertDecimal(value.observedBeforeUnixMs, `${label}.observedBeforeUnixMs`);
+  if (BigInt(value.observedAtOrAfterUnixMs) >= BigInt(value.observedBeforeUnixMs)) {
+    throw invalidFrame(`${label} must be a non-empty half-open window`);
+  }
+}
+
+function assertAggregateFilters(value, label, { terminalStates = false } = {}) {
+  const fields = ["providers", "projectKeys", "closureStates"];
+  if (terminalStates) fields.push("capabilityTerminalStates");
+  assertExactKeys(value, label, fields);
+  assertBoundedSortedArray(value.providers, `${label}.providers`, MAX_FILTER_PROVIDERS,
+    (provider, itemLabel) => assertBoundedString(provider, itemLabel, 64, {
+      allowEmpty: false,
+      ascii: true,
+    }));
+  assertBoundedSortedArray(value.projectKeys, `${label}.projectKeys`, MAX_FILTER_KEYS, assertHex64);
+  assertBoundedSortedArray(value.closureStates, `${label}.closureStates`, 3,
+    (state, itemLabel) => assertEnum(state, itemLabel, SEARCH_CLOSURE_STATES));
+  if (terminalStates) {
+    assertBoundedSortedArray(
+      value.capabilityTerminalStates,
+      `${label}.capabilityTerminalStates`,
+      5,
+      (state, itemLabel) => assertEnum(state, itemLabel, CAPABILITY_TERMINAL_STATES),
+    );
+  }
+}
+
+function assertReadCapabilityUsage(message) {
+  assertEnvelope(message, "READ_CAPABILITY_USAGE", [
+    "kind", "window", "comparisonWindow", "filters", "orderBy", "cursor", "limit",
+    "nowUnixMs", "quiescenceSeconds",
+  ]);
+  assertEnum(message.kind, "READ_CAPABILITY_USAGE.kind", new Set(["tool", "skill"]));
+  assertUsageWindow(message.window, "READ_CAPABILITY_USAGE.window");
+  if (message.comparisonWindow !== null) {
+    assertUsageWindow(message.comparisonWindow, "READ_CAPABILITY_USAGE.comparisonWindow");
+  }
+  assertAggregateFilters(message.filters, "READ_CAPABILITY_USAGE.filters", {
+    terminalStates: true,
+  });
+  assertEnum(message.orderBy, "READ_CAPABILITY_USAGE.orderBy", USAGE_ORDER);
+  if (message.orderBy === "absolute-recorded-invocation-change" &&
+      message.comparisonWindow === null) {
+    throw invalidFrame("READ_CAPABILITY_USAGE comparisonWindow is required for absolute change");
+  }
+  assertOpaqueCursor(message.cursor, "READ_CAPABILITY_USAGE.cursor");
+  assertSafeInteger(message.limit, "READ_CAPABILITY_USAGE.limit", { min: 1, max: 50 });
+  assertDecimal(message.nowUnixMs, "READ_CAPABILITY_USAGE.nowUnixMs");
+  assertSafeInteger(message.quiescenceSeconds, "READ_CAPABILITY_USAGE.quiescenceSeconds", {
+    min: 60,
+    max: 86_400,
+  });
+}
+
+function requiredTimestamp(value, label) {
+  if (value === null) throw invalidFrame(`${label} is required`);
+  assertCanonicalTimestamp(value, label);
+  return Date.parse(value);
+}
+
+function assertReadInsightsActivity(message) {
+  assertEnvelope(message, "READ_INSIGHTS_ACTIVITY", [
+    "window", "filters", "bucket", "timeZone", "nowUnixMs", "quiescenceSeconds",
+  ]);
+  assertExactKeys(message.window, "READ_INSIGHTS_ACTIVITY.window", [
+    "observedAtOrAfter", "observedBefore",
+  ]);
+  const after = requiredTimestamp(
+    message.window.observedAtOrAfter,
+    "READ_INSIGHTS_ACTIVITY.window.observedAtOrAfter",
+  );
+  const before = requiredTimestamp(
+    message.window.observedBefore,
+    "READ_INSIGHTS_ACTIVITY.window.observedBefore",
+  );
+  assertAggregateFilters(message.filters, "READ_INSIGHTS_ACTIVITY.filters");
+  assertEnum(message.bucket, "READ_INSIGHTS_ACTIVITY.bucket", ACTIVITY_BUCKETS);
+  if (message.timeZone !== "UTC") throw invalidFrame("READ_INSIGHTS_ACTIVITY.timeZone must be UTC");
+  const bucketMs = message.bucket === "day" ? 86_400_000 : 7 * 86_400_000;
+  const afterDate = new Date(after);
+  const beforeDate = new Date(before);
+  const alignedDay = (date) => date.getUTCHours() === 0 && date.getUTCMinutes() === 0 &&
+    date.getUTCSeconds() === 0 && date.getUTCMilliseconds() === 0;
+  const alignedWeek = (date) => message.bucket !== "week" || date.getUTCDay() === 1;
+  const bucketCount = (before - after) / bucketMs;
+  if (!alignedDay(afterDate) || !alignedDay(beforeDate) ||
+      !alignedWeek(afterDate) || !alignedWeek(beforeDate) ||
+      !Number.isSafeInteger(bucketCount) || bucketCount < 1 || bucketCount > 366) {
+    throw invalidFrame("READ_INSIGHTS_ACTIVITY.window must contain 1..=366 complete UTC buckets");
+  }
+  assertDecimal(message.nowUnixMs, "READ_INSIGHTS_ACTIVITY.nowUnixMs");
+  assertSafeInteger(message.quiescenceSeconds, "READ_INSIGHTS_ACTIVITY.quiescenceSeconds", {
+    min: 60,
+    max: 86_400,
+  });
+}
+
+function assertSignedDecimal(value, label) {
+  if (typeof value !== "string" || !/^-?(?:0|[1-9][0-9]*)$/u.test(value) || value === "-0") {
+    throw invalidFrame(`${label} must be a canonical signed decimal string`);
+  }
+  const number = BigInt(value);
+  if (number < -U64_MAX || number > U64_MAX) {
+    throw invalidFrame(`${label} is outside the supported signed count range`);
+  }
+}
+
+function assertQueryCoverage(value, label, { fullyExcluded = false } = {}) {
+  const fields = [
+    "excludedUndatedInvocationCount",
+    "excludedUndatedTurnCount",
+    "excludedUnrevisionedInvocationCount",
+    "excludedUnrevisionedTurnCount",
+  ];
+  if (fullyExcluded) fields.push("fullyExcludedCapabilityCount");
+  assertDecimalObject(value, label, fields);
+}
+
+function assertDedupeSupport(value, label, { methods = false } = {}) {
+  const fields = [
+    "distinctDedupeGroupCount",
+    "strongDedupeGroupCount",
+    "weakDedupeGroupCount",
+    "observedEofProvisionalGroupCount",
+    "unknownDedupeSessionCount",
+  ];
+  if (methods) fields.push("sessionDuplicateMethodCounts");
+  assertExactKeys(value, label, fields);
+  for (const field of fields.slice(0, 5)) assertDecimal(value[field], `${label}.${field}`);
+  const groups = BigInt(value.distinctDedupeGroupCount);
+  if (BigInt(value.strongDedupeGroupCount) + BigInt(value.weakDedupeGroupCount) !== groups ||
+      BigInt(value.observedEofProvisionalGroupCount) > groups) {
+    throw invalidFrame(`${label} dedupe group counts are inconsistent`);
+  }
+  if (methods) {
+    assertDecimalObject(value.sessionDuplicateMethodCounts, `${label}.sessionDuplicateMethodCounts`, [
+      "explicitLineage", "exactFirstTurnPrefix",
+    ]);
+  }
+}
+
+function assertUsageItem(item, label) {
+  assertExactKeys(item, label, [
+    "capabilityKey", "provider", "kind", "canonicalName",
+    "recordedInvocationCount", "recordedFailingInvocationCount", "distinctTurnCount",
+    "distinctSessionCount", "lastUsedAt", "invocationTerminalCounts",
+    "containingTurnOutcomeCounts", "groupedInvocationCount", "ungroupedInvocationCount",
+    "support", "strengthCounts", "outOfWindow", "comparison",
+  ]);
+  assertHex64(item.capabilityKey, `${label}.capabilityKey`);
+  assertBoundedString(item.provider, `${label}.provider`, 128, {
+    allowEmpty: false, ascii: true,
+  });
+  assertEnum(item.kind, `${label}.kind`, new Set(["tool", "skill"]));
+  assertBoundedString(item.canonicalName, `${label}.canonicalName`, 512, { allowEmpty: false });
+  for (const field of [
+    "recordedInvocationCount", "recordedFailingInvocationCount", "distinctTurnCount",
+    "distinctSessionCount", "groupedInvocationCount", "ungroupedInvocationCount",
+  ]) assertDecimal(item[field], `${label}.${field}`);
+  if (item.lastUsedAt !== null) requiredTimestamp(item.lastUsedAt, `${label}.lastUsedAt`);
+
+  assertDecimalObject(item.invocationTerminalCounts, `${label}.invocationTerminalCounts`, [
+    "invocationTotal", "pending", "completed", "failed", "cancelled", "unknown",
+  ]);
+  assertDecimalObject(item.containingTurnOutcomeCounts, `${label}.containingTurnOutcomeCounts`, [
+    "distinctTurnTotal", "providerCompleted", "abandoned", "unknown",
+  ]);
+  assertDedupeSupport(item.support, `${label}.support`, { methods: true });
+  assertDecimalObject(item.strengthCounts, `${label}.strengthCounts`, [
+    "observed", "confirmed", "inferred",
+  ]);
+
+  const invocations = BigInt(item.recordedInvocationCount);
+  const turns = BigInt(item.distinctTurnCount);
+  const sessions = BigInt(item.distinctSessionCount);
+  const terminal = item.invocationTerminalCounts;
+  const outcomes = item.containingTurnOutcomeCounts;
+  const support = item.support;
+  if (BigInt(item.recordedFailingInvocationCount) > invocations ||
+      turns > invocations || sessions > turns ||
+      BigInt(item.groupedInvocationCount) + BigInt(item.ungroupedInvocationCount) !== invocations ||
+      BigInt(terminal.invocationTotal) !== invocations ||
+      decimalSum(terminal, ["pending", "completed", "failed", "cancelled", "unknown"]) !== invocations ||
+      BigInt(outcomes.distinctTurnTotal) !== turns ||
+      decimalSum(outcomes, ["providerCompleted", "abandoned", "unknown"]) !== turns ||
+      decimalSum(item.strengthCounts, ["observed", "confirmed", "inferred"]) !== invocations ||
+      BigInt(support.distinctDedupeGroupCount) > sessions ||
+      BigInt(support.unknownDedupeSessionCount) > sessions ||
+      decimalSum(support.sessionDuplicateMethodCounts, ["explicitLineage", "exactFirstTurnPrefix"]) > sessions) {
+    throw invalidFrame(`${label} aggregate counts are inconsistent`);
+  }
+
+  assertExactKeys(item.outOfWindow, `${label}.outOfWindow`, ["scope", "retrySummary"]);
+  if (item.outOfWindow.scope !== "all-indexed-history") {
+    throw invalidFrame(`${label}.outOfWindow.scope is invalid`);
+  }
+  if (item.outOfWindow.retrySummary !== null) {
+    assertDecimalObject(item.outOfWindow.retrySummary, `${label}.outOfWindow.retrySummary`, [
+      "failedCount", "sameInputRepeatCount", "retryAfterFailureCount",
+    ]);
+  }
+  if (item.comparison !== null) {
+    assertExactKeys(item.comparison, `${label}.comparison`, [
+      "baselineRecordedInvocationCount", "currentRecordedInvocationCount",
+      "absoluteRecordedInvocationChange",
+    ]);
+    assertDecimal(
+      item.comparison.baselineRecordedInvocationCount,
+      `${label}.comparison.baselineRecordedInvocationCount`,
+    );
+    assertDecimal(
+      item.comparison.currentRecordedInvocationCount,
+      `${label}.comparison.currentRecordedInvocationCount`,
+    );
+    assertSignedDecimal(
+      item.comparison.absoluteRecordedInvocationChange,
+      `${label}.comparison.absoluteRecordedInvocationChange`,
+    );
+    if (BigInt(item.comparison.currentRecordedInvocationCount) !== invocations ||
+        BigInt(item.comparison.currentRecordedInvocationCount) -
+          BigInt(item.comparison.baselineRecordedInvocationCount) !==
+          BigInt(item.comparison.absoluteRecordedInvocationChange)) {
+      throw invalidFrame(`${label}.comparison is inconsistent`);
+    }
+  }
+}
+
+function assertCapabilityUsage(message) {
+  assertEnvelope(message, "CAPABILITY_USAGE", [
+    "databaseUuid", "snapshotSeq", "closureEvaluatedAt", "quiescenceSeconds", "orderBy",
+    "items", "totalCandidateCount", "truncated", "coverage", "nextCursor",
+  ]);
+  assertUuid(message.databaseUuid, "CAPABILITY_USAGE.databaseUuid");
+  assertDecimal(message.snapshotSeq, "CAPABILITY_USAGE.snapshotSeq");
+  requiredTimestamp(message.closureEvaluatedAt, "CAPABILITY_USAGE.closureEvaluatedAt");
+  assertSafeInteger(message.quiescenceSeconds, "CAPABILITY_USAGE.quiescenceSeconds", {
+    min: 60, max: 86_400,
+  });
+  assertEnum(message.orderBy, "CAPABILITY_USAGE.orderBy", USAGE_ORDER);
+  if (!Array.isArray(message.items) || message.items.length > MAX_USAGE_ITEMS) {
+    throw invalidFrame("CAPABILITY_USAGE.items exceeds its bounded limit");
+  }
+  for (let index = 0; index < message.items.length; index += 1) {
+    assertUsageItem(message.items[index], `CAPABILITY_USAGE.items[${index}]`);
+  }
+  assertDecimal(message.totalCandidateCount, "CAPABILITY_USAGE.totalCandidateCount");
+  if (BigInt(message.totalCandidateCount) < BigInt(message.items.length)) {
+    throw invalidFrame("CAPABILITY_USAGE.totalCandidateCount is inconsistent");
+  }
+  assertBoolean(message.truncated, "CAPABILITY_USAGE.truncated");
+  assertOpaqueCursor(message.nextCursor, "CAPABILITY_USAGE.nextCursor");
+  if (message.truncated !== (message.nextCursor !== null)) {
+    throw invalidFrame("CAPABILITY_USAGE cursor and truncation state are inconsistent");
+  }
+  assertQueryCoverage(message.coverage, "CAPABILITY_USAGE.coverage", { fullyExcluded: true });
+  assertMessagePayloadBound(message, "CAPABILITY_USAGE");
+}
+
+function assertActivityBucket(row, label, previousEnd) {
+  assertExactKeys(row, label, [
+    "bucketStart", "bucketEnd", "distinctSessionCount", "distinctTurnCount",
+    "currentClosureCounts", "turnResultEvidenceCounts", "recordedToolInvocationCount",
+    "recordedSkillInvocationCount", "support",
+  ]);
+  const start = requiredTimestamp(row.bucketStart, `${label}.bucketStart`);
+  const end = requiredTimestamp(row.bucketEnd, `${label}.bucketEnd`);
+  if (start >= end || (previousEnd !== null && start !== previousEnd)) {
+    throw invalidFrame(`${label} bucket boundaries are inconsistent`);
+  }
+  const duration = end - start;
+  if (duration !== 86_400_000 && duration !== 7 * 86_400_000) {
+    throw invalidFrame(`${label} must be one complete UTC day or week`);
+  }
+  for (const field of [
+    "distinctSessionCount", "distinctTurnCount", "recordedToolInvocationCount",
+    "recordedSkillInvocationCount",
+  ]) assertDecimal(row[field], `${label}.${field}`);
+  assertDecimalObject(row.currentClosureCounts, `${label}.currentClosureCounts`, [
+    "hardSealed", "quiescent", "open",
+  ]);
+  assertDecimalObject(row.turnResultEvidenceCounts, `${label}.turnResultEvidenceCounts`, [
+    "providerCompleted", "abandoned", "unknown",
+  ]);
+  assertDedupeSupport(row.support, `${label}.support`);
+  const turns = BigInt(row.distinctTurnCount);
+  const sessions = BigInt(row.distinctSessionCount);
+  if (sessions > turns ||
+      decimalSum(row.currentClosureCounts, ["hardSealed", "quiescent", "open"]) !== turns ||
+      decimalSum(row.turnResultEvidenceCounts, ["providerCompleted", "abandoned", "unknown"]) !== turns ||
+      BigInt(row.support.distinctDedupeGroupCount) > sessions ||
+      BigInt(row.support.unknownDedupeSessionCount) > sessions) {
+    throw invalidFrame(`${label} aggregate counts are inconsistent`);
+  }
+  return { end, duration };
+}
+
+function assertInsightsActivity(message) {
+  assertEnvelope(message, "INSIGHTS_ACTIVITY", [
+    "databaseUuid", "snapshotSeq", "closureEvaluatedAt", "quiescenceSeconds", "buckets",
+    "coverage",
+  ]);
+  assertUuid(message.databaseUuid, "INSIGHTS_ACTIVITY.databaseUuid");
+  assertDecimal(message.snapshotSeq, "INSIGHTS_ACTIVITY.snapshotSeq");
+  requiredTimestamp(message.closureEvaluatedAt, "INSIGHTS_ACTIVITY.closureEvaluatedAt");
+  assertSafeInteger(message.quiescenceSeconds, "INSIGHTS_ACTIVITY.quiescenceSeconds", {
+    min: 60, max: 86_400,
+  });
+  if (!Array.isArray(message.buckets) || message.buckets.length < 1 ||
+      message.buckets.length > MAX_ACTIVITY_BUCKETS) {
+    throw invalidFrame("INSIGHTS_ACTIVITY.buckets must contain 1..=366 rows");
+  }
+  let previousEnd = null;
+  let duration = null;
+  for (let index = 0; index < message.buckets.length; index += 1) {
+    const validated = assertActivityBucket(
+      message.buckets[index], `INSIGHTS_ACTIVITY.buckets[${index}]`, previousEnd,
+    );
+    if (duration !== null && validated.duration !== duration) {
+      throw invalidFrame("INSIGHTS_ACTIVITY bucket durations must be consistent");
+    }
+    previousEnd = validated.end;
+    duration = validated.duration;
+  }
+  assertQueryCoverage(message.coverage, "INSIGHTS_ACTIVITY.coverage");
+  assertMessagePayloadBound(message, "INSIGHTS_ACTIVITY");
 }
 
 function assertEvidenceTurn(turn, label) {
@@ -1698,9 +2129,14 @@ function assertEvidenceEntry(entry, label) {
 }
 
 function assertTurnEvidencePage(message) {
-  assertEnvelope(message, "TURN_EVIDENCE_PAGE", [
+  const fields = [
     "snapshotSeq", "turn", "entries", "nextCursor",
-  ]);
+  ];
+  if (Object.hasOwn(message, "databaseUuid")) fields.push("databaseUuid");
+  assertEnvelope(message, "TURN_EVIDENCE_PAGE", fields);
+  if (Object.hasOwn(message, "databaseUuid")) {
+    assertUuid(message.databaseUuid, "TURN_EVIDENCE_PAGE.databaseUuid");
+  }
   assertDecimal(message.snapshotSeq, "TURN_EVIDENCE_PAGE.snapshotSeq");
   assertEvidenceTurn(message.turn, "TURN_EVIDENCE_PAGE.turn");
   if (!Array.isArray(message.entries) || message.entries.length > MAX_EVIDENCE_PAGE_ENTRIES) {
@@ -1795,6 +2231,10 @@ export function assertProtocolMessage(message) {
   else if (message.type === "CAPABILITY_PAGE") assertCapabilityPage(message);
   else if (message.type === "SEARCH_TURNS") assertSearchTurns(message);
   else if (message.type === "TURN_SEARCH_RESULTS") assertTurnSearchResults(message);
+  else if (message.type === "READ_CAPABILITY_USAGE") assertReadCapabilityUsage(message);
+  else if (message.type === "CAPABILITY_USAGE") assertCapabilityUsage(message);
+  else if (message.type === "READ_INSIGHTS_ACTIVITY") assertReadInsightsActivity(message);
+  else if (message.type === "INSIGHTS_ACTIVITY") assertInsightsActivity(message);
   else if (message.type === "READ_TURN_EVIDENCE") assertReadTurnEvidence(message);
   else if (message.type === "TURN_EVIDENCE_PAGE") assertTurnEvidencePage(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
@@ -2183,7 +2623,11 @@ export function createCapabilityPageMessage({ requestId, page }) {
 
 function canonicalSearchFilters(filters) {
   assertPlainObject(filters, "filters");
-  assertExactKeys(filters, "filters", [
+  const source = {
+    ...filters,
+    capabilityTerminalStates: filters.capabilityTerminalStates ?? [],
+  };
+  assertExactKeys(source, "filters", [
     "providers",
     "projectKeys",
     "observedAtOrAfterUnixMs",
@@ -2192,44 +2636,51 @@ function canonicalSearchFilters(filters) {
     "skillCapabilityKeys",
     "resultEvidence",
     "closureStates",
+    "capabilityTerminalStates",
   ]);
   const result = {
-    providers: canonicalBoundedArray(filters.providers, "filters.providers", MAX_FILTER_PROVIDERS,
+    providers: canonicalBoundedArray(source.providers, "filters.providers", MAX_FILTER_PROVIDERS,
       (value, label) => assertBoundedString(value, label, 64, {
         allowEmpty: false,
         ascii: true,
       })),
     projectKeys: canonicalBoundedArray(
-      filters.projectKeys,
+      source.projectKeys,
       "filters.projectKeys",
       MAX_FILTER_KEYS,
       assertHex64,
     ),
-    observedAtOrAfterUnixMs: filters.observedAtOrAfterUnixMs,
-    observedBeforeUnixMs: filters.observedBeforeUnixMs,
+    observedAtOrAfterUnixMs: source.observedAtOrAfterUnixMs,
+    observedBeforeUnixMs: source.observedBeforeUnixMs,
     toolCapabilityKeys: canonicalBoundedArray(
-      filters.toolCapabilityKeys,
+      source.toolCapabilityKeys,
       "filters.toolCapabilityKeys",
       MAX_FILTER_KEYS,
       assertHex64,
     ),
     skillCapabilityKeys: canonicalBoundedArray(
-      filters.skillCapabilityKeys,
+      source.skillCapabilityKeys,
       "filters.skillCapabilityKeys",
       MAX_FILTER_KEYS,
       assertHex64,
     ),
     resultEvidence: canonicalBoundedArray(
-      filters.resultEvidence,
+      source.resultEvidence,
       "filters.resultEvidence",
       3,
       (value, label) => assertEnum(value, label, SEARCH_RESULT_EVIDENCE),
     ),
     closureStates: canonicalBoundedArray(
-      filters.closureStates,
+      source.closureStates,
       "filters.closureStates",
       3,
       (value, label) => assertEnum(value, label, SEARCH_CLOSURE_STATES),
+    ),
+    capabilityTerminalStates: canonicalBoundedArray(
+      source.capabilityTerminalStates,
+      "filters.capabilityTerminalStates",
+      5,
+      (value, label) => assertEnum(value, label, CAPABILITY_TERMINAL_STATES),
     ),
   };
   assertSearchFilters(result, "filters");
@@ -2240,6 +2691,7 @@ export function createSearchTurnsMessage({
   requestId,
   query,
   filters,
+  orderBy = query.length > 0 ? "relevance" : "observed-desc",
   limit = 50,
   pathLimit = 10,
   nowUnixMs,
@@ -2248,6 +2700,7 @@ export function createSearchTurnsMessage({
   const message = assertProtocolMessage(envelope("SEARCH_TURNS", requestId, {
     query,
     filters: canonicalSearchFilters(filters),
+    orderBy,
     limit,
     pathLimit,
     nowUnixMs,
@@ -2259,27 +2712,134 @@ export function createSearchTurnsMessage({
 
 export function createTurnSearchResultsMessage({
   requestId,
+  databaseUuid,
   snapshot,
+  orderBy,
+  totalMatchCount,
+  closureEvaluatedAt,
+  quiescenceSeconds,
   scoringTerms,
   results,
   evidencePaths,
   diagnostic,
   searchTrace,
 }) {
-  return assertProtocolMessage(envelope("TURN_SEARCH_RESULTS", requestId, {
+  const response = {
     snapshot,
     scoringTerms,
     results,
     evidencePaths,
     diagnostic,
     searchTrace,
+  };
+  if (databaseUuid !== undefined) response.databaseUuid = databaseUuid;
+  if ([orderBy, totalMatchCount, closureEvaluatedAt, quiescenceSeconds]
+    .some((value) => value !== undefined)) {
+    response.orderBy = orderBy;
+    response.totalMatchCount = totalMatchCount;
+    response.closureEvaluatedAt = closureEvaluatedAt;
+    response.quiescenceSeconds = quiescenceSeconds;
+  }
+  return assertProtocolMessage(envelope("TURN_SEARCH_RESULTS", requestId, response));
+}
+
+function canonicalAggregateFilters(filters, { terminalStates = false } = {}) {
+  assertPlainObject(filters, "filters");
+  const source = terminalStates
+    ? { ...filters, capabilityTerminalStates: filters.capabilityTerminalStates ?? [] }
+    : filters;
+  const fields = ["providers", "projectKeys", "closureStates"];
+  if (terminalStates) fields.push("capabilityTerminalStates");
+  assertExactKeys(source, "filters", fields);
+  const result = {
+    providers: canonicalBoundedArray(source.providers, "filters.providers", MAX_FILTER_PROVIDERS,
+      (provider, label) => assertBoundedString(provider, label, 64, {
+        allowEmpty: false,
+        ascii: true,
+      })),
+    projectKeys: canonicalBoundedArray(
+      source.projectKeys,
+      "filters.projectKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    ),
+    closureStates: canonicalBoundedArray(
+      source.closureStates,
+      "filters.closureStates",
+      3,
+      (state, label) => assertEnum(state, label, SEARCH_CLOSURE_STATES),
+    ),
+  };
+  if (terminalStates) {
+    result.capabilityTerminalStates = canonicalBoundedArray(
+      source.capabilityTerminalStates,
+      "filters.capabilityTerminalStates",
+      5,
+      (state, label) => assertEnum(state, label, CAPABILITY_TERMINAL_STATES),
+    );
+  }
+  assertAggregateFilters(result, "filters", { terminalStates });
+  return result;
+}
+
+export function createReadCapabilityUsageMessage({
+  requestId,
+  kind,
+  window,
+  comparisonWindow = null,
+  filters,
+  orderBy,
+  cursor = null,
+  limit = 50,
+  nowUnixMs,
+  quiescenceSeconds = 300,
+}) {
+  return assertProtocolMessage(envelope("READ_CAPABILITY_USAGE", requestId, {
+    kind,
+    window,
+    comparisonWindow,
+    filters: canonicalAggregateFilters(filters, { terminalStates: true }),
+    orderBy,
+    cursor,
+    limit,
+    nowUnixMs,
+    quiescenceSeconds,
   }));
+}
+
+export function createCapabilityUsageMessage({ requestId, usage }) {
+  assertPlainObject(usage, "usage");
+  return assertProtocolMessage(envelope("CAPABILITY_USAGE", requestId, { ...usage }));
+}
+
+export function createReadInsightsActivityMessage({
+  requestId,
+  window,
+  filters,
+  bucket,
+  timeZone = "UTC",
+  nowUnixMs,
+  quiescenceSeconds = 300,
+}) {
+  return assertProtocolMessage(envelope("READ_INSIGHTS_ACTIVITY", requestId, {
+    window,
+    filters: canonicalAggregateFilters(filters),
+    bucket,
+    timeZone,
+    nowUnixMs,
+    quiescenceSeconds,
+  }));
+}
+
+export function createInsightsActivityMessage({ requestId, activity }) {
+  assertPlainObject(activity, "activity");
+  return assertProtocolMessage(envelope("INSIGHTS_ACTIVITY", requestId, { ...activity }));
 }
 
 export function createReadTurnEvidenceMessage({
   requestId,
   turnKey,
-  expectedRevision = null,
+  expectedRevision,
   cursor = null,
   limit = 64,
 }) {

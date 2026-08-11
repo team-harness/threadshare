@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-activity.v1.schema.json",
+  "title": "Threadshare Insights Activity V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "bucket", "timeZone", "window", "closureEvaluatedAt", "quiescenceSeconds", "buckets", "coverage"],
+  "properties": {
+    "format": { "const": "threadshare-insights-activity@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "bucket": { "enum": ["day", "week"] },
+    "timeZone": { "const": "UTC" },
+    "window": { "$ref": "#/$defs/window" },
+    "closureEvaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "quiescenceSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "buckets": { "type": "array", "maxItems": 366, "items": { "$ref": "#/$defs/bucketRow" } },
+    "coverage": { "$ref": "#/$defs/coverage" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observedAtOrAfter", "observedBefore"],
+      "properties": {
+        "observedAtOrAfter": { "$ref": "#/$defs/timestamp" },
+        "observedBefore": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "closureCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hardSealed", "quiescent", "open"],
+      "properties": {
+        "hardSealed": { "$ref": "#/$defs/decimal" },
+        "quiescent": { "$ref": "#/$defs/decimal" },
+        "open": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "resultEvidenceCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["providerCompleted", "abandoned", "unknown"],
+      "properties": {
+        "providerCompleted": { "$ref": "#/$defs/decimal" },
+        "abandoned": { "$ref": "#/$defs/decimal" },
+        "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "support": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctDedupeGroupCount", "strongDedupeGroupCount", "weakDedupeGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount"],
+      "properties": {
+        "distinctDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "strongDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "weakDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "observedEofProvisionalGroupCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "bucketRow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bucketStart", "bucketEnd", "distinctSessionCount", "distinctTurnCount", "currentClosureCounts", "turnResultEvidenceCounts", "recordedToolInvocationCount", "recordedSkillInvocationCount", "support"],
+      "properties": {
+        "bucketStart": { "$ref": "#/$defs/timestamp" },
+        "bucketEnd": { "$ref": "#/$defs/timestamp" },
+        "distinctSessionCount": { "$ref": "#/$defs/decimal" },
+        "distinctTurnCount": { "$ref": "#/$defs/decimal" },
+        "currentClosureCounts": { "$ref": "#/$defs/closureCounts" },
+        "turnResultEvidenceCounts": { "$ref": "#/$defs/resultEvidenceCounts" },
+        "recordedToolInvocationCount": { "$ref": "#/$defs/decimal" },
+        "recordedSkillInvocationCount": { "$ref": "#/$defs/decimal" },
+        "support": { "$ref": "#/$defs/support" }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap"],
+      "properties": {
+        "excludedUndatedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUndatedTurnCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedTurnCount": { "$ref": "#/$defs/decimal" },
+        "categoriesMayOverlap": { "const": true }
+      }
+    }
+  }
+}

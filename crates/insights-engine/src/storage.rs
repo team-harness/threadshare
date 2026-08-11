@@ -1,4 +1,6 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior, params, params_from_iter,
+};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -218,6 +220,58 @@ fn valid_hex64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn valid_database_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+        })
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+}
+
+fn new_database_uuid(connection: &Connection) -> Result<String, StorageError> {
+    let mut bytes: Vec<u8> = connection.query_row("SELECT randomblob(16)", [], |row| row.get(0))?;
+    if bytes.len() != 16 {
+        return Err(StorageError::new(
+            "TS_INSIGHTS_STORAGE_FAILED",
+            "SQLite did not generate a database UUID",
+        ));
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let value = hex::encode(bytes);
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &value[0..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..32]
+    ))
+}
+
+fn ensure_database_uuid(connection: &Connection) -> Result<(), StorageError> {
+    let candidate = new_database_uuid(connection)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO engine_metadata(key, value) VALUES ('database_uuid', ?1)",
+        [candidate],
+    )?;
+    let value: String = connection.query_row(
+        "SELECT value FROM engine_metadata WHERE key='database_uuid'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !valid_database_uuid(&value) {
+        return Err(StorageError::new(
+            "TS_INSIGHTS_STORAGE_CORRUPT",
+            "the Insights database UUID is invalid",
+        ));
+    }
+    Ok(())
+}
+
 fn fts5_virtual_table_index(detail: &str) -> Option<u16> {
     let value = detail.split_once("VIRTUAL TABLE INDEX ")?.1;
     let digits = value
@@ -254,6 +308,20 @@ impl EngineStorage {
         let storage = Self::configure(connection, Some(path.to_path_buf()))?;
         persistent_file_permissions::enforce(path)?;
         Ok(storage)
+    }
+
+    pub fn open_existing(path: &Path) -> Result<Self, StorageError> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|_| {
+            StorageError::new(
+                "TS_INSIGHTS_STORAGE_FAILED",
+                "the existing Insights database could not be opened",
+            )
+        })?;
+        Self::configure(connection, Some(path.to_path_buf()))
     }
 
     pub fn open_in_memory() -> Result<Self, StorageError> {
@@ -309,6 +377,7 @@ impl EngineStorage {
                ON CONFLICT(key) DO UPDATE SET value=excluded.value;
              END;",
         )?;
+        ensure_database_uuid(&connection)?;
         crate::normalized_repository::initialize_schema(&mut connection)?;
         crate::source_state::initialize_schema(&connection)?;
         crate::fact_staging::initialize(&connection)?;
@@ -361,6 +430,21 @@ impl EngineStorage {
 
     pub fn sqlite_version(&self) -> String {
         rusqlite::version().to_owned()
+    }
+
+    pub fn database_uuid(&self) -> Result<String, StorageError> {
+        let value: String = self.connection.query_row(
+            "SELECT value FROM engine_metadata WHERE key='database_uuid'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !valid_database_uuid(&value) {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_STORAGE_CORRUPT",
+                "the Insights database UUID is invalid",
+            ));
+        }
+        Ok(value)
     }
 
     pub fn compile_options(&self) -> Result<Vec<String>, StorageError> {
@@ -848,6 +932,20 @@ impl EngineStorage {
         crate::insights_overview::list_capabilities(&self.connection, request)
     }
 
+    pub fn read_capability_usage(
+        &self,
+        request: &crate::agent_query::UsageRequest,
+    ) -> Result<crate::agent_query::UsageResponse, crate::query::QueryError> {
+        crate::agent_query::read_capability_usage(&self.connection, request)
+    }
+
+    pub fn read_insights_activity(
+        &self,
+        request: &crate::agent_query::ActivityRequest,
+    ) -> Result<crate::agent_query::ActivityResponse, crate::query::QueryError> {
+        crate::agent_query::read_activity(&self.connection, request)
+    }
+
     pub fn maintain_search_projection(
         &mut self,
         batch_size: u16,
@@ -934,6 +1032,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
     #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -984,10 +1084,37 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn nofollow_database_path(database: &TemporaryDatabase) -> PathBuf {
+        fs::canonicalize(&database.directory)
+            .unwrap()
+            .join(database.path.file_name().unwrap())
+    }
+
+    #[cfg(unix)]
     fn assert_private_mode(path: &Path) {
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    fn assert_uuid_v4(value: &str) {
+        assert_eq!(value.len(), 36);
+        assert_eq!(&value[8..9], "-");
+        assert_eq!(&value[13..14], "-");
+        assert_eq!(&value[18..19], "-");
+        assert_eq!(&value[23..24], "-");
+        assert_eq!(&value[14..15], "4");
+        assert!(matches!(&value[19..20], "8" | "9" | "a" | "b"));
+        assert!(
+            value
+                .bytes()
+                .enumerate()
+                .all(
+                    |(index, byte)| matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+                        || !matches!(index, 8 | 13 | 18 | 23)
+                            && (byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                )
         );
     }
 
@@ -1033,6 +1160,107 @@ mod tests {
     fn verifies_bundled_sqlite_and_fts5() {
         let storage = EngineStorage::open_in_memory().unwrap();
         storage.verify_sqlite_contract().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_databases_have_distinct_immutable_database_uuids() {
+        let first_database = TemporaryDatabase::new();
+        let first_uuid = {
+            let storage = EngineStorage::open(&first_database.path).unwrap();
+            storage.database_uuid().unwrap()
+        };
+        assert_uuid_v4(&first_uuid);
+
+        let reopened_uuid = EngineStorage::open(&first_database.path)
+            .unwrap()
+            .database_uuid()
+            .unwrap();
+        assert_eq!(reopened_uuid, first_uuid);
+
+        let second_database = TemporaryDatabase::new();
+        let second_uuid = EngineStorage::open(&second_database.path)
+            .unwrap()
+            .database_uuid()
+            .unwrap();
+        assert_uuid_v4(&second_uuid);
+        assert_ne!(second_uuid, first_uuid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_never_creates_a_missing_database() {
+        let database = TemporaryDatabase::new();
+        let path = nofollow_database_path(&database);
+        assert!(!path.exists());
+
+        let error = match EngineStorage::open_existing(&path) {
+            Ok(_) => panic!("a missing database must not be created"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "TS_INSIGHTS_STORAGE_FAILED");
+        assert!(!error.message.contains(path.to_string_lossy().as_ref()));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_rejects_a_symlink_without_touching_its_target() {
+        let database = TemporaryDatabase::new();
+        let path = nofollow_database_path(&database);
+        let expected_uuid = EngineStorage::open(&path).unwrap().database_uuid().unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let link_path = path.with_file_name("engine-link.sqlite3");
+        symlink(&path, &link_path).unwrap();
+
+        let error = match EngineStorage::open_existing(&link_path) {
+            Ok(_) => panic!("a symlink database path must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "TS_INSIGHTS_STORAGE_FAILED");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            EngineStorage::open_existing(&path)
+                .unwrap()
+                .database_uuid()
+                .unwrap(),
+            expected_uuid
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_preserves_database_and_sidecar_permissions() {
+        let database = TemporaryDatabase::new();
+        let path = nofollow_database_path(&database);
+        let writer = EngineStorage::open(&path).unwrap();
+        writer
+            .connection
+            .execute_batch(
+                "CREATE TABLE open_existing_fixture(value TEXT NOT NULL);
+                 INSERT INTO open_existing_fixture(value) VALUES ('ready');",
+            )
+            .unwrap();
+        let wal_path = sidecar_path(&path, "-wal");
+        let shm_path = sidecar_path(&path, "-shm");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&wal_path, fs::Permissions::from_mode(0o620)).unwrap();
+        fs::set_permissions(&shm_path, fs::Permissions::from_mode(0o660)).unwrap();
+
+        let reader = EngineStorage::open_existing(&path).unwrap();
+        assert_eq!(reader.read_engine_status().unwrap().snapshot_seq, "0");
+
+        for (path, expected) in [(&path, 0o640), (&wal_path, 0o620), (&shm_path, 0o660)] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                expected
+            );
+        }
     }
 
     #[test]

@@ -31,6 +31,10 @@ import {
   createPurgeStatusMessage,
   createReadPurgeStatusMessage,
   createReadEngineStatusMessage,
+  createReadCapabilityUsageMessage,
+  createReadInsightsActivityMessage,
+  createCapabilityUsageMessage,
+  createInsightsActivityMessage,
   createReadInsightsOverviewMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
@@ -258,6 +262,7 @@ function searchFilters(overrides = {}) {
     skillCapabilityKeys: [],
     resultEvidence: [],
     closureStates: [],
+    capabilityTerminalStates: [],
     ...overrides,
   };
 }
@@ -276,6 +281,11 @@ function searchResult(overrides = {}) {
     finalAnswerTruncated: false,
     closureState: "hard-sealed",
     resultEvidence: "provider-completed",
+    dedupe: {
+      duplicateGroupKey: "9".repeat(64),
+      confidence: "strong",
+      observedEofProvisional: false,
+    },
     score: {
       relevancePpm: 925_000,
       bm25Rank: 1,
@@ -456,15 +466,35 @@ test("capability pages are stable-key paged and contain only bounded aggregates"
     terminal: { pending: "0", completed: "2", failed: "1", cancelled: "0", unknown: "0" },
     strength: { observed: "3", confirmed: "0", inferred: "0" },
   };
-  const response = createCapabilityPageMessage({
-    requestId: "11",
-    page: { snapshotSeq: "7", items: [item], nextCursor: item.capabilityKey },
-  });
+  const page = {
+    databaseUuid: EPOCH,
+    snapshotSeq: "7",
+    items: [item],
+    nextCursor: item.capabilityKey,
+    coverage: {
+      excludedUndatedInvocationCount: "2",
+      excludedUndatedTurnCount: "1",
+      excludedUnrevisionedInvocationCount: "3",
+      excludedUnrevisionedTurnCount: "2",
+      fullyExcludedCapabilityCount: "1",
+    },
+  };
+  const response = createCapabilityPageMessage({ requestId: "11", page });
   assert.equal(assertProtocolMessage(response), response);
   assert.throws(
     () => createCapabilityPageMessage({
       requestId: "11",
-      page: { snapshotSeq: "7", items: [item], nextCursor: "3".repeat(64) },
+      page: {
+        ...page,
+        coverage: { ...page.coverage, fullyExcludedCapabilityCount: 1 },
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createCapabilityPageMessage({
+      requestId: "11",
+      page: { ...page, nextCursor: "3".repeat(64) },
     }),
     { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
   );
@@ -472,7 +502,7 @@ test("capability pages are stable-key paged and contain only bounded aggregates"
     () => createCapabilityPageMessage({
       requestId: "11",
       page: {
-        snapshotSeq: "7",
+        ...page,
         items: [{ ...item, sourcePath: "/private/session.jsonl" }],
         nextCursor: null,
       },
@@ -489,17 +519,40 @@ test("turn search requests canonicalize bounded filters and reject broad queries
       providers: ["codex", "claude"],
       toolCapabilityKeys: ["2".repeat(64), "1".repeat(64)],
       resultEvidence: ["unknown", "provider-completed"],
+      capabilityTerminalStates: ["failed", "completed"],
     }),
+    orderBy: "observed-desc",
     nowUnixMs: "1786323723000",
   });
   assert.deepEqual(request.filters.providers, ["claude", "codex"]);
   assert.deepEqual(request.filters.toolCapabilityKeys, ["1".repeat(64), "2".repeat(64)]);
   assert.deepEqual(request.filters.resultEvidence, ["provider-completed", "unknown"]);
+  assert.deepEqual(request.filters.capabilityTerminalStates, ["completed", "failed"]);
+  assert.equal(request.orderBy, "observed-desc");
   assert.equal(request.limit, 50);
   assert.equal(request.pathLimit, 10);
   assert.equal(request.quiescenceSeconds, 300);
   assert.equal(assertProtocolMessage(request), request);
 
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "needle",
+      filters: searchFilters({ capabilityTerminalStates: ["failed"] }),
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createSearchTurnsMessage({
+      requestId: "10",
+      query: "needle",
+      filters: searchFilters(),
+      orderBy: "recent",
+      nowUnixMs: "1786323723000",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
   assert.throws(
     () => createSearchTurnsMessage({
       requestId: "10",
@@ -553,12 +606,17 @@ test("turn search requests canonicalize bounded filters and reject broad queries
 test("turn search responses bound excerpts, scores, terms, and path evidence", () => {
   const response = createTurnSearchResultsMessage({
     requestId: "10",
+    databaseUuid: EPOCH,
     snapshot: {
       snapshotSeq: "21",
       projectionVersion: 2,
       analyzerVersion: 1,
       rankerVersion: 1,
     },
+    orderBy: "relevance",
+    totalMatchCount: "1",
+    closureEvaluatedAt: "2026-08-11T00:00:00.000Z",
+    quiescenceSeconds: 300,
     scoringTerms: [{
       logicalTerm: "normalized",
       field: "natural",
@@ -735,6 +793,19 @@ test("turn search responses bound excerpts, scores, terms, and path evidence", (
 });
 
 test("turn evidence pages are revision-aware, strictly tagged, and frame bounded", () => {
+  assert.throws(
+    () => createReadTurnEvidenceMessage({ requestId: "11", turnKey: TURN_KEY }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createReadTurnEvidenceMessage({
+      requestId: "11",
+      turnKey: TURN_KEY,
+      expectedRevision: null,
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
   const request = createReadTurnEvidenceMessage({
     requestId: "11",
     turnKey: TURN_KEY,
@@ -810,6 +881,194 @@ test("turn evidence pages are revision-aware, strictly tagged, and frame bounded
       turn: response.turn,
       entries: [{ factKind: "future", fact: {} }],
       nextCursor: null,
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("Usage and Activity requests carry bounded frozen windows", () => {
+  const usage = createReadCapabilityUsageMessage({
+    requestId: "12",
+    kind: "tool",
+    window: {
+      observedAtOrAfterUnixMs: "1785542400000",
+      observedBeforeUnixMs: "1788220800000",
+    },
+    comparisonWindow: null,
+    filters: {
+      providers: ["codex"],
+      projectKeys: ["1".repeat(64)],
+      closureStates: ["hard-sealed"],
+      capabilityTerminalStates: ["failed"],
+    },
+    orderBy: "recorded-failing-invocation-count",
+    nowUnixMs: "1786406400000",
+  });
+  assert.equal(usage.limit, 50);
+  assert.equal(usage.cursor, null);
+  assert.equal(usage.quiescenceSeconds, 300);
+
+  const activity = createReadInsightsActivityMessage({
+    requestId: "13",
+    window: {
+      observedAtOrAfter: "2026-08-03T00:00:00.000Z",
+      observedBefore: "2026-08-17T00:00:00.000Z",
+    },
+    filters: { providers: [], projectKeys: [], closureStates: [] },
+    bucket: "week",
+    timeZone: "UTC",
+    nowUnixMs: "1786406400000",
+  });
+  assert.equal(activity.quiescenceSeconds, 300);
+
+  assert.throws(
+    () => createReadCapabilityUsageMessage({
+      ...usage,
+      requestId: "12",
+      orderBy: "use-count",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createReadInsightsActivityMessage({
+      ...activity,
+      requestId: "13",
+      timeZone: "Asia/Shanghai",
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createReadInsightsActivityMessage({
+      ...activity,
+      requestId: "13",
+      window: {
+        observedAtOrAfter: "+010000-08-03T00:00:00.000Z",
+        observedBefore: "+010000-08-17T00:00:00.000Z",
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createReadCapabilityUsageMessage({
+      ...usage,
+      requestId: "12",
+      filters: { ...usage.filters, provider: "codex" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("Usage and Activity responses are bounded and preserve aggregate invariants", () => {
+  const usage = {
+    databaseUuid: EPOCH,
+    snapshotSeq: "7",
+    closureEvaluatedAt: "2026-08-11T00:00:00.000Z",
+    quiescenceSeconds: 300,
+    orderBy: "absolute-recorded-invocation-change",
+    items: [{
+      capabilityKey: "1".repeat(64),
+      provider: "codex",
+      kind: "tool",
+      canonicalName: "Read",
+      recordedInvocationCount: "7",
+      recordedFailingInvocationCount: "2",
+      distinctTurnCount: "5",
+      distinctSessionCount: "4",
+      lastUsedAt: "2026-08-10T01:02:03.000Z",
+      invocationTerminalCounts: {
+        invocationTotal: "7", pending: "0", completed: "5", failed: "2",
+        cancelled: "0", unknown: "0",
+      },
+      containingTurnOutcomeCounts: {
+        distinctTurnTotal: "5", providerCompleted: "3", abandoned: "1", unknown: "1",
+      },
+      groupedInvocationCount: "5",
+      ungroupedInvocationCount: "2",
+      support: {
+        distinctDedupeGroupCount: "3",
+        strongDedupeGroupCount: "2",
+        weakDedupeGroupCount: "1",
+        observedEofProvisionalGroupCount: "1",
+        unknownDedupeSessionCount: "1",
+        sessionDuplicateMethodCounts: { explicitLineage: "2", exactFirstTurnPrefix: "1" },
+      },
+      strengthCounts: { observed: "5", confirmed: "1", inferred: "1" },
+      outOfWindow: {
+        scope: "all-indexed-history",
+        retrySummary: { failedCount: "9", sameInputRepeatCount: "4", retryAfterFailureCount: "3" },
+      },
+      comparison: {
+        baselineRecordedInvocationCount: "5",
+        currentRecordedInvocationCount: "7",
+        absoluteRecordedInvocationChange: "2",
+      },
+    }],
+    totalCandidateCount: "1",
+    truncated: false,
+    coverage: {
+      excludedUndatedInvocationCount: "1",
+      excludedUndatedTurnCount: "1",
+      excludedUnrevisionedInvocationCount: "2",
+      excludedUnrevisionedTurnCount: "2",
+      fullyExcludedCapabilityCount: "3",
+    },
+    nextCursor: null,
+  };
+  const usageMessage = createCapabilityUsageMessage({ requestId: "14", usage });
+  assert.equal(assertProtocolMessage(usageMessage), usageMessage);
+
+  const activity = {
+    databaseUuid: EPOCH,
+    snapshotSeq: "7",
+    closureEvaluatedAt: "2026-08-11T00:00:00.000Z",
+    quiescenceSeconds: 300,
+    buckets: [{
+      bucketStart: "2026-08-10T00:00:00.000Z",
+      bucketEnd: "2026-08-11T00:00:00.000Z",
+      distinctSessionCount: "4",
+      distinctTurnCount: "5",
+      currentClosureCounts: { hardSealed: "2", quiescent: "1", open: "2" },
+      turnResultEvidenceCounts: { providerCompleted: "3", abandoned: "1", unknown: "1" },
+      recordedToolInvocationCount: "7",
+      recordedSkillInvocationCount: "3",
+      support: {
+        distinctDedupeGroupCount: "3",
+        strongDedupeGroupCount: "2",
+        weakDedupeGroupCount: "1",
+        observedEofProvisionalGroupCount: "1",
+        unknownDedupeSessionCount: "1",
+      },
+    }],
+    coverage: {
+      excludedUndatedInvocationCount: "1",
+      excludedUndatedTurnCount: "1",
+      excludedUnrevisionedInvocationCount: "2",
+      excludedUnrevisionedTurnCount: "2",
+    },
+  };
+  const activityMessage = createInsightsActivityMessage({ requestId: "15", activity });
+  assert.equal(assertProtocolMessage(activityMessage), activityMessage);
+
+  assert.throws(
+    () => createCapabilityUsageMessage({
+      requestId: "14",
+      usage: {
+        ...usage,
+        items: [{
+          ...usage.items[0],
+          invocationTerminalCounts: { ...usage.items[0].invocationTerminalCounts, failed: "1" },
+        }],
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsActivityMessage({
+      requestId: "15",
+      activity: {
+        ...activity,
+        buckets: [{ ...activity.buckets[0], bucketEnd: "2026-08-10T12:00:00.000Z" }],
+      },
     }),
     { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
   );

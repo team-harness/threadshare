@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::io::Write;
 use unicode_normalization::UnicodeNormalization;
 
+pub mod agent_query;
 pub mod analyzer;
 pub mod engine;
 pub mod engine_status;

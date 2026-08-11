@@ -395,6 +395,7 @@ test("installed smoke obtains the current contract from the installed root packa
   const platform = path.join(scope, "threadshare-darwin-arm64");
   const contractCapture = Symbol.for("threadshare.test.installed-smoke-contract");
   const protocolCapture = Symbol.for("threadshare.test.installed-smoke-protocol-calls");
+  let querySmokeRoot;
   try {
     await Promise.all([
       mkdir(path.join(root, "src"), { recursive: true }),
@@ -432,9 +433,18 @@ export function createInsightsRequiredContract(originSecretEpoch) {
 }
 `);
 
-    await smokeInstalledInsights({ prefix: fixture, version });
+    const result = await smokeInstalledInsights({
+      prefix: fixture,
+      version,
+      runAgentQuerySmoke: async ({ rootDirectory }) => {
+        querySmokeRoot = rootDirectory;
+        return { queryCount: 6, schemaCount: 9 };
+      },
+    });
 
     assert.equal(globalThis[protocolCapture], 1);
+    assert.equal(querySmokeRoot, root);
+    assert.deepEqual(result.agentQueries, { queryCount: 6, schemaCount: 9 });
     assert.deepEqual(globalThis[contractCapture].projectionVersions, [
       "turn-search@2",
       "turn-summary@1",

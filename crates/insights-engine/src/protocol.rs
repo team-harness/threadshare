@@ -105,6 +105,10 @@ pub enum MessageKind {
     CapabilityPage,
     SearchTurns,
     TurnSearchResults,
+    ReadCapabilityUsage,
+    CapabilityUsage,
+    ReadInsightsActivity,
+    InsightsActivity,
     ReadTurnEvidence,
     TurnEvidencePage,
     AbortSession,
@@ -144,6 +148,10 @@ impl MessageKind {
             Self::CapabilityPage => "CAPABILITY_PAGE",
             Self::SearchTurns => "SEARCH_TURNS",
             Self::TurnSearchResults => "TURN_SEARCH_RESULTS",
+            Self::ReadCapabilityUsage => "READ_CAPABILITY_USAGE",
+            Self::CapabilityUsage => "CAPABILITY_USAGE",
+            Self::ReadInsightsActivity => "READ_INSIGHTS_ACTIVITY",
+            Self::InsightsActivity => "INSIGHTS_ACTIVITY",
             Self::ReadTurnEvidence => "READ_TURN_EVIDENCE",
             Self::TurnEvidencePage => "TURN_EVIDENCE_PAGE",
             Self::AbortSession => "ABORT_SESSION",
@@ -798,22 +806,49 @@ fn validate_fact_count_items(
 }
 
 fn validate_insights_overview(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    const LEGACY_FIELDS: [&str; 10] = [
+        "snapshotSeq",
+        "sessions",
+        "scopes",
+        "dedupe",
+        "turns",
+        "capabilities",
+        "providers",
+        "projects",
+        "coverage",
+        "diagnostics",
+    ];
+    const FIELDS: [&str; 11] = [
+        "snapshotSeq",
+        "sessions",
+        "scopes",
+        "dedupe",
+        "turns",
+        "capabilities",
+        "providers",
+        "projects",
+        "coverage",
+        "diagnostics",
+        "databaseUuid",
+    ];
+    let has_database_uuid = message
+        .as_object()
+        .is_some_and(|message| message.contains_key("databaseUuid"));
     validate_envelope(
         message,
         kind,
-        &[
-            "snapshotSeq",
-            "sessions",
-            "scopes",
-            "dedupe",
-            "turns",
-            "capabilities",
-            "providers",
-            "projects",
-            "coverage",
-            "diagnostics",
-        ],
+        if has_database_uuid {
+            &FIELDS
+        } else {
+            &LEGACY_FIELDS
+        },
     )?;
+    if has_database_uuid {
+        uuid(
+            field(message, "databaseUuid", kind.as_str())?,
+            "INSIGHTS_OVERVIEW.databaseUuid",
+        )?;
+    }
     decimal_u64(
         field(message, "snapshotSeq", kind.as_str())?,
         "INSIGHTS_OVERVIEW.snapshotSeq",
@@ -904,7 +939,21 @@ fn validate_insights_overview(message: &Value, kind: MessageKind) -> Result<(), 
 }
 
 fn validate_capability_page(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
-    validate_envelope(message, kind, &["snapshotSeq", "items", "nextCursor"])?;
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "databaseUuid",
+            "snapshotSeq",
+            "items",
+            "nextCursor",
+            "coverage",
+        ],
+    )?;
+    uuid(
+        field(message, "databaseUuid", kind.as_str())?,
+        "CAPABILITY_PAGE.databaseUuid",
+    )?;
     decimal_u64(
         field(message, "snapshotSeq", kind.as_str())?,
         "CAPABILITY_PAGE.snapshotSeq",
@@ -995,6 +1044,17 @@ fn validate_capability_page(message: &Value, kind: MessageKind) -> Result<(), Pr
             ));
         }
     }
+    decimal_object(
+        field(message, "coverage", kind.as_str())?,
+        "CAPABILITY_PAGE.coverage",
+        &[
+            "excludedUndatedInvocationCount",
+            "excludedUndatedTurnCount",
+            "excludedUnrevisionedInvocationCount",
+            "excludedUnrevisionedTurnCount",
+            "fullyExcludedCapabilityCount",
+        ],
+    )?;
     Ok(())
 }
 
@@ -1179,7 +1239,7 @@ fn validate_envelope(
 }
 
 fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
-    const FIELDS: [&str; 8] = [
+    const LEGACY_FIELDS: [&str; 8] = [
         "providers",
         "projectKeys",
         "observedAtOrAfterUnixMs",
@@ -1189,7 +1249,29 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
         "resultEvidence",
         "closureStates",
     ];
-    exact_object_keys(value, "SEARCH_TURNS.filters", &FIELDS)?;
+    const FIELDS: [&str; 9] = [
+        "providers",
+        "projectKeys",
+        "observedAtOrAfterUnixMs",
+        "observedBeforeUnixMs",
+        "toolCapabilityKeys",
+        "skillCapabilityKeys",
+        "resultEvidence",
+        "closureStates",
+        "capabilityTerminalStates",
+    ];
+    let has_capability_terminal_states = value
+        .as_object()
+        .is_some_and(|value| value.contains_key("capabilityTerminalStates"));
+    exact_object_keys(
+        value,
+        "SEARCH_TURNS.filters",
+        if has_capability_terminal_states {
+            &FIELDS
+        } else {
+            &LEGACY_FIELDS
+        },
+    )?;
     sorted_bounded_strings(
         field(value, "providers", "SEARCH_TURNS.filters")?,
         "SEARCH_TURNS.filters.providers",
@@ -1250,21 +1332,69 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
             return Err(invalid_frame(format!("{label} is invalid")));
         }
     }
+    if has_capability_terminal_states {
+        let terminal_states = sorted_bounded_strings(
+            field(value, "capabilityTerminalStates", "SEARCH_TURNS.filters")?,
+            "SEARCH_TURNS.filters.capabilityTerminalStates",
+            5,
+            16,
+            true,
+        )?;
+        if terminal_states
+            .iter()
+            .any(|item| !["pending", "completed", "failed", "cancelled", "unknown"].contains(item))
+        {
+            return Err(invalid_frame(
+                "SEARCH_TURNS.filters.capabilityTerminalStates is invalid",
+            ));
+        }
+        let has_capability_keys =
+            ["toolCapabilityKeys", "skillCapabilityKeys"]
+                .iter()
+                .any(|name| {
+                    field(value, name, "SEARCH_TURNS.filters")
+                        .ok()
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| !values.is_empty())
+                });
+        if !terminal_states.is_empty() && !has_capability_keys {
+            return Err(invalid_frame(
+                "SEARCH_TURNS.filters.capabilityTerminalStates requires a capability key filter",
+            ));
+        }
+    }
     Ok(())
 }
 
 fn validate_search_turns(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    const LEGACY_FIELDS: [&str; 6] = [
+        "query",
+        "filters",
+        "limit",
+        "pathLimit",
+        "nowUnixMs",
+        "quiescenceSeconds",
+    ];
+    const FIELDS: [&str; 7] = [
+        "query",
+        "filters",
+        "orderBy",
+        "limit",
+        "pathLimit",
+        "nowUnixMs",
+        "quiescenceSeconds",
+    ];
+    let has_order_by = message
+        .as_object()
+        .is_some_and(|message| message.contains_key("orderBy"));
     validate_envelope(
         message,
         kind,
-        &[
-            "query",
-            "filters",
-            "limit",
-            "pathLimit",
-            "nowUnixMs",
-            "quiescenceSeconds",
-        ],
+        if has_order_by {
+            &FIELDS
+        } else {
+            &LEGACY_FIELDS
+        },
     )?;
     bounded_string(
         field(message, "query", kind.as_str())?,
@@ -1296,6 +1426,13 @@ fn validate_search_turns(message: &Value, kind: MessageKind) -> Result<(), Proto
         60,
         86_400,
     )?;
+    if has_order_by {
+        enum_string(
+            field(message, "orderBy", kind.as_str())?,
+            "SEARCH_TURNS.orderBy",
+            &["relevance", "observed-desc"],
+        )?;
+    }
     Ok(())
 }
 
@@ -1440,25 +1577,28 @@ fn validate_search_result(
     scoring_term_count: usize,
 ) -> Result<(), ProtocolError> {
     let label = format!("TURN_SEARCH_RESULTS.results[{index}]");
-    exact_object_keys(
-        value,
-        &label,
-        &[
-            "turnKey",
-            "sessionKey",
-            "revision",
-            "provider",
-            "projectKey",
-            "observedTimestamp",
-            "problemExcerpt",
-            "problemTruncated",
-            "finalAnswerExcerpt",
-            "finalAnswerTruncated",
-            "closureState",
-            "resultEvidence",
-            "score",
-        ],
-    )?;
+    let has_dedupe = value
+        .as_object()
+        .is_some_and(|value| value.contains_key("dedupe"));
+    let mut fields = vec![
+        "turnKey",
+        "sessionKey",
+        "revision",
+        "provider",
+        "projectKey",
+        "observedTimestamp",
+        "problemExcerpt",
+        "problemTruncated",
+        "finalAnswerExcerpt",
+        "finalAnswerTruncated",
+        "closureState",
+        "resultEvidence",
+        "score",
+    ];
+    if has_dedupe {
+        fields.push("dedupe");
+    }
+    exact_object_keys(value, &label, &fields)?;
     for name in ["turnKey", "sessionKey", "revision"] {
         hex64(field(value, name, &label)?, &format!("{label}.{name}"))?;
     }
@@ -1517,6 +1657,28 @@ fn validate_search_result(
         &format!("{label}.score"),
         scoring_term_count,
     )?;
+    if has_dedupe {
+        let dedupe = field(value, "dedupe", &label)?;
+        let dedupe_label = format!("{label}.dedupe");
+        exact_object_keys(
+            dedupe,
+            &dedupe_label,
+            &["duplicateGroupKey", "confidence", "observedEofProvisional"],
+        )?;
+        hex64(
+            field(dedupe, "duplicateGroupKey", &dedupe_label)?,
+            &format!("{dedupe_label}.duplicateGroupKey"),
+        )?;
+        enum_string(
+            field(dedupe, "confidence", &dedupe_label)?,
+            &format!("{dedupe_label}.confidence"),
+            &["strong", "weak"],
+        )?;
+        boolean(
+            field(dedupe, "observedEofProvisional", &dedupe_label)?,
+            &format!("{dedupe_label}.observedEofProvisional"),
+        )?;
+    }
     Ok(())
 }
 
@@ -1865,18 +2027,65 @@ fn validate_search_trace(value: &Value) -> Result<(), ProtocolError> {
 }
 
 fn validate_turn_search_results(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
-    validate_envelope(
-        message,
-        kind,
-        &[
-            "snapshot",
-            "scoringTerms",
-            "results",
-            "evidencePaths",
-            "diagnostic",
-            "searchTrace",
-        ],
-    )?;
+    let mut fields = vec![
+        "snapshot",
+        "scoringTerms",
+        "results",
+        "evidencePaths",
+        "diagnostic",
+        "searchTrace",
+    ];
+    let agent_fields = [
+        "orderBy",
+        "totalMatchCount",
+        "closureEvaluatedAt",
+        "quiescenceSeconds",
+    ];
+    let has_agent_fields = message.as_object().is_some_and(|message| {
+        agent_fields
+            .iter()
+            .any(|field| message.contains_key(*field))
+    });
+    if has_agent_fields {
+        fields.extend(agent_fields);
+    }
+    let has_database_uuid = message
+        .as_object()
+        .is_some_and(|message| message.contains_key("databaseUuid"));
+    if has_database_uuid {
+        fields.push("databaseUuid");
+    }
+    validate_envelope(message, kind, &fields)?;
+    if has_database_uuid {
+        uuid(
+            field(message, "databaseUuid", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.databaseUuid",
+        )?;
+    }
+    let order_by = if has_agent_fields {
+        let order_by = enum_string(
+            field(message, "orderBy", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.orderBy",
+            &["relevance", "observed-desc"],
+        )?;
+        decimal_u64(
+            field(message, "totalMatchCount", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.totalMatchCount",
+        )?;
+        canonical_timestamp_millis(
+            field(message, "closureEvaluatedAt", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.closureEvaluatedAt",
+        )?;
+        safe_integer_range(
+            field(message, "quiescenceSeconds", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.quiescenceSeconds",
+            60,
+            86_400,
+        )?;
+        Some(order_by)
+    } else {
+        None
+    };
     validate_search_snapshot(field(message, "snapshot", kind.as_str())?)?;
     let terms = field(message, "scoringTerms", kind.as_str())?
         .as_array()
@@ -1893,6 +2102,31 @@ fn validate_turn_search_results(message: &Value, kind: MessageKind) -> Result<()
         .ok_or_else(|| invalid_frame("TURN_SEARCH_RESULTS.results exceeds its bounded limit"))?;
     for (index, result) in results.iter().enumerate() {
         validate_search_result(result, index, terms.len())?;
+        if has_agent_fields
+            && field(result, "observedTimestamp", "TURN_SEARCH_RESULTS result")?.is_null()
+        {
+            return Err(invalid_frame(
+                "TURN_SEARCH_RESULTS Agent results require observedTimestamp",
+            ));
+        }
+        if order_by == Some("observed-desc")
+            && !field(result, "score", "TURN_SEARCH_RESULTS result")?.is_null()
+        {
+            return Err(invalid_frame(
+                "TURN_SEARCH_RESULTS observed-desc results must not carry a score",
+            ));
+        }
+    }
+    if has_agent_fields
+        && decimal_u64(
+            field(message, "totalMatchCount", kind.as_str())?,
+            "TURN_SEARCH_RESULTS.totalMatchCount",
+        )?
+        .1 < results.len() as u64
+    {
+        return Err(invalid_frame(
+            "TURN_SEARCH_RESULTS.totalMatchCount is inconsistent",
+        ));
     }
     validate_evidence_path_report(field(message, "evidencePaths", kind.as_str())?)?;
     let diagnostic = field(message, "diagnostic", kind.as_str())?;
@@ -1923,7 +2157,7 @@ fn validate_read_turn_evidence(message: &Value, kind: MessageKind) -> Result<(),
         field(message, "turnKey", kind.as_str())?,
         "READ_TURN_EVIDENCE.turnKey",
     )?;
-    nullable_hex64(
+    hex64(
         field(message, "expectedRevision", kind.as_str())?,
         "READ_TURN_EVIDENCE.expectedRevision",
     )?;
@@ -1942,6 +2176,840 @@ fn validate_read_turn_evidence(message: &Value, kind: MessageKind) -> Result<(),
         "READ_TURN_EVIDENCE.limit",
         1,
         MAX_EVIDENCE_PAGE_ENTRIES,
+    )?;
+    Ok(())
+}
+
+fn validate_usage_window(value: &Value, label: &str) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        &["observedAtOrAfterUnixMs", "observedBeforeUnixMs"],
+    )?;
+    let after = decimal_u64(
+        field(value, "observedAtOrAfterUnixMs", label)?,
+        &format!("{label}.observedAtOrAfterUnixMs"),
+    )?
+    .1;
+    let before = decimal_u64(
+        field(value, "observedBeforeUnixMs", label)?,
+        &format!("{label}.observedBeforeUnixMs"),
+    )?
+    .1;
+    if after >= before {
+        return Err(invalid_frame(format!(
+            "{label} must be a non-empty half-open window"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_aggregate_filters(
+    value: &Value,
+    label: &str,
+    terminal_states: bool,
+) -> Result<(), ProtocolError> {
+    exact_object_keys(
+        value,
+        label,
+        if terminal_states {
+            &[
+                "providers",
+                "projectKeys",
+                "closureStates",
+                "capabilityTerminalStates",
+            ]
+        } else {
+            &["providers", "projectKeys", "closureStates"]
+        },
+    )?;
+    sorted_bounded_strings(
+        field(value, "providers", label)?,
+        &format!("{label}.providers"),
+        MAX_FILTER_PROVIDERS,
+        64,
+        true,
+    )?;
+    let project_keys = field(value, "projectKeys", label)?
+        .as_array()
+        .filter(|values| values.len() <= MAX_FILTER_KEYS)
+        .ok_or_else(|| invalid_frame(format!("{label}.projectKeys exceeds its bounded limit")))?;
+    let mut previous = None;
+    for (index, key) in project_keys.iter().enumerate() {
+        let key = hex64(key, &format!("{label}.projectKeys[{index}]"))?;
+        if previous.is_some_and(|value| value >= key) {
+            return Err(invalid_frame(format!(
+                "{label}.projectKeys must be sorted and contain unique values"
+            )));
+        }
+        previous = Some(key);
+    }
+    let closure_states = sorted_bounded_strings(
+        field(value, "closureStates", label)?,
+        &format!("{label}.closureStates"),
+        3,
+        16,
+        true,
+    )?;
+    if closure_states
+        .iter()
+        .any(|state| !["hard-sealed", "open", "quiescent"].contains(state))
+    {
+        return Err(invalid_frame(format!("{label}.closureStates is invalid")));
+    }
+    if terminal_states {
+        let states = sorted_bounded_strings(
+            field(value, "capabilityTerminalStates", label)?,
+            &format!("{label}.capabilityTerminalStates"),
+            5,
+            16,
+            true,
+        )?;
+        if states.iter().any(|state| {
+            !["pending", "completed", "failed", "cancelled", "unknown"].contains(state)
+        }) {
+            return Err(invalid_frame(format!(
+                "{label}.capabilityTerminalStates is invalid"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_read_capability_usage(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "kind",
+            "window",
+            "comparisonWindow",
+            "filters",
+            "orderBy",
+            "cursor",
+            "limit",
+            "nowUnixMs",
+            "quiescenceSeconds",
+        ],
+    )?;
+    enum_string(
+        field(message, "kind", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.kind",
+        &["tool", "skill"],
+    )?;
+    validate_usage_window(
+        field(message, "window", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.window",
+    )?;
+    let comparison = field(message, "comparisonWindow", kind.as_str())?;
+    if !comparison.is_null() {
+        validate_usage_window(comparison, "READ_CAPABILITY_USAGE.comparisonWindow")?;
+    }
+    validate_aggregate_filters(
+        field(message, "filters", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.filters",
+        true,
+    )?;
+    let order_by = enum_string(
+        field(message, "orderBy", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.orderBy",
+        &[
+            "recorded-invocation-count",
+            "recorded-failing-invocation-count",
+            "distinct-turn-count",
+            "distinct-session-count",
+            "distinct-dedupe-group-count",
+            "last-used",
+            "absolute-recorded-invocation-change",
+        ],
+    )?;
+    if order_by == "absolute-recorded-invocation-change" && comparison.is_null() {
+        return Err(invalid_frame(
+            "READ_CAPABILITY_USAGE comparisonWindow is required for absolute change",
+        ));
+    }
+    let cursor = field(message, "cursor", kind.as_str())?;
+    if !cursor.is_null() {
+        bounded_string(
+            cursor,
+            "READ_CAPABILITY_USAGE.cursor",
+            MAX_CURSOR_BYTES,
+            false,
+            true,
+        )?;
+    }
+    safe_integer_range(
+        field(message, "limit", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.limit",
+        1,
+        50,
+    )?;
+    decimal_u64(
+        field(message, "nowUnixMs", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.nowUnixMs",
+    )?;
+    safe_integer_range(
+        field(message, "quiescenceSeconds", kind.as_str())?,
+        "READ_CAPABILITY_USAGE.quiescenceSeconds",
+        60,
+        86_400,
+    )?;
+    Ok(())
+}
+
+fn validate_read_insights_activity(
+    message: &Value,
+    kind: MessageKind,
+) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "window",
+            "filters",
+            "bucket",
+            "timeZone",
+            "nowUnixMs",
+            "quiescenceSeconds",
+        ],
+    )?;
+    let window = field(message, "window", kind.as_str())?;
+    exact_object_keys(
+        window,
+        "READ_INSIGHTS_ACTIVITY.window",
+        &["observedAtOrAfter", "observedBefore"],
+    )?;
+    let (_, after) = canonical_timestamp_millis(
+        field(window, "observedAtOrAfter", "READ_INSIGHTS_ACTIVITY.window")?,
+        "READ_INSIGHTS_ACTIVITY.window.observedAtOrAfter",
+    )?;
+    let (_, before) = canonical_timestamp_millis(
+        field(window, "observedBefore", "READ_INSIGHTS_ACTIVITY.window")?,
+        "READ_INSIGHTS_ACTIVITY.window.observedBefore",
+    )?;
+    if after >= before {
+        return Err(invalid_frame(
+            "READ_INSIGHTS_ACTIVITY.window must be non-empty",
+        ));
+    }
+    validate_aggregate_filters(
+        field(message, "filters", kind.as_str())?,
+        "READ_INSIGHTS_ACTIVITY.filters",
+        false,
+    )?;
+    let bucket = enum_string(
+        field(message, "bucket", kind.as_str())?,
+        "READ_INSIGHTS_ACTIVITY.bucket",
+        &["day", "week"],
+    )?;
+    if field(message, "timeZone", kind.as_str())?.as_str() != Some("UTC") {
+        return Err(invalid_frame("READ_INSIGHTS_ACTIVITY.timeZone must be UTC"));
+    }
+    const DAY_MILLIS: i64 = 86_400_000;
+    let bucket_millis = if bucket == "day" {
+        DAY_MILLIS
+    } else {
+        7 * DAY_MILLIS
+    };
+    let after_day = after.div_euclid(DAY_MILLIS);
+    let before_day = before.div_euclid(DAY_MILLIS);
+    let aligned_week = bucket != "week"
+        || ((after_day + 3).rem_euclid(7) == 0 && (before_day + 3).rem_euclid(7) == 0);
+    let span = before - after;
+    if after.rem_euclid(DAY_MILLIS) != 0
+        || before.rem_euclid(DAY_MILLIS) != 0
+        || !aligned_week
+        || span % bucket_millis != 0
+        || !(1..=366).contains(&(span / bucket_millis))
+    {
+        return Err(invalid_frame(
+            "READ_INSIGHTS_ACTIVITY.window must contain 1..=366 complete UTC buckets",
+        ));
+    }
+    decimal_u64(
+        field(message, "nowUnixMs", kind.as_str())?,
+        "READ_INSIGHTS_ACTIVITY.nowUnixMs",
+    )?;
+    safe_integer_range(
+        field(message, "quiescenceSeconds", kind.as_str())?,
+        "READ_INSIGHTS_ACTIVITY.quiescenceSeconds",
+        60,
+        86_400,
+    )?;
+    Ok(())
+}
+
+fn timestamp_digits(bytes: &[u8], start: usize, length: usize) -> Option<i64> {
+    bytes
+        .get(start..start + length)?
+        .iter()
+        .try_fold(0_i64, |value, byte| {
+            byte.is_ascii_digit()
+                .then_some(value * 10 + i64::from(*byte - b'0'))
+        })
+}
+
+fn canonical_timestamp_millis<'a>(
+    value: &'a Value,
+    label: &str,
+) -> Result<(&'a str, i64), ProtocolError> {
+    let text = bounded_string(value, label, 24, false, true)?;
+    let bytes = text.as_bytes();
+    if bytes.len() != 24
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'.'
+        || bytes[23] != b'Z'
+    {
+        return Err(invalid_frame(format!(
+            "{label} must be a canonical UTC timestamp"
+        )));
+    }
+    let year = timestamp_digits(bytes, 0, 4);
+    let month = timestamp_digits(bytes, 5, 2);
+    let day = timestamp_digits(bytes, 8, 2);
+    let hour = timestamp_digits(bytes, 11, 2);
+    let minute = timestamp_digits(bytes, 14, 2);
+    let second = timestamp_digits(bytes, 17, 2);
+    let millis = timestamp_digits(bytes, 20, 3);
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second), Some(millis)) =
+        (year, month, day, hour, minute, second, millis)
+    else {
+        return Err(invalid_frame(format!(
+            "{label} must be a canonical UTC timestamp"
+        )));
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 59 || millis > 999 {
+        return Err(invalid_frame(format!(
+            "{label} must be a canonical UTC timestamp"
+        )));
+    }
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let epoch_days = era * 146_097 + day_of_era - 719_468;
+    let timestamp = (((epoch_days * 24 + hour) * 60 + minute) * 60 + second) * 1_000 + millis;
+    Ok((text, timestamp))
+}
+
+fn signed_decimal(value: &Value, label: &str) -> Result<i128, ProtocolError> {
+    let text = value.as_str().ok_or_else(|| {
+        invalid_frame(format!("{label} must be a canonical signed decimal string"))
+    })?;
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty()
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || text == "-0"
+    {
+        return Err(invalid_frame(format!(
+            "{label} must be a canonical signed decimal string"
+        )));
+    }
+    let number = text
+        .parse::<i128>()
+        .map_err(|_| invalid_frame(format!("{label} must be a canonical signed decimal string")))?;
+    let limit = i128::from(u64::MAX);
+    if number < -limit || number > limit {
+        return Err(invalid_frame(format!(
+            "{label} is outside the supported signed count range"
+        )));
+    }
+    Ok(number)
+}
+
+fn validate_query_coverage(
+    value: &Value,
+    label: &str,
+    fully_excluded: bool,
+) -> Result<(), ProtocolError> {
+    let mut fields = vec![
+        "excludedUndatedInvocationCount",
+        "excludedUndatedTurnCount",
+        "excludedUnrevisionedInvocationCount",
+        "excludedUnrevisionedTurnCount",
+    ];
+    if fully_excluded {
+        fields.push("fullyExcludedCapabilityCount");
+    }
+    decimal_object(value, label, &fields)?;
+    Ok(())
+}
+
+fn validate_dedupe_support(
+    value: &Value,
+    label: &str,
+    methods: bool,
+) -> Result<[u64; 5], ProtocolError> {
+    let mut fields = vec![
+        "distinctDedupeGroupCount",
+        "strongDedupeGroupCount",
+        "weakDedupeGroupCount",
+        "observedEofProvisionalGroupCount",
+        "unknownDedupeSessionCount",
+    ];
+    if methods {
+        fields.push("sessionDuplicateMethodCounts");
+    }
+    exact_object_keys(value, label, &fields)?;
+    let counts = decimal_fields(value, label, &fields[..5])?;
+    let counts: [u64; 5] = counts.try_into().expect("fixed dedupe support count set");
+    if counts[1].checked_add(counts[2]) != Some(counts[0]) || counts[3] > counts[0] {
+        return Err(invalid_frame(format!(
+            "{label} dedupe group counts are inconsistent"
+        )));
+    }
+    if methods {
+        decimal_object(
+            field(value, "sessionDuplicateMethodCounts", label)?,
+            &format!("{label}.sessionDuplicateMethodCounts"),
+            &["explicitLineage", "exactFirstTurnPrefix"],
+        )?;
+    }
+    Ok(counts)
+}
+
+fn validate_usage_item(item: &Value, index: usize) -> Result<(), ProtocolError> {
+    let label = format!("CAPABILITY_USAGE.items[{index}]");
+    exact_object_keys(
+        item,
+        &label,
+        &[
+            "capabilityKey",
+            "provider",
+            "kind",
+            "canonicalName",
+            "recordedInvocationCount",
+            "recordedFailingInvocationCount",
+            "distinctTurnCount",
+            "distinctSessionCount",
+            "lastUsedAt",
+            "invocationTerminalCounts",
+            "containingTurnOutcomeCounts",
+            "groupedInvocationCount",
+            "ungroupedInvocationCount",
+            "support",
+            "strengthCounts",
+            "outOfWindow",
+            "comparison",
+        ],
+    )?;
+    hex64(
+        field(item, "capabilityKey", &label)?,
+        &format!("{label}.capabilityKey"),
+    )?;
+    bounded_string(
+        field(item, "provider", &label)?,
+        &format!("{label}.provider"),
+        128,
+        false,
+        true,
+    )?;
+    enum_string(
+        field(item, "kind", &label)?,
+        &format!("{label}.kind"),
+        &["tool", "skill"],
+    )?;
+    bounded_string(
+        field(item, "canonicalName", &label)?,
+        &format!("{label}.canonicalName"),
+        512,
+        false,
+        false,
+    )?;
+    let counts = decimal_fields(
+        item,
+        &label,
+        &[
+            "recordedInvocationCount",
+            "recordedFailingInvocationCount",
+            "distinctTurnCount",
+            "distinctSessionCount",
+            "groupedInvocationCount",
+            "ungroupedInvocationCount",
+        ],
+    )?;
+    let [invocations, failing, turns, sessions, grouped, ungrouped] = counts.as_slice() else {
+        unreachable!("fixed Usage count set")
+    };
+    let last_used = field(item, "lastUsedAt", &label)?;
+    if !last_used.is_null() {
+        canonical_timestamp_millis(last_used, &format!("{label}.lastUsedAt"))?;
+    }
+    let terminal = decimal_object(
+        field(item, "invocationTerminalCounts", &label)?,
+        &format!("{label}.invocationTerminalCounts"),
+        &[
+            "invocationTotal",
+            "pending",
+            "completed",
+            "failed",
+            "cancelled",
+            "unknown",
+        ],
+    )?;
+    let outcomes = decimal_object(
+        field(item, "containingTurnOutcomeCounts", &label)?,
+        &format!("{label}.containingTurnOutcomeCounts"),
+        &[
+            "distinctTurnTotal",
+            "providerCompleted",
+            "abandoned",
+            "unknown",
+        ],
+    )?;
+    let support_value = field(item, "support", &label)?;
+    let support = validate_dedupe_support(support_value, &format!("{label}.support"), true)?;
+    let strength = decimal_object(
+        field(item, "strengthCounts", &label)?,
+        &format!("{label}.strengthCounts"),
+        &["observed", "confirmed", "inferred"],
+    )?;
+    let methods = decimal_object(
+        field(
+            support_value,
+            "sessionDuplicateMethodCounts",
+            &format!("{label}.support"),
+        )?,
+        &format!("{label}.support.sessionDuplicateMethodCounts"),
+        &["explicitLineage", "exactFirstTurnPrefix"],
+    )?;
+    if failing > invocations
+        || turns > invocations
+        || sessions > turns
+        || grouped.checked_add(*ungrouped) != Some(*invocations)
+        || terminal[0] != *invocations
+        || checked_sum(&terminal[1..], &format!("{label}.invocationTerminalCounts"))?
+            != *invocations
+        || outcomes[0] != *turns
+        || checked_sum(
+            &outcomes[1..],
+            &format!("{label}.containingTurnOutcomeCounts"),
+        )? != *turns
+        || checked_sum(&strength, &format!("{label}.strengthCounts"))? != *invocations
+        || support[0] > *sessions
+        || support[4] > *sessions
+        || checked_sum(
+            &methods,
+            &format!("{label}.support.sessionDuplicateMethodCounts"),
+        )? > *sessions
+    {
+        return Err(invalid_frame(format!(
+            "{label} aggregate counts are inconsistent"
+        )));
+    }
+    let out_of_window = field(item, "outOfWindow", &label)?;
+    exact_object_keys(
+        out_of_window,
+        &format!("{label}.outOfWindow"),
+        &["scope", "retrySummary"],
+    )?;
+    if field(out_of_window, "scope", &format!("{label}.outOfWindow"))?.as_str()
+        != Some("all-indexed-history")
+    {
+        return Err(invalid_frame(format!(
+            "{label}.outOfWindow.scope is invalid"
+        )));
+    }
+    let retry = field(
+        out_of_window,
+        "retrySummary",
+        &format!("{label}.outOfWindow"),
+    )?;
+    if !retry.is_null() {
+        decimal_object(
+            retry,
+            &format!("{label}.outOfWindow.retrySummary"),
+            &[
+                "failedCount",
+                "sameInputRepeatCount",
+                "retryAfterFailureCount",
+            ],
+        )?;
+    }
+    let comparison = field(item, "comparison", &label)?;
+    if !comparison.is_null() {
+        exact_object_keys(
+            comparison,
+            &format!("{label}.comparison"),
+            &[
+                "baselineRecordedInvocationCount",
+                "currentRecordedInvocationCount",
+                "absoluteRecordedInvocationChange",
+            ],
+        )?;
+        let baseline = decimal_u64(
+            field(
+                comparison,
+                "baselineRecordedInvocationCount",
+                &format!("{label}.comparison"),
+            )?,
+            &format!("{label}.comparison.baselineRecordedInvocationCount"),
+        )?
+        .1;
+        let current = decimal_u64(
+            field(
+                comparison,
+                "currentRecordedInvocationCount",
+                &format!("{label}.comparison"),
+            )?,
+            &format!("{label}.comparison.currentRecordedInvocationCount"),
+        )?
+        .1;
+        let change = signed_decimal(
+            field(
+                comparison,
+                "absoluteRecordedInvocationChange",
+                &format!("{label}.comparison"),
+            )?,
+            &format!("{label}.comparison.absoluteRecordedInvocationChange"),
+        )?;
+        if current != *invocations || i128::from(current) - i128::from(baseline) != change {
+            return Err(invalid_frame(format!("{label}.comparison is inconsistent")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_usage(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "databaseUuid",
+            "snapshotSeq",
+            "closureEvaluatedAt",
+            "quiescenceSeconds",
+            "orderBy",
+            "items",
+            "totalCandidateCount",
+            "truncated",
+            "coverage",
+            "nextCursor",
+        ],
+    )?;
+    uuid(
+        field(message, "databaseUuid", kind.as_str())?,
+        "CAPABILITY_USAGE.databaseUuid",
+    )?;
+    decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "CAPABILITY_USAGE.snapshotSeq",
+    )?;
+    canonical_timestamp_millis(
+        field(message, "closureEvaluatedAt", kind.as_str())?,
+        "CAPABILITY_USAGE.closureEvaluatedAt",
+    )?;
+    safe_integer_range(
+        field(message, "quiescenceSeconds", kind.as_str())?,
+        "CAPABILITY_USAGE.quiescenceSeconds",
+        60,
+        86_400,
+    )?;
+    enum_string(
+        field(message, "orderBy", kind.as_str())?,
+        "CAPABILITY_USAGE.orderBy",
+        &[
+            "recorded-invocation-count",
+            "recorded-failing-invocation-count",
+            "distinct-turn-count",
+            "distinct-session-count",
+            "distinct-dedupe-group-count",
+            "last-used",
+            "absolute-recorded-invocation-change",
+        ],
+    )?;
+    let items = field(message, "items", kind.as_str())?
+        .as_array()
+        .filter(|items| items.len() <= 50)
+        .ok_or_else(|| invalid_frame("CAPABILITY_USAGE.items exceeds its bounded limit"))?;
+    for (index, item) in items.iter().enumerate() {
+        validate_usage_item(item, index)?;
+    }
+    let total = decimal_u64(
+        field(message, "totalCandidateCount", kind.as_str())?,
+        "CAPABILITY_USAGE.totalCandidateCount",
+    )?
+    .1;
+    if total < items.len() as u64 {
+        return Err(invalid_frame(
+            "CAPABILITY_USAGE.totalCandidateCount is inconsistent",
+        ));
+    }
+    let truncated = boolean(
+        field(message, "truncated", kind.as_str())?,
+        "CAPABILITY_USAGE.truncated",
+    )?;
+    let cursor = field(message, "nextCursor", kind.as_str())?;
+    if !cursor.is_null() {
+        bounded_string(
+            cursor,
+            "CAPABILITY_USAGE.nextCursor",
+            MAX_CURSOR_BYTES,
+            false,
+            true,
+        )?;
+    }
+    if truncated == cursor.is_null() {
+        return Err(invalid_frame(
+            "CAPABILITY_USAGE cursor and truncation state are inconsistent",
+        ));
+    }
+    validate_query_coverage(
+        field(message, "coverage", kind.as_str())?,
+        "CAPABILITY_USAGE.coverage",
+        true,
+    )?;
+    Ok(())
+}
+
+fn validate_activity_bucket(
+    row: &Value,
+    index: usize,
+    previous_end: Option<i64>,
+) -> Result<(i64, i64), ProtocolError> {
+    let label = format!("INSIGHTS_ACTIVITY.buckets[{index}]");
+    exact_object_keys(
+        row,
+        &label,
+        &[
+            "bucketStart",
+            "bucketEnd",
+            "distinctSessionCount",
+            "distinctTurnCount",
+            "currentClosureCounts",
+            "turnResultEvidenceCounts",
+            "recordedToolInvocationCount",
+            "recordedSkillInvocationCount",
+            "support",
+        ],
+    )?;
+    let start = canonical_timestamp_millis(
+        field(row, "bucketStart", &label)?,
+        &format!("{label}.bucketStart"),
+    )?
+    .1;
+    let end = canonical_timestamp_millis(
+        field(row, "bucketEnd", &label)?,
+        &format!("{label}.bucketEnd"),
+    )?
+    .1;
+    if start >= end || previous_end.is_some_and(|previous| previous != start) {
+        return Err(invalid_frame(format!(
+            "{label} bucket boundaries are inconsistent"
+        )));
+    }
+    let duration = end - start;
+    if !matches!(duration, 86_400_000 | 604_800_000) {
+        return Err(invalid_frame(format!(
+            "{label} must be one complete UTC day or week"
+        )));
+    }
+    let counts = decimal_fields(
+        row,
+        &label,
+        &[
+            "distinctSessionCount",
+            "distinctTurnCount",
+            "recordedToolInvocationCount",
+            "recordedSkillInvocationCount",
+        ],
+    )?;
+    let sessions = counts[0];
+    let turns = counts[1];
+    let closure = decimal_object(
+        field(row, "currentClosureCounts", &label)?,
+        &format!("{label}.currentClosureCounts"),
+        &["hardSealed", "quiescent", "open"],
+    )?;
+    let outcomes = decimal_object(
+        field(row, "turnResultEvidenceCounts", &label)?,
+        &format!("{label}.turnResultEvidenceCounts"),
+        &["providerCompleted", "abandoned", "unknown"],
+    )?;
+    let support = validate_dedupe_support(
+        field(row, "support", &label)?,
+        &format!("{label}.support"),
+        false,
+    )?;
+    if sessions > turns
+        || checked_sum(&closure, &format!("{label}.currentClosureCounts"))? != turns
+        || checked_sum(&outcomes, &format!("{label}.turnResultEvidenceCounts"))? != turns
+        || support[0] > sessions
+        || support[4] > sessions
+    {
+        return Err(invalid_frame(format!(
+            "{label} aggregate counts are inconsistent"
+        )));
+    }
+    Ok((end, duration))
+}
+
+fn validate_insights_activity(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    validate_envelope(
+        message,
+        kind,
+        &[
+            "databaseUuid",
+            "snapshotSeq",
+            "closureEvaluatedAt",
+            "quiescenceSeconds",
+            "buckets",
+            "coverage",
+        ],
+    )?;
+    uuid(
+        field(message, "databaseUuid", kind.as_str())?,
+        "INSIGHTS_ACTIVITY.databaseUuid",
+    )?;
+    decimal_u64(
+        field(message, "snapshotSeq", kind.as_str())?,
+        "INSIGHTS_ACTIVITY.snapshotSeq",
+    )?;
+    canonical_timestamp_millis(
+        field(message, "closureEvaluatedAt", kind.as_str())?,
+        "INSIGHTS_ACTIVITY.closureEvaluatedAt",
+    )?;
+    safe_integer_range(
+        field(message, "quiescenceSeconds", kind.as_str())?,
+        "INSIGHTS_ACTIVITY.quiescenceSeconds",
+        60,
+        86_400,
+    )?;
+    let buckets = field(message, "buckets", kind.as_str())?
+        .as_array()
+        .filter(|buckets| !buckets.is_empty() && buckets.len() <= 366)
+        .ok_or_else(|| invalid_frame("INSIGHTS_ACTIVITY.buckets must contain 1..=366 rows"))?;
+    let mut previous_end = None;
+    let mut duration = None;
+    for (index, bucket) in buckets.iter().enumerate() {
+        let (end, current_duration) = validate_activity_bucket(bucket, index, previous_end)?;
+        if duration.is_some_and(|expected| expected != current_duration) {
+            return Err(invalid_frame(
+                "INSIGHTS_ACTIVITY bucket durations must be consistent",
+            ));
+        }
+        previous_end = Some(end);
+        duration = Some(current_duration);
+    }
+    validate_query_coverage(
+        field(message, "coverage", kind.as_str())?,
+        "INSIGHTS_ACTIVITY.coverage",
+        false,
     )?;
     Ok(())
 }
@@ -2357,11 +3425,30 @@ fn validate_evidence_entry(value: &Value, index: usize) -> Result<(), ProtocolEr
 }
 
 fn validate_turn_evidence_page(message: &Value, kind: MessageKind) -> Result<(), ProtocolError> {
+    let has_database_uuid = message
+        .as_object()
+        .is_some_and(|message| message.contains_key("databaseUuid"));
     validate_envelope(
         message,
         kind,
-        &["snapshotSeq", "turn", "entries", "nextCursor"],
+        if has_database_uuid {
+            &[
+                "snapshotSeq",
+                "turn",
+                "entries",
+                "nextCursor",
+                "databaseUuid",
+            ]
+        } else {
+            &["snapshotSeq", "turn", "entries", "nextCursor"]
+        },
     )?;
+    if has_database_uuid {
+        uuid(
+            field(message, "databaseUuid", kind.as_str())?,
+            "TURN_EVIDENCE_PAGE.databaseUuid",
+        )?;
+    }
     decimal_u64(
         field(message, "snapshotSeq", kind.as_str())?,
         "TURN_EVIDENCE_PAGE.snapshotSeq",
@@ -2433,6 +3520,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "CAPABILITY_PAGE" => MessageKind::CapabilityPage,
         "SEARCH_TURNS" => MessageKind::SearchTurns,
         "TURN_SEARCH_RESULTS" => MessageKind::TurnSearchResults,
+        "READ_CAPABILITY_USAGE" => MessageKind::ReadCapabilityUsage,
+        "CAPABILITY_USAGE" => MessageKind::CapabilityUsage,
+        "READ_INSIGHTS_ACTIVITY" => MessageKind::ReadInsightsActivity,
+        "INSIGHTS_ACTIVITY" => MessageKind::InsightsActivity,
         "READ_TURN_EVIDENCE" => MessageKind::ReadTurnEvidence,
         "TURN_EVIDENCE_PAGE" => MessageKind::TurnEvidencePage,
         "ABORT_SESSION" => MessageKind::AbortSession,
@@ -2885,6 +3976,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         MessageKind::CapabilityPage => validate_capability_page(message, kind)?,
         MessageKind::SearchTurns => validate_search_turns(message, kind)?,
         MessageKind::TurnSearchResults => validate_turn_search_results(message, kind)?,
+        MessageKind::ReadCapabilityUsage => validate_read_capability_usage(message, kind)?,
+        MessageKind::CapabilityUsage => validate_capability_usage(message, kind)?,
+        MessageKind::ReadInsightsActivity => validate_read_insights_activity(message, kind)?,
+        MessageKind::InsightsActivity => validate_insights_activity(message, kind)?,
         MessageKind::ReadTurnEvidence => validate_read_turn_evidence(message, kind)?,
         MessageKind::TurnEvidencePage => validate_turn_evidence_page(message, kind)?,
         MessageKind::AbortSession => {
@@ -3571,6 +4666,7 @@ mod tests {
             "format": PROTOCOL_FORMAT,
             "type": "CAPABILITY_PAGE",
             "requestId": "42",
+            "databaseUuid": "11111111-2222-4333-8444-555555555555",
             "snapshotSeq": "7",
             "items": [{
                 "capabilityKey": "b".repeat(64), "provider": "codex", "kind": "tool",
@@ -3579,10 +4675,26 @@ mod tests {
                 "strength": {"observed": "2", "confirmed": "0", "inferred": "0"}
             }],
             "nextCursor": null,
+            "coverage": {
+                "excludedUndatedInvocationCount": "2",
+                "excludedUndatedTurnCount": "1",
+                "excludedUnrevisionedInvocationCount": "3",
+                "excludedUnrevisionedTurnCount": "2",
+                "fullyExcludedCapabilityCount": "1"
+            },
         });
         assert_eq!(
             validate_protocol_message(&page).unwrap(),
             MessageKind::CapabilityPage
+        );
+
+        let mut invalid_coverage = page.clone();
+        invalid_coverage["coverage"]["fullyExcludedCapabilityCount"] = json!(1);
+        assert_eq!(
+            validate_protocol_message(&invalid_coverage)
+                .unwrap_err()
+                .code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
         );
 
         let mut inconsistent = page;
@@ -3617,6 +4729,249 @@ mod tests {
         request["filters"]["providers"] = json!(["codex", "codex"]);
         assert_eq!(
             validate_protocol_message(&request).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+
+        let mut response = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "turn-search-results")
+            .unwrap()
+            .message;
+        response["databaseUuid"] = json!("11111111-2222-4333-8444-555555555555");
+        response["orderBy"] = json!("relevance");
+        response["totalMatchCount"] = json!("1");
+        response["closureEvaluatedAt"] = json!("2026-08-11T00:00:00.000Z");
+        response["quiescenceSeconds"] = json!(300);
+        response["results"][0]["dedupe"] = json!({
+            "duplicateGroupKey": "9".repeat(64),
+            "confidence": "strong",
+            "observedEofProvisional": false
+        });
+        assert_eq!(
+            validate_protocol_message(&response).unwrap(),
+            MessageKind::TurnSearchResults
+        );
+
+        response["orderBy"] = json!("observed-desc");
+        assert_eq!(
+            validate_protocol_message(&response).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn validates_search_order_and_capability_terminal_filters() {
+        let mut request = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "search-turns")
+            .unwrap()
+            .message;
+        request["orderBy"] = json!("observed-desc");
+        request["filters"]["toolCapabilityKeys"] = json!(["1".repeat(64)]);
+        request["filters"]["capabilityTerminalStates"] = json!(["completed", "failed"]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap(),
+            MessageKind::SearchTurns
+        );
+
+        request["filters"]["toolCapabilityKeys"] = json!([]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn read_turn_evidence_requires_an_expected_revision() {
+        let mut request = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "read-turn-evidence")
+            .unwrap()
+            .message;
+        request["expectedRevision"] = Value::Null;
+
+        assert_eq!(
+            validate_protocol_message(&request).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn validates_bounded_usage_and_activity_requests() {
+        let usage = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_CAPABILITY_USAGE",
+            "requestId": "12",
+            "kind": "tool",
+            "window": {
+                "observedAtOrAfterUnixMs": "1785542400000",
+                "observedBeforeUnixMs": "1788220800000"
+            },
+            "comparisonWindow": null,
+            "filters": {
+                "providers": ["codex"],
+                "projectKeys": ["1".repeat(64)],
+                "closureStates": ["hard-sealed"],
+                "capabilityTerminalStates": ["failed"]
+            },
+            "orderBy": "recorded-failing-invocation-count",
+            "cursor": null,
+            "limit": 50,
+            "nowUnixMs": "1786406400000",
+            "quiescenceSeconds": 300
+        });
+        assert_eq!(
+            validate_protocol_message(&usage).unwrap(),
+            MessageKind::ReadCapabilityUsage
+        );
+
+        let activity = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_INSIGHTS_ACTIVITY",
+            "requestId": "13",
+            "window": {
+                "observedAtOrAfter": "2026-08-03T00:00:00.000Z",
+                "observedBefore": "2026-08-17T00:00:00.000Z"
+            },
+            "filters": {
+                "providers": [], "projectKeys": [], "closureStates": []
+            },
+            "bucket": "week",
+            "timeZone": "UTC",
+            "nowUnixMs": "1786406400000",
+            "quiescenceSeconds": 300
+        });
+        assert_eq!(
+            validate_protocol_message(&activity).unwrap(),
+            MessageKind::ReadInsightsActivity
+        );
+
+        let mut extended_year = activity;
+        extended_year["window"]["observedAtOrAfter"] = json!("+010000-08-03T00:00:00.000Z");
+        extended_year["window"]["observedBefore"] = json!("+010000-08-17T00:00:00.000Z");
+        assert_eq!(
+            validate_protocol_message(&extended_year).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn validates_bounded_usage_and_activity_responses() {
+        let usage = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "CAPABILITY_USAGE",
+            "requestId": "14",
+            "databaseUuid": "11111111-2222-4333-8444-555555555555",
+            "snapshotSeq": "7",
+            "closureEvaluatedAt": "2026-08-11T00:00:00.000Z",
+            "quiescenceSeconds": 300,
+            "orderBy": "absolute-recorded-invocation-change",
+            "items": [{
+                "capabilityKey": "1".repeat(64),
+                "provider": "codex",
+                "kind": "tool",
+                "canonicalName": "Read",
+                "recordedInvocationCount": "7",
+                "recordedFailingInvocationCount": "2",
+                "distinctTurnCount": "5",
+                "distinctSessionCount": "4",
+                "lastUsedAt": "2026-08-10T01:02:03.000Z",
+                "invocationTerminalCounts": {
+                    "invocationTotal": "7", "pending": "0", "completed": "5",
+                    "failed": "2", "cancelled": "0", "unknown": "0"
+                },
+                "containingTurnOutcomeCounts": {
+                    "distinctTurnTotal": "5", "providerCompleted": "3",
+                    "abandoned": "1", "unknown": "1"
+                },
+                "groupedInvocationCount": "5",
+                "ungroupedInvocationCount": "2",
+                "support": {
+                    "distinctDedupeGroupCount": "3",
+                    "strongDedupeGroupCount": "2",
+                    "weakDedupeGroupCount": "1",
+                    "observedEofProvisionalGroupCount": "1",
+                    "unknownDedupeSessionCount": "1",
+                    "sessionDuplicateMethodCounts": {
+                        "explicitLineage": "2", "exactFirstTurnPrefix": "1"
+                    }
+                },
+                "strengthCounts": {"observed": "5", "confirmed": "1", "inferred": "1"},
+                "outOfWindow": {
+                    "scope": "all-indexed-history",
+                    "retrySummary": {
+                        "failedCount": "9", "sameInputRepeatCount": "4",
+                        "retryAfterFailureCount": "3"
+                    }
+                },
+                "comparison": {
+                    "baselineRecordedInvocationCount": "5",
+                    "currentRecordedInvocationCount": "7",
+                    "absoluteRecordedInvocationChange": "2"
+                }
+            }],
+            "totalCandidateCount": "1",
+            "truncated": false,
+            "coverage": {
+                "excludedUndatedInvocationCount": "1",
+                "excludedUndatedTurnCount": "1",
+                "excludedUnrevisionedInvocationCount": "2",
+                "excludedUnrevisionedTurnCount": "2",
+                "fullyExcludedCapabilityCount": "3"
+            },
+            "nextCursor": null
+        });
+        assert_eq!(
+            validate_protocol_message(&usage).unwrap(),
+            MessageKind::CapabilityUsage
+        );
+
+        let activity = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "INSIGHTS_ACTIVITY",
+            "requestId": "15",
+            "databaseUuid": "11111111-2222-4333-8444-555555555555",
+            "snapshotSeq": "7",
+            "closureEvaluatedAt": "2026-08-11T00:00:00.000Z",
+            "quiescenceSeconds": 300,
+            "buckets": [{
+                "bucketStart": "2026-08-10T00:00:00.000Z",
+                "bucketEnd": "2026-08-11T00:00:00.000Z",
+                "distinctSessionCount": "4",
+                "distinctTurnCount": "5",
+                "currentClosureCounts": {"hardSealed": "2", "quiescent": "1", "open": "2"},
+                "turnResultEvidenceCounts": {
+                    "providerCompleted": "3", "abandoned": "1", "unknown": "1"
+                },
+                "recordedToolInvocationCount": "7",
+                "recordedSkillInvocationCount": "3",
+                "support": {
+                    "distinctDedupeGroupCount": "3",
+                    "strongDedupeGroupCount": "2",
+                    "weakDedupeGroupCount": "1",
+                    "observedEofProvisionalGroupCount": "1",
+                    "unknownDedupeSessionCount": "1"
+                }
+            }],
+            "coverage": {
+                "excludedUndatedInvocationCount": "1",
+                "excludedUndatedTurnCount": "1",
+                "excludedUnrevisionedInvocationCount": "2",
+                "excludedUnrevisionedTurnCount": "2"
+            }
+        });
+        assert_eq!(
+            validate_protocol_message(&activity).unwrap(),
+            MessageKind::InsightsActivity
+        );
+
+        let mut inconsistent = usage;
+        inconsistent["items"][0]["invocationTerminalCounts"]["failed"] = json!("1");
+        assert_eq!(
+            validate_protocol_message(&inconsistent).unwrap_err().code,
             "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
         );
     }

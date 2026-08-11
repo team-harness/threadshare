@@ -41,6 +41,9 @@ import { parseShareReference } from "../src/share-url.mjs";
 
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
+const INSIGHTS_QUERY_ACTIONS = new Set([
+  "overview", "search", "capabilities", "usage", "activity", "evidence",
+]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 
 function parseExpiresDuration(value, command = "share") {
@@ -887,6 +890,49 @@ async function main() {
   }
   if (command === "insights") {
     validateCommandInvocation(command, positionals, options);
+    const queryOnlyOptions = {
+      cursor: options.cursor,
+      limit: options.limit,
+      query: options.query,
+      request: options.request,
+      revision: options.revision,
+    };
+    if (INSIGHTS_QUERY_ACTIONS.has(positionals[1])) {
+      let invocation;
+      const controller = new AbortController();
+      const onSignal = () => controller.abort();
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+      try {
+        const {
+          executeInsightsQuery,
+          formatInsightsQueryResult,
+          parseInsightsQueryInvocation,
+        } = await import("../src/insights-query.mjs");
+        invocation = parseInsightsQueryInvocation(positionals, options);
+        const result = await executeInsightsQuery(invocation, { signal: controller.signal });
+        process.stdout.write(formatInsightsQueryResult(result));
+        return;
+      } catch (error) {
+        const { insightsQueryDiagnostic } = await import("../src/insights-query.mjs");
+        throw insightsQueryDiagnostic(error, invocation?.action ?? positionals[1]);
+      } finally {
+        process.off("SIGINT", onSignal);
+        process.off("SIGTERM", onSignal);
+      }
+    }
+    for (const [optionName, optionValue] of Object.entries(queryOnlyOptions)) {
+      if (optionValue !== undefined) {
+        throw cliDiagnostic(
+          "TS_USAGE_OPTION_NOT_ALLOWED",
+          `--${optionName} is only valid for an Insights query action.`,
+          {
+            command: "insights",
+            next: "Remove the query option, or choose overview, search, capabilities, usage, activity, or evidence.",
+          },
+        );
+      }
+    }
     let invocation;
     try {
       const {

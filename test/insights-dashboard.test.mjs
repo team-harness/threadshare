@@ -14,10 +14,12 @@ test("committed reader reuses one Engine and reopens after database replacement"
   const databaseFile = path.join(root, "insights.sqlite3");
   await writeFile(databaseFile, "v1");
   const clients = [];
+  const createOptions = [];
   const reader = createCommittedInsightsReader({
     paths: { databaseFile, stateDirectory: root, tempDirectory: path.join(root, "tmp") },
     originSecretEpoch: "11111111-2222-4333-8444-555555555555",
-    async createEngineClient() {
+    async createEngineClient(options) {
+      createOptions.push(options);
       const number = clients.length + 1;
       const client = {
         number,
@@ -45,6 +47,7 @@ test("committed reader reuses one Engine and reopens after database replacement"
   assert.equal(first.purge.state, "idle");
   assert.equal(repeated.overview.snapshotSeq, "1");
   assert.equal(clients.length, 1);
+  assert.equal(createOptions[0].openExisting, true);
   assert.deepEqual(await reader.search({ query: "needle" }), { query: "needle", client: 1 });
 
   await appendFile(databaseFile, "-replacement");

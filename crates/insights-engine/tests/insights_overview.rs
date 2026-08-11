@@ -106,6 +106,9 @@ fn capability_page_reports_only_safe_aggregate_identity_and_use_counts() {
     assert_eq!(page.items[0].session_count, "1");
     assert_eq!(page.items[0].terminal.pending, "1");
     assert_eq!(page.items[0].strength.observed, "1");
+    assert_eq!(page.coverage.excluded_undated_invocation_count, "0");
+    assert_eq!(page.coverage.excluded_unrevisioned_invocation_count, "0");
+    assert_eq!(page.coverage.fully_excluded_capability_count, "0");
     assert_eq!(page.next_cursor, None);
 
     let serialized = serde_json::to_string(&page).unwrap();
@@ -176,6 +179,7 @@ fn capability_pages_are_keyset_stable_and_exclude_subagent_origin_uses() {
         })
         .unwrap();
     assert!(skills.items.is_empty());
+    assert_eq!(skills.coverage.fully_excluded_capability_count, "1");
 
     let overview = storage
         .read_insights_overview(InsightsOverviewRequest {

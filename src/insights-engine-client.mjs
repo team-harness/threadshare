@@ -11,6 +11,8 @@ import {
   createListCapabilitiesMessage,
   createListSourceStatesMessage,
   createReadEngineStatusMessage,
+  createReadCapabilityUsageMessage,
+  createReadInsightsActivityMessage,
   createReadInsightsOverviewMessage,
   createReadPurgeStatusMessage,
   createReadTurnEvidenceMessage,
@@ -122,6 +124,13 @@ function abortedError(stderr, cause) {
 
 function throwIfAborted(signal, stderr) {
   if (signal?.aborted) throw abortedError(stderr, signal.reason);
+}
+
+function fatalReadError(error) {
+  return error?.fatal === true ||
+    error?.code === "TS_INSIGHTS_ENGINE_ABORTED" ||
+    error?.code === "TS_INSIGHTS_ENGINE_DISCONNECTED" ||
+    error?.code === "TS_INSIGHTS_ENGINE_TIMEOUT";
 }
 
 function protocolClientError(message, cause, stderr, { fatal = true } = {}) {
@@ -461,7 +470,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#readSourceStates(signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readSourceStates(signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -478,7 +488,7 @@ class InsightsEngineClient {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
     const operation = this.#tail.then(() =>
-      this.#readSourceCheckpoint(sessionKey, signal));
+      this.#runRead(() => this.#readSourceCheckpoint(sessionKey, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -538,7 +548,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#readPurgeStatus(sessionKey, signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readPurgeStatus(sessionKey, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -554,7 +565,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#readEngineStatus(signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readEngineStatus(signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -570,7 +582,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#readInsightsOverview(input, signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsOverview(input, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -586,7 +599,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#listCapabilities(input, signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#listCapabilities(input, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -602,7 +616,8 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#searchTurns(input, signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#searchTurns(input, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -618,7 +633,42 @@ class InsightsEngineClient {
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
       return Promise.reject(new TypeError("signal must be an AbortSignal"));
     }
-    const operation = this.#tail.then(() => this.#readTurnEvidence(input, signal));
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readTurnEvidence(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readCapabilityUsage(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readCapabilityUsage(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readInsightsActivity(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsActivity(input, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -766,6 +816,34 @@ class InsightsEngineClient {
         await this.#transport.close({ force: true });
       }
       throw error;
+    }
+  }
+
+  async #runRead(read, signal) {
+    let abortHandler;
+    try {
+      throwIfAborted(signal, this.#transport.stderr);
+      const operation = read();
+      const completion = signal === undefined
+        ? operation
+        : Promise.race([
+            operation,
+            new Promise((_, reject) => {
+              abortHandler = () => reject(abortedError(this.#transport.stderr, signal.reason));
+              signal.addEventListener("abort", abortHandler, { once: true });
+              if (signal.aborted) abortHandler();
+            }),
+          ]);
+      return await completion;
+    } catch (error) {
+      if (fatalReadError(error)) {
+        this.#broken = true;
+        error.fatal = true;
+        await this.#transport.close({ force: true });
+      }
+      throw error;
+    } finally {
+      if (abortHandler !== undefined) signal.removeEventListener("abort", abortHandler);
     }
   }
 
@@ -980,6 +1058,46 @@ class InsightsEngineClient {
     return freezeEvidencePage(response);
   }
 
+  async #readCapabilityUsage(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readCapabilityUsage input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadCapabilityUsageMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending READ_CAPABILITY_USAGE", this.#timeoutMs);
+    const response = await this.#expect(
+      "CAPABILITY_USAGE",
+      requestId,
+      {},
+      "waiting for CAPABILITY_USAGE",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response);
+  }
+
+  async #readInsightsActivity(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsActivity input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsActivityMessage({ ...input, requestId });
+    await this.#transport.write(request, "sending READ_INSIGHTS_ACTIVITY", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_ACTIVITY",
+      requestId,
+      {},
+      "waiting for INSIGHTS_ACTIVITY",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response);
+  }
+
   async #runPurgeMaintenance(limit, signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
@@ -1087,12 +1205,19 @@ export async function createInsightsEngineClient(options = {}) {
       (typeof options.databasePath !== "string" || options.databasePath.length === 0)) {
     throw new TypeError("databasePath must be a non-empty string");
   }
+  if (options.openExisting !== undefined && typeof options.openExisting !== "boolean") {
+    throw new TypeError("openExisting must be a boolean");
+  }
+  if (options.openExisting === true && options.databasePath === undefined) {
+    throw new TypeError("openExisting requires databasePath");
+  }
   if (options.requiredContract === undefined) {
     throw new TypeError("requiredContract is required");
   }
 
   const resolved = await resolveInsightsEngine(options.runtimeOptions);
   const arguments_ = options.databasePath === undefined ? [] : ["--db", options.databasePath];
+  if (options.openExisting === true) arguments_.push("--open-existing");
   const child = spawn(resolved.binaryPath, arguments_, {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

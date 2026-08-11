@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-capabilities.v1.schema.json",
+  "title": "Threadshare Insights Capabilities V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "kind", "items", "coverage", "nextCursor"],
+  "properties": {
+    "format": { "const": "threadshare-insights-capabilities@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "kind": { "enum": ["tool", "skill"] },
+    "items": {
+      "type": "array", "maxItems": 50,
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "nextCursor": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capabilityKey", "provider", "kind", "canonicalName"],
+      "properties": {
+        "capabilityKey": { "$ref": "#/$defs/hex64" },
+        "provider": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["tool", "skill"] },
+        "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap", "fullyExcludedCapabilityCount"],
+      "properties": {
+        "excludedUndatedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUndatedTurnCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "excludedUnrevisionedTurnCount": { "$ref": "#/$defs/decimal" },
+        "categoriesMayOverlap": { "const": true },
+        "fullyExcludedCapabilityCount": { "$ref": "#/$defs/decimal" }
+      }
+    }
+  }
+}

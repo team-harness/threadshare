@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-evidence.v1.schema.json",
+  "title": "Threadshare Insights Evidence V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "turn", "entries", "nextCursor"],
+  "properties": {
+    "format": { "const": "threadshare-insights-evidence@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "turn": { "$ref": "#/$defs/turn" },
+    "entries": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/entry" } },
+    "nextCursor": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "turn": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turnKey", "revision", "problemText", "finalAnswerExcerpt", "observedTimestamp", "nextUserBoundary", "providerTerminal", "observedEofClosed", "factTruncation"],
+      "properties": {
+        "turnKey": { "$ref": "#/$defs/hex64" },
+        "revision": { "$ref": "#/$defs/hex64" },
+        "problemText": { "type": "string", "maxLength": 65536 },
+        "finalAnswerExcerpt": { "anyOf": [{ "type": "string", "maxLength": 8192 }, { "type": "null" }] },
+        "observedTimestamp": { "$ref": "#/$defs/nullableTimestamp" },
+        "nextUserBoundary": { "type": "boolean" },
+        "providerTerminal": { "anyOf": [{ "enum": ["completed", "aborted"] }, { "type": "null" }] },
+        "observedEofClosed": { "type": "boolean" },
+        "factTruncation": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "linkedTurn": {
+      "type": "object", "additionalProperties": false, "required": ["turnKey", "role"],
+      "properties": {
+        "turnKey": { "$ref": "#/$defs/hex64" },
+        "role": { "enum": ["boundary", "lifecycle", "result", "follow-up", "rollback", "corroboration"] }
+      }
+    },
+    "visibleMessage": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "role"],
+      "properties": { "kind": { "const": "visible-message" }, "role": { "enum": ["user", "assistant"] } }
+    },
+    "capabilityInvocation": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "capabilityKey"],
+      "properties": { "kind": { "const": "capability-invocation" }, "capabilityKey": { "$ref": "#/$defs/hex64" } }
+    },
+    "capabilityResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "providerState", "exitCode", "outputBytes", "durationMs"],
+      "properties": {
+        "kind": { "const": "capability-result" },
+        "providerState": { "enum": ["pending", "completed", "failed", "unknown"] },
+        "exitCode": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "outputBytes": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "durationMs": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+      }
+    },
+    "skillCatalogEntry": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "capabilityKey"],
+      "properties": { "kind": { "const": "skill-catalog-entry" }, "capabilityKey": { "$ref": "#/$defs/hex64" } }
+    },
+    "skillLoad": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "capabilityKey", "strength", "evidenceSource"],
+      "properties": {
+        "kind": { "const": "skill-load" }, "capabilityKey": { "$ref": "#/$defs/hex64" },
+        "strength": { "enum": ["confirmed", "inferred"] },
+        "evidenceSource": { "enum": ["structured-skill-injection", "session-catalog-complete-read", "claude-skill-tool-success"] }
+      }
+    },
+    "turnLifecycle": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "lifecycleState"],
+      "properties": { "kind": { "const": "turn-lifecycle" }, "lifecycleState": { "enum": ["started", "completed", "aborted"] } }
+    },
+    "providerStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "statusKind", "providerState", "rolledBackTurnCount"],
+      "properties": {
+        "kind": { "const": "provider-status" },
+        "statusKind": { "enum": ["thread-rolled-back", "inline-subagent-activity", "inter-agent-communication"] },
+        "providerState": { "enum": ["observed", "invalid"] },
+        "rolledBackTurnCount": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+      }
+    },
+    "payload": {
+      "oneOf": [
+        { "$ref": "#/$defs/visibleMessage" },
+        { "$ref": "#/$defs/capabilityInvocation" },
+        { "$ref": "#/$defs/capabilityResult" },
+        { "$ref": "#/$defs/skillCatalogEntry" },
+        { "$ref": "#/$defs/skillLoad" },
+        { "$ref": "#/$defs/turnLifecycle" },
+        { "$ref": "#/$defs/providerStatus" }
+      ]
+    },
+    "eventEntry": {
+      "type": "object", "additionalProperties": false, "required": ["factKind", "fact"],
+      "properties": {
+        "factKind": { "const": "event" },
+        "fact": {
+          "type": "object", "additionalProperties": false,
+          "required": ["occurredTurnKey", "linkedTurns", "originScope", "observedTimestamp", "payload"],
+          "properties": {
+            "occurredTurnKey": { "anyOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+            "linkedTurns": { "type": "array", "items": { "$ref": "#/$defs/linkedTurn" } },
+            "originScope": { "enum": ["main", "subagent", "unknown"] },
+            "observedTimestamp": { "$ref": "#/$defs/nullableTimestamp" },
+            "payload": { "$ref": "#/$defs/payload" }
+          }
+        }
+      }
+    },
+    "capabilityUseEntry": {
+      "type": "object", "additionalProperties": false, "required": ["factKind", "fact"],
+      "properties": {
+        "factKind": { "const": "capability-use" },
+        "fact": {
+          "type": "object", "additionalProperties": false,
+          "required": ["capabilityKey", "provider", "kind", "canonicalName", "turnOrdinal", "originScope", "terminalState", "strength", "evidenceRoles"],
+          "properties": {
+            "capabilityKey": { "$ref": "#/$defs/hex64" },
+            "provider": { "type": "string", "minLength": 1 },
+            "kind": { "enum": ["tool", "skill"] },
+            "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "turnOrdinal": { "$ref": "#/$defs/decimal" },
+            "originScope": { "enum": ["main", "subagent", "unknown"] },
+            "terminalState": { "enum": ["pending", "completed", "failed", "cancelled", "unknown"] },
+            "strength": { "enum": ["observed", "confirmed", "inferred"] },
+            "evidenceRoles": {
+              "type": "array", "uniqueItems": true,
+              "items": { "enum": ["invocation", "result", "corroboration"] }
+            }
+          }
+        }
+      }
+    },
+    "entry": { "oneOf": [{ "$ref": "#/$defs/eventEntry" }, { "$ref": "#/$defs/capabilityUseEntry" }] }
+  }
+}

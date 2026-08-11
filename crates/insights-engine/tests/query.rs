@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use threadshare_insights_engine::fact_model::SessionFactsDeltaV1;
-use threadshare_insights_engine::query::{QueryError, SearchRequest};
+use threadshare_insights_engine::fact_model::{
+    CapabilityTerminalState, DedupeClosure, DuplicateConfidence, DuplicateMethod,
+    SessionFactsDeltaV1,
+};
+use threadshare_insights_engine::query::{QueryError, SearchOrderBy, SearchRequest};
 use threadshare_insights_engine::storage::EngineStorage;
 
 fn fixture_delta() -> SessionFactsDeltaV1 {
@@ -35,13 +38,31 @@ fn remap_fixture_value(value: &mut Value, replacements: &BTreeMap<String, String
 }
 
 fn independent_fixture_delta() -> SessionFactsDeltaV1 {
+    remapped_fixture_delta(BTreeMap::new())
+}
+
+/// Same independent session as [`independent_fixture_delta`], observed one day earlier so
+/// `observed-desc` has a deterministic ordering to assert against.
+fn earlier_fixture_delta() -> SessionFactsDeltaV1 {
+    remapped_fixture_delta(
+        [
+            ("2026-08-10T01:00:00.000Z", "2026-08-09T01:00:00.000Z"),
+            ("2026-08-10T01:00:01.000Z", "2026-08-09T01:00:01.000Z"),
+        ]
+        .into_iter()
+        .map(|(source, target)| (source.to_owned(), target.to_owned()))
+        .collect(),
+    )
+}
+
+fn remapped_fixture_delta(extra_replacements: BTreeMap<String, String>) -> SessionFactsDeltaV1 {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../test/fixtures/insights-fact-mutations/v1-basic.json"
     ))
     .unwrap();
     let mut value = fixture["initial"].clone();
     // Every target starts with 0, so this single-pass remap cannot cascade into a source key.
-    let replacements = [
+    let mut replacements = [
         ('9', "08"),
         ('a', "01"),
         ('b', "02"),
@@ -56,6 +77,7 @@ fn independent_fixture_delta() -> SessionFactsDeltaV1 {
     .into_iter()
     .map(|(source, target)| (source.to_string().repeat(64), target.repeat(32)))
     .collect::<BTreeMap<_, _>>();
+    replacements.extend(extra_replacements);
     remap_fixture_value(&mut value, &replacements);
     SessionFactsDeltaV1::try_from(value).unwrap()
 }
@@ -255,4 +277,267 @@ fn equal_bm25_candidates_are_stable_across_ingestion_histories() {
     assert_eq!(forward, reverse);
     assert_eq!(forward.0, vec!["02".repeat(32), "b".repeat(64)]);
     assert_eq!(forward.1, forward.0);
+}
+
+#[test]
+fn a_text_query_without_scoring_terms_is_rejected_even_when_filters_are_present() {
+    // "a" analyzes to zero scoring terms. Silently dropping it degraded the request into a
+    // filter-only recent-turns listing, which is not what the caller asked for.
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+    let error = storage
+        .search(SearchRequest {
+            query: "a".to_owned(),
+            providers: vec!["codex".to_owned()],
+            tool_capability_keys: vec!["e".repeat(64)],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "QUERY_TOO_BROAD");
+}
+
+#[test]
+fn relevance_is_the_default_order_and_is_echoed_on_the_response() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+    let response = storage
+        .search(SearchRequest {
+            query: "normalized fact store".to_owned(),
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+
+    assert_eq!(SearchRequest::default().order_by, SearchOrderBy::Relevance);
+    assert_eq!(response.order_by, SearchOrderBy::Relevance);
+    assert_eq!(response.total_match_count, "1");
+}
+
+#[test]
+fn observed_desc_orders_matches_by_canonical_timestamp_not_relevance_tie_break() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+    storage
+        .apply_session_facts(earlier_fixture_delta())
+        .unwrap();
+
+    // Relevance ties break on turn key ascending, which puts the older "02..." turn first.
+    let relevance = storage
+        .search(SearchRequest {
+            query: "normalized fact store".to_owned(),
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        relevance
+            .results
+            .iter()
+            .map(|result| result.turn_key.clone())
+            .collect::<Vec<_>>(),
+        vec!["02".repeat(32), "b".repeat(64)]
+    );
+    assert_eq!(relevance.total_match_count, "2");
+
+    // observed-desc must return true newest-first, which is the opposite order here.
+    let newest = storage
+        .search(SearchRequest {
+            query: "normalized fact store".to_owned(),
+            order_by: SearchOrderBy::ObservedDesc,
+            after_unix_ms: Some(1_786_237_200_000),
+            before_unix_ms: Some(1_786_323_600_001),
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert_eq!(newest.order_by, SearchOrderBy::ObservedDesc);
+    assert_eq!(newest.total_match_count, "2");
+    assert_eq!(
+        newest
+            .results
+            .iter()
+            .map(|result| result.turn_key.clone())
+            .collect::<Vec<_>>(),
+        vec!["b".repeat(64), "02".repeat(32)]
+    );
+}
+
+#[test]
+fn observed_desc_text_queries_require_a_complete_bounded_window() {
+    let unbounded = SearchRequest {
+        query: "needle".to_owned(),
+        order_by: SearchOrderBy::ObservedDesc,
+        after_unix_ms: Some(1_786_237_200_000),
+        ..SearchRequest::default()
+    };
+    let error = unbounded.validate().unwrap_err();
+    assert_eq!(error.code, "QUERY_TOO_BROAD");
+    assert!(error.message.contains("observed-desc"), "{}", error.message);
+
+    // 367 days is one day past the supported retention window.
+    let too_wide = SearchRequest {
+        query: "needle".to_owned(),
+        order_by: SearchOrderBy::ObservedDesc,
+        after_unix_ms: Some(1_786_323_600_000 - 367 * 86_400_000),
+        before_unix_ms: Some(1_786_323_600_000),
+        ..SearchRequest::default()
+    };
+    assert_eq!(too_wide.validate().unwrap_err().code, "QUERY_TOO_BROAD");
+
+    let exactly_366_days = SearchRequest {
+        query: "needle".to_owned(),
+        order_by: SearchOrderBy::ObservedDesc,
+        after_unix_ms: Some(1_786_323_600_000 - 366 * 86_400_000),
+        before_unix_ms: Some(1_786_323_600_000),
+        ..SearchRequest::default()
+    };
+    assert!(exactly_366_days.validate().is_ok());
+
+    // A filter-only observed-desc request needs no window: it is already bounded by limit.
+    let filter_only = SearchRequest {
+        order_by: SearchOrderBy::ObservedDesc,
+        providers: vec!["codex".to_owned()],
+        ..SearchRequest::default()
+    };
+    assert!(filter_only.validate().is_ok());
+}
+
+#[test]
+fn capability_terminal_states_are_bounded_unique_and_need_a_capability_key() {
+    let orphaned = SearchRequest {
+        query: "needle".to_owned(),
+        capability_terminal_states: vec![CapabilityTerminalState::Completed],
+        ..SearchRequest::default()
+    };
+    let error = orphaned.validate().unwrap_err();
+    assert_eq!(error.code, "QUERY_INVALID_FILTER");
+    assert!(
+        error.message.contains("capabilityTerminalStates"),
+        "{}",
+        error.message
+    );
+
+    // Ranked by wire spelling, so "completed" sorts before "pending".
+    let unsorted = SearchRequest {
+        query: "needle".to_owned(),
+        tool_capability_keys: vec!["e".repeat(64)],
+        capability_terminal_states: vec![
+            CapabilityTerminalState::Pending,
+            CapabilityTerminalState::Completed,
+        ],
+        ..SearchRequest::default()
+    };
+    assert!(unsorted.validate().unwrap_err().message.contains("sorted"));
+
+    let duplicated = SearchRequest {
+        query: "needle".to_owned(),
+        tool_capability_keys: vec!["e".repeat(64)],
+        capability_terminal_states: vec![
+            CapabilityTerminalState::Pending,
+            CapabilityTerminalState::Pending,
+        ],
+        ..SearchRequest::default()
+    };
+    assert!(
+        duplicated
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("unique")
+    );
+
+    let accepted = SearchRequest {
+        query: "needle".to_owned(),
+        tool_capability_keys: vec!["e".repeat(64)],
+        capability_terminal_states: vec![
+            CapabilityTerminalState::Completed,
+            CapabilityTerminalState::Pending,
+        ],
+        ..SearchRequest::default()
+    };
+    assert!(accepted.validate().is_ok());
+}
+
+#[test]
+fn capability_terminal_states_filter_the_matching_use_row_not_the_whole_turn() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+
+    // The fixture's only use of capability "ee..." is pending, so asking for the completed
+    // rows of that capability must return nothing.
+    let completed = storage
+        .search(SearchRequest {
+            providers: vec!["codex".to_owned()],
+            tool_capability_keys: vec!["e".repeat(64)],
+            capability_terminal_states: vec![CapabilityTerminalState::Completed],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert!(completed.results.is_empty());
+
+    let pending = storage
+        .search(SearchRequest {
+            providers: vec!["codex".to_owned()],
+            tool_capability_keys: vec!["e".repeat(64)],
+            capability_terminal_states: vec![CapabilityTerminalState::Pending],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert_eq!(pending.results.len(), 1);
+    assert_eq!(pending.total_match_count, "1");
+    assert_eq!(pending.results[0].turn_key, "b".repeat(64));
+}
+
+#[test]
+fn search_returns_group_confidence_and_only_marks_prefix_eof_as_provisional() {
+    let mut delta = fixture_delta();
+    delta.session.dedupe_fingerprint = Some("7".repeat(64).parse().unwrap());
+    delta.session.duplicate_method = Some(DuplicateMethod::ExplicitLineage);
+    delta.session.duplicate_confidence = Some(DuplicateConfidence::Strong);
+    delta.session.dedupe_closure = Some(DedupeClosure::ObservedEof);
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(delta).unwrap();
+
+    let response = storage
+        .search(SearchRequest {
+            providers: vec!["codex".to_owned()],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    let dedupe = response.results[0].dedupe.as_ref().unwrap();
+    assert_eq!(dedupe.duplicate_group_key.len(), 64);
+    assert_eq!(
+        dedupe.confidence,
+        threadshare_insights_engine::evidence_path::DedupeConfidence::Strong
+    );
+    assert!(!dedupe.observed_eof_provisional);
+}
+
+#[test]
+fn observed_timestamp_filters_use_a_half_open_canonical_range() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+    let mut matches = |after: u64, before: u64| {
+        storage
+            .search(SearchRequest {
+                providers: vec!["codex".to_owned()],
+                after_unix_ms: Some(after),
+                before_unix_ms: Some(before),
+                now_unix_ms: 1_786_320_000_000,
+                ..SearchRequest::default()
+            })
+            .unwrap()
+            .results
+            .len()
+    };
+
+    // The turn is observed exactly at 2026-08-10T01:00:00.000Z.
+    assert_eq!(matches(1_786_323_600_000, 1_786_323_600_001), 1);
+    assert_eq!(matches(1_786_323_600_001, 1_786_323_700_000), 0);
+    assert_eq!(matches(1_786_323_500_000, 1_786_323_600_000), 0);
 }

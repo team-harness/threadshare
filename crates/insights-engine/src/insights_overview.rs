@@ -265,6 +265,7 @@ pub struct CapabilitySummary {
 pub struct CapabilityPage {
     pub snapshot_seq: String,
     pub items: Vec<CapabilitySummary>,
+    pub coverage: crate::agent_query::QueryCoverage,
     pub next_cursor: Option<String>,
 }
 
@@ -948,6 +949,7 @@ pub fn list_capabilities(
          WHERE c.capability_kind=?1
            AND (?2 IS NULL OR c.capability_key>?2)
            AND s.eligibility='eligible' AND s.session_scope='main'
+           AND t.revision IS NOT NULL AND t.observed_timestamp IS NOT NULL
            AND NOT EXISTS (
              SELECT 1 FROM source_purge_states purge WHERE purge.session_key=s.session_key
            )
@@ -965,11 +967,20 @@ pub fn list_capabilities(
     let next_cursor = has_more
         .then(|| items.last().map(|item| item.capability_key.clone()))
         .flatten();
+    let coverage = crate::agent_query::read_coverage(
+        &transaction,
+        Some(match request.kind {
+            CapabilityListKind::Tool => crate::fact_model::CapabilityKind::Tool,
+            CapabilityListKind::Skill => crate::fact_model::CapabilityKind::Skill,
+        }),
+    )
+    .map_err(|error| StorageError::new(error.code, error.message))?;
     drop(statement);
     transaction.commit()?;
     Ok(CapabilityPage {
         snapshot_seq,
         items,
+        coverage,
         next_cursor,
     })
 }

@@ -4,6 +4,10 @@ use std::env;
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use threadshare_insights_engine::agent_query::{
+    ActivityRequest, ActivityResponse, ActivityWindow, UsageOrderBy, UsageRequest, UsageResponse,
+    UsageWindow,
+};
 use threadshare_insights_engine::canonical_json;
 use threadshare_insights_engine::engine::{EngineError, SessionAccumulator};
 use threadshare_insights_engine::evidence_path::{
@@ -17,7 +21,9 @@ use threadshare_insights_engine::protocol::{
     accepted_contract_from_hello, bounded_message, read_frame, request_id,
     validate_begin_against_contract, validate_protocol_message, write_frame,
 };
-use threadshare_insights_engine::query::{QueryError, SearchRequest, SearchResponse, SearchTrace};
+use threadshare_insights_engine::query::{
+    QueryError, SearchOrderBy, SearchRequest, SearchResponse, SearchTrace,
+};
 use threadshare_insights_engine::storage::{EngineStorage, StorageError};
 
 const ENGINE_VERSION: &str = match option_env!("THREADSHARE_RELEASE_VERSION") {
@@ -43,6 +49,7 @@ enum State {
 
 struct EngineServer {
     storage: EngineStorage,
+    database_uuid: String,
     state: State,
 }
 
@@ -193,6 +200,18 @@ fn dashboard_storage_error(error: StorageError) -> EngineError {
     )
 }
 
+fn agent_query_engine_error(error: QueryError) -> EngineError {
+    let (category, message) = match error.code {
+        "QUERY_FAILED" => ("storage", "Insights aggregate query failed"),
+        "TS_INSIGHTS_REQUEST_INVALID" => ("validation", "Insights aggregate request is invalid"),
+        _ => (
+            "validation",
+            "Insights aggregate query could not be completed",
+        ),
+    };
+    EngineError::new(error.code, category, message)
+}
+
 fn search_request(message: &Value) -> SearchRequest {
     let filters = &message["filters"];
     SearchRequest {
@@ -200,6 +219,11 @@ fn search_request(message: &Value) -> SearchRequest {
             .as_str()
             .expect("validated search query")
             .to_owned(),
+        order_by: match message.get("orderBy").and_then(Value::as_str) {
+            Some("observed-desc") => SearchOrderBy::ObservedDesc,
+            Some("relevance") | None => SearchOrderBy::Relevance,
+            Some(_) => unreachable!("protocol validated search order"),
+        },
         providers: serde_json::from_value(filters["providers"].clone())
             .expect("validated providers"),
         project_keys: serde_json::from_value(filters["projectKeys"].clone())
@@ -208,6 +232,13 @@ fn search_request(message: &Value) -> SearchRequest {
             .expect("validated tool keys"),
         skill_capability_keys: serde_json::from_value(filters["skillCapabilityKeys"].clone())
             .expect("validated skill keys"),
+        capability_terminal_states: filters
+            .get("capabilityTerminalStates")
+            .map(|states| {
+                serde_json::from_value(states.clone())
+                    .expect("validated capability terminal states")
+            })
+            .unwrap_or_default(),
         after_unix_ms: filters["observedAtOrAfterUnixMs"]
             .as_str()
             .map(|value| value.parse().expect("validated after timestamp")),
@@ -233,6 +264,108 @@ fn search_request(message: &Value) -> SearchRequest {
                 .expect("validated quiescence"),
         )
         .expect("validated quiescence fits u32"),
+    }
+}
+
+fn usage_window(value: &Value) -> UsageWindow {
+    UsageWindow {
+        observed_at_or_after_unix_ms: value["observedAtOrAfterUnixMs"]
+            .as_str()
+            .expect("validated Usage window start")
+            .parse()
+            .expect("validated Usage window start fits u64"),
+        observed_before_unix_ms: value["observedBeforeUnixMs"]
+            .as_str()
+            .expect("validated Usage window end")
+            .parse()
+            .expect("validated Usage window end fits u64"),
+    }
+}
+
+fn usage_order_by(value: &Value) -> UsageOrderBy {
+    match value.as_str().expect("validated Usage order") {
+        "recorded-invocation-count" => UsageOrderBy::RecordedInvocationCount,
+        "recorded-failing-invocation-count" => UsageOrderBy::RecordedFailingInvocationCount,
+        "distinct-turn-count" => UsageOrderBy::DistinctTurnCount,
+        "distinct-session-count" => UsageOrderBy::DistinctSessionCount,
+        "distinct-dedupe-group-count" => UsageOrderBy::DistinctDedupeGroupCount,
+        "last-used" => UsageOrderBy::LastUsedAt,
+        "absolute-recorded-invocation-change" => UsageOrderBy::AbsoluteRecordedInvocationChange,
+        _ => unreachable!("protocol validated Usage order"),
+    }
+}
+
+fn capability_usage_request(message: &Value) -> UsageRequest {
+    let filters = &message["filters"];
+    UsageRequest {
+        kind: serde_json::from_value(message["kind"].clone()).expect("validated Usage kind"),
+        window: usage_window(&message["window"]),
+        comparison_window: (!message["comparisonWindow"].is_null())
+            .then(|| usage_window(&message["comparisonWindow"])),
+        providers: serde_json::from_value(filters["providers"].clone())
+            .expect("validated Usage providers"),
+        project_keys: serde_json::from_value(filters["projectKeys"].clone())
+            .expect("validated Usage project keys"),
+        closure_states: serde_json::from_value(filters["closureStates"].clone())
+            .expect("validated Usage closure states"),
+        capability_terminal_states: serde_json::from_value(
+            filters["capabilityTerminalStates"].clone(),
+        )
+        .expect("validated Usage terminal states"),
+        order_by: usage_order_by(&message["orderBy"]),
+        cursor: message["cursor"].as_str().map(str::to_owned),
+        limit: u16::try_from(message["limit"].as_u64().expect("validated Usage limit"))
+            .expect("validated Usage limit fits u16"),
+        now_unix_ms: message["nowUnixMs"]
+            .as_str()
+            .expect("validated Usage clock")
+            .parse()
+            .expect("validated Usage clock fits u64"),
+        quiescence_seconds: u32::try_from(
+            message["quiescenceSeconds"]
+                .as_u64()
+                .expect("validated Usage quiescence"),
+        )
+        .expect("validated Usage quiescence fits u32"),
+    }
+}
+
+fn activity_request(message: &Value) -> ActivityRequest {
+    let filters = &message["filters"];
+    ActivityRequest {
+        window: ActivityWindow {
+            observed_at_or_after: message["window"]["observedAtOrAfter"]
+                .as_str()
+                .expect("validated Activity window start")
+                .to_owned(),
+            observed_before: message["window"]["observedBefore"]
+                .as_str()
+                .expect("validated Activity window end")
+                .to_owned(),
+        },
+        providers: serde_json::from_value(filters["providers"].clone())
+            .expect("validated Activity providers"),
+        project_keys: serde_json::from_value(filters["projectKeys"].clone())
+            .expect("validated Activity project keys"),
+        closure_states: serde_json::from_value(filters["closureStates"].clone())
+            .expect("validated Activity closure states"),
+        bucket: serde_json::from_value(message["bucket"].clone())
+            .expect("validated Activity bucket"),
+        time_zone: message["timeZone"]
+            .as_str()
+            .expect("validated Activity time zone")
+            .to_owned(),
+        now_unix_ms: message["nowUnixMs"]
+            .as_str()
+            .expect("validated Activity clock")
+            .parse()
+            .expect("validated Activity clock fits u64"),
+        quiescence_seconds: u32::try_from(
+            message["quiescenceSeconds"]
+                .as_u64()
+                .expect("validated Activity quiescence"),
+        )
+        .expect("validated Activity quiescence fits u32"),
     }
 }
 
@@ -271,11 +404,17 @@ fn evidence_paths_wire(report: EvidencePathReport) -> Value {
     })
 }
 
-fn search_results_wire(request_id: &str, response: SearchResponse, trace: SearchTrace) -> Value {
+fn search_results_wire(
+    request_id: &str,
+    database_uuid: &str,
+    response: SearchResponse,
+    trace: SearchTrace,
+) -> Value {
     let results = response
         .results
         .into_iter()
         .map(|result| {
+            let dedupe = result.dedupe;
             let score = result.bm25_rank.map_or(Value::Null, |rank| {
                 json!({
                     "relevancePpm": result.relevance_ppm,
@@ -286,7 +425,7 @@ fn search_results_wire(request_id: &str, response: SearchResponse, trace: Search
                     "matchedTermIndexes": result.matched_term_indexes,
                 })
             });
-            json!({
+            let mut wire = json!({
                 "turnKey": result.turn_key,
                 "sessionKey": result.session_key,
                 "revision": result.revision,
@@ -300,13 +439,22 @@ fn search_results_wire(request_id: &str, response: SearchResponse, trace: Search
                 "closureState": result.closure,
                 "resultEvidence": result.result_evidence,
                 "score": score,
-            })
+            });
+            if let Some(dedupe) = dedupe {
+                wire["dedupe"] = json!(dedupe);
+            }
+            wire
         })
         .collect::<Vec<_>>();
     json!({
         "format": PROTOCOL_FORMAT,
         "type": "TURN_SEARCH_RESULTS",
         "requestId": request_id,
+        "databaseUuid": database_uuid,
+        "orderBy": response.order_by,
+        "totalMatchCount": response.total_match_count,
+        "closureEvaluatedAt": response.closure_evaluated_at,
+        "quiescenceSeconds": response.quiescence_seconds,
         "snapshot": {
             "snapshotSeq": response.snapshot_seq,
             "projectionVersion": response.projection_version,
@@ -338,7 +486,7 @@ fn evidence_event_wire(event: SafeEvidenceEvent) -> Value {
     })
 }
 
-fn evidence_page_wire(request_id: &str, page: TurnEvidencePage) -> Value {
+fn evidence_page_wire(request_id: &str, database_uuid: &str, page: TurnEvidencePage) -> Value {
     let entries = page
         .entries
         .into_iter()
@@ -357,6 +505,7 @@ fn evidence_page_wire(request_id: &str, page: TurnEvidencePage) -> Value {
         "format": PROTOCOL_FORMAT,
         "type": "TURN_EVIDENCE_PAGE",
         "requestId": request_id,
+        "databaseUuid": database_uuid,
         "snapshotSeq": page.snapshot_seq,
         "turn": page.turn,
         "entries": entries,
@@ -364,12 +513,60 @@ fn evidence_page_wire(request_id: &str, page: TurnEvidencePage) -> Value {
     })
 }
 
+fn capability_usage_wire(
+    request_id: &str,
+    database_uuid: &str,
+    order_by: &Value,
+    response: UsageResponse,
+) -> Value {
+    json!({
+        "format": PROTOCOL_FORMAT,
+        "type": "CAPABILITY_USAGE",
+        "requestId": request_id,
+        "databaseUuid": database_uuid,
+        "snapshotSeq": response.snapshot_seq,
+        "closureEvaluatedAt": response.closure_evaluated_at,
+        "quiescenceSeconds": response.quiescence_seconds,
+        "orderBy": order_by,
+        "items": response.items,
+        "totalCandidateCount": response.total_candidate_count,
+        "truncated": response.truncated,
+        "coverage": response.coverage,
+        "nextCursor": response.next_cursor,
+    })
+}
+
+fn insights_activity_wire(
+    request_id: &str,
+    database_uuid: &str,
+    response: ActivityResponse,
+) -> Value {
+    json!({
+        "format": PROTOCOL_FORMAT,
+        "type": "INSIGHTS_ACTIVITY",
+        "requestId": request_id,
+        "databaseUuid": database_uuid,
+        "snapshotSeq": response.snapshot_seq,
+        "closureEvaluatedAt": response.closure_evaluated_at,
+        "quiescenceSeconds": response.quiescence_seconds,
+        "buckets": response.buckets,
+        "coverage": {
+            "excludedUndatedInvocationCount": response.coverage.excluded_undated_invocation_count,
+            "excludedUndatedTurnCount": response.coverage.excluded_undated_turn_count,
+            "excludedUnrevisionedInvocationCount": response.coverage.excluded_unrevisioned_invocation_count,
+            "excludedUnrevisionedTurnCount": response.coverage.excluded_unrevisioned_turn_count,
+        },
+    })
+}
+
 impl EngineServer {
     fn new(mut storage: EngineStorage) -> Result<Self, EngineError> {
         storage.verify_sqlite_contract()?;
         storage.maintain_search_projection(16)?;
+        let database_uuid = storage.database_uuid()?;
         Ok(Self {
             storage,
+            database_uuid,
             state: State::AwaitHello,
         })
     }
@@ -477,6 +674,7 @@ impl EngineServer {
                                     "format": PROTOCOL_FORMAT,
                                     "type": "INSIGHTS_OVERVIEW",
                                     "requestId": request_id,
+                                    "databaseUuid": self.database_uuid,
                                     "snapshotSeq": overview.snapshot_seq,
                                     "sessions": overview.sessions,
                                     "scopes": overview.scopes,
@@ -520,9 +718,11 @@ impl EngineServer {
                                     "format": PROTOCOL_FORMAT,
                                     "type": "CAPABILITY_PAGE",
                                     "requestId": request_id,
+                                    "databaseUuid": self.database_uuid,
                                     "snapshotSeq": page.snapshot_seq,
                                     "items": page.items,
                                     "nextCursor": page.next_cursor,
+                                    "coverage": page.coverage,
                                 }),
                             ))
                         }
@@ -697,12 +897,48 @@ impl EngineServer {
                                 State::Ready {
                                     accepted_contract: accepted_contract.clone(),
                                 },
-                                search_results_wire(&request_id, response, trace),
+                                search_results_wire(
+                                    &request_id,
+                                    &self.database_uuid,
+                                    response,
+                                    trace,
+                                ),
+                            ))
+                        }
+                        MessageKind::ReadCapabilityUsage => {
+                            let response = self
+                                .storage
+                                .read_capability_usage(&capability_usage_request(&message))
+                                .map_err(agent_query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                capability_usage_wire(
+                                    &request_id,
+                                    &self.database_uuid,
+                                    &message["orderBy"],
+                                    response,
+                                ),
+                            ))
+                        }
+                        MessageKind::ReadInsightsActivity => {
+                            let response = self
+                                .storage
+                                .read_insights_activity(&activity_request(&message))
+                                .map_err(agent_query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                insights_activity_wire(&request_id, &self.database_uuid, response),
                             ))
                         }
                         MessageKind::ReadTurnEvidence => {
                             let turn_key = message["turnKey"].as_str().expect("validated turn key");
-                            let expected_revision = message["expectedRevision"].as_str();
+                            let expected_revision = message["expectedRevision"]
+                                .as_str()
+                                .expect("validated expected revision");
                             let cursor = message["cursor"].as_str();
                             let limit = u16::try_from(
                                 message["limit"].as_u64().expect("validated evidence limit"),
@@ -710,13 +946,18 @@ impl EngineServer {
                             .expect("validated evidence limit fits u16");
                             let page = self
                                 .storage
-                                .read_turn_evidence(turn_key, expected_revision, cursor, limit)
+                                .read_turn_evidence(
+                                    turn_key,
+                                    Some(expected_revision),
+                                    cursor,
+                                    limit,
+                                )
                                 .map_err(query_engine_error)?;
                             Ok((
                                 State::Ready {
                                     accepted_contract: accepted_contract.clone(),
                                 },
-                                evidence_page_wire(&request_id, page),
+                                evidence_page_wire(&request_id, &self.database_uuid, page),
                             ))
                         }
                         _ => Err(EngineError::new(
@@ -852,15 +1093,26 @@ impl EngineServer {
     }
 }
 
-fn parse_arguments() -> Result<(bool, Option<PathBuf>), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct EngineArguments {
+    show_version: bool,
+    database: Option<PathBuf>,
+    open_existing: bool,
+}
+
+fn parse_arguments_from(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<EngineArguments, String> {
     let mut version = false;
     let mut json_output = false;
     let mut database = None;
-    let mut arguments = env::args().skip(1);
+    let mut open_existing = false;
+    let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--version" => version = true,
             "--json" => json_output = true,
+            "--open-existing" => open_existing = true,
             "--db" => {
                 let value = arguments.next().ok_or("--db requires a path")?;
                 database = Some(PathBuf::from(value));
@@ -871,7 +1123,18 @@ fn parse_arguments() -> Result<(bool, Option<PathBuf>), String> {
     if json_output && !version {
         return Err("--json requires --version".to_owned());
     }
-    Ok((version, database))
+    if open_existing && database.is_none() {
+        return Err("--open-existing requires --db".to_owned());
+    }
+    Ok(EngineArguments {
+        show_version: version,
+        database,
+        open_existing,
+    })
+}
+
+fn parse_arguments() -> Result<EngineArguments, String> {
+    parse_arguments_from(env::args().skip(1))
 }
 
 fn run_server_stream<R: Read, W: Write>(
@@ -920,28 +1183,30 @@ fn report_storage_initialization_error(error: StorageError) -> Result<(), Protoc
 }
 
 fn main() {
-    let (show_version, database) = match parse_arguments() {
+    let arguments = match parse_arguments() {
         Ok(value) => value,
         Err(message) => {
             eprintln!("{message}");
             std::process::exit(2);
         }
     };
-    let storage = match database {
-        Some(path) => EngineStorage::open(&path),
-        None => EngineStorage::open_in_memory(),
+    let storage = match (arguments.database, arguments.open_existing) {
+        (Some(path), true) => EngineStorage::open_existing(&path),
+        (Some(path), false) => EngineStorage::open(&path),
+        (None, false) => EngineStorage::open_in_memory(),
+        (None, true) => unreachable!("argument validation requires an existing database path"),
     };
     let storage = match storage {
         Ok(value) => value,
         Err(error) => {
-            if !show_version {
+            if !arguments.show_version {
                 let _ = report_storage_initialization_error(error);
             }
             eprintln!("Insights Engine storage initialization failed");
             std::process::exit(1);
         }
     };
-    if show_version {
+    if arguments.show_version {
         match version_document(&storage) {
             Ok(value) => println!("{}", canonical_json(&value)),
             Err(_) => {
@@ -959,7 +1224,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineServer, State, evidence_event_wire, evidence_paths_wire, query_engine_error,
+        EngineServer, State, evidence_event_wire, evidence_paths_wire, parse_arguments_from,
+        query_engine_error, search_request, search_results_wire, usage_order_by,
         validate_protocol_message,
     };
     use serde::Deserialize;
@@ -967,11 +1233,16 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
+    use threadshare_insights_engine::agent_query::UsageOrderBy;
     use threadshare_insights_engine::evidence_path::{
-        EvidenceLink, EvidencePathFamily, EvidencePathReport, PathNode, RepeatBucket,
-        SafeEventPayload, SafeEvidenceEvent, ToolStateCounts,
+        DedupeConfidence, EvidenceLink, EvidencePathFamily, EvidencePathReport, PathNode,
+        RepeatBucket, SafeEventPayload, SafeEvidenceEvent, ToolStateCounts,
     };
-    use threadshare_insights_engine::query::QueryError;
+    use threadshare_insights_engine::fact_model::CapabilityTerminalState;
+    use threadshare_insights_engine::query::{
+        ClosureFilter, QueryDiagnostic, QueryError, ResultEvidenceFilter, SearchDedupe,
+        SearchOrderBy, SearchResponse, SearchResult, SearchTrace,
+    };
     use threadshare_insights_engine::storage::EngineStorage;
     use threadshare_insights_engine::{canonical_json, hash_key};
 
@@ -1000,6 +1271,24 @@ mod tests {
 
     fn server() -> EngineServer {
         EngineServer::new(EngineStorage::open_in_memory().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn open_existing_argument_requires_and_preserves_the_database_path() {
+        let database = PathBuf::from("/existing/insights.sqlite3");
+        let arguments = parse_arguments_from([
+            "--db".to_owned(),
+            database.to_string_lossy().into_owned(),
+            "--open-existing".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(arguments.database, Some(database));
+        assert!(arguments.open_existing);
+
+        assert_eq!(
+            parse_arguments_from(["--open-existing".to_owned()]).unwrap_err(),
+            "--open-existing requires --db"
+        );
     }
 
     fn large_session_delta() -> Value {
@@ -1195,6 +1484,10 @@ mod tests {
             .unwrap();
         assert_eq!(overview["type"], "INSIGHTS_OVERVIEW");
         assert_eq!(overview["snapshotSeq"], "0");
+        let database_uuid = overview["databaseUuid"]
+            .as_str()
+            .expect("overview carries database generation identity")
+            .to_owned();
         assert_eq!(overview["sessions"]["raw"], "0");
         validate_protocol_message(&overview).unwrap();
         assert!(matches!(server.state, State::Ready { .. }));
@@ -1211,8 +1504,141 @@ mod tests {
             .unwrap();
         assert_eq!(page["type"], "CAPABILITY_PAGE");
         assert_eq!(page["snapshotSeq"], "0");
+        assert_eq!(page["databaseUuid"], database_uuid);
         assert_eq!(page["items"], json!([]));
+        assert_eq!(page["coverage"]["fullyExcludedCapabilityCount"], "0");
         validate_protocol_message(&page).unwrap();
+        assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn usage_and_activity_are_bounded_ready_state_reads() {
+        assert_eq!(
+            usage_order_by(&json!("last-used")),
+            UsageOrderBy::LastUsedAt
+        );
+        assert_eq!(
+            usage_order_by(&json!("distinct-dedupe-group-count")),
+            UsageOrderBy::DistinctDedupeGroupCount
+        );
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+
+        let usage = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_CAPABILITY_USAGE",
+                "requestId": "61",
+                "kind": "tool",
+                "window": {
+                    "observedAtOrAfterUnixMs": "1786320000000",
+                    "observedBeforeUnixMs": "1786406400000"
+                },
+                "comparisonWindow": null,
+                "filters": {
+                    "providers": [], "projectKeys": [], "closureStates": [],
+                    "capabilityTerminalStates": []
+                },
+                "orderBy": "last-used",
+                "cursor": null,
+                "limit": 50,
+                "nowUnixMs": "1786406400000",
+                "quiescenceSeconds": 300
+            }))
+            .unwrap();
+        assert_eq!(usage["type"], "CAPABILITY_USAGE");
+        assert_eq!(usage["orderBy"], "last-used");
+        assert_eq!(usage["closureEvaluatedAt"], "2026-08-11T00:00:00.000Z");
+        assert_eq!(usage["items"], json!([]));
+        assert_eq!(usage["totalCandidateCount"], "0");
+        validate_protocol_message(&usage).unwrap();
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let distinct_dedupe_usage = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_CAPABILITY_USAGE",
+                "requestId": "63",
+                "kind": "tool",
+                "window": {
+                    "observedAtOrAfterUnixMs": "1786320000000",
+                    "observedBeforeUnixMs": "1786406400000"
+                },
+                "comparisonWindow": null,
+                "filters": {
+                    "providers": [], "projectKeys": [], "closureStates": [],
+                    "capabilityTerminalStates": []
+                },
+                "orderBy": "distinct-dedupe-group-count",
+                "cursor": null,
+                "limit": 50,
+                "nowUnixMs": "1786406400000",
+                "quiescenceSeconds": 300
+            }))
+            .unwrap();
+        assert_eq!(
+            distinct_dedupe_usage["orderBy"],
+            "distinct-dedupe-group-count"
+        );
+        validate_protocol_message(&distinct_dedupe_usage).unwrap();
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        for (request_id, project_key_count) in [("64", 17), ("65", 64)] {
+            let project_keys = (0..project_key_count)
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>();
+            let bounded_project_usage = server
+                .handle_message(json!({
+                    "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                    "type": "READ_CAPABILITY_USAGE",
+                    "requestId": request_id,
+                    "kind": "tool",
+                    "window": {
+                        "observedAtOrAfterUnixMs": "1786320000000",
+                        "observedBeforeUnixMs": "1786406400000"
+                    },
+                    "comparisonWindow": null,
+                    "filters": {
+                        "providers": [], "projectKeys": project_keys, "closureStates": [],
+                        "capabilityTerminalStates": []
+                    },
+                    "orderBy": "recorded-invocation-count",
+                    "cursor": null,
+                    "limit": 50,
+                    "nowUnixMs": "1786406400000",
+                    "quiescenceSeconds": 300
+                }))
+                .unwrap();
+            assert_eq!(bounded_project_usage["type"], "CAPABILITY_USAGE");
+            validate_protocol_message(&bounded_project_usage).unwrap();
+            assert!(matches!(server.state, State::Ready { .. }));
+        }
+
+        let activity = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_INSIGHTS_ACTIVITY",
+                "requestId": "62",
+                "window": {
+                    "observedAtOrAfter": "2026-08-10T00:00:00.000Z",
+                    "observedBefore": "2026-08-11T00:00:00.000Z"
+                },
+                "filters": {"providers": [], "projectKeys": [], "closureStates": []},
+                "bucket": "day",
+                "timeZone": "UTC",
+                "nowUnixMs": "1786406400000",
+                "quiescenceSeconds": 300
+            }))
+            .unwrap();
+        assert_eq!(activity["type"], "INSIGHTS_ACTIVITY");
+        assert_eq!(activity["closureEvaluatedAt"], "2026-08-11T00:00:00.000Z");
+        assert_eq!(activity["buckets"].as_array().unwrap().len(), 1);
+        assert!(
+            activity["coverage"]
+                .get("fullyExcludedCapabilityCount")
+                .is_none()
+        );
+        validate_protocol_message(&activity).unwrap();
         assert!(matches!(server.state, State::Ready { .. }));
     }
 
@@ -1221,8 +1647,24 @@ mod tests {
         let mut server = server();
         server.handle_message(message("hello")).unwrap();
 
+        let mut search = message("search-turns");
+        search["orderBy"] = json!("observed-desc");
+        search["filters"]["capabilityTerminalStates"] = json!(["failed"]);
+        search["filters"]["toolCapabilityKeys"] = json!(["1".repeat(64)]);
+        let mapped = search_request(&search);
+        assert_eq!(mapped.order_by, SearchOrderBy::ObservedDesc);
+        assert_eq!(
+            mapped.capability_terminal_states,
+            vec![CapabilityTerminalState::Failed]
+        );
+
         let response = server.handle_message(message("search-turns")).unwrap();
         assert_eq!(response["type"], "TURN_SEARCH_RESULTS");
+        assert!(response["databaseUuid"].as_str().is_some());
+        assert_eq!(response["orderBy"], "relevance");
+        assert_eq!(response["totalMatchCount"], "0");
+        assert_eq!(response["closureEvaluatedAt"], "2026-08-10T00:00:00.000Z");
+        assert_eq!(response["quiescenceSeconds"], 300);
         assert_eq!(response["snapshot"]["projectionVersion"], 2);
         assert_eq!(response["snapshot"]["analyzerVersion"], 1);
         assert_eq!(response["snapshot"]["rankerVersion"], 1);
@@ -1295,6 +1737,82 @@ mod tests {
                 .is_none()
         );
         assert_eq!(path["families"][0]["nodes"][0]["repeatBucket"], "1");
+
+        let dedupe_group_key = "4".repeat(64);
+        let turn_key = "5".repeat(64);
+        let search = search_results_wire(
+            "71",
+            "11111111-1111-4111-8111-111111111111",
+            SearchResponse {
+                snapshot_seq: "3".to_owned(),
+                projection_version: 2,
+                analyzer_version: 1,
+                ranker_version: 1,
+                order_by: SearchOrderBy::Relevance,
+                closure_evaluated_at: "2026-08-11T00:00:00.000Z".to_owned(),
+                quiescence_seconds: 300,
+                total_match_count: "7".to_owned(),
+                scoring_terms: Vec::new(),
+                results: vec![SearchResult {
+                    turn_key: turn_key.clone(),
+                    session_key: "6".repeat(64),
+                    revision: "7".repeat(64),
+                    provider: "codex".to_owned(),
+                    project_key: None,
+                    observed_timestamp: "2026-08-10T01:00:00.000Z".to_owned(),
+                    closure: ClosureFilter::HardSealed,
+                    result_evidence: ResultEvidenceFilter::ProviderCompleted,
+                    problem_summary: "bounded problem".to_owned(),
+                    problem_truncated: false,
+                    final_summary: Some("bounded answer".to_owned()),
+                    final_truncated: false,
+                    dedupe: Some(SearchDedupe {
+                        duplicate_group_key: dedupe_group_key.clone(),
+                        confidence: DedupeConfidence::Strong,
+                        observed_eof_provisional: true,
+                    }),
+                    bm25_rank: Some(1),
+                    rank_component_ppm: 900_000,
+                    matched_field_terms: Vec::new(),
+                    matched_term_indexes: Vec::new(),
+                    coverage_ppm: 1_000_000,
+                    exact: true,
+                    relevance_ppm: 950_000,
+                }],
+                evidence_paths: EvidencePathReport {
+                    insufficient_sample: true,
+                    paths_truncated: false,
+                    raw_match_count: 1,
+                    eligible_turn_count: 1,
+                    raw_session_count: 1,
+                    independent_group_count: 1,
+                    strong_group_count: 1,
+                    weak_group_count: 0,
+                    observed_eof_provisional_group_count: 1,
+                    unknown_dedupe_count: 0,
+                    unknown_dedupe_session_count: 0,
+                    families: Vec::new(),
+                },
+                diagnostic: QueryDiagnostic::default(),
+            },
+            SearchTrace {
+                candidate_turn_keys: vec![turn_key],
+                candidate_count: 1,
+                ..SearchTrace::default()
+            },
+        );
+        assert_eq!(search["orderBy"], "relevance");
+        assert_eq!(search["totalMatchCount"], "7");
+        assert_eq!(
+            search["results"][0]["dedupe"]["duplicateGroupKey"],
+            dedupe_group_key
+        );
+        assert_eq!(search["results"][0]["dedupe"]["confidence"], "strong");
+        assert_eq!(
+            search["results"][0]["dedupe"]["observedEofProvisional"],
+            true
+        );
+        validate_protocol_message(&search).unwrap();
 
         let event = evidence_event_wire(SafeEvidenceEvent {
             event_key: "4".repeat(64),

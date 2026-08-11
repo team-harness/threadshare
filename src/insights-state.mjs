@@ -112,6 +112,67 @@ async function readOriginSecret(file, options) {
   return parseOriginSecret(await readFile(file), file);
 }
 
+async function readExistingOriginSecret(file) {
+  let entry;
+  try {
+    entry = await lstat(file, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw errorWithCode(
+        "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
+        "Insights origin secret is missing while indexed state still exists",
+        error,
+      );
+    }
+    throw error;
+  }
+  if (!entry.isFile() || entry.isSymbolicLink() || entry.size > BigInt(MAX_ORIGIN_SECRET_BYTES)) {
+    throw errorWithCode(
+      "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
+      `Invalid insights origin secret at ${file}`,
+    );
+  }
+
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino ||
+        opened.size !== entry.size || opened.mtimeNs !== entry.mtimeNs ||
+        opened.size > BigInt(MAX_ORIGIN_SECRET_BYTES)) {
+      throw errorWithCode(
+        "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
+        `Invalid insights origin secret at ${file}`,
+      );
+    }
+    return parseOriginSecret(await handle.readFile(), file);
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function assertExistingDatabase(file) {
+  let entry;
+  try {
+    entry = await lstat(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw errorWithCode(
+        "TS_INSIGHTS_NOT_INDEXED",
+        "Insights index is not available yet",
+        error,
+      );
+    }
+    throw error;
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw errorWithCode(
+      "TS_INSIGHTS_STATE_INVALID",
+      "Insights database is not a regular file",
+    );
+  }
+}
+
 async function stateDatabaseExists(databaseFile) {
   for (const file of [databaseFile, `${databaseFile}-wal`, `${databaseFile}-shm`]) {
     try {
@@ -223,6 +284,19 @@ export async function openInsightsState(options = {}) {
   return Object.freeze({
     paths,
     created: origin.created,
+    originSecretEpoch: privacyContext.originSecretEpoch,
+    privacyContext,
+  });
+}
+
+export async function openExistingInsightsState(options = {}) {
+  const paths = options.paths ?? resolveInsightsPaths(options);
+  await assertExistingDatabase(paths.databaseFile);
+  const origin = await readExistingOriginSecret(paths.originSecretFile);
+  const privacyContext = createPrivacyContext(origin);
+  return Object.freeze({
+    paths,
+    created: false,
     originSecretEpoch: privacyContext.originSecretEpoch,
     privacyContext,
   });

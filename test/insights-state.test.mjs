@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,7 +12,7 @@ import {
   updateInsightsExclusion,
 } from "../src/insights-config.mjs";
 import { resolveInsightsPaths } from "../src/insights-paths.mjs";
-import { openInsightsState } from "../src/insights-state.mjs";
+import { openExistingInsightsState, openInsightsState } from "../src/insights-state.mjs";
 
 test("resolves platform state and config paths with explicit environment overrides", () => {
   const darwin = resolveInsightsPaths({
@@ -115,6 +117,76 @@ test("opens a persistent origin secret and enforces POSIX private modes", async 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("opens existing Insights state without creating or repairing local files", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-existing-"));
+  const stateDirectory = path.join(directory, "state");
+  const paths = resolveInsightsPaths({
+    platform: "linux",
+    environment: { THREADSHARE_INSIGHTS_HOME: stateDirectory },
+  });
+  try {
+    await assert.rejects(
+      openExistingInsightsState({ paths }),
+      (error) => error?.code === "TS_INSIGHTS_NOT_INDEXED",
+    );
+    await assert.rejects(stat(stateDirectory), (error) => error?.code === "ENOENT");
+
+    const created = await openInsightsState({ paths, platform: "linux" });
+    await writeFile(paths.databaseFile, "existing database", { mode: 0o640 });
+    await chmod(paths.stateDirectory, 0o750);
+    await chmod(paths.originSecretFile, 0o640);
+    const beforeDirectory = await stat(paths.stateDirectory, { bigint: true });
+    const beforeDatabase = await stat(paths.databaseFile, { bigint: true });
+    const beforeSecret = await stat(paths.originSecretFile, { bigint: true });
+
+    const existing = await openExistingInsightsState({ paths, platform: "linux" });
+    const afterDirectory = await stat(paths.stateDirectory, { bigint: true });
+    const afterDatabase = await stat(paths.databaseFile, { bigint: true });
+    const afterSecret = await stat(paths.originSecretFile, { bigint: true });
+    assert.equal(existing.originSecretEpoch, created.originSecretEpoch);
+    assert.equal(existing.created, false);
+    assert.equal(afterDirectory.mode, beforeDirectory.mode);
+    assert.equal(afterDirectory.mtimeNs, beforeDirectory.mtimeNs);
+    assert.equal(afterDatabase.mode, beforeDatabase.mode);
+    assert.equal(afterDatabase.mtimeNs, beforeDatabase.mtimeNs);
+    assert.equal(afterSecret.mode, beforeSecret.mode);
+    assert.equal(afterSecret.mtimeNs, beforeSecret.mtimeNs);
+
+    await rm(paths.originSecretFile);
+    await assert.rejects(
+      openExistingInsightsState({ paths }),
+      (error) => error?.code === "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("existing-state open rejects a database symlink without touching its target", {
+  skip: process.platform === "win32" ? "symlink fixture requires elevated Windows privileges" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-symlink-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = resolveInsightsPaths({
+    platform: "linux",
+    environment: { THREADSHARE_INSIGHTS_HOME: path.join(directory, "state") },
+  });
+  await openInsightsState({ paths, platform: "linux" });
+  const target = path.join(directory, "private-target.sqlite3");
+  await writeFile(target, "must remain untouched", { mode: 0o640 });
+  const before = await stat(target, { bigint: true });
+  await symlink(target, paths.databaseFile);
+
+  await assert.rejects(
+    openExistingInsightsState({ paths }),
+    (error) => error?.code === "TS_INSIGHTS_STATE_INVALID",
+  );
+  const after = await stat(target, { bigint: true });
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mode, before.mode);
+  assert.equal(after.mtimeNs, before.mtimeNs);
 });
 
 test("requires an explicit owner-only ACL adapter on Windows", async () => {

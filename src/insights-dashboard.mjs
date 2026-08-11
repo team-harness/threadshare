@@ -1,15 +1,13 @@
-import { lstat } from "node:fs/promises";
 import process from "node:process";
 
 import {
   createInsightsBackgroundWorker,
-  insightsChildEnv,
   insightsRequiredContract,
 } from "./insights-command.mjs";
 import { createInsightsDashboardServer } from "./insights-dashboard-server.mjs";
-import { createInsightsEngineClient } from "./insights-engine-client.mjs";
 import { inspectInsightsState } from "./insights-lifecycle.mjs";
 import { resolveInsightsPaths } from "./insights-paths.mjs";
+import { createInsightsQueryReader } from "./insights-query-reader.mjs";
 import { openInsightsState } from "./insights-state.mjs";
 
 const DEFAULT_QUIESCENCE_SECONDS = 300;
@@ -21,30 +19,6 @@ function dashboardError(code, message, cause) {
   return error;
 }
 
-async function databaseIdentity(file) {
-  try {
-    const value = await lstat(file, { bigint: true });
-    if (!value.isFile() || value.isSymbolicLink()) {
-      throw dashboardError("TS_INSIGHTS_STATE_INVALID", "Insights database is not a regular file");
-    }
-    return Object.freeze({
-      dev: value.dev.toString(),
-      ino: value.ino.toString(),
-      size: value.size.toString(),
-      mtimeNs: value.mtimeNs.toString(),
-    });
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-function sameIdentity(left, right) {
-  return left !== null && right !== null &&
-    left.dev === right.dev && left.ino === right.ino &&
-    left.size === right.size && left.mtimeNs === right.mtimeNs;
-}
-
 function dashboardIndexLocation(environment = process.env) {
   return typeof environment?.THREADSHARE_INSIGHTS_HOME === "string" &&
     environment.THREADSHARE_INSIGHTS_HOME.trim() !== ""
@@ -53,84 +27,31 @@ function dashboardIndexLocation(environment = process.env) {
 }
 
 export function createCommittedInsightsReader(options) {
-  if (!options?.paths || typeof options.originSecretEpoch !== "string") {
-    throw new TypeError("paths and originSecretEpoch are required");
-  }
-  const createClient = options.createEngineClient ?? createInsightsEngineClient;
-  let client = null;
-  let identity = null;
-  let opening = null;
-  let invalidated = false;
-  let closed = false;
-
-  const closeCurrent = async () => {
-    const current = client;
-    client = null;
-    identity = null;
-    if (current !== null) await current.close();
-  };
-  const ensureClient = async () => {
-    if (closed) throw dashboardError("TS_INSIGHTS_DASHBOARD_CLOSED", "Dashboard reader is closed");
-    if (opening !== null) return opening;
-    opening = (async () => {
-      const currentIdentity = await databaseIdentity(options.paths.databaseFile);
-      if (currentIdentity === null) {
-        await closeCurrent();
-        invalidated = false;
-        return null;
-      }
-      if (!invalidated && client !== null && sameIdentity(identity, currentIdentity)) return client;
-      await closeCurrent();
-      const next = await createClient({
-        databasePath: options.paths.databaseFile,
-        requiredContract: insightsRequiredContract(options.originSecretEpoch),
-        runtimeOptions: options.runtimeOptions,
-        childEnv: insightsChildEnv(options.paths, options),
-        timeoutMs: options.timeoutMs,
-        closeTimeoutMs: options.closeTimeoutMs,
-      });
-      client = next;
-      identity = currentIdentity;
-      invalidated = false;
-      return next;
-    })().finally(() => { opening = null; });
-    return opening;
-  };
-  const requireClient = async () => {
-    const value = await ensureClient();
-    if (value === null) {
-      throw dashboardError("TS_INSIGHTS_NOT_INDEXED", "Insights index is not available yet");
-    }
-    return value;
-  };
+  const reader = createInsightsQueryReader(options);
 
   return Object.freeze({
     invalidate() {
-      invalidated = true;
+      reader.invalidate();
     },
     async readStatus(input) {
-      const value = await ensureClient();
-      if (value === null) return null;
-      const [overview, purge] = await Promise.all([
-        value.readInsightsOverview(input.overview, input.options),
-        value.readPurgeStatus(null, input.options),
-      ]);
-      return Object.freeze({ overview, purge });
+      try {
+        return await reader.status(input);
+      } catch (error) {
+        if (error?.code === "TS_INSIGHTS_NOT_INDEXED") return null;
+        throw error;
+      }
     },
     async search(input, options_) {
-      return (await requireClient()).searchTurns(input, options_);
+      return reader.search(input, options_);
     },
     async evidence(input, options_) {
-      return (await requireClient()).readTurnEvidence(input, options_);
+      return reader.evidence(input, options_);
     },
     async capabilities(input, options_) {
-      return (await requireClient()).listCapabilities(input, options_);
+      return reader.capabilities(input, options_);
     },
     async close() {
-      if (closed) return;
-      closed = true;
-      if (opening !== null) await opening.catch(() => {});
-      await closeCurrent();
+      await reader.close();
     },
   });
 }

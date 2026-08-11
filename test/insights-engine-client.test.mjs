@@ -536,6 +536,50 @@ process.stdin.on("data", (chunk) => {
         },
         searchTrace: { candidateCount: 0, candidateTurnKeys: [] },
       });
+    } else if (message.type === "READ_CAPABILITY_USAGE") {
+      if (message.kind !== "tool" || message.orderBy !== "recorded-invocation-count") {
+        process.exit(14);
+      }
+      send({
+        format: "threadshare-insights-protocol@v1", type: "CAPABILITY_USAGE",
+        requestId: message.requestId,
+        databaseUuid: "11111111-2222-4333-8444-555555555555",
+        snapshotSeq: "7", closureEvaluatedAt: "2026-08-11T00:00:00.000Z",
+        quiescenceSeconds: 300, orderBy: message.orderBy, items: [],
+        totalCandidateCount: "0", truncated: false,
+        coverage: {
+          excludedUndatedInvocationCount: "0", excludedUndatedTurnCount: "0",
+          excludedUnrevisionedInvocationCount: "0", excludedUnrevisionedTurnCount: "0",
+          fullyExcludedCapabilityCount: "0",
+        },
+        nextCursor: null,
+      });
+    } else if (message.type === "READ_INSIGHTS_ACTIVITY") {
+      if (message.bucket !== "day" || message.timeZone !== "UTC") process.exit(15);
+      send({
+        format: "threadshare-insights-protocol@v1", type: "INSIGHTS_ACTIVITY",
+        requestId: message.requestId,
+        databaseUuid: "11111111-2222-4333-8444-555555555555",
+        snapshotSeq: "7", closureEvaluatedAt: "2026-08-11T00:00:00.000Z",
+        quiescenceSeconds: 300,
+        buckets: [{
+          bucketStart: "2026-08-10T00:00:00.000Z",
+          bucketEnd: "2026-08-11T00:00:00.000Z",
+          distinctSessionCount: "0", distinctTurnCount: "0",
+          currentClosureCounts: { hardSealed: "0", quiescent: "0", open: "0" },
+          turnResultEvidenceCounts: { providerCompleted: "0", abandoned: "0", unknown: "0" },
+          recordedToolInvocationCount: "0", recordedSkillInvocationCount: "0",
+          support: {
+            distinctDedupeGroupCount: "0", strongDedupeGroupCount: "0",
+            weakDedupeGroupCount: "0", observedEofProvisionalGroupCount: "0",
+            unknownDedupeSessionCount: "0",
+          },
+        }],
+        coverage: {
+          excludedUndatedInvocationCount: "0", excludedUndatedTurnCount: "0",
+          excludedUnrevisionedInvocationCount: "0", excludedUnrevisionedTurnCount: "0",
+        },
+      });
     } else if (message.type === "READ_TURN_EVIDENCE") {
       if (message.turnKey !== turnKey || message.expectedRevision !== revision) process.exit(13);
       send({
@@ -557,6 +601,43 @@ process.stdin.on("data", (chunk) => {
           },
         }],
         nextCursor: null,
+      });
+    }
+  }
+});
+`;
+  await writeFile(binaryPath, binary, { mode: 0o700 });
+  return binaryPath;
+}
+
+async function createHangingReadEngine(directory) {
+  const binaryPath = path.join(directory, "hanging-read-engine");
+  const binary = `#!/usr/bin/env node
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+}
+function send(message) {
+  const payload = Buffer.from(canonical(message));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(payload.length);
+  process.stdout.write(Buffer.concat([prefix, payload]));
+}
+let input = Buffer.alloc(0);
+process.stdin.on("data", (chunk) => {
+  input = Buffer.concat([input, chunk]);
+  while (input.length >= 4) {
+    const length = input.readUInt32BE(0);
+    if (input.length < length + 4) return;
+    const message = JSON.parse(input.subarray(4, length + 4).toString("utf8"));
+    input = input.subarray(length + 4);
+    if (message.type === "HELLO") {
+      send({
+        format: "threadshare-insights-protocol@v1", type: "READY", requestId: message.requestId,
+        engineVersion: "test", target: "development", maxFrameBytes: 4194304,
+        sqliteVersion: "3.53.2", sqliteCompileOptionsDigest: "c".repeat(64),
+        buildManifestDigest: "d".repeat(64), acceptedContract: message.requiredContract,
       });
     }
   }
@@ -968,7 +1049,7 @@ test("an aborted operation does not poison a ready sidecar", {
   });
 });
 
-test("search and evidence requests use the strict paged query protocol", {
+test("search, aggregate, and evidence requests use the strict query protocol", {
   timeout: 30_000,
   skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
 }, async (t) => {
@@ -1003,6 +1084,40 @@ test("search and evidence requests use the strict paged query protocol", {
   assert.deepEqual(search.searchTrace, { candidateCount: 0, candidateTurnKeys: [] });
   assert.equal(Object.isFrozen(search), true);
 
+  const usage = await client.readCapabilityUsage({
+    kind: "tool",
+    window: {
+      observedAtOrAfterUnixMs: "1786320000000",
+      observedBeforeUnixMs: "1786406400000",
+    },
+    comparisonWindow: null,
+    filters: {
+      providers: ["codex"], projectKeys: [], closureStates: [], capabilityTerminalStates: [],
+    },
+    orderBy: "recorded-invocation-count",
+    cursor: null,
+    limit: 5,
+    nowUnixMs: "1786406400000",
+    quiescenceSeconds: 300,
+  });
+  assert.equal(usage.totalCandidateCount, "0");
+  assert.equal(usage.orderBy, "recorded-invocation-count");
+  assert.equal(Object.isFrozen(usage.coverage), true);
+
+  const activity = await client.readInsightsActivity({
+    window: {
+      observedAtOrAfter: "2026-08-10T00:00:00.000Z",
+      observedBefore: "2026-08-11T00:00:00.000Z",
+    },
+    filters: { providers: ["codex"], projectKeys: [], closureStates: [] },
+    bucket: "day",
+    timeZone: "UTC",
+    nowUnixMs: "1786406400000",
+    quiescenceSeconds: 300,
+  });
+  assert.equal(activity.buckets[0].bucketStart, "2026-08-10T00:00:00.000Z");
+  assert.equal(Object.isFrozen(activity.buckets[0]), true);
+
   const page = await client.readTurnEvidence({
     turnKey: "e".repeat(64),
     expectedRevision: "f".repeat(64),
@@ -1010,6 +1125,41 @@ test("search and evidence requests use the strict paged query protocol", {
   assert.equal(page.turn.problemText, "question");
   assert.equal(page.entries[0].fact.linkedTurns[0].role, "lifecycle");
   assert.equal(Object.isFrozen(page), true);
+});
+
+test("an aborted read closes the sidecar before another response can reuse it", {
+  timeout: 10_000,
+  skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-read-abort-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binaryPath = await createHangingReadEngine(directory);
+  const client = await createInsightsEngineClient({
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
+    },
+    requiredContract: handshakeContract(),
+    timeoutMs: 5_000,
+  });
+  t.after(() => client.close());
+  const controller = new AbortController();
+  const pending = client.searchTurns({
+    query: "needle",
+    filters: {
+      providers: ["codex"], projectKeys: [],
+      observedAtOrAfterUnixMs: null, observedBeforeUnixMs: null,
+      toolCapabilityKeys: [], skillCapabilityKeys: [],
+      resultEvidence: [], closureStates: [],
+    },
+    nowUnixMs: "1786323723000",
+  }, { signal: controller.signal });
+  controller.abort();
+
+  await assert.rejects(pending, { code: "TS_INSIGHTS_ENGINE_ABORTED", fatal: true });
+  await assert.rejects(
+    client.readInsightsOverview({ nowUnixMs: "1786323723000" }),
+    { code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true },
+  );
 });
 
 test("disconnecting after SESSION_ACCEPTED does not commit the main database", {

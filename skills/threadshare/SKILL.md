@@ -16,6 +16,7 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
 - List local native sessions: `threadshare sessions <codex|claude> --format json`
 - Analyze one local native session without uploading: `threadshare analyze <codex|claude> <session> --format json`
+- Query committed local history: `threadshare insights <overview|search|capabilities|usage|activity|evidence> ... --format json`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
 - Preflight without uploading: `threadshare share <provider> <session-or-agent> --dry-run --report --json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
@@ -35,6 +36,29 @@ Override the shared service only when requested, using `--url <service-url>` or 
 ## Analyze A Local Session
 
 Use `analyze` when the user wants Turn closure, Tool/Skill usage, retry evidence, or rollback visibility for one native Codex or Claude session. It is local-only, calls no external model, and does not upload the session. Prefer `--format json` for agent inspection; use the default text view for a person. Treat completed, exit 0, or a single validation as observed evidence only, never as proof that the problem was solved or the Tool was effective.
+
+## Query Local Insights
+
+Use `insights` when the user wants cross-session evidence from the committed local index. Query actions
+are local, JSON-only, and do not upload or rescan raw provider sessions. If status reports no index, ask
+before running the maintenance action `threadshare insights reindex`; queries never reindex implicitly.
+
+1. Use `overview` to establish the committed snapshot and coverage. Use `capabilities` to resolve a Tool
+   or Skill key before filtering Search or requesting Usage.
+2. Use `usage` for time-window rankings. Choose recorded invocation count for "used most" and distinct
+   dedupe group count for breadth; never substitute one for the other. Always report grouped and
+   ungrouped invocations plus dedupe support. If ungrouped is non-zero, state that its independence cannot
+   be evaluated. If distinct sessions exceed distinct dedupe groups, state that recorded invocations may
+   include duplicate bookkeeping across related sessions.
+3. Use `activity` for aligned UTC day or ISO-week trends. Treat closure counts as current state evaluated
+   at the response clock, not as the closure state that existed during the historical bucket.
+4. Use `search` to find candidate Turns, then request `evidence` with the exact returned Turn revision.
+   Preserve the response window, snapshot, and evidence Turn keys when presenting a conclusion.
+5. Describe invocation terminal counts separately from containing-Turn outcomes. They are different axes
+   with different denominators; never say a Tool or Skill caused success, failure, improvement, or decline.
+
+Use `threadshare insights <action> --help` for request files, filters, limits, and cursor syntax. Never put
+raw Tool arguments, Tool output, system/thinking content, local paths, or internal digests into a summary.
 
 ## Choose A Start Turn
 

@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-overview.v1.schema.json",
+  "title": "Threadshare Insights Overview V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "closureEvaluatedAt", "quiescenceSeconds", "sessions", "scopes", "dedupe", "turns", "capabilities", "providers", "projects", "coverage", "diagnostics"],
+  "properties": {
+    "format": { "const": "threadshare-insights-overview@v1" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "const": "not-evaluated" },
+    "closureEvaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "quiescenceSeconds": { "type": "integer", "minimum": 0 },
+    "sessions": { "$ref": "#/$defs/sessionCounts" },
+    "scopes": { "$ref": "#/$defs/scopeCounts" },
+    "dedupe": { "$ref": "#/$defs/dedupeCounts" },
+    "turns": { "$ref": "#/$defs/turnCounts" },
+    "capabilities": { "$ref": "#/$defs/capabilityCounts" },
+    "providers": { "$ref": "#/$defs/providerRollup" },
+    "projects": { "$ref": "#/$defs/projectRollup" },
+    "coverage": { "$ref": "#/$defs/keyCountRollup" },
+    "diagnostics": { "$ref": "#/$defs/diagnosticRollup" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "$ref": "#/$defs/hex64" } }
+    },
+    "sessionCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw", "eligible", "excluded", "subagentExcluded", "unknown"],
+      "properties": {
+        "raw": { "$ref": "#/$defs/decimal" }, "eligible": { "$ref": "#/$defs/decimal" },
+        "excluded": { "$ref": "#/$defs/decimal" }, "subagentExcluded": { "$ref": "#/$defs/decimal" },
+        "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "scopeCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["main", "subagent", "unknown"],
+      "properties": {
+        "main": { "$ref": "#/$defs/decimal" }, "subagent": { "$ref": "#/$defs/decimal" },
+        "unknown": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "dedupeCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strongGroup", "weakGroup", "observedEofProvisionalSession", "unknownSession"],
+      "properties": {
+        "strongGroup": { "$ref": "#/$defs/decimal" }, "weakGroup": { "$ref": "#/$defs/decimal" },
+        "observedEofProvisionalSession": { "$ref": "#/$defs/decimal" },
+        "unknownSession": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "turnCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["indexed", "active", "rolledBack", "unknownVisibility", "hardSealed", "quiescent", "open"],
+      "properties": {
+        "indexed": { "$ref": "#/$defs/decimal" }, "active": { "$ref": "#/$defs/decimal" },
+        "rolledBack": { "$ref": "#/$defs/decimal" }, "unknownVisibility": { "$ref": "#/$defs/decimal" },
+        "hardSealed": { "$ref": "#/$defs/decimal" }, "quiescent": { "$ref": "#/$defs/decimal" },
+        "open": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "capabilityCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "tool", "skill"],
+      "properties": {
+        "total": { "$ref": "#/$defs/decimal" }, "tool": { "$ref": "#/$defs/decimal" },
+        "skill": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "providerRollupItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "rawSessionCount", "eligibleSessionCount", "indexedTurnCount"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "rawSessionCount": { "$ref": "#/$defs/decimal" },
+        "eligibleSessionCount": { "$ref": "#/$defs/decimal" },
+        "indexedTurnCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "projectRollupItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["projectKey", "rawSessionCount", "eligibleSessionCount", "indexedTurnCount"],
+      "properties": {
+        "projectKey": { "$ref": "#/$defs/hex64" },
+        "rawSessionCount": { "$ref": "#/$defs/decimal" },
+        "eligibleSessionCount": { "$ref": "#/$defs/decimal" },
+        "indexedTurnCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "providerRollup": {
+      "type": "object", "additionalProperties": false, "required": ["items", "truncated"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/providerRollupItem" } },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "projectRollup": {
+      "type": "object", "additionalProperties": false, "required": ["items", "truncated"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/projectRollupItem" } },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "keyCountRollup": {
+      "type": "object", "additionalProperties": false, "required": ["items", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["key", "count"],
+            "properties": { "key": { "type": "string", "minLength": 1 }, "count": { "$ref": "#/$defs/decimal" } }
+          }
+        },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "diagnosticRollup": {
+      "type": "object", "additionalProperties": false, "required": ["items", "truncated"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["code", "count"],
+            "properties": { "code": { "type": "string", "minLength": 1 }, "count": { "$ref": "#/$defs/decimal" } }
+          }
+        },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  }
+}
