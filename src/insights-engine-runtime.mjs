@@ -7,14 +7,18 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalJson } from "./canonical-json.mjs";
 import {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
+  insightsEngineReleaseTarget,
   insightsEngineTarget,
 } from "./insights-engine-targets.mjs";
 
 export {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
+  insightsEngineReleaseTarget,
   insightsEngineTarget,
 };
 
@@ -140,11 +144,11 @@ export async function resolveInsightsEngine(options = {}) {
     });
   }
 
-  const target = insightsEngineTarget(platform, arch);
+  const target = insightsEngineReleaseTarget(platform, arch);
   if (!target) {
     throw runtimeError(
       "TS_INSIGHTS_ENGINE_UNAVAILABLE",
-      "Insights is not available for this operating system and architecture",
+      "Insights is not packaged for this platform in this release",
     );
   }
   const packageName = insightsEnginePackageName(target.target);

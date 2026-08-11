@@ -49,8 +49,8 @@ Stable npm releases are published only by `.github/workflows/publish-npm.yml` fr
 
 One-time npm package settings:
 
-- The six `@team-harness/threadshare-<target>` package names must exist before npm allows Trusted Publisher configuration. This bootstrap is not implied by an Epic or release authorization: obtain explicit owner approval first, then publish only a binary-free `0.0.0-bootstrap.0` with the `bootstrap` dist-tag from a clean temporary directory using interactive 2FA. Never create or move `latest`, and never repeat the bootstrap.
-- Trusted Publisher for the root and all six platform packages: organization `team-harness`, repository `threadshare`, workflow `publish-npm.yml`, no Environment, and allowed action `npm publish` only.
+- The four released Engine package names (`darwin-arm64`, `darwin-x64`, `linux-arm64`, and `linux-x64`) must exist before npm allows Trusted Publisher configuration. This bootstrap is not implied by an Epic or release authorization: obtain explicit owner approval first, then publish only a binary-free `0.0.0-bootstrap.0` with the `bootstrap` dist-tag from a clean temporary directory using interactive 2FA. Never manually create or move `latest`, and never repeat the bootstrap. npm may initialize `latest` to `0.0.0-bootstrap.0` when the first version creates the package; release verification accepts only that exact bootstrap exception until the first stable publish replaces it. Windows receives the root core CLI only; do not bootstrap or publish Windows Engine packages until the owner-only ACL adapter is implemented and separately approved.
+- Trusted Publisher for the root and all four released Engine packages: organization `team-harness`, repository `threadshare`, workflow `publish-npm.yml`, no Environment, and allowed action `npm publish` only.
 - Publishing access: require 2FA and disallow token publishing. Trusted Publishing remains the automation path.
 
 For each stable release:
@@ -59,13 +59,13 @@ For each stable release:
 2. Run the full verification above plus `npm run test:insights-engine` and `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 54-file source-root allowlist and each platform package's exact four-file allowlist from `scripts/verify-release.mjs`.
 3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
 4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
-5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`. Require its six signed/notarized Engine artifacts, SBOMs, attempt-scoped seven-package release bundle, platform publication, six-platform registry consumer smoke, and root-last publication to finish successfully. Then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.
+5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`. Require its four signed/notarized Engine artifacts and SBOMs, attempt-scoped five-package release bundle, Engine publication, six-target consumer smoke (full Insights on macOS/Linux and core-only on Windows), and root-last publication to finish successfully. Then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.
 
 The workflow pins GitHub Actions, Rust, SQLite, Node, and npm. Update those pins together with the release automation tests. Publish jobs may only consume the attempt-scoped release bundle; they must not rebuild, resign, or repack. A rerun of an already published release must use `gh run rerun <run-id>` so it retains the original event SHA and pinned toolchain.
 
 Recovery rules:
 
-- If npm contains none of the seven target versions and the workflow failed before publish, fix `main`, then delete the unpublished release and tag with `gh release delete <version> --cleanup-tag --yes`; recreate it from the fixed commit.
+- If npm contains none of the five target versions and the workflow failed before publish, fix `main`, then delete the unpublished release and tag with `gh release delete <version> --cleanup-tag --yes`; recreate it from the fixed commit.
 - If any platform or root package contains the target version and only registry confirmation failed transiently, get the run ID from `gh run list --workflow publish-npm.yml --limit 10`, then use `gh run rerun <run-id>`. Never delete or move its tag.
 - If any platform package contains the version and source, provenance, generated manifest, binary, or workflow logic needs a code change, keep that release and tag immutable, do not backfill the root package, fix `main`, and publish a new version.
 - A cancelled run is incomplete. Rerun it before any higher release. If a higher version already reached npm, never backfill the lower version.

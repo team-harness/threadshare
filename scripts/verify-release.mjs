@@ -18,6 +18,7 @@ export const PACKAGE_NAME = "@team-harness/threadshare";
 const REGISTRY_URL = "https://registry.npmjs.org";
 const SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1";
 const STABLE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const BOOTSTRAP_VERSION = "0.0.0-bootstrap.0";
 
 export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "LICENSE",
@@ -197,8 +198,13 @@ function validatePackument(packument, packageName, { allowBootstrap = false } = 
     throw new Error("registry packument must contain dist-tags");
   }
   const latest = packument["dist-tags"].latest;
-  if (latest !== undefined) parseStableVersion(latest, "registry latest");
-  else if (!allowBootstrap) throw new Error("registry packument must contain stable latest");
+  const bootstrapLatest = allowBootstrap &&
+    latest === BOOTSTRAP_VERSION &&
+    packument["dist-tags"].bootstrap === BOOTSTRAP_VERSION;
+  if (latest !== undefined && !bootstrapLatest) parseStableVersion(latest, "registry latest");
+  else if (latest === undefined && !allowBootstrap) {
+    throw new Error("registry packument must contain stable latest");
+  }
   if (!packument.versions || typeof packument.versions !== "object" || Array.isArray(packument.versions)) {
     throw new Error("registry packument must contain versions");
   }

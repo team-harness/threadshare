@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import {
-  INSIGHTS_ENGINE_TARGETS,
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   insightsEnginePackageName,
 } from "../src/insights-engine-targets.mjs";
 import { canonicalJson } from "../src/canonical-json.mjs";
@@ -46,7 +46,7 @@ async function ensureEmptyDirectory(directory) {
 
 function descriptors(stagingDirectory, version) {
   return [
-    ...INSIGHTS_ENGINE_TARGETS.map((target) => ({
+    ...INSIGHTS_ENGINE_RELEASE_TARGETS.map((target) => ({
       directory: path.join(stagingDirectory, target.target),
       kind: "platform",
       name: insightsEnginePackageName(target.target),
@@ -223,7 +223,9 @@ async function packExisting(descriptor, stagingDirectory, outputDirectory, sourc
   if (!Buffer.from(canonicalJson(registry)).equals(registryBytes)) {
     throw new Error(`${descriptor.name} registry artifact must be canonical JSON`);
   }
-  const target = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === descriptor.target);
+  const target = INSIGHTS_ENGINE_RELEASE_TARGETS.find(
+    (candidate) => candidate.target === descriptor.target,
+  );
   const inspection = await inspectPlatformTarball({
     tarballPath: sourceTarball,
     target,
@@ -314,7 +316,7 @@ function assertReleaseManifest(manifest, expected = {}) {
     Object.keys(manifest).sort().join("\n") !== manifestKeys.join("\n") ||
     manifest?.format !== "threadshare-insights-release@v1" ||
     !Array.isArray(manifest.packages) ||
-    manifest.packages.length !== 7 ||
+    manifest.packages.length !== INSIGHTS_ENGINE_RELEASE_TARGETS.length + 1 ||
     !GIT_OBJECT_ID.test(manifest.sourceSha) ||
     !/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u.test(manifest.version) ||
     !/^[1-9][0-9]*$/u.test(manifest.runId) ||
@@ -361,7 +363,7 @@ export async function verifyReleaseArtifacts({ artifactDirectory, ...expected })
   }
   assertReleaseManifest(manifest, expected);
   const expectedNames = new Set([
-    ...INSIGHTS_ENGINE_TARGETS.map((target) => insightsEnginePackageName(target.target)),
+    ...INSIGHTS_ENGINE_RELEASE_TARGETS.map((target) => insightsEnginePackageName(target.target)),
     PACKAGE_NAME,
   ]);
   for (const item of manifest.packages) {
@@ -380,7 +382,7 @@ export async function verifyReleaseArtifacts({ artifactDirectory, ...expected })
     }
     if (item.kind === "root") {
       const expectedOptional = Object.fromEntries(
-        INSIGHTS_ENGINE_TARGETS
+        INSIGHTS_ENGINE_RELEASE_TARGETS
           .map((target) => insightsEnginePackageName(target.target))
           .sort()
           .map((name) => [name, manifest.version]),
@@ -389,7 +391,9 @@ export async function verifyReleaseArtifacts({ artifactDirectory, ...expected })
         throw new Error("staged root optional dependencies are invalid");
       }
     } else {
-      const target = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === item.target);
+      const target = INSIGHTS_ENGINE_RELEASE_TARGETS.find(
+        (candidate) => candidate.target === item.target,
+      );
       if (!target) throw new Error("platform artifact target is invalid");
       const rawBuildManifest = await tarEntry(tarballPath, "package/build-manifest.json");
       if (sha256(rawBuildManifest) !== item.buildManifestDigest) {

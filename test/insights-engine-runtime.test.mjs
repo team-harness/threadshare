@@ -5,8 +5,10 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
+  insightsEngineReleaseTarget,
   insightsEngineTarget,
   resolveInsightsEngine,
 } from "../src/insights-engine-runtime.mjs";
@@ -27,6 +29,14 @@ test("target matrix covers six unique npm and Rust targets", () => {
     insightsEnginePackageName("win32-x64"),
     "@team-harness/threadshare-win32-x64",
   );
+  assert.deepEqual(INSIGHTS_ENGINE_RELEASE_TARGETS.map(({ target }) => target), [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+  ]);
+  assert.equal(insightsEngineReleaseTarget("win32", "x64"), null);
+  assert.equal(insightsEngineReleaseTarget("linux", "x64").target, "linux-x64");
 });
 
 test("explicit Engine path works without platform package metadata", async () => {
@@ -116,6 +126,22 @@ test("unsupported and missing platform packages only disable Insights", async ()
   await assert.rejects(
     resolveInsightsEngine({ platform: "freebsd", arch: "x64", env: {} }),
     { code: "TS_INSIGHTS_ENGINE_UNAVAILABLE", failureKind: "engine_unavailable" },
+  );
+  await assert.rejects(
+    resolveInsightsEngine({
+      platform: "win32",
+      arch: "x64",
+      version: "0.7.0",
+      env: {},
+      resolvePackage() {
+        throw new Error("Windows package resolution must not run");
+      },
+    }),
+    {
+      code: "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+      failureKind: "engine_unavailable",
+      message: "Insights is not packaged for this platform in this release",
+    },
   );
   await assert.rejects(
     resolveInsightsEngine({

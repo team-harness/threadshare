@@ -890,6 +890,17 @@ async function main() {
   }
   if (command === "insights") {
     validateCommandInvocation(command, positionals, options);
+    const { insightsEngineReleaseTarget } = await import("../src/insights-engine-targets.mjs");
+    if (insightsEngineReleaseTarget() === null) {
+      throw cliDiagnostic(
+        "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+        "Local Insights is not available for this platform in this release.",
+        {
+          command: "insights",
+          next: "Use Threadshare core commands on Windows, or run Insights on macOS or Linux.",
+        },
+      );
+    }
     const queryOnlyOptions = {
       cursor: options.cursor,
       limit: options.limit,

@@ -12,7 +12,7 @@ import {
   inspectPlatformTarball,
   verifyReleaseArtifacts,
 } from "./package-insights-release.mjs";
-import { INSIGHTS_ENGINE_TARGETS } from "../src/insights-engine-targets.mjs";
+import { INSIGHTS_ENGINE_RELEASE_TARGETS } from "../src/insights-engine-targets.mjs";
 import {
   decidePublish,
   fetchPackument,
@@ -176,7 +176,9 @@ async function inspectPublishedPlatform({
   packument,
   fetchImpl,
 }) {
-  const target = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === item.target);
+  const target = INSIGHTS_ENGINE_RELEASE_TARGETS.find(
+    (candidate) => candidate.target === item.target,
+  );
   if (!target) throw new Error(`${item.packageName} release target is invalid`);
   const published = packument.versions[manifest.version];
   const tarballUrl = published?.dist?.tarball;

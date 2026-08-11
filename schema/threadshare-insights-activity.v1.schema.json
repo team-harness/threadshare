@@ -83,8 +83,9 @@
     },
     "coverage": {
       "type": "object", "additionalProperties": false,
-      "required": ["excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap"],
+      "required": ["scope", "excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap"],
       "properties": {
+        "scope": { "const": "all-indexed-history" },
         "excludedUndatedInvocationCount": { "$ref": "#/$defs/decimal" },
         "excludedUndatedTurnCount": { "$ref": "#/$defs/decimal" },
         "excludedUnrevisionedInvocationCount": { "$ref": "#/$defs/decimal" },

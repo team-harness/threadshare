@@ -144,8 +144,9 @@
     },
     "coverage": {
       "type": "object", "additionalProperties": false,
-      "required": ["excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap", "fullyExcludedCapabilityCount"],
+      "required": ["scope", "excludedUndatedInvocationCount", "excludedUndatedTurnCount", "excludedUnrevisionedInvocationCount", "excludedUnrevisionedTurnCount", "categoriesMayOverlap", "fullyExcludedCapabilityCount"],
       "properties": {
+        "scope": { "const": "all-indexed-history" },
         "excludedUndatedInvocationCount": { "$ref": "#/$defs/decimal" },
         "excludedUndatedTurnCount": { "$ref": "#/$defs/decimal" },
         "excludedUnrevisionedInvocationCount": { "$ref": "#/$defs/decimal" },

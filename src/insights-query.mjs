@@ -825,6 +825,7 @@ function decimalObject(value, fields) {
 function publicCoverage(value, { fullyExcluded = false } = {}) {
   if (!plainObject(value)) throw responseError("Engine response is missing query coverage");
   return {
+    scope: "all-indexed-history",
     excludedUndatedInvocationCount: decimal(value.excludedUndatedInvocationCount),
     excludedUndatedTurnCount: decimal(value.excludedUndatedTurnCount),
     excludedUnrevisionedInvocationCount: decimal(value.excludedUnrevisionedInvocationCount),

@@ -113,16 +113,6 @@ jobs:
             runner: ubuntu-24.04
             binary: threadshare-insights-engine
             rustflags: -C link-arg=-Wl,--build-id=none
-          - target: win32-arm64
-            rust_target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            binary: threadshare-insights-engine.exe
-            rustflags: -C link-arg=/Brepro
-          - target: win32-x64
-            rust_target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            binary: threadshare-insights-engine.exe
-            rustflags: -C link-arg=/Brepro
     env:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
       CARGO_PROFILE_RELEASE_LTO: "true"
@@ -260,23 +250,6 @@ jobs:
         shell: bash
         run: security delete-keychain "$RUNNER_TEMP/threadshare-signing.keychain-db" || true
 
-      - name: Sign Windows Engine
-        if: runner.os == 'Windows' && steps.existing.outputs.exists != 'true'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not $env:WINDOWS_CERTIFICATE_PFX) { throw "WINDOWS_CERTIFICATE_PFX is required" }
-          $pfx = Join-Path $env:RUNNER_TEMP "threadshare-signing.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
-          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signTool) { throw "signtool.exe was not found" }
-          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD "engine/${{ matrix.target }}/${{ matrix.binary }}"
-          & $signTool.FullName verify /pa /v "engine/${{ matrix.target }}/${{ matrix.binary }}"
-
       - name: Smoke selected Engine and record native identity
         shell: bash
         run: |
@@ -342,7 +315,7 @@ jobs:
           path: engine
           merge-multiple: true
 
-      - name: Prove staged root reproducibility and pack the seven packages once
+      - name: Prove staged root reproducibility and pack the five packages once
         shell: bash
         run: |
           set -euo pipefail
@@ -418,16 +391,22 @@ jobs:
         include:
           - target: darwin-arm64
             runner: macos-15
+            smoke: insights
           - target: darwin-x64
             runner: macos-15-intel
+            smoke: insights
           - target: linux-arm64
             runner: ubuntu-24.04-arm
+            smoke: insights
           - target: linux-x64
             runner: ubuntu-24.04
+            smoke: insights
           - target: win32-arm64
             runner: windows-11-arm
+            smoke: core
           - target: win32-x64
             runner: windows-2025
+            smoke: core
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org
       RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -462,7 +441,11 @@ jobs:
           ROOT_TARBALL="$(node -e "const m=require('./release-artifacts/release-manifest.json');process.stdout.write(m.packages.find((p)=>p.kind==='root').tarball)")"
           mkdir -p "$RUNNER_TEMP/threadshare-consumer"
           npm install --prefix "$RUNNER_TEMP/threadshare-consumer" "./release-artifacts/$ROOT_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org
-          node scripts/smoke-installed-insights.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"
+          if [[ "${{ matrix.smoke }}" == "insights" ]]; then
+            node scripts/smoke-installed-insights.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"
+          else
+            node scripts/smoke-installed-core.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"
+          fi
 
   publish-root:
     needs: consumer-smoke

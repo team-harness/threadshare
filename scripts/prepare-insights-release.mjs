@@ -16,6 +16,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
 } from "../src/insights-engine-targets.mjs";
@@ -39,12 +40,18 @@ function assertReleaseIdentity(version, sourceSha) {
   }
 }
 
-function platformDependencyNames() {
+function knownPlatformDependencyNames() {
   return INSIGHTS_ENGINE_TARGETS.map((target) => insightsEnginePackageName(target.target)).sort();
 }
 
+function releasePlatformDependencyNames() {
+  return INSIGHTS_ENGINE_RELEASE_TARGETS
+    .map((target) => insightsEnginePackageName(target.target))
+    .sort();
+}
+
 export function assertSourceManifestHasNoPlatformPackages(packageJson, packageLock) {
-  const forbidden = platformDependencyNames();
+  const forbidden = knownPlatformDependencyNames();
   const documents = [
     ["package.json", packageJson],
     ["package-lock.json", packageLock],
@@ -67,7 +74,7 @@ export function createStagedRootManifest(sourceManifest, version) {
     throw new Error("source package version must equal the staged release version");
   }
   const optionalDependencies = Object.fromEntries(
-    platformDependencyNames().map((packageName) => [packageName, version]),
+    releasePlatformDependencyNames().map((packageName) => [packageName, version]),
   );
   return { ...structuredClone(sourceManifest), optionalDependencies };
 }
@@ -212,7 +219,7 @@ export async function stageInsightsRelease({ root, binariesDirectory, outputDire
   const existingDirectory = path.join(outputDirectory, "existing");
 
   const packages = [];
-  for (const target of INSIGHTS_ENGINE_TARGETS) {
+  for (const target of INSIGHTS_ENGINE_RELEASE_TARGETS) {
     const binaryName = target.platform === "win32" ? `${ENGINE_BASENAME}.exe` : ENGINE_BASENAME;
     const targetDirectory = path.join(binariesDirectory, target.target);
     const versionDocument = await readEngineVersionDocument(targetDirectory);

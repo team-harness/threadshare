@@ -44,7 +44,10 @@ are local, JSON-only, and do not upload or rescan raw provider sessions. If stat
 before running the maintenance action `threadshare insights reindex`; queries never reindex implicitly.
 
 1. Use `overview` to establish the committed snapshot and coverage. Use `capabilities` to resolve a Tool
-   or Skill key before filtering Search or requesting Usage.
+   or Skill key before filtering Search or requesting Usage. Query `coverage` counts have
+   `scope: "all-indexed-history"`; they do not shrink to a Usage or Activity window. A non-zero
+   `fullyExcludedCapabilityCount` means the directory omits capabilities whose uses all lack a queryable
+   timestamp or revision.
 2. Use `usage` for time-window rankings. Choose recorded invocation count for "used most" and distinct
    dedupe group count for breadth; never substitute one for the other. Always report grouped and
    ungrouped invocations plus dedupe support. If ungrouped is non-zero, state that its independence cannot

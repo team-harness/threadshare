@@ -609,6 +609,7 @@ test("Usage and Activity projections expose only stable aggregate semantics", as
   ]);
   assert.equal(usage.items[0].recordedInvocationCount, "7");
   assert.equal(usage.items[0].comparison.absoluteRecordedInvocationChange, "2");
+  assert.equal(usage.coverage.scope, "all-indexed-history");
   assert.equal(usage.coverage.categoriesMayOverlap, true);
   assert.equal(typeof usage.nextCursor, "string");
   for (const canary of ["PRIVATE_EXACT", "inputFingerprint", "privatePath", "internalTimingMicros"]) {
@@ -633,6 +634,7 @@ test("Usage and Activity projections expose only stable aggregate semantics", as
   ]);
   assert.equal(activity.buckets[0].bucketEnd, "2026-08-11T00:00:00.000Z");
   assert.equal(activity.buckets[0].recordedToolInvocationCount, "7");
+  assert.equal(activity.coverage.scope, "all-indexed-history");
   assert.equal(activity.coverage.categoriesMayOverlap, true);
   assert.equal(JSON.stringify(activity).includes("rawProviderPath"), false);
   assert.equal(JSON.stringify(activity).includes("SELECT private"), false);

@@ -47,6 +47,7 @@ test("usage and activity schemas lock the non-causal aggregate axes", async () =
   const schemas = await compiledSchemas();
   const snapshot = { seq: "1", token: "a".repeat(64) };
   const coverage = {
+    scope: "all-indexed-history",
     excludedUndatedInvocationCount: "0",
     excludedUndatedTurnCount: "0",
     excludedUnrevisionedInvocationCount: "0",

@@ -180,8 +180,9 @@ Skill 固化至少五条组合流程：最近 recorded invocation 最多或 dist
 - 2026-08-11：`npm run test:release` 58/58 通过，installed-smoke 注入、54-file root allowlist、六平台发布矩阵与 clean-tree release imports 均保持有效。
 - 2026-08-11：Rust Usage/Activity/Search、Engine dispatch、Node protocol/client/reader 与六个 JSON-only CLI 动作已集成；真实 installed-package smoke 执行 6 个查询动作并解析 9 份 schema，返回 `queryCount:6` / `schemaCount:9`。
 - 2026-08-11：Usage selection 已收敛为两阶段：第一阶段只计算所选 metric 与固定 tie-break tuple，第二阶段只 enrich 当前页最多 50 项；comparison 仍对两窗口候选取并集。
-- 2026-08-11：实库与同源单测 `EXPLAIN QUERY PLAN` 均证明 recent Usage window 使用既有 `turns_query_filters` 与 `capability_uses_query_filter`，无 `SCAN turns` / `SCAN capability_uses`；候选新索引未被采用，已移除，避免增加容量占用。
+- 2026-08-11：实库与同源单测 `EXPLAIN QUERY PLAN` 均证明 recent Usage selection 使用既有 `turns_query_filters` 与 `capability_uses_query_filter`，无 `SCAN turns` / `SCAN capability_uses`；coverage 是显式标记为 `all-indexed-history` 的全域聚合，成本随索引总量线性；候选新索引未被采用，已移除，避免增加容量占用。
 - 2026-08-11：最终验证：`npm run test:insights-engine` Rust 全绿、Node 234/234、ITEM-4/5/6 evidence verifier 全绿；CLI 176/176、Viewer 7/7、API 32/32、release 59/59、FC 19/19、Cloudflare build 与 Skill validation 全绿；Clippy `-D warnings`、rustfmt、`git diff --check` 全绿；npm dry-run 精确 54 files。
+- 2026-08-11：独立终审 0 blocking；唯一 important 的 coverage scope 披露已补为 `all-indexed-history`，三份 schema、投影测试与 Skill 同步，selection/coverage 性能证据边界已改为准确措辞。
 
 ## 验收
 

@@ -15,9 +15,11 @@ import {
 } from "../scripts/package-insights-release.mjs";
 import { createInsightsSbom } from "../scripts/generate-insights-sbom.mjs";
 import { smokeInsightsEngine } from "../scripts/smoke-insights-engine.mjs";
+import { smokeInstalledCore } from "../scripts/smoke-installed-core.mjs";
 import { smokeInstalledInsights } from "../scripts/smoke-installed-insights.mjs";
 import { EXPECTED_PACKAGE_FILES } from "../scripts/verify-release.mjs";
 import {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
 } from "../src/insights-engine-runtime.mjs";
@@ -102,17 +104,26 @@ test("source manifests stay platform-package free and staged root injects exact 
   assert.deepEqual(
     staged.optionalDependencies,
     Object.fromEntries(
-      INSIGHTS_ENGINE_TARGETS
+      INSIGHTS_ENGINE_RELEASE_TARGETS
         .map((target) => insightsEnginePackageName(target.target))
         .sort()
         .map((name) => [name, version]),
     ),
   );
-  const polluted = { ...source, optionalDependencies: { [Object.keys(staged.optionalDependencies)[0]]: version } };
-  assert.throws(
-    () => assertSourceManifestHasNoPlatformPackages(polluted, lock),
-    /must not contain/,
+  assert.deepEqual(
+    INSIGHTS_ENGINE_RELEASE_TARGETS.map(({ target }) => target),
+    ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
   );
+  for (const target of INSIGHTS_ENGINE_TARGETS) {
+    const polluted = {
+      ...source,
+      optionalDependencies: { [insightsEnginePackageName(target.target)]: version },
+    };
+    assert.throws(
+      () => assertSourceManifestHasNoPlatformPackages(polluted, lock),
+      /must not contain/,
+    );
+  }
 });
 
 test("release identity accepts current and future Git object id lengths", async () => {
@@ -174,7 +185,7 @@ test("SPDX generation is deterministic and omits Cargo workspace paths", () => {
   assert.match(first, /SPDX-2\.3/);
 });
 
-test("staging produces one isolated root and six minimal platform packages", async () => {
+test("staging produces one isolated root and four minimal Engine packages", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-stage-"));
   const root = path.join(fixture, "source");
   const binaries = path.join(fixture, "binaries");
@@ -190,16 +201,19 @@ test("staging produces one isolated root and six minimal platform packages", asy
       version,
       sourceSha,
     });
-    assert.equal(result.packages.length, 6);
+    assert.equal(result.packages.length, INSIGHTS_ENGINE_RELEASE_TARGETS.length);
     assert.deepEqual(
       JSON.parse(await readFile(path.join(root, "package.json"), "utf8")),
       source.manifest,
       "staging must not rewrite the source manifest",
     );
     const rootManifest = JSON.parse(await readFile(path.join(output, "root", "package.json"), "utf8"));
-    assert.equal(Object.keys(rootManifest.optionalDependencies).length, 6);
+    assert.equal(
+      Object.keys(rootManifest.optionalDependencies).length,
+      INSIGHTS_ENGINE_RELEASE_TARGETS.length,
+    );
 
-    for (const target of INSIGHTS_ENGINE_TARGETS) {
+    for (const target of INSIGHTS_ENGINE_RELEASE_TARGETS) {
       const directory = path.join(output, target.target);
       assert.deepEqual((await readdir(directory)).sort(), [
         "LICENSE",
@@ -218,12 +232,15 @@ test("staging produces one isolated root and six minimal platform packages", asy
       assert.equal(buildManifest.minimumOs, target.minimumOs);
       assert.equal(buildManifest.sqliteVersion, "3.53.2");
     }
+    for (const target of INSIGHTS_ENGINE_TARGETS.filter(({ platform }) => platform === "win32")) {
+      await assert.rejects(readdir(path.join(output, target.target)), { code: "ENOENT" });
+    }
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 });
 
-test("artifact-first packaging records and rechecks all seven tarballs", async () => {
+test("artifact-first packaging records and rechecks four Engine tarballs plus root", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-artifacts-"));
   const root = path.join(fixture, "source");
   const binaries = path.join(fixture, "binaries");
@@ -248,10 +265,16 @@ test("artifact-first packaging records and rechecks all seven tarballs", async (
       runId: "123",
       runAttempt: "2",
     });
-    assert.equal(packed.packages.length, 7);
+    assert.equal(packed.packages.length, INSIGHTS_ENGINE_RELEASE_TARGETS.length + 1);
     assert.equal(packed.packages.at(-1).kind, "root", "root must publish after platforms");
-    assert.equal((await readdir(artifacts)).filter((name) => name.endsWith(".tgz")).length, 7);
-    assert.equal((await readdir(artifacts)).filter((name) => name.endsWith(".spdx.json")).length, 6);
+    assert.equal(
+      (await readdir(artifacts)).filter((name) => name.endsWith(".tgz")).length,
+      INSIGHTS_ENGINE_RELEASE_TARGETS.length + 1,
+    );
+    assert.equal(
+      (await readdir(artifacts)).filter((name) => name.endsWith(".spdx.json")).length,
+      INSIGHTS_ENGINE_RELEASE_TARGETS.length,
+    );
     const verified = await verifyReleaseArtifacts({
       artifactDirectory: artifacts,
       version,
@@ -453,6 +476,78 @@ export function createInsightsRequiredContract(originSecretEpoch) {
   } finally {
     delete globalThis[contractCapture];
     delete globalThis[protocolCapture];
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("installed core smoke accepts a root-only Windows-style installation", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-installed-core-smoke-"));
+  const root = path.join(fixture, "node_modules", "@team-harness", "threadshare");
+  try {
+    await mkdir(path.join(root, "bin"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "package.json"), `${JSON.stringify({
+      name: "@team-harness/threadshare",
+      version,
+    })}\n`);
+    await writeFile(path.join(root, "bin", "threadshare.mjs"), "export {};\n");
+    await writeFile(
+      path.join(root, "src", "cli-contract.mjs"),
+      'export function renderRootHelp() { return "canonical installed help"; }\n',
+    );
+    const calls = [];
+    const result = await smokeInstalledCore({
+      prefix: fixture,
+      platform: "win32",
+      version,
+      runCli: async (binary, arguments_) => {
+        assert.equal(binary, path.join(root, "bin", "threadshare.mjs"));
+        calls.push(arguments_);
+        if (arguments_[0] === "--help") {
+          return { exitCode: 0, stderr: "", stdout: "canonical installed help\n" };
+        }
+        return {
+          exitCode: 1,
+          stderr: [
+            "threadshare: error TS_INSIGHTS_ENGINE_UNAVAILABLE",
+            "Problem: Local Insights is not available for this platform in this release.",
+            "Usage: threadshare insights [status|reindex|reset|exclude] [subcommand] [options]",
+            "Next: Use Threadshare core commands on Windows, or run Insights on macOS or Linux.",
+            "",
+          ].join("\n"),
+          stdout: "",
+        };
+      },
+    });
+    assert.deepEqual(calls, [
+      ["--help"],
+      ["insights", "status"],
+    ]);
+    assert.deepEqual(result, {
+      packageName: "@team-harness/threadshare",
+      platformPackageCount: 0,
+      version,
+    });
+
+    const nestedPlatform = path.join(
+      root,
+      "node_modules",
+      "@team-harness",
+      "threadshare-linux-x64",
+    );
+    await mkdir(nestedPlatform, { recursive: true });
+    await assert.rejects(
+      smokeInstalledCore({
+        prefix: fixture,
+        platform: "win32",
+        version,
+        runCli: async () => {
+          throw new Error("nested platform package must be rejected before the CLI runs");
+        },
+      }),
+      /must not resolve an Insights Engine package/,
+    );
+  } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 });

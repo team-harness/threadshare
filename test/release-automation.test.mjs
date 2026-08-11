@@ -34,6 +34,7 @@ import {
 } from "../scripts/publish-insights-release.mjs";
 import { canonicalJson } from "../src/canonical-json.mjs";
 import {
+  INSIGHTS_ENGINE_RELEASE_TARGETS,
   INSIGHTS_ENGINE_TARGETS,
   insightsEnginePackageName,
 } from "../src/insights-engine-targets.mjs";
@@ -293,7 +294,10 @@ test("platform reruns trust immutable registry provenance instead of new signed 
     decidePublish({
       packument: {
         name: packageName,
-        "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+        "dist-tags": {
+          bootstrap: "0.0.0-bootstrap.0",
+          latest: "0.0.0-bootstrap.0",
+        },
         versions: { "0.0.0-bootstrap.0": {} },
       },
       packageName,
@@ -301,11 +305,14 @@ test("platform reruns trust immutable registry provenance instead of new signed 
       integrity,
       kind: "platform",
     }),
-    { latest: null, shouldPublish: true },
+    { latest: "0.0.0-bootstrap.0", shouldPublish: true },
   );
   const platformPackument = {
     name: packageName,
-    "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+    "dist-tags": {
+      bootstrap: "0.0.0-bootstrap.0",
+      latest: "0.0.0-bootstrap.0",
+    },
     versions: {
       "0.0.0-bootstrap.0": {},
       "0.4.2": {
@@ -327,7 +334,7 @@ test("platform reruns trust immutable registry provenance instead of new signed 
       integrity,
       kind: "platform",
     }),
-    { latest: null, registryIntegrity, shouldPublish: false },
+    { latest: "0.0.0-bootstrap.0", registryIntegrity, shouldPublish: false },
   );
   assert.doesNotThrow(() => assertPreparedIntegrity(integrity, registryIntegrity, { kind: "platform" }));
   assert.deepEqual(
@@ -344,7 +351,7 @@ test("platform reruns trust immutable registry provenance instead of new signed 
         subjectIntegrity: registryIntegrity,
       },
     }),
-    { latest: null, registryIntegrity },
+    { latest: "0.0.0-bootstrap.0", registryIntegrity },
   );
 });
 
@@ -554,7 +561,10 @@ test("platform registry probing accepts the bootstrap and not-yet-created states
   assert.deepEqual(missing, { name: packageName, "dist-tags": {}, versions: {} });
   const bootstrap = {
     name: packageName,
-    "dist-tags": { bootstrap: "0.0.0-bootstrap.0" },
+    "dist-tags": {
+      bootstrap: "0.0.0-bootstrap.0",
+      latest: "0.0.0-bootstrap.0",
+    },
     versions: { "0.0.0-bootstrap.0": {} },
   };
   assert.deepEqual(
@@ -565,6 +575,25 @@ test("platform registry probing accepts the bootstrap and not-yet-created states
       fetchImpl: async () => Response.json(bootstrap),
     }),
     bootstrap,
+  );
+  await assert.rejects(
+    fetchPackument({
+      packageName,
+      allowMissing: true,
+      maxAttempts: 1,
+      fetchImpl: async () => Response.json({
+        ...bootstrap,
+        "dist-tags": {
+          bootstrap: "0.0.0-bootstrap.0",
+          latest: "0.0.0-other.0",
+        },
+        versions: {
+          ...bootstrap.versions,
+          "0.0.0-other.0": {},
+        },
+      }),
+    }),
+    /registry latest must be a stable semver/,
   );
 });
 
@@ -629,7 +658,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
   let publishCalls = 0;
   try {
     await mkdir(artifactDirectory, { recursive: true });
-    for (const target of INSIGHTS_ENGINE_TARGETS) {
+    for (const target of INSIGHTS_ENGINE_RELEASE_TARGETS) {
       const packageParent = path.join(fixture, `package-${target.target}`);
       const packageDirectory = path.join(packageParent, "package");
       const binaryName = target.platform === "win32"
@@ -684,7 +713,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
     const rootParent = path.join(fixture, "package-root");
     const rootPackageDirectory = path.join(rootParent, "package");
     const optionalDependencies = Object.fromEntries(
-      INSIGHTS_ENGINE_TARGETS
+      INSIGHTS_ENGINE_RELEASE_TARGETS
         .map((target) => insightsEnginePackageName(target.target))
         .sort()
         .map((packageName) => [packageName, version]),
@@ -808,7 +837,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
       auditExec: async () => ({ stdout: "{}", stderr: "" }),
     });
     assert.equal(publishCalls, 0);
-    assert.equal(outcomes.length, INSIGHTS_ENGINE_TARGETS.length);
+    assert.equal(outcomes.length, INSIGHTS_ENGINE_RELEASE_TARGETS.length);
     assert.ok(outcomes.every((outcome) => outcome.latest === version && !outcome.published));
     assert.deepEqual(fetchedTarballs.sort(), [...tarballUrls].sort());
   } finally {
@@ -832,6 +861,7 @@ test("release-time modules import from a clean tree without node_modules", async
     "scripts/fetch-existing-insights-engine.mjs",
     "scripts/generate-insights-sbom.mjs",
     "scripts/smoke-insights-engine.mjs",
+    "scripts/smoke-installed-core.mjs",
     "scripts/smoke-installed-insights.mjs",
   ];
   try {
@@ -955,10 +985,20 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
     "darwin-x64",
     "linux-arm64",
     "linux-x64",
-    "win32-arm64",
-    "win32-x64",
   ]);
-  assert.deepEqual(consumerTargets, buildTargets);
+  assert.deepEqual(consumerTargets, INSIGHTS_ENGINE_TARGETS.map(({ target }) => target).sort());
+  assert.deepEqual(buildTargets, INSIGHTS_ENGINE_RELEASE_TARGETS.map(({ target }) => target).sort());
+  const consumerSmokeByTarget = new Map(
+    consumerSmoke.strategy.matrix.include.map((entry) => [entry.target, entry.smoke]),
+  );
+  assert.deepEqual(Object.fromEntries(consumerSmokeByTarget), {
+    "darwin-arm64": "insights",
+    "darwin-x64": "insights",
+    "linux-arm64": "insights",
+    "linux-x64": "insights",
+    "win32-arm64": "core",
+    "win32-x64": "core",
+  });
   const buildMatrixByTarget = new Map(
     build.strategy.matrix.include.map((entry) => [entry.target, entry]),
   );
@@ -1040,7 +1080,7 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
   assert.match(buildCommands, /MACOSX_DEPLOYMENT_TARGET="13\.0"/);
   assert.match(buildCommands, /codesign --force/);
   assert.match(buildCommands, /notarytool submit/);
-  assert.match(buildCommands, /signtool\.exe/);
+  assert.doesNotMatch(buildCommands, /signtool\.exe|WINDOWS_CERTIFICATE/);
   assert.match(buildCommands, /generate-insights-sbom/);
 
   const reuseStep = build.steps.find(
@@ -1059,7 +1099,6 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
     "Install musl linker",
     "Build unsigned Engine twice",
     "Sign and notarize macOS Engine",
-    "Sign Windows Engine",
     "Attest signed Engine and SBOM",
   ]) {
     const step = build.steps.find((candidate) => candidate.name === stepName);
@@ -1106,6 +1145,7 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
   assert.match(platformCommands, /--kind platform/);
   assert.match(consumerCommands, /npm install --prefix/);
   assert.match(consumerCommands, /smoke-installed-insights/);
+  assert.match(consumerCommands, /smoke-installed-core/);
   assert.match(rootCommands, /publish-insights-release\.mjs/);
   assert.match(rootCommands, /--kind root/);
   assert.doesNotMatch(
@@ -1143,8 +1183,6 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
     "APPLE_ID",
     "APPLE_SIGNING_IDENTITY",
     "APPLE_TEAM_ID",
-    "WINDOWS_CERTIFICATE_PASSWORD",
-    "WINDOWS_CERTIFICATE_PFX",
   ]);
 });
 

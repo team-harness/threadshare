@@ -151,6 +151,10 @@ surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filter
 capability discovery, and revision-checked evidence pages. Responses include the committed snapshot
 identity needed to cite results and detect an atomic reindex between pages.
 
+Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
+core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
+available in the 0.7.x release line while the owner-only Windows ACL adapter remains unimplemented.
+
 Usage counts are recorded invocations, not inferred independent uses. Agents must report grouped and
 ungrouped invocations with the returned dedupe support, and must describe Capability terminal states
 separately from the outcome of the containing Turn. Co-occurrence is not evidence that a Tool or Skill

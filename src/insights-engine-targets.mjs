@@ -61,8 +61,29 @@ export const INSIGHTS_ENGINE_TARGETS = Object.freeze([
   }),
 ]);
 
+const INSIGHTS_ENGINE_RELEASE_TARGET_NAMES = Object.freeze([
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-arm64",
+  "linux-x64",
+]);
+
+export const INSIGHTS_ENGINE_RELEASE_TARGETS = Object.freeze(
+  INSIGHTS_ENGINE_RELEASE_TARGET_NAMES.map((name) => {
+    const target = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === name);
+    if (!target) throw new Error(`missing Insights Engine release target: ${name}`);
+    return target;
+  }),
+);
+
 export function insightsEngineTarget(platform = process.platform, arch = process.arch) {
   return INSIGHTS_ENGINE_TARGETS.find((candidate) =>
+    candidate.platform === platform && candidate.arch === arch
+  ) ?? null;
+}
+
+export function insightsEngineReleaseTarget(platform = process.platform, arch = process.arch) {
+  return INSIGHTS_ENGINE_RELEASE_TARGETS.find((candidate) =>
     candidate.platform === platform && candidate.arch === arch
   ) ?? null;
 }
