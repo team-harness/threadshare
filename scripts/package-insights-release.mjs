@@ -17,7 +17,11 @@ import {
   createBuildManifest,
   createPlatformManifest,
 } from "./prepare-insights-release.mjs";
-import { PACKAGE_NAME, validatePackOutput } from "./verify-release.mjs";
+import {
+  PACKAGE_NAME,
+  npmPackFilename,
+  validatePackOutput,
+} from "./verify-release.mjs";
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = "release-manifest.json";
@@ -71,8 +75,7 @@ async function packOne(descriptor, outputDirectory, npmCommand) {
   );
   const output = JSON.parse(stdout);
   const verified = validatePackOutput(output, descriptor);
-  const packed = Array.isArray(output) ? output[0] : output[descriptor.name];
-  const tarball = packed.filename;
+  const tarball = npmPackFilename(output, descriptor.name);
   const bytes = await readFile(path.join(outputDirectory, tarball));
   if (sha512Integrity(bytes) !== verified.integrity) {
     throw new Error(`${descriptor.name} tarball bytes do not match npm integrity`);

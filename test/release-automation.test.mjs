@@ -15,6 +15,7 @@ import {
   compareStableVersions,
   decidePublish,
   fetchPackument,
+  npmPackFilename,
   parseArguments,
   validatePackOutput,
   validatePublishedRelease,
@@ -211,6 +212,39 @@ test("locks npm pack to the exact public root files", () => {
     }),
     /unpacked size/,
   );
+});
+
+test("reads npm pack filenames from npm 12 objects and legacy arrays", async (t) => {
+  const filename = "team-harness-threadshare-0.7.0.tgz";
+  const packed = {
+    filename,
+    name: "@team-harness/threadshare",
+  };
+  assert.equal(
+    npmPackFilename({ "@team-harness/threadshare": packed }, "@team-harness/threadshare"),
+    filename,
+  );
+  assert.equal(npmPackFilename([packed], "@team-harness/threadshare"), filename);
+  assert.throws(
+    () => npmPackFilename({ "@team-harness/other": packed }, "@team-harness/threadshare"),
+    /exactly one package/,
+  );
+  assert.throws(
+    () => npmPackFilename([{ ...packed, name: "@team-harness/other" }], "@team-harness/threadshare"),
+    /name must match/,
+  );
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-pack-output-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const inputFile = path.join(directory, "pack.json");
+  await writeFile(inputFile, JSON.stringify({ "@team-harness/threadshare": packed }));
+  const resolved = await execFileAsync(process.execPath, [
+    path.join(root, "scripts", "resolve-npm-pack-filename.mjs"),
+    inputFile,
+    "@team-harness/threadshare",
+  ]);
+  assert.equal(resolved.stdout, `${filename}\n`);
+  assert.equal(resolved.stderr, "");
 });
 
 test("platform packages use a separate four-file allowlist", () => {
@@ -1138,6 +1172,8 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
   assert.match(packageCommands, /release-staging-b\/root/);
   assert.match(packageCommands, /root-pack-a/);
   assert.match(packageCommands, /root-pack-b/);
+  assert.match(packageCommands, /resolve-npm-pack-filename\.mjs/);
+  assert.doesNotMatch(packageCommands, /\[0\]\.filename/);
   assert.match(packageCommands, /cmp "\$RUNNER_TEMP\/root-pack-a/);
   assert.match(packageCommands, /package-insights-release\.mjs pack/);
   assert.match(packageCommands, /package-insights-release\.mjs verify/);

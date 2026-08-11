@@ -139,6 +139,33 @@ export function validateReleaseMetadata({ tag, packageJson, packageLock }) {
   return { name: PACKAGE_NAME, version: tag };
 }
 
+function npmPackEntry(packOutput, packageName) {
+  if (Array.isArray(packOutput)) {
+    if (packOutput.length === 1) return packOutput[0];
+  } else if (packOutput && typeof packOutput === "object") {
+    const entries = Object.entries(packOutput);
+    if (entries.length === 1 && entries[0][0] === packageName) return entries[0][1];
+  }
+  throw new Error("npm pack must return exactly one package");
+}
+
+export function npmPackFilename(packOutput, packageName) {
+  const packed = npmPackEntry(packOutput, packageName);
+  if (packed?.name !== packageName) {
+    throw new Error("npm pack name must match the requested package");
+  }
+  const filename = packed.filename;
+  if (
+    typeof filename !== "string" ||
+    filename === "" ||
+    path.basename(filename) !== filename ||
+    !filename.endsWith(".tgz")
+  ) {
+    throw new Error("npm pack filename must be a local tarball name");
+  }
+  return filename;
+}
+
 function requireIntegrity(value, label) {
   if (typeof value !== "string" || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(value)) {
     throw new Error(`${label} must be a sha512 integrity value`);
@@ -147,19 +174,7 @@ function requireIntegrity(value, label) {
 }
 
 export function validatePackOutput(packOutput, metadata) {
-  let packages;
-  if (Array.isArray(packOutput)) {
-    packages = packOutput;
-  } else if (packOutput && typeof packOutput === "object") {
-    const entries = Object.entries(packOutput);
-    if (entries.length === 1 && entries[0][0] === metadata.name) {
-      packages = [entries[0][1]];
-    }
-  }
-  if (!packages || packages.length !== 1) {
-    throw new Error("npm pack must return exactly one package");
-  }
-  const packed = packages[0];
+  const packed = npmPackEntry(packOutput, metadata.name);
   if (packed?.name !== metadata.name || packed?.version !== metadata.version) {
     throw new Error("npm pack name and version must match release metadata");
   }
