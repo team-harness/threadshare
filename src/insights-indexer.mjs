@@ -1004,6 +1004,12 @@ export async function runInsightsIndexer(options = {}) {
   if (options.onProgress !== undefined && typeof options.onProgress !== "function") {
     throw new TypeError("onProgress must be a function");
   }
+  if (
+    options.onSourceCommitted !== undefined &&
+    typeof options.onSourceCommitted !== "function"
+  ) {
+    throw new TypeError("onSourceCommitted must be a function");
+  }
   if (!options.privacyContext || typeof options.privacyContext.originSecretEpoch !== "string") {
     throw new TypeError("privacyContext is required");
   }
@@ -1132,6 +1138,12 @@ export async function runInsightsIndexer(options = {}) {
         },
         { signal: options.signal },
       );
+      if (options.onSourceCommitted !== undefined) {
+        await options.onSourceCommitted(Object.freeze({
+          provider: item.source.provider,
+          sessionId: item.source.sessionId.toLowerCase(),
+        }));
+      }
       await new Promise((resolve) => setImmediate(resolve));
       return { status: "committed" };
     } catch (error) {

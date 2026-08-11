@@ -1,4 +1,3 @@
-use crate::fact_model::SessionFactsDeltaV1;
 use crate::protocol::{MessageKind, ProtocolError, validate_protocol_message};
 use crate::storage::{CommitOutcome, EngineStorage, StorageError};
 use crate::{hash_key, try_canonical_json};
@@ -19,7 +18,6 @@ pub const UPSERT_COLLECTIONS: [&str; 7] = [
     "capabilityUseEvidence",
 ];
 pub const MAX_SESSION_FACTS: u64 = 1_000_000;
-pub const MAX_SESSION_FACT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
@@ -133,9 +131,11 @@ fn field<'a>(object: &'a Map<String, Value>, name: &str) -> Result<&'a Value, En
 #[derive(Debug)]
 pub struct SessionAccumulator {
     begin: Value,
+    provider: String,
     expected_counts: BTreeMap<String, usize>,
-    collections: BTreeMap<String, Vec<Value>>,
+    received_counts: BTreeMap<String, usize>,
     canonical_fact_bytes: usize,
+    staged_payload_bytes: usize,
     next_sequence: u64,
     last_collection_rank: Option<usize>,
 }
@@ -197,6 +197,18 @@ impl SessionAccumulator {
             expected_counts.insert((*collection).to_owned(), count);
         }
         let session_fact = field(root, "session")?;
+        let provider = object(session_fact, "session")?
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|provider| !provider.is_empty())
+            .ok_or_else(|| {
+                EngineError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "validation",
+                    "session provider must be a non-empty string",
+                )
+            })?
+            .to_owned();
         let session_fact_bytes = try_canonical_json(session_fact)
             .map_err(|_| {
                 EngineError::new(
@@ -206,24 +218,23 @@ impl SessionAccumulator {
                 )
             })?
             .len();
-        if session_fact_bytes > MAX_SESSION_FACT_BYTES {
-            return Err(EngineError::new(
-                "TS_INSIGHTS_INVALID_DELTA",
-                "validation",
-                "session fact data exceeds the 32 MiB canonical byte limit",
-            ));
-        }
         Ok(Self {
             begin: message,
+            provider,
             expected_counts,
-            collections: BTreeMap::new(),
+            received_counts: BTreeMap::new(),
             canonical_fact_bytes: session_fact_bytes,
+            staged_payload_bytes: 0,
             next_sequence: 0,
             last_collection_rank: None,
         })
     }
 
-    pub fn apply_batch(&mut self, message: &Value) -> Result<(), EngineError> {
+    pub fn apply_batch(
+        &mut self,
+        message: &Value,
+        storage: &mut EngineStorage,
+    ) -> Result<(), EngineError> {
         if !matches!(
             validate_protocol_message(message)?,
             MessageKind::RetractFacts | MessageKind::UpsertFacts
@@ -298,7 +309,7 @@ impl SessionAccumulator {
             ));
         }
         let expected = self.expected_counts[collection];
-        let accumulated_count = self.collections.get(collection).map(Vec::len).unwrap_or(0);
+        let accumulated_count = self.received_counts.get(collection).copied().unwrap_or(0);
         let next_count = accumulated_count.checked_add(items.len()).ok_or_else(|| {
             EngineError::new(
                 "TS_INSIGHTS_INVALID_DELTA",
@@ -313,41 +324,40 @@ impl SessionAccumulator {
                 "batch count exceeds BEGIN_SESSION declaration",
             ));
         }
-        let batch_bytes = items.iter().try_fold(0_usize, |total, item| {
-            let item_bytes = try_canonical_json(item)
-                .map_err(|_| {
-                    EngineError::new(
-                        "TS_INSIGHTS_INVALID_DELTA",
-                        "validation",
-                        "batch item is outside the canonical JSON domain",
-                    )
-                })?
-                .len();
-            total.checked_add(item_bytes).ok_or_else(|| {
-                EngineError::new(
-                    "TS_INSIGHTS_INVALID_DELTA",
-                    "validation",
-                    "session fact data exceeds the 32 MiB canonical byte limit",
-                )
-            })
-        })?;
+        let staged = storage
+            .stage_session_fact_batch(
+                collection,
+                accumulated_count,
+                items,
+                self.session_key(),
+                &self.provider,
+                self.staged_payload_bytes,
+            )
+            .map_err(EngineError::from)?;
         let next_fact_bytes = self
             .canonical_fact_bytes
-            .checked_add(batch_bytes)
-            .filter(|bytes| *bytes <= MAX_SESSION_FACT_BYTES)
+            .checked_add(staged.canonical_bytes)
             .ok_or_else(|| {
                 EngineError::new(
                     "TS_INSIGHTS_INVALID_DELTA",
                     "validation",
-                    "session fact data exceeds the 32 MiB canonical byte limit",
+                    "session fact byte count exceeds platform limits",
                 )
             })?;
 
-        self.collections
-            .entry(collection.to_owned())
-            .or_default()
-            .extend(items.iter().cloned());
+        self.received_counts
+            .insert(collection.to_owned(), next_count);
         self.canonical_fact_bytes = next_fact_bytes;
+        self.staged_payload_bytes = self
+            .staged_payload_bytes
+            .checked_add(staged.staged_payload_bytes)
+            .ok_or_else(|| {
+                EngineError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "validation",
+                    "staged session payload byte count exceeds platform limits",
+                )
+            })?;
         self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
             EngineError::new(
                 "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
@@ -423,7 +433,7 @@ impl SessionAccumulator {
             ));
         }
         for (collection, expected) in &self.expected_counts {
-            let actual = self.collections.get(collection).map(Vec::len).unwrap_or(0);
+            let actual = self.received_counts.get(collection).copied().unwrap_or(0);
             if actual != *expected {
                 return Err(EngineError::new(
                     "TS_INSIGHTS_INVALID_DELTA",
@@ -468,21 +478,13 @@ impl SessionAccumulator {
         delta.insert(
             "retractions".to_owned(),
             json!({
-                "turnKeys": self.collections.get("turnKeys").cloned().unwrap_or_default(),
-                "orphanEventKeys": self.collections.get("orphanEventKeys").cloned().unwrap_or_default(),
-                "authoritativeTurnKeys": self.collections.get("authoritativeTurnKeys").cloned().unwrap_or_default(),
+                "turnKeys": [],
+                "orphanEventKeys": [],
+                "authoritativeTurnKeys": [],
             }),
         );
         for collection in UPSERT_COLLECTIONS {
-            delta.insert(
-                collection.to_owned(),
-                Value::Array(
-                    self.collections
-                        .get(collection)
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-            );
+            delta.insert(collection.to_owned(), Value::Array(Vec::new()));
         }
         delta.insert("checkpoint".to_owned(), checkpoint.clone());
         delta.insert(
@@ -494,18 +496,11 @@ impl SessionAccumulator {
             field(commit_root, "coverage")?.clone(),
         );
         let delta = Value::Object(delta);
-        verify_delta_id(&delta)?;
-        try_canonical_json(&delta).map_err(|_| {
-            EngineError::new(
-                "TS_INSIGHTS_INVALID_DELTA",
-                "validation",
-                "delta is outside the canonical JSON domain",
-            )
-        })?;
-        let typed_delta = SessionFactsDeltaV1::try_from(delta)
-            .map_err(|error| EngineError::new(error.code, "validation", error.message))?;
+        let staged = storage
+            .prepare_staged_session_facts(delta)
+            .map_err(EngineError::from)?;
         storage
-            .apply_session_facts(typed_delta)
+            .apply_staged_session_facts(staged)
             .map_err(EngineError::from)
     }
 }
@@ -579,10 +574,9 @@ pub fn verify_delta_id(delta: &Value) -> Result<(), EngineError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SESSION_FACT_BYTES, MAX_SESSION_FACTS, RETRACTION_COLLECTIONS, SessionAccumulator,
-        UPSERT_COLLECTIONS,
+        MAX_SESSION_FACTS, RETRACTION_COLLECTIONS, SessionAccumulator, UPSERT_COLLECTIONS,
     };
-    use crate::canonical_json;
+    use crate::storage::EngineStorage;
     use serde_json::{Value, json};
 
     fn fixture_message(name: &str) -> Value {
@@ -627,46 +621,72 @@ mod tests {
     }
 
     #[test]
-    fn bounds_accumulated_canonical_fact_bytes_without_partial_batch_state() {
+    fn rejects_a_missing_or_invalid_begin_session_provider_without_panicking() {
+        for provider in [
+            Value::Null,
+            Value::Number(7.into()),
+            Value::String(String::new()),
+        ] {
+            let mut begin = begin_with_zero_counts();
+            begin["session"]["provider"] = provider;
+            let error = SessionAccumulator::begin(begin).unwrap_err();
+            assert_eq!(error.code, "TS_INSIGHTS_INVALID_DELTA");
+            assert_eq!(error.category, "validation");
+            assert_eq!(error.message, "session provider must be a non-empty string");
+        }
+
         let mut begin = begin_with_zero_counts();
-        begin["counts"]["turns"] = Value::String("2".to_owned());
-        let session_fact_bytes = canonical_json(&begin["session"]).len();
-        let mut accumulator = SessionAccumulator::begin(begin).unwrap();
-        assert_eq!(accumulator.canonical_fact_bytes, session_fact_bytes);
-
-        let first_item = json!({"problemText": "first"});
-        let first = json!({
-            "format": "threadshare-insights-protocol@v1",
-            "type": "UPSERT_FACTS",
-            "requestId": "2",
-            "sequence": "0",
-            "collection": "turns",
-            "items": [first_item.clone()],
-        });
-        accumulator.apply_batch(&first).unwrap();
-        assert_eq!(
-            accumulator.canonical_fact_bytes,
-            session_fact_bytes + canonical_json(&first_item).len()
-        );
-        accumulator.canonical_fact_bytes = MAX_SESSION_FACT_BYTES - 1;
-
-        let overflowing = json!({
-            "format": "threadshare-insights-protocol@v1",
-            "type": "UPSERT_FACTS",
-            "requestId": "2",
-            "sequence": "1",
-            "collection": "turns",
-            "items": ["xx"],
-        });
-        let error = accumulator.apply_batch(&overflowing).unwrap_err();
+        begin["session"].as_object_mut().unwrap().remove("provider");
+        let error = SessionAccumulator::begin(begin).unwrap_err();
         assert_eq!(error.code, "TS_INSIGHTS_INVALID_DELTA");
         assert_eq!(error.category, "validation");
+        assert_eq!(error.message, "session provider must be a non-empty string");
+    }
+
+    #[test]
+    fn accepts_more_than_32_mib_across_protocol_sized_batches() {
+        let mut begin = begin_with_zero_counts();
+        const TURN_COUNT: usize = 513;
+        begin["counts"]["turns"] = Value::String(TURN_COUNT.to_string());
+        let mut accumulator = SessionAccumulator::begin(begin).unwrap();
+        let mut storage = EngineStorage::open_in_memory().unwrap();
+        let problem_text = "x".repeat(64 * 1_024);
+        for index in 0..TURN_COUNT {
+            let item = json!({
+                "turnKey": format!("{index:064x}"),
+                "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "turnStartOffset": index.to_string(),
+                "problemText": problem_text,
+                "finalAnswerExcerpt": null,
+                "observedTimestamp": null,
+                "rawClosure": {
+                    "nextUserBoundary": false,
+                    "providerTerminal": "completed",
+                    "observedEofClosed": false
+                },
+                "providerVisibility": "active",
+                "factTruncation": []
+            });
+            accumulator
+                .apply_batch(
+                    &json!({
+                        "format": "threadshare-insights-protocol@v1",
+                        "type": "UPSERT_FACTS",
+                        "requestId": "2",
+                        "sequence": index.to_string(),
+                        "collection": "turns",
+                        "items": [item],
+                    }),
+                    &mut storage,
+                )
+                .unwrap();
+        }
+        assert!(accumulator.canonical_fact_bytes > 32 * 1024 * 1024);
+        assert_eq!(accumulator.received_counts["turns"], TURN_COUNT);
         assert_eq!(
-            error.message,
-            "session fact data exceeds the 32 MiB canonical byte limit"
+            storage.staged_session_fact_count("turns").unwrap(),
+            TURN_COUNT
         );
-        assert_eq!(accumulator.collections["turns"].len(), 1);
-        assert_eq!(accumulator.canonical_fact_bytes, MAX_SESSION_FACT_BYTES - 1);
-        assert_eq!(accumulator.next_sequence, 1);
+        assert_eq!(accumulator.next_sequence, TURN_COUNT as u64);
     }
 }

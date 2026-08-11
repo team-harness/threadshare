@@ -311,6 +311,7 @@ impl EngineStorage {
         )?;
         crate::normalized_repository::initialize_schema(&mut connection)?;
         crate::source_state::initialize_schema(&connection)?;
+        crate::fact_staging::initialize(&connection)?;
         Ok(Self {
             connection,
             staged_source_state: None,
@@ -701,6 +702,86 @@ impl EngineStorage {
         Ok(outcome)
     }
 
+    pub fn clear_session_fact_staging(&mut self) -> Result<(), StorageError> {
+        crate::fact_staging::clear(&self.connection)
+    }
+
+    pub(crate) fn stage_session_fact_batch(
+        &mut self,
+        collection: &str,
+        first_ordinal: usize,
+        items: &[serde_json::Value],
+        session_key: &str,
+        provider: &str,
+        current_staged_payload_bytes: usize,
+    ) -> Result<crate::fact_staging::StageBatchOutcome, StorageError> {
+        crate::fact_staging::stage_batch(
+            &mut self.connection,
+            collection,
+            first_ordinal,
+            items,
+            session_key,
+            provider,
+            current_staged_payload_bytes,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn staged_session_fact_count(
+        &self,
+        collection: &str,
+    ) -> Result<usize, StorageError> {
+        crate::fact_staging::count(&self.connection, collection)
+    }
+
+    pub(crate) fn prepare_staged_session_facts(
+        &self,
+        wire_delta: serde_json::Value,
+    ) -> Result<crate::fact_staging::StagedSessionFacts, StorageError> {
+        crate::fact_staging::prepare(&self.connection, wire_delta)
+    }
+
+    pub(crate) fn apply_staged_session_facts(
+        &mut self,
+        staged: crate::fact_staging::StagedSessionFacts,
+    ) -> Result<CommitOutcome, StorageError> {
+        let delta = &staged.delta;
+        let source_state = self.staged_source_state.take();
+        let staged_digest =
+            crate::source_state::stage_for_delta(&self.connection, delta, source_state.as_ref())?;
+        #[cfg(debug_assertions)]
+        let commit_failpoint_armed = arm_session_fact_commit_failpoint(&self.connection)?;
+        let outcome =
+            crate::normalized_repository::apply_staged_session_facts(&mut self.connection, &staged);
+        #[cfg(debug_assertions)]
+        if commit_failpoint_armed {
+            self.connection.commit_hook(None::<fn() -> bool>)?;
+        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                crate::source_state::discard_staged(&self.connection, delta.session.session_key);
+                let _ = crate::fact_staging::clear(&self.connection);
+                return Err(error);
+            }
+        };
+        let finish = crate::source_state::finish_staged_commit(
+            &self.connection,
+            delta.session.session_key,
+            staged_digest,
+            outcome.idempotent,
+        );
+        let clear = crate::fact_staging::clear(&self.connection);
+        finish?;
+        clear?;
+        #[cfg(debug_assertions)]
+        if !outcome.idempotent {
+            test_crash_failpoint("after-session-fact-commit-before-ack");
+        }
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
     pub fn stage_source_state(&mut self, state: Option<crate::source_state::SourceState>) {
         self.staged_source_state = state;
     }
@@ -908,6 +989,44 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_session_facts_do_not_survive_a_connection_restart() {
+        let database = TemporaryDatabase::new();
+        let item = serde_json::json!({
+            "turnKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "ownerSessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "turnStartOffset": "0",
+            "problemText": "staged only",
+            "finalAnswerExcerpt": null,
+            "observedTimestamp": null,
+            "rawClosure": {
+                "nextUserBoundary": false,
+                "providerTerminal": "completed",
+                "observedEofClosed": false
+            },
+            "providerVisibility": "active",
+            "factTruncation": []
+        });
+        let mut storage = EngineStorage::open(&database.path).unwrap();
+        storage
+            .stage_session_fact_batch(
+                "turns",
+                0,
+                &[item],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "codex",
+                0,
+            )
+            .unwrap();
+        assert_eq!(storage.staged_session_fact_count("turns").unwrap(), 1);
+        drop(storage);
+
+        let storage = EngineStorage::open(&database.path).unwrap();
+        assert_eq!(storage.staged_session_fact_count("turns").unwrap(), 0);
+        assert_eq!(storage.committed_session_count().unwrap(), 0);
     }
 
     #[test]

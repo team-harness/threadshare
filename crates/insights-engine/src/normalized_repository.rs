@@ -419,7 +419,7 @@ pub(crate) fn apply_session_facts(
     }
 
     let before_projection =
-        capture_session_projection_snapshot(&*transaction, delta.session.session_key)?;
+        capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
     let forced_turn_keys = delta
         .retractions
         .turn_keys
@@ -474,23 +474,18 @@ pub(crate) fn apply_session_facts(
             snapshot_seq,
         ],
     )?;
-    recompute_session_derivations(
-        &transaction,
-        &*transaction,
-        session_id,
-        delta.session.session_key,
-    )?;
+    recompute_session_derivations(&transaction, session_id)?;
     let after_projection =
-        capture_session_projection_snapshot(&*transaction, delta.session.session_key)?;
+        capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
+    let is_forced_turn_key = |turn_key| Ok(forced_turn_keys.contains(&turn_key));
     record_projection_changes(
         &transaction,
-        &*transaction,
         &SessionProjectionChangeSet {
             session_key: delta.session.session_key,
             snapshot_seq,
             before: &before_projection,
             after: &after_projection,
-            forced_turn_keys: &forced_turn_keys,
+            is_forced_turn_key: &is_forced_turn_key,
             force_all_turns: delta.mode == MutationMode::ReplaceSession,
         },
     )?;
@@ -498,6 +493,162 @@ pub(crate) fn apply_session_facts(
     // SQLite enforces every touched foreign key inside this transaction. A full
     // foreign_key_check scans the entire repository, so it belongs to explicit
     // integrity maintenance and capacity validation rather than the commit path.
+    transaction.commit()?;
+    Ok(CommitOutcome {
+        snapshot_seq: snapshot_seq.to_string(),
+        session_key: delta.session.session_key.to_string(),
+        delta_id: delta.delta_id.to_string(),
+        idempotent: false,
+    })
+}
+
+pub(crate) fn apply_staged_session_facts(
+    connection: &mut Connection,
+    staged: &crate::fact_staging::StagedSessionFacts,
+) -> Result<CommitOutcome, StorageError> {
+    let delta = &staged.delta;
+    delta
+        .validate()
+        .map_err(|error| StorageError::new(error.code, error.message))?;
+    let canonical_digest = staged.canonical_digest;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = current_commit(&transaction, delta.session.session_key)?;
+    if let Some(current) = &current
+        && current.delta_id == delta.delta_id
+    {
+        if current.canonical_digest != canonical_digest {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_DELTA_ID_CONFLICT",
+                "the committed deltaId belongs to different canonical bytes",
+            ));
+        }
+        return Ok(CommitOutcome {
+            snapshot_seq: current.snapshot_seq.to_string(),
+            session_key: delta.session.session_key.to_string(),
+            delta_id: delta.delta_id.to_string(),
+            idempotent: true,
+        });
+    }
+    let actual_generation = current
+        .as_ref()
+        .map(|value| value.generation)
+        .unwrap_or(WireU64::ZERO);
+    if actual_generation != delta.expected_generation {
+        return Err(StorageError::new(
+            "TS_INSIGHTS_GENERATION_CONFLICT",
+            format!(
+                "expected generation {}, committed generation is {actual_generation}",
+                delta.expected_generation
+            ),
+        ));
+    }
+
+    let before_projection =
+        capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
+    if delta.mode == MutationMode::ReplaceSession {
+        delete_session_projections(&transaction, delta.session.session_key)?;
+        transaction.execute(
+            "DELETE FROM sessions WHERE session_key=?1",
+            params![blob(delta.session.session_key)],
+        )?;
+    }
+    let session_id = upsert_session(&transaction, &delta.session)?;
+    crate::fact_staging::for_each_chunk::<StableKey>(&transaction, "turnKeys", |keys| {
+        retract_turns(&transaction, session_id, keys)
+    })?;
+    crate::fact_staging::for_each_chunk::<StableKey>(&transaction, "orphanEventKeys", |keys| {
+        retract_orphan_events(&transaction, session_id, keys)
+    })?;
+    if delta.mode == MutationMode::Append {
+        crate::fact_staging::for_each_chunk::<StableKey>(
+            &transaction,
+            "authoritativeTurnKeys",
+            |keys| retract_authoritative_turns(&transaction, session_id, keys),
+        )?;
+    }
+    crate::fact_staging::for_each_chunk::<CapabilityFact>(&transaction, "capabilities", |facts| {
+        upsert_capabilities(&transaction, facts)
+    })?;
+    crate::fact_staging::for_each_chunk::<TurnFact>(&transaction, "turns", |facts| {
+        upsert_turns(&transaction, session_id, facts)
+    })?;
+    crate::fact_staging::for_each_chunk::<SourceRecordFact>(
+        &transaction,
+        "sourceRecords",
+        |facts| upsert_source_records(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<EvidenceEvent>(
+        &transaction,
+        "evidenceEvents",
+        |facts| upsert_events(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<CapabilityUseFact>(
+        &transaction,
+        "capabilityUses",
+        |facts| upsert_uses(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<TurnEvidenceFact>(
+        &transaction,
+        "turnEvidence",
+        |facts| upsert_turn_links(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<CapabilityUseEvidenceFact>(
+        &transaction,
+        "capabilityUseEvidence",
+        |facts| upsert_use_links(&transaction, session_id, facts),
+    )?;
+    replace_session_children(&transaction, session_id, &delta.session)?;
+    replace_checkpoint(&transaction, session_id, &delta.checkpoint)?;
+    replace_checkpoint_pins(&transaction, session_id, &delta.checkpoint)?;
+    replace_diagnostics(&transaction, session_id, &delta.diagnostics)?;
+    replace_coverage(&transaction, session_id, &delta.coverage)?;
+    collect_garbage(&transaction, session_id)?;
+
+    let snapshot_seq: i64 = transaction.query_row(
+        "UPDATE engine_metadata SET value=CAST(value AS INTEGER)+1
+         WHERE key='snapshot_seq' RETURNING CAST(value AS INTEGER)",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO session_commits(
+           session_id, generation, delta_id, canonical_digest, snapshot_seq
+         ) VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(session_id) DO UPDATE SET
+           generation=excluded.generation,
+           delta_id=excluded.delta_id,
+           canonical_digest=excluded.canonical_digest,
+           snapshot_seq=excluded.snapshot_seq",
+        params![
+            session_id,
+            u64_blob(delta.target_generation),
+            blob(delta.delta_id),
+            canonical_digest.to_vec(),
+            snapshot_seq,
+        ],
+    )?;
+    recompute_session_derivations(&transaction, session_id)?;
+    let after_projection =
+        capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
+    let is_forced_turn_key = |turn_key| {
+        crate::fact_staging::contains_identity(
+            &transaction,
+            &["turnKeys", "authoritativeTurnKeys"],
+            turn_key,
+        )
+    };
+    record_projection_changes(
+        &transaction,
+        &SessionProjectionChangeSet {
+            session_key: delta.session.session_key,
+            snapshot_seq,
+            before: &before_projection,
+            after: &after_projection,
+            is_forced_turn_key: &is_forced_turn_key,
+            force_all_turns: delta.mode == MutationMode::ReplaceSession,
+        },
+    )?;
+    crate::insights_overview::refresh_session_overview_rollup(&transaction, session_id)?;
     transaction.commit()?;
     Ok(CommitOutcome {
         snapshot_seq: snapshot_seq.to_string(),
@@ -639,7 +790,28 @@ fn apply_retractions(
     session_id: i64,
     delta: &SessionFactsDeltaV1,
 ) -> Result<(), StorageError> {
-    for turn_key in &delta.retractions.turn_keys {
+    retract_turns(transaction, session_id, &delta.retractions.turn_keys)?;
+    retract_orphan_events(
+        transaction,
+        session_id,
+        &delta.retractions.orphan_event_keys,
+    )?;
+    if delta.mode == MutationMode::Append {
+        retract_authoritative_turns(
+            transaction,
+            session_id,
+            &delta.retractions.authoritative_turn_keys,
+        )?;
+    }
+    Ok(())
+}
+
+fn retract_turns(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    turn_keys: &[StableKey],
+) -> Result<(), StorageError> {
+    for turn_key in turn_keys {
         if let Some(turn_id) = optional_entity_id(
             transaction,
             "SELECT turn_id FROM turns WHERE session_id=?1 AND turn_key=?2",
@@ -653,32 +825,46 @@ fn apply_retractions(
             params![session_id, blob(*turn_key)],
         )?;
     }
-    for event_key in &delta.retractions.orphan_event_keys {
+    Ok(())
+}
+
+fn retract_orphan_events(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    event_keys: &[StableKey],
+) -> Result<(), StorageError> {
+    for event_key in event_keys {
         transaction.execute(
             "DELETE FROM evidence_events
              WHERE session_id=?1 AND event_key=?2 AND occurred_turn_id IS NULL",
             params![session_id, blob(*event_key)],
         )?;
     }
-    if delta.mode == MutationMode::Append {
-        for turn_key in &delta.retractions.authoritative_turn_keys {
-            let Some(turn_id) = optional_entity_id(
-                transaction,
-                "SELECT turn_id FROM turns WHERE session_id=?1 AND turn_key=?2",
-                session_id,
-                *turn_key,
-            )?
-            else {
-                continue;
-            };
-            crate::projection::delete_turn_projection(transaction, turn_id)?;
-            transaction.execute("DELETE FROM turn_evidence WHERE turn_id=?1", [turn_id])?;
-            transaction.execute("DELETE FROM capability_uses WHERE turn_id=?1", [turn_id])?;
-            transaction.execute(
-                "DELETE FROM evidence_events WHERE occurred_turn_id=?1",
-                [turn_id],
-            )?;
-        }
+    Ok(())
+}
+
+fn retract_authoritative_turns(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    turn_keys: &[StableKey],
+) -> Result<(), StorageError> {
+    for turn_key in turn_keys {
+        let Some(turn_id) = optional_entity_id(
+            transaction,
+            "SELECT turn_id FROM turns WHERE session_id=?1 AND turn_key=?2",
+            session_id,
+            *turn_key,
+        )?
+        else {
+            continue;
+        };
+        crate::projection::delete_turn_projection(transaction, turn_id)?;
+        transaction.execute("DELETE FROM turn_evidence WHERE turn_id=?1", [turn_id])?;
+        transaction.execute("DELETE FROM capability_uses WHERE turn_id=?1", [turn_id])?;
+        transaction.execute(
+            "DELETE FROM evidence_events WHERE occurred_turn_id=?1",
+            [turn_id],
+        )?;
     }
     Ok(())
 }
@@ -1494,11 +1680,7 @@ impl FactRepository for Connection {
         &self,
         turn_key: &StableKey,
     ) -> Result<Option<TurnFactClosure>, StorageError> {
-        let Some(session_key) = owner_session_key(self, FactEntityKind::Turn, turn_key)? else {
-            return Ok(None);
-        };
-        Ok(read_session_snapshot(self, &session_key)?
-            .and_then(|(_, snapshot)| snapshot.turn_closure(turn_key)))
+        read_turn_closure_narrow(self, turn_key)
     }
 
     fn scan_snapshot(
@@ -1770,6 +1952,252 @@ fn read_turns(
         facts: rows.into_iter().map(|(turn, _)| turn).collect(),
         revisions,
     })
+}
+
+fn read_turn_closure_narrow(
+    connection: &Connection,
+    turn_key: &StableKey,
+) -> Result<Option<TurnFactClosure>, StorageError> {
+    let owner = connection
+        .query_row(
+            "SELECT t.turn_id,t.session_id,s.session_key
+             FROM turns t JOIN sessions s ON s.session_id=t.session_id
+             WHERE t.turn_key=?1",
+            params![blob(*turn_key)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    key_row(row, 2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((turn_id, session_id, session_key)) = owner else {
+        return Ok(None);
+    };
+    let (mut turn, revision) = connection.query_row(
+        "SELECT turn_start_offset,problem_text,final_answer_excerpt,
+                observed_timestamp,next_user_boundary,provider_terminal,
+                observed_eof_closed,effective_provider_visibility,revision
+         FROM turns WHERE turn_id=?1",
+        [turn_id],
+        |row| {
+            Ok((
+                TurnFact {
+                    turn_key: *turn_key,
+                    owner_session_key: session_key,
+                    turn_start_offset: wire_row(row, 0)?,
+                    problem_text: row.get(1)?,
+                    final_answer_excerpt: row.get(2)?,
+                    observed_timestamp: row.get(3)?,
+                    raw_closure: RawClosure {
+                        next_user_boundary: row.get(4)?,
+                        provider_terminal: optional_enum_row(row, 5)?,
+                        observed_eof_closed: row.get(6)?,
+                    },
+                    provider_visibility: enum_row(row, 7)?,
+                    fact_truncation: Vec::new(),
+                },
+                row.get::<_, Option<Vec<u8>>>(8)?,
+            ))
+        },
+    )?;
+    turn.fact_truncation = read_flags(connection, "turn_fact_truncation", "turn_id", turn_id)?;
+    let revision = revision
+        .map(|value| digest_from(&value, "stored Turn revision is not 32 bytes"))
+        .transpose()?;
+    let evidence_events =
+        read_events_for_turn(connection, session_id, session_key, *turn_key, turn_id)?;
+    let source_records = read_source_records_for_turn(connection, session_key, turn_id)?;
+    let turn_evidence = read_turn_links_for_turn(connection, session_key, turn_id)?;
+    let capability_uses = read_uses_for_turn(connection, session_key, turn_id)?;
+    let capability_use_evidence = read_use_links_for_turn(connection, session_key, turn_id)?;
+    let capabilities = read_capabilities_by_keys(
+        connection,
+        capability_uses
+            .iter()
+            .map(|usage| usage.capability_key)
+            .collect(),
+    )?;
+    Ok(Some(TurnFactClosure {
+        turn,
+        revision,
+        source_records,
+        evidence_events,
+        turn_evidence,
+        capabilities,
+        capability_uses,
+        capability_use_evidence,
+    }))
+}
+
+fn read_source_records_for_turn(
+    connection: &Connection,
+    session_key: StableKey,
+    turn_id: i64,
+) -> Result<Vec<SourceRecordFact>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT r.source_record_key,r.start_offset,r.end_offset,
+                r.record_sha256,r.provider_record_class
+         FROM source_records r JOIN evidence_events e
+           ON e.source_record_id=r.source_record_id
+         WHERE e.occurred_turn_id=?1 ORDER BY r.source_record_key",
+    )?;
+    Ok(statement
+        .query_map([turn_id], |row| {
+            Ok(SourceRecordFact {
+                source_record_key: key_row(row, 0)?,
+                owner_session_key: session_key,
+                start_offset: wire_row(row, 1)?,
+                end_offset: wire_row(row, 2)?,
+                record_sha256: key_row(row, 3)?,
+                provider_record_class: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_events_for_turn(
+    connection: &Connection,
+    session_id: i64,
+    session_key: StableKey,
+    turn_key: StableKey,
+    turn_id: i64,
+) -> Result<Vec<EvidenceEvent>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT e.event_id,e.event_key,r.source_record_key,
+                e.record_start_offset,e.content_index,e.event_ordinal,e.pointer_kind,
+                e.pointer_content_index,e.pointer_event_ordinal,e.origin_scope,
+                e.observed_timestamp,e.event_kind
+         FROM evidence_events e
+         JOIN source_records r ON r.source_record_id=e.source_record_id
+         WHERE e.session_id=?1 AND e.occurred_turn_id=?2 ORDER BY e.event_key",
+    )?;
+    let rows = statement
+        .query_map(params![session_id, turn_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                EventCommon {
+                    event_key: key_row(row, 1)?,
+                    owner_session_key: session_key,
+                    occurred_turn_key: Some(turn_key),
+                    source_record_key: key_row(row, 2)?,
+                    source_order: SourceOrder {
+                        record_start_offset: wire_row(row, 3)?,
+                        content_index: row.get(4)?,
+                        event_ordinal: row.get(5)?,
+                    },
+                    pointer: EvidencePointer {
+                        pointer_kind: row.get(6)?,
+                        content_index: row.get(7)?,
+                        event_ordinal: row.get(8)?,
+                    },
+                    origin_scope: enum_row(row, 9)?,
+                    observed_timestamp: row.get(10)?,
+                },
+                row.get::<_, String>(11)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    rows.into_iter()
+        .map(|(event_id, common, kind)| read_event_payload(connection, event_id, common, &kind))
+        .collect()
+}
+
+fn read_turn_links_for_turn(
+    connection: &Connection,
+    session_key: StableKey,
+    turn_id: i64,
+) -> Result<Vec<TurnEvidenceFact>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT t.turn_key,e.event_key,l.role FROM turn_evidence l
+         JOIN turns t ON t.turn_id=l.turn_id
+         JOIN evidence_events e ON e.event_id=l.event_id
+         WHERE l.turn_id=?1
+         ORDER BY e.event_key,
+           CASE l.role
+             WHEN 'boundary' THEN 0
+             WHEN 'corroboration' THEN 1
+             WHEN 'follow-up' THEN 2
+             WHEN 'lifecycle' THEN 3
+             WHEN 'result' THEN 4
+             WHEN 'rollback' THEN 5
+           END",
+    )?;
+    Ok(statement
+        .query_map([turn_id], |row| {
+            Ok(TurnEvidenceFact {
+                owner_session_key: session_key,
+                turn_key: key_row(row, 0)?,
+                event_key: key_row(row, 1)?,
+                role: enum_row(row, 2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_uses_for_turn(
+    connection: &Connection,
+    session_key: StableKey,
+    turn_id: i64,
+) -> Result<Vec<CapabilityUseFact>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT u.use_key,t.turn_key,c.capability_key,u.turn_ordinal,
+                u.exact_observed_name,u.origin_scope,u.origin_fingerprint,
+                u.input_fingerprint,u.provider_terminal_state,u.strength,u.correlation_digest
+         FROM capability_uses u JOIN turns t ON t.turn_id=u.turn_id
+         JOIN capabilities c ON c.capability_id=u.capability_id
+         WHERE u.turn_id=?1 ORDER BY u.use_key",
+    )?;
+    Ok(statement
+        .query_map([turn_id], |row| {
+            Ok(CapabilityUseFact {
+                use_key: key_row(row, 0)?,
+                owner_session_key: session_key,
+                turn_key: key_row(row, 1)?,
+                capability_key: key_row(row, 2)?,
+                turn_ordinal: wire_row(row, 3)?.get(),
+                exact_observed_name: row.get(4)?,
+                origin_scope: enum_row(row, 5)?,
+                origin_fingerprint: optional_key_row(row, 6)?,
+                input_fingerprint: optional_key_row(row, 7)?,
+                provider_terminal_state: enum_row(row, 8)?,
+                strength: enum_row(row, 9)?,
+                correlation_digest: optional_key_row(row, 10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_use_links_for_turn(
+    connection: &Connection,
+    session_key: StableKey,
+    turn_id: i64,
+) -> Result<Vec<CapabilityUseEvidenceFact>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT u.use_key,e.event_key,l.role FROM capability_use_evidence l
+         JOIN capability_uses u ON u.use_id=l.use_id
+         JOIN evidence_events e ON e.event_id=l.event_id
+         WHERE u.turn_id=?1
+         ORDER BY u.use_key,e.event_key,
+           CASE l.role
+             WHEN 'corroboration' THEN 0
+             WHEN 'invocation' THEN 1
+             WHEN 'result' THEN 2
+           END",
+    )?;
+    Ok(statement
+        .query_map([turn_id], |row| {
+            Ok(CapabilityUseEvidenceFact {
+                owner_session_key: session_key,
+                use_key: key_row(row, 0)?,
+                event_key: key_row(row, 1)?,
+                role: enum_row(row, 2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn read_source_records(

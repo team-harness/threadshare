@@ -23,6 +23,8 @@ export const REGENERATE_SECRET_CONFIRMATION = INSIGHTS_REGENERATE_CONFIRMATION;
 const ACTIONS = new Set(["status", "reindex", "reset", "exclude"]);
 const EXCLUSION_OPERATIONS = new Set(["add", "remove", "list"]);
 const EXCLUSION_KINDS = new Set(["provider", "project", "session"]);
+const MAX_REINDEX_SOURCE_CHANGED_RETRIES = 3;
+const REINDEX_SOURCE_CHANGED_RETRY_DELAY_MS = 100;
 
 function commandError(code, message) {
   const error = new Error(message);
@@ -63,6 +65,73 @@ function incompleteIndexError(index) {
     enumerable: false,
   });
   return error;
+}
+
+function onlySourceChangedFailures(index) {
+  if (!Number.isSafeInteger(index?.failed) || index.failed < 1) return false;
+  const matching = (index.diagnostics ?? []).filter((diagnostic) =>
+    diagnostic?.code === "session-index-failed" &&
+    diagnostic?.errorCode === "TS_INSIGHTS_SOURCE_CHANGED");
+  return matching.length === index.failed;
+}
+
+function reindexSourceSetError() {
+  return commandError(
+    "TS_INSIGHTS_REINDEX_INCOMPLETE",
+    "Insights source set changed while retrying candidate construction",
+  );
+}
+
+function reindexSourceKey(source) {
+  if (
+    !source ||
+    (source.provider !== "codex" && source.provider !== "claude") ||
+    typeof source.sessionId !== "string" ||
+    source.sessionId === ""
+  ) {
+    throw reindexSourceSetError();
+  }
+  return `${source.provider}\0${source.sessionId.toLowerCase()}`;
+}
+
+function reindexSourceSet(sources) {
+  if (!Array.isArray(sources)) throw reindexSourceSetError();
+  const keys = new Set();
+  for (const source of sources) {
+    const key = reindexSourceKey(source);
+    if (keys.has(key)) throw reindexSourceSetError();
+    keys.add(key);
+  }
+  return keys;
+}
+
+function assertSameReindexSourceSet(expected, actual) {
+  if (expected.size !== actual.size) throw reindexSourceSetError();
+  for (const key of expected) {
+    if (!actual.has(key)) throw reindexSourceSetError();
+  }
+}
+
+function mergeReindexRetryReport(index, committedSourceKeys) {
+  const committed = committedSourceKeys.size;
+  const previouslyCommitted = committed - index.committed;
+  if (
+    previouslyCommitted < 0 ||
+    !Number.isSafeInteger(index.unchanged) ||
+    index.unchanged < previouslyCommitted
+  ) {
+    throw reindexSourceSetError();
+  }
+  return {
+    ...index,
+    committed,
+    unchanged: index.unchanged - previouslyCommitted,
+  };
+}
+
+async function waitForSourceChangedRetry(signal) {
+  await new Promise((resolve) => setTimeout(resolve, REINDEX_SOURCE_CHANGED_RETRY_DELAY_MS));
+  signal?.throwIfAborted();
 }
 
 function assertFormat(format) {
@@ -267,10 +336,7 @@ export async function reconcileInsights(options = {}) {
     regenerateSecret: regeneratedSecret,
     confirmation: options.confirmation,
     async buildCandidate({ databaseFile, originSecretEpoch, privacyContext, signal }) {
-      const [config, discovery] = await Promise.all([
-        loadInsightsConfig({ ...options.configOptions, paths }),
-        discoverSources(options),
-      ]);
+      const config = await loadInsightsConfig({ ...options.configOptions, paths });
       const requiredContract = insightsRequiredContract(originSecretEpoch);
       const engine = await createInsightsEngineClient({
         databasePath: databaseFile,
@@ -280,23 +346,40 @@ export async function reconcileInsights(options = {}) {
         timeoutMs: options.timeoutMs,
       });
       try {
-        const index = await runInsightsIndexer({
-          sources: discovery.sources,
-          config,
-          engine,
-          privacyContext,
-          requiredContract,
-          concurrency: options.concurrency,
-          signal,
-          adapterOptions: options.adapterOptions,
-          statSource: options.statSource,
-          sampleSource: options.sampleSource,
-          readDelta: options.readDelta,
-          onProgress: options.onProgress,
-        });
-        if (index.failed > 0) {
-          throw incompleteIndexError(index);
+        let discovery;
+        let index;
+        let initialSourceKeys;
+        const committedSourceKeys = new Set();
+        for (let attempt = 0; attempt <= MAX_REINDEX_SOURCE_CHANGED_RETRIES; attempt += 1) {
+          discovery = await discoverSources(options);
+          const sourceKeys = reindexSourceSet(discovery.sources);
+          if (initialSourceKeys === undefined) initialSourceKeys = sourceKeys;
+          else assertSameReindexSourceSet(initialSourceKeys, sourceKeys);
+          index = await runInsightsIndexer({
+            sources: discovery.sources,
+            config,
+            engine,
+            privacyContext,
+            requiredContract,
+            concurrency: options.concurrency,
+            signal,
+            adapterOptions: options.adapterOptions,
+            statSource: options.statSource,
+            sampleSource: options.sampleSource,
+            readDelta: options.readDelta,
+            onProgress: options.onProgress,
+            onSourceCommitted(source) {
+              committedSourceKeys.add(reindexSourceKey(source));
+            },
+          });
+          if (index.failed === 0) break;
+          if (!onlySourceChangedFailures(index) ||
+              attempt === MAX_REINDEX_SOURCE_CHANGED_RETRIES) {
+            throw incompleteIndexError(index);
+          }
+          await waitForSourceChangedRetry(signal);
         }
+        index = mergeReindexRetryReport(index, committedSourceKeys);
         const purge = await finishPurgeMaintenance(engine, { ...options, signal });
         if (insightsPurgeWorkPending(purge)) {
           throw commandError(

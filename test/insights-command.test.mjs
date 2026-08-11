@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,7 @@ import {
   reconcileActiveInsights,
   reconcileInsights,
 } from "../src/insights-command.mjs";
+import { readProviderSessionDelta } from "../src/provider-evidence.mjs";
 import {
   createInsightsE2EFixture,
   INSIGHTS_E2E_SKIP,
@@ -370,6 +371,164 @@ test("real sidecar reindex atomically replaces an empty snapshot and preserves i
   );
   assert.deepEqual(await readFile(value.databaseFile), activeDatabase);
   assert.deepEqual(await readFile(value.originSecretFile), secret);
+});
+
+test("real sidecar reindex reports unique committed sources across source-change retries", {
+  timeout: 30_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "88888888-8888-4888-8888-888888888888",
+  );
+  const secondSessionId = "88888888-8888-4888-8888-999999999999";
+  const secondSessionFile = path.join(
+    path.dirname(fixture.sessionFile),
+    path.basename(fixture.sessionFile).replace(fixture.sessionId, secondSessionId),
+  );
+  await writeFile(
+    secondSessionFile,
+    (await readFile(fixture.sessionFile, "utf8")).replaceAll(fixture.sessionId, secondSessionId),
+    { mode: 0o600 },
+  );
+  const reads = new Map();
+  const result = await reconcileInsights({
+    ...fixture.reconcileOptions,
+    async readDelta(provider, file, options) {
+      const delta = await readProviderSessionDelta(provider, file, options);
+      const count = (reads.get(file) ?? 0) + 1;
+      reads.set(file, count);
+      if (file === fixture.sessionFile && count === 1) {
+        await appendFile(file, `${JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-10T09:00:11.000Z",
+          payload: { type: "token_count", info: {} },
+        })}\n`);
+      }
+      return delta;
+    },
+  });
+
+  assert.equal(reads.get(fixture.sessionFile), 2);
+  assert.equal(reads.get(secondSessionFile), 1);
+  assert.equal(result.report.planned, 2);
+  assert.equal(result.report.committed, 2);
+  assert.equal(result.report.unchanged, 0);
+  assert.equal(result.report.failed, 0);
+});
+
+test("real sidecar reindex rejects source-set drift between retries", {
+  timeout: 30_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "77777777-7777-4777-8777-777777777777",
+  );
+  let reads = 0;
+  let stats = 0;
+  await assert.rejects(
+    reconcileInsights({
+      ...fixture.reconcileOptions,
+      async readDelta(provider, file, options) {
+        const delta = await readProviderSessionDelta(provider, file, options);
+        reads += 1;
+        await appendFile(file, `${JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-10T09:00:11.000Z",
+          payload: { type: "token_count", info: {} },
+        })}\n`);
+        return delta;
+      },
+      async statSource(file) {
+        const metadata = await stat(file, { bigint: true });
+        stats += 1;
+        if (stats === 2) await rm(file);
+        return metadata;
+      },
+    }),
+    { code: "TS_INSIGHTS_REINDEX_INCOMPLETE" },
+  );
+  assert.equal(reads, 1);
+  assert.equal(stats, 2);
+});
+
+test("real sidecar reindex does not retry mixed source-change and read failures", {
+  timeout: 30_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "66666666-6666-4666-8666-666666666666",
+  );
+  const secondSessionId = "66666666-6666-4666-8666-777777777777";
+  const secondSessionFile = path.join(
+    path.dirname(fixture.sessionFile),
+    path.basename(fixture.sessionFile).replace(fixture.sessionId, secondSessionId),
+  );
+  await writeFile(
+    secondSessionFile,
+    (await readFile(fixture.sessionFile, "utf8")).replaceAll(fixture.sessionId, secondSessionId),
+    { mode: 0o600 },
+  );
+  const reads = new Map();
+  await assert.rejects(
+    reconcileInsights({
+      ...fixture.reconcileOptions,
+      async readDelta(provider, file, options) {
+        reads.set(file, (reads.get(file) ?? 0) + 1);
+        if (file === secondSessionFile) {
+          throw Object.assign(new Error("injected read failure"), { code: "EACCES" });
+        }
+        const delta = await readProviderSessionDelta(provider, file, options);
+        await appendFile(file, `${JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-10T09:00:11.000Z",
+          payload: { type: "token_count", info: {} },
+        })}\n`);
+        return delta;
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "TS_INSIGHTS_REINDEX_INCOMPLETE");
+      assert.equal(error.failureSummary.failed, 2);
+      assert.deepEqual(
+        error.failureSummary.diagnostics.map(({ errorCode }) => errorCode),
+        ["EACCES", "TS_INSIGHTS_SOURCE_CHANGED"],
+      );
+      return true;
+    },
+  );
+  assert.equal(reads.get(fixture.sessionFile), 1);
+  assert.equal(reads.get(secondSessionFile), 1);
+});
+
+test("real sidecar reindex bounds repeated source-change retries", {
+  timeout: 30_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "99999999-9999-4999-8999-999999999999",
+  );
+  let reads = 0;
+  await assert.rejects(
+    reconcileInsights({
+      ...fixture.reconcileOptions,
+      async readDelta(provider, file, options) {
+        const delta = await readProviderSessionDelta(provider, file, options);
+        reads += 1;
+        await appendFile(file, `${JSON.stringify({
+          type: "event_msg",
+          timestamp: `2026-08-10T09:00:${String(11 + reads).padStart(2, "0")}.000Z`,
+          payload: { type: "token_count", info: {} },
+        })}\n`);
+        return delta;
+      },
+    }),
+    { code: "TS_INSIGHTS_REINDEX_INCOMPLETE" },
+  );
+  assert.equal(reads, 4);
 });
 
 test("background reconciliation finishes an installed reindex swap before indexing", {

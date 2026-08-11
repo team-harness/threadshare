@@ -410,6 +410,79 @@ process.stdin.on("data", (chunk) => {
   return binaryPath;
 }
 
+async function createDelayedCommitEngine(directory, delayMs) {
+  const binaryPath = path.join(directory, "delayed-commit-engine");
+  const binary = `#!/usr/bin/env node
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+}
+function send(message) {
+  const payload = Buffer.from(canonical(message));
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32BE(payload.length);
+  process.stdout.write(Buffer.concat([prefix, payload]));
+}
+let input = Buffer.alloc(0);
+let sessionKey;
+let deltaId;
+process.stdin.on("data", (chunk) => {
+  input = Buffer.concat([input, chunk]);
+  while (input.length >= 4) {
+    const length = input.readUInt32BE(0);
+    if (input.length < length + 4) return;
+    const message = JSON.parse(input.subarray(4, length + 4).toString("utf8"));
+    input = input.subarray(length + 4);
+    if (message.type === "HELLO") {
+      send({
+        format: "threadshare-insights-protocol@v1",
+        type: "READY",
+        requestId: message.requestId,
+        engineVersion: "test",
+        target: "development",
+        maxFrameBytes: 4194304,
+        sqliteVersion: "3.53.2",
+        sqliteCompileOptionsDigest: "c".repeat(64),
+        buildManifestDigest: "d".repeat(64),
+        acceptedContract: message.requiredContract,
+      });
+    } else if (message.type === "BEGIN_SESSION") {
+      sessionKey = message.session.sessionKey;
+      deltaId = message.deltaId;
+      send({
+        format: "threadshare-insights-protocol@v1",
+        type: "SESSION_ACCEPTED",
+        requestId: message.requestId,
+        sessionKey,
+        deltaId,
+        nextSequence: "0",
+      });
+    } else if (message.type === "RETRACT_FACTS" || message.type === "UPSERT_FACTS") {
+      send({
+        format: "threadshare-insights-protocol@v1",
+        type: "BATCH_ACCEPTED",
+        requestId: message.requestId,
+        sequence: message.sequence,
+      });
+    } else if (message.type === "COMMIT_SESSION") {
+      setTimeout(() => send({
+        format: "threadshare-insights-protocol@v1",
+        type: "SESSION_COMMITTED",
+        requestId: message.requestId,
+        sessionKey,
+        deltaId,
+        snapshotSeq: "1",
+        idempotent: false,
+      }), ${delayMs});
+    }
+  }
+});
+`;
+  await writeFile(binaryPath, binary, { mode: 0o700 });
+  return binaryPath;
+}
+
 async function createQueryProtocolEngine(directory) {
   const binaryPath = path.join(directory, "query-protocol-engine");
   const binary = `#!/usr/bin/env node
@@ -1064,6 +1137,53 @@ test("a session-time disconnect marks the client fatal and close remains joinabl
   const secondClose = client.close();
   assert.equal(firstClose, secondClose);
   await firstClose;
+});
+
+test("session commit uses its bounded transaction timeout", {
+  timeout: 10_000,
+  skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-commit-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binaryPath = await createDelayedCommitEngine(directory, 2_000);
+  const client = await createInsightsEngineClient({
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
+    },
+    requiredContract: handshakeContract(),
+    timeoutMs: 1_500,
+    commitTimeoutMs: 5_000,
+  });
+  t.after(() => client.close());
+
+  assert.deepEqual(await client.applySessionFacts(sampleDelta()), {
+    snapshotSeq: "1",
+    sessionKey: SESSION_KEY,
+    idempotent: false,
+  });
+});
+
+test("session commit timeout remains fail-closed", {
+  timeout: 10_000,
+  skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-commit-timeout-bound-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binaryPath = await createDelayedCommitEngine(directory, 250);
+  const client = await createInsightsEngineClient({
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
+    },
+    requiredContract: handshakeContract(),
+    timeoutMs: 1_500,
+    commitTimeoutMs: 50,
+  });
+  t.after(() => client.close());
+
+  await assert.rejects(
+    client.applySessionFacts(sampleDelta()),
+    { code: "TS_INSIGHTS_ENGINE_TIMEOUT" },
+  );
 });
 
 test("packaged runtime requires exact READY target, version, manifest, and SQLite identity", {

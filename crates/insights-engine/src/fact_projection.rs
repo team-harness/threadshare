@@ -1,11 +1,10 @@
 use crate::analyzer::{AnalyzerOriginScope, CapabilityInput, analyze_document};
 use crate::fact_model::{
-    CapabilityFact, CapabilityUseEvidenceFact, CapabilityUseFact, Eligibility, EvidenceEvent,
-    LifecycleState, MessageRole, OriginScope, ProviderStatusKind, ProviderStatusState,
-    ProviderTerminal, ProviderVisibility, SessionScope, SourceOrder, SourceRecordFact, StableKey,
-    TurnEvidenceFact, TurnEvidenceRole, TurnFact,
+    CapabilityFact, CapabilityUseEvidenceFact, CapabilityUseFact, EvidenceEvent, OriginScope,
+    ProviderStatusState, ProviderTerminal, ProviderVisibility, SourceOrder, SourceRecordFact,
+    StableKey, TurnEvidenceFact, TurnFact,
 };
-use crate::fact_repository::{FactEntity, FactEntityKind, FactRepository, SessionFactSnapshot};
+use crate::fact_repository::{FactRepository, TurnFactClosure};
 use crate::fts_projection::FtsDocument;
 use crate::projection::{
     ACTIVE_TURN_SUMMARY_PROJECTION_VERSION, AnalyzedTurnProjection, ProjectionChange,
@@ -38,7 +37,7 @@ pub(crate) struct SessionProjectionChangeSet<'a> {
     pub snapshot_seq: i64,
     pub before: &'a SessionProjectionSnapshot,
     pub after: &'a SessionProjectionSnapshot,
-    pub forced_turn_keys: &'a BTreeSet<StableKey>,
+    pub is_forced_turn_key: &'a dyn Fn(StableKey) -> Result<bool, StorageError>,
     pub force_all_turns: bool,
 }
 
@@ -101,8 +100,42 @@ pub(crate) fn maintain_projection_change_log_for_test(
 
 #[derive(Debug, Clone)]
 enum TimelineKind {
-    Rollback,
+    Rollback(RollbackAction),
     Seal(StableKey),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RollbackAction {
+    provider_state: ProviderStatusState,
+    rolled_back_turn_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RollbackTurn {
+    turn_key: StableKey,
+    turn_start_offset: u64,
+    provider_visibility: ProviderVisibility,
+    declares_hard_seal: bool,
+    truncated: bool,
+}
+
+#[derive(Debug, Default)]
+struct UnresolvedRollbacks {
+    count: u64,
+    first_offset: Option<u64>,
+}
+
+impl UnresolvedRollbacks {
+    fn record(&mut self, offset: u64) -> Result<(), StorageError> {
+        self.count = self.count.checked_add(1).ok_or_else(|| {
+            StorageError::new(
+                "TS_INSIGHTS_STORAGE_FAILED",
+                "rollback diagnostic count exceeds uint64",
+            )
+        })?;
+        self.first_offset = Some(self.first_offset.map_or(offset, |prior| prior.min(offset)));
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -125,79 +158,107 @@ struct TurnRevisionInput<'a> {
 }
 
 pub(crate) fn capture_session_projection_snapshot(
-    repository: &dyn FactRepository,
+    transaction: &Transaction<'_>,
     session_key: StableKey,
 ) -> Result<SessionProjectionSnapshot, StorageError> {
-    let Some(FactEntity::Session(facts)) =
-        repository.lookup_stable_key(FactEntityKind::Session, &session_key)?
-    else {
+    let projection_eligible = transaction
+        .query_row(
+            "SELECT session_scope='main' AND eligibility='eligible'
+             FROM sessions WHERE session_key=?1",
+            params![session_key.as_bytes().as_slice()],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?;
+    let Some(projection_eligible) = projection_eligible else {
         return Ok(SessionProjectionSnapshot::default());
     };
-    let facts = *facts;
-    let projection_eligible = facts.session.session_scope == SessionScope::Main
-        && facts.session.eligibility == Eligibility::Eligible;
+
+    let mut turn_statement = transaction.prepare(
+        "SELECT turn_key,revision FROM turns
+         WHERE session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+         ORDER BY turn_key",
+    )?;
+    let turn_rows = turn_statement
+        .query_map(params![session_key.as_bytes().as_slice()], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let turn_revisions = turn_rows
+        .into_iter()
+        .map(|(turn_key, revision)| {
+            Ok((
+                stable_key_from_blob(turn_key, "stored Turn key is not 32 bytes")?,
+                revision
+                    .map(|value| digest_from_blob(value, "stored Turn revision is not 32 bytes"))
+                    .transpose()?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, StorageError>>()?;
+
+    let mut capability_statement = transaction.prepare(
+        "SELECT capability_key FROM (
+           SELECT c.capability_key AS capability_key
+             FROM capability_uses u JOIN capabilities c ON c.capability_id=u.capability_id
+            WHERE u.session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+           UNION
+           SELECT c.capability_key
+             FROM evidence_events e
+             JOIN capability_invocation_events i ON i.event_id=e.event_id
+             JOIN capabilities c ON c.capability_id=i.capability_id
+            WHERE e.session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+           UNION
+           SELECT c.capability_key
+             FROM evidence_events e
+             JOIN skill_catalog_entry_events catalog ON catalog.event_id=e.event_id
+             JOIN capabilities c ON c.capability_id=catalog.capability_id
+            WHERE e.session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+           UNION
+           SELECT c.capability_key
+             FROM evidence_events e
+             JOIN skill_load_events load ON load.event_id=e.event_id
+             JOIN capabilities c ON c.capability_id=load.capability_id
+            WHERE e.session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+           UNION
+           SELECT c.capability_key
+             FROM checkpoint_capability_pins pin
+             JOIN capabilities c ON c.capability_id=pin.capability_id
+            WHERE pin.session_id=(SELECT session_id FROM sessions WHERE session_key=?1)
+         ) ORDER BY capability_key",
+    )?;
+    let capability_rows = capability_statement
+        .query_map(params![session_key.as_bytes().as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let capability_keys = capability_rows
+        .into_iter()
+        .map(|value| stable_key_from_blob(value, "stored Capability key is not 32 bytes"))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
     Ok(SessionProjectionSnapshot {
-        turn_revisions: facts.turn_revisions,
-        capability_keys: facts
-            .capabilities
-            .into_iter()
-            .map(|capability| capability.capability_key)
-            .collect(),
+        turn_revisions,
+        capability_keys,
         projection_eligible,
     })
 }
 
 pub(crate) fn recompute_session_derivations(
     transaction: &Transaction<'_>,
-    repository: &dyn FactRepository,
     session_id: i64,
-    session_key: StableKey,
 ) -> Result<(), StorageError> {
     clear_engine_rollback_state(transaction, session_id)?;
-    let Some(FactEntity::Session(facts)) =
-        repository.lookup_stable_key(FactEntityKind::Session, &session_key)?
-    else {
-        return Err(StorageError::new(
-            "TS_INSIGHTS_STORAGE_CORRUPT",
-            "committed session disappeared while deriving Facts",
-        ));
-    };
-    let mut facts = *facts;
-
-    let effective_visibility = replay_rollback_visibility(transaction, session_id, &mut facts)?;
-    recompute_turn_revisions(transaction, session_id, &facts, &effective_visibility)
+    replay_rollback_visibility(transaction, session_id)?;
+    recompute_turn_revisions(transaction, session_id)
 }
 
 pub(crate) fn record_projection_changes(
     transaction: &Transaction<'_>,
-    repository: &dyn FactRepository,
     changes: &SessionProjectionChangeSet<'_>,
 ) -> Result<(), StorageError> {
     let session_key = changes.session_key;
     let snapshot_seq = changes.snapshot_seq;
     let before = changes.before;
     let after = changes.after;
-    let facts = match repository.lookup_stable_key(FactEntityKind::Session, &session_key)? {
-        Some(FactEntity::Session(facts)) => Some(*facts),
-        None => None,
-        Some(_) => {
-            return Err(StorageError::new(
-                "TS_INSIGHTS_STORAGE_CORRUPT",
-                "session key resolved to the wrong Fact entity kind",
-            ));
-        }
-    };
-    let events = facts
-        .as_ref()
-        .map(|facts| {
-            facts
-                .evidence_events
-                .iter()
-                .cloned()
-                .map(|event| (event.common().event_key, event))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
     append_projection_change(
         transaction,
         &ProjectionChange {
@@ -219,19 +280,25 @@ pub(crate) fn record_projection_changes(
         let exists_after = after.turn_revisions.contains_key(&turn_key);
         let changed = changes.force_all_turns
             || before.projection_eligible != after.projection_eligible
-            || changes.forced_turn_keys.contains(&turn_key)
-            || before.turn_revisions.get(&turn_key) != after.turn_revisions.get(&turn_key);
+            || before.turn_revisions.get(&turn_key) != after.turn_revisions.get(&turn_key)
+            || (changes.is_forced_turn_key)(turn_key)?;
         if !changed {
             continue;
         }
         if exists_after {
-            let facts = facts.as_ref().ok_or_else(|| {
+            let closure = transaction.read_turn_closure(&turn_key)?.ok_or_else(|| {
                 StorageError::new(
                     "TS_INSIGHTS_STORAGE_CORRUPT",
-                    "Turn survived without its owner Session Fact",
+                    "Turn projection root is missing from its logical Fact closure",
                 )
             })?;
-            materialize_turn_projection(transaction, facts, &events, turn_key, snapshot_seq)?;
+            materialize_turn_projection(
+                transaction,
+                session_key,
+                after.projection_eligible,
+                &closure,
+                snapshot_seq,
+            )?;
         }
         append_projection_change(
             transaction,
@@ -257,9 +324,11 @@ pub(crate) fn record_projection_changes(
         .copied()
         .collect::<BTreeSet<_>>();
     for capability_key in capability_keys {
-        let exists_after = repository
-            .lookup_stable_key(FactEntityKind::Capability, &capability_key)?
-            .is_some();
+        let exists_after = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM capabilities WHERE capability_key=?1)",
+            params![capability_key.as_bytes().as_slice()],
+            |row| row.get::<_, bool>(0),
+        )?;
         append_projection_change(
             transaction,
             &ProjectionChange {
@@ -281,26 +350,19 @@ pub(crate) fn record_projection_changes(
 
 fn materialize_turn_projection(
     transaction: &Transaction<'_>,
-    facts: &SessionFactSnapshot,
-    events: &BTreeMap<StableKey, EvidenceEvent>,
-    turn_key: StableKey,
+    session_key: StableKey,
+    projection_eligible: bool,
+    closure: &TurnFactClosure,
     snapshot_seq: i64,
 ) -> Result<(), StorageError> {
-    let turn_id = turn_id(transaction, turn_key)?.ok_or_else(|| {
+    let turn_id = turn_id(transaction, closure.turn.turn_key)?.ok_or_else(|| {
         StorageError::new(
             "TS_INSIGHTS_STORAGE_CORRUPT",
             "Turn projection root disappeared during its Fact commit",
         )
     })?;
-    let closure = facts.turn_closure(&turn_key).ok_or_else(|| {
-        StorageError::new(
-            "TS_INSIGHTS_STORAGE_CORRUPT",
-            "Turn projection root is missing from its logical Fact closure",
-        )
-    })?;
-    let eligible = facts.session.session_scope == SessionScope::Main
-        && facts.session.eligibility == Eligibility::Eligible
-        && closure.turn.provider_visibility == ProviderVisibility::Active;
+    let eligible =
+        projection_eligible && closure.turn.provider_visibility == ProviderVisibility::Active;
     if !eligible {
         delete_turn_projection(transaction, turn_id)?;
         return Ok(());
@@ -336,12 +398,12 @@ fn materialize_turn_projection(
         .collect::<Vec<_>>()
         .join(" ");
     let analyzed = analyze_document(&closure.turn.problem_text, &capability_inputs);
-    let hard_sealed = hard_seal_event(&closure.turn, &facts.turn_evidence, events).is_some();
+    let hard_sealed = hard_seal_exists(transaction, turn_id, &closure.turn)?;
     let rollup = [RollupContribution {
         projection_name: TURN_SUMMARY_PROJECTION_NAME,
         projection_version: ACTIVE_TURN_SUMMARY_PROJECTION_VERSION,
         dimension: "session",
-        bucket_key: facts.session.session_key.as_bytes(),
+        bucket_key: session_key.as_bytes(),
         metric: "hard-sealed-turn-count",
         value: 1,
         snapshot_seq,
@@ -383,6 +445,34 @@ fn materialize_turn_projection(
     Ok(())
 }
 
+fn hard_seal_exists(
+    transaction: &Transaction<'_>,
+    turn_id: i64,
+    turn: &TurnFact,
+) -> Result<bool, StorageError> {
+    let provider_terminal = turn.raw_closure.provider_terminal.map(|value| match value {
+        ProviderTerminal::Completed => "completed",
+        ProviderTerminal::Aborted => "aborted",
+    });
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM turn_evidence link
+           LEFT JOIN visible_message_events message ON message.event_id=link.event_id
+           LEFT JOIN turn_lifecycle_events lifecycle ON lifecycle.event_id=link.event_id
+           WHERE link.turn_id=?1 AND (
+             (?2 AND link.role='follow-up' AND message.message_role='user') OR
+             (?3 IS NOT NULL AND link.role='lifecycle' AND lifecycle.lifecycle_state=?3)
+           )
+         )",
+        params![
+            turn_id,
+            turn.raw_closure.next_user_boundary,
+            provider_terminal
+        ],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
 fn clear_engine_rollback_state(
     transaction: &Transaction<'_>,
     session_id: i64,
@@ -410,227 +500,296 @@ fn clear_engine_rollback_state(
 fn replay_rollback_visibility(
     transaction: &Transaction<'_>,
     session_id: i64,
-    facts: &mut SessionFactSnapshot,
-) -> Result<BTreeMap<StableKey, ProviderVisibility>, StorageError> {
-    let turns = facts
-        .turns
-        .iter()
-        .cloned()
-        .map(|turn| (turn.turn_key, turn))
-        .collect::<BTreeMap<_, _>>();
-    let events = facts
-        .evidence_events
-        .iter()
-        .cloned()
-        .map(|event| (event.common().event_key, event))
-        .collect::<BTreeMap<_, _>>();
-    let mut effective = turns
-        .iter()
-        .map(|(key, turn)| (*key, turn.provider_visibility))
-        .collect::<BTreeMap<_, _>>();
-    let mut incomplete_turns = BTreeSet::new();
-    let mut timeline = Vec::new();
+) -> Result<(), StorageError> {
+    let (session_scope, session_incomplete) = transaction
+        .query_row(
+            "SELECT s.session_scope,
+                    EXISTS(SELECT 1 FROM session_fact_truncation f WHERE f.session_id=s.session_id)
+             FROM sessions s WHERE s.session_id=?1",
+            [session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StorageError::new(
+                "TS_INSIGHTS_STORAGE_CORRUPT",
+                "committed session disappeared while deriving Facts",
+            )
+        })?;
+    let session_is_main = match session_scope.as_str() {
+        "main" => true,
+        "subagent" | "unknown" => false,
+        _ => {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_STORAGE_CORRUPT",
+                "stored Session scope is invalid",
+            ));
+        }
+    };
 
-    for event in events.values() {
-        if let EvidenceEvent::ProviderStatus(status) = event
-            && status.status_kind == ProviderStatusKind::ThreadRolledBack
-        {
-            timeline.push(TimelineAction {
-                source_order: status.common.source_order.clone(),
-                event_key: status.common.event_key,
-                kind: TimelineKind::Rollback,
-            });
-        }
+    let mut turn_statement = transaction.prepare(
+        "SELECT t.turn_key,t.turn_start_offset,t.base_provider_visibility,
+                t.next_user_boundary,t.provider_terminal,
+                EXISTS(SELECT 1 FROM turn_fact_truncation f WHERE f.turn_id=t.turn_id)
+         FROM turns t WHERE t.session_id=?1 ORDER BY t.turn_key",
+    )?;
+    let turn_rows = turn_statement
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let turns = turn_rows
+        .into_iter()
+        .map(
+            |(turn_key, start_offset, visibility, next_user_boundary, terminal, truncated)| {
+                let provider_visibility = match visibility.as_str() {
+                    "active" => ProviderVisibility::Active,
+                    "rolled-back" => ProviderVisibility::RolledBack,
+                    "unknown" => ProviderVisibility::Unknown,
+                    _ => {
+                        return Err(StorageError::new(
+                            "TS_INSIGHTS_STORAGE_CORRUPT",
+                            "stored Turn visibility is invalid",
+                        ));
+                    }
+                };
+                if terminal
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "completed" | "aborted"))
+                {
+                    return Err(StorageError::new(
+                        "TS_INSIGHTS_STORAGE_CORRUPT",
+                        "stored Turn terminal state is invalid",
+                    ));
+                }
+                let turn_key = stable_key_from_blob(turn_key, "stored Turn key is not 32 bytes")?;
+                Ok((
+                    turn_key,
+                    RollbackTurn {
+                        turn_key,
+                        turn_start_offset: wire_value_from_blob(
+                            start_offset,
+                            "stored Turn offset is not 8 bytes",
+                        )?
+                        .get(),
+                        provider_visibility,
+                        declares_hard_seal: next_user_boundary || terminal.is_some(),
+                        truncated,
+                    },
+                ))
+            },
+        )
+        .collect::<Result<BTreeMap<StableKey, RollbackTurn>, StorageError>>()?;
+
+    let mut seal_statement = transaction.prepare(
+        "SELECT t.turn_key,e.event_key,e.record_start_offset,e.content_index,e.event_ordinal
+         FROM turns t
+         JOIN turn_evidence link ON link.turn_id=t.turn_id
+         JOIN evidence_events e ON e.event_id=link.event_id
+         LEFT JOIN visible_message_events message ON message.event_id=e.event_id
+         LEFT JOIN turn_lifecycle_events lifecycle ON lifecycle.event_id=e.event_id
+         WHERE t.session_id=?1 AND (
+           (t.next_user_boundary=1 AND link.role='follow-up' AND message.message_role='user') OR
+           (t.provider_terminal IS NOT NULL AND link.role='lifecycle'
+             AND lifecycle.lifecycle_state=t.provider_terminal)
+         )
+         ORDER BY t.turn_key,e.record_start_offset,e.content_index,e.event_ordinal,e.event_key",
+    )?;
+    let seal_rows = seal_statement
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, u16>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seals = BTreeMap::new();
+    for (turn_key, event_key, record_start_offset, content_index, event_ordinal) in seal_rows {
+        let turn_key = stable_key_from_blob(turn_key, "stored Turn key is not 32 bytes")?;
+        seals.entry(turn_key).or_insert((
+            SourceOrder {
+                record_start_offset: wire_value_from_blob(
+                    record_start_offset,
+                    "stored Event offset is not 8 bytes",
+                )?,
+                content_index,
+                event_ordinal,
+            },
+            stable_key_from_blob(event_key, "stored Event key is not 32 bytes")?,
+        ));
     }
-    for turn in turns.values() {
-        let declares_hard_seal =
-            turn.raw_closure.next_user_boundary || turn.raw_closure.provider_terminal.is_some();
-        let seal = hard_seal_event(turn, &facts.turn_evidence, &events);
-        if declares_hard_seal && seal.is_none() {
-            incomplete_turns.insert(turn.turn_key);
-        }
-        if let Some((source_order, event_key)) = seal {
-            timeline.push(TimelineAction {
-                source_order,
-                event_key,
-                kind: TimelineKind::Seal(turn.turn_key),
-            });
-        }
+
+    let mut timeline = seals
+        .iter()
+        .map(|(turn_key, (source_order, event_key))| TimelineAction {
+            source_order: source_order.clone(),
+            event_key: *event_key,
+            kind: TimelineKind::Seal(*turn_key),
+        })
+        .collect::<Vec<_>>();
+    let mut rollback_statement = transaction.prepare(
+        "SELECT e.event_key,e.record_start_offset,e.content_index,e.event_ordinal,
+                p.provider_state,p.rolled_back_turn_count
+         FROM evidence_events e JOIN provider_status_events p ON p.event_id=e.event_id
+         WHERE e.session_id=?1 AND p.status_kind='thread-rolled-back'
+         ORDER BY e.record_start_offset,e.content_index,e.event_ordinal,e.event_key",
+    )?;
+    let rollback_rows = rollback_statement
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, u16>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (event_key, record_start_offset, content_index, event_ordinal, state, count) in
+        rollback_rows
+    {
+        let provider_state = match state.as_str() {
+            "observed" => ProviderStatusState::Observed,
+            "invalid" => ProviderStatusState::Invalid,
+            _ => {
+                return Err(StorageError::new(
+                    "TS_INSIGHTS_STORAGE_CORRUPT",
+                    "stored Provider status state is invalid",
+                ));
+            }
+        };
+        timeline.push(TimelineAction {
+            source_order: SourceOrder {
+                record_start_offset: wire_value_from_blob(
+                    record_start_offset,
+                    "stored Event offset is not 8 bytes",
+                )?,
+                content_index,
+                event_ordinal,
+            },
+            event_key: stable_key_from_blob(event_key, "stored Event key is not 32 bytes")?,
+            kind: TimelineKind::Rollback(RollbackAction {
+                provider_state,
+                rolled_back_turn_count: count
+                    .map(|value| {
+                        wire_value_from_blob(value, "stored rollback count is not 8 bytes")
+                            .map(|value| value.get())
+                    })
+                    .transpose()?,
+            }),
+        });
     }
     timeline.sort_by(compare_timeline);
 
-    let session_incomplete = !facts.session.fact_truncation.is_empty();
+    let earliest_incomplete_turn = turns
+        .values()
+        .filter(|turn| {
+            turn.truncated || (turn.declares_hard_seal && !seals.contains_key(&turn.turn_key))
+        })
+        .map(|turn| turn.turn_start_offset)
+        .min();
     let mut sealed_active = BTreeSet::new();
-    let mut observed_seals = BTreeSet::new();
-    let mut unresolved = Vec::new();
-    let mut rollback_links = Vec::new();
+    let mut unresolved = UnresolvedRollbacks::default();
     for action in timeline {
         match action.kind {
             TimelineKind::Seal(turn_key) => {
-                if !observed_seals.insert(turn_key) {
-                    continue;
-                }
                 if turns
                     .get(&turn_key)
                     .is_some_and(|turn| turn.provider_visibility == ProviderVisibility::Active)
+                    && let Some(turn) = turns.get(&turn_key)
                 {
-                    sealed_active.insert(turn_key);
+                    sealed_active.insert((turn.turn_start_offset, turn.turn_key));
                 }
             }
-            TimelineKind::Rollback => {
-                let Some(EvidenceEvent::ProviderStatus(status)) = events.get(&action.event_key)
-                else {
-                    continue;
-                };
-                let count = status
-                    .rolled_back_turn_count
-                    .map(|value| value.get())
-                    .unwrap_or(0);
-                let prior_incomplete = turns.values().any(|turn| {
-                    turn.turn_start_offset.get()
-                        < status.common.source_order.record_start_offset.get()
-                        && (!turn.fact_truncation.is_empty()
-                            || incomplete_turns.contains(&turn.turn_key))
-                });
-                if status.provider_state != ProviderStatusState::Observed
+            TimelineKind::Rollback(rollback) => {
+                let count = rollback.rolled_back_turn_count.unwrap_or(0);
+                let rollback_offset = action.source_order.record_start_offset.get();
+                let prior_incomplete = earliest_incomplete_turn
+                    .is_some_and(|turn_offset| turn_offset < rollback_offset);
+                if rollback.provider_state != ProviderStatusState::Observed
                     || !(1..=512).contains(&count)
-                    || facts.session.session_scope != SessionScope::Main
+                    || !session_is_main
                     || session_incomplete
                     || prior_incomplete
                 {
-                    unresolved.push(status.clone());
+                    unresolved.record(rollback_offset)?;
                     continue;
                 }
-
-                let mut active = sealed_active
-                    .iter()
-                    .filter_map(|key| turns.get(key))
-                    .collect::<Vec<_>>();
-                active.sort_by(|left, right| {
-                    left.turn_start_offset
-                        .get()
-                        .cmp(&right.turn_start_offset.get())
-                        .then_with(|| left.turn_key.cmp(&right.turn_key))
-                });
                 let target_count = usize::try_from(count).map_err(|_| {
                     StorageError::new(
                         "TS_INSIGHTS_STORAGE_CORRUPT",
                         "rollback count cannot be represented by the Engine",
                     )
                 })?;
-                if active.len() < target_count {
-                    unresolved.push(status.clone());
+                if sealed_active.len() < target_count {
+                    unresolved.record(rollback_offset)?;
                     continue;
                 }
-                for target in active.into_iter().rev().take(target_count) {
-                    sealed_active.remove(&target.turn_key);
-                    effective.insert(target.turn_key, ProviderVisibility::RolledBack);
-                    rollback_links.push(TurnEvidenceFact {
-                        owner_session_key: facts.session.session_key,
-                        turn_key: target.turn_key,
-                        event_key: status.common.event_key,
-                        role: TurnEvidenceRole::Rollback,
-                    });
+                let targets = sealed_active
+                    .iter()
+                    .rev()
+                    .take(target_count)
+                    .copied()
+                    .collect::<Vec<_>>();
+                for target @ (_, turn_key) in targets {
+                    sealed_active.remove(&target);
+                    transaction.execute(
+                        "UPDATE turns SET effective_provider_visibility='rolled-back'
+                         WHERE session_id=?1 AND turn_key=?2",
+                        params![session_id, turn_key.as_bytes().as_slice()],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO turn_evidence(session_id,turn_id,event_id,role)
+                         SELECT ?1,t.turn_id,e.event_id,'rollback'
+                           FROM turns t,evidence_events e
+                          WHERE t.session_id=?1 AND t.turn_key=?2
+                            AND e.session_id=?1 AND e.event_key=?3",
+                        params![
+                            session_id,
+                            turn_key.as_bytes().as_slice(),
+                            action.event_key.as_bytes().as_slice()
+                        ],
+                    )?;
                 }
             }
         }
     }
-
-    for (turn_key, visibility) in &effective {
-        transaction.execute(
-            "UPDATE turns SET effective_provider_visibility=?1
-             WHERE session_id=?2 AND turn_key=?3",
-            params![
-                visibility_text(*visibility),
-                session_id,
-                turn_key.as_bytes().as_slice()
-            ],
-        )?;
-    }
-    for link in &rollback_links {
-        transaction.execute(
-            "INSERT INTO turn_evidence(session_id,turn_id,event_id,role)
-             SELECT ?1,t.turn_id,e.event_id,'rollback'
-               FROM turns t,evidence_events e
-              WHERE t.session_id=?1 AND t.turn_key=?2
-                AND e.session_id=?1 AND e.event_key=?3",
-            params![
-                session_id,
-                link.turn_key.as_bytes().as_slice(),
-                link.event_key.as_bytes().as_slice()
-            ],
-        )?;
-    }
-    facts.turn_evidence.extend(rollback_links);
     replace_rollback_unresolved(transaction, session_id, &unresolved)?;
-    Ok(effective)
-}
-
-fn hard_seal_event(
-    turn: &TurnFact,
-    links: &[TurnEvidenceFact],
-    events: &BTreeMap<StableKey, EvidenceEvent>,
-) -> Option<(SourceOrder, StableKey)> {
-    let mut candidates = Vec::new();
-    for link in links.iter().filter(|link| link.turn_key == turn.turn_key) {
-        let Some(event) = events.get(&link.event_key) else {
-            continue;
-        };
-        let is_boundary = turn.raw_closure.next_user_boundary
-            && link.role == TurnEvidenceRole::FollowUp
-            && matches!(
-                event,
-                EvidenceEvent::VisibleMessage(message) if message.role == MessageRole::User
-            );
-        let is_terminal = turn.raw_closure.provider_terminal.is_some()
-            && link.role == TurnEvidenceRole::Lifecycle
-            && matches!(
-                event,
-                EvidenceEvent::TurnLifecycle(lifecycle)
-                    if terminal_matches(
-                        turn.raw_closure.provider_terminal,
-                        lifecycle.lifecycle_state
-                    )
-            );
-        if is_boundary || is_terminal {
-            candidates.push((
-                event.common().source_order.clone(),
-                event.common().event_key,
-            ));
-        }
-    }
-    candidates.sort_by(|left, right| {
-        compare_source_order(&left.0, &right.0).then_with(|| left.1.cmp(&right.1))
-    });
-    candidates.into_iter().next()
+    Ok(())
 }
 
 fn replace_rollback_unresolved(
     transaction: &Transaction<'_>,
     session_id: i64,
-    events: &[crate::fact_model::ProviderStatusEvent],
+    unresolved: &UnresolvedRollbacks,
 ) -> Result<(), StorageError> {
-    if events.is_empty() {
+    if unresolved.count == 0 {
         return Ok(());
     }
-    let count = u64::try_from(events.len()).map_err(|_| {
+    let first_offset = unresolved.first_offset.ok_or_else(|| {
         StorageError::new(
-            "TS_INSIGHTS_STORAGE_FAILED",
-            "rollback diagnostic count exceeds uint64",
+            "TS_INSIGHTS_STORAGE_CORRUPT",
+            "rollback diagnostic is missing its first offset",
         )
     })?;
-    let first_offset = events
-        .iter()
-        .map(|event| event.common.source_order.record_start_offset.get())
-        .min()
-        .unwrap_or(0);
     transaction.execute(
         "INSERT INTO fact_coverage(session_id,coverage_key,coverage_count)
          VALUES (?1,?2,?3)",
         params![
             session_id,
             ROLLBACK_UNRESOLVED,
-            count.to_be_bytes().to_vec()
+            unresolved.count.to_be_bytes().to_vec()
         ],
     )?;
     transaction.execute(
@@ -639,7 +798,7 @@ fn replace_rollback_unresolved(
         params![
             session_id,
             ROLLBACK_UNRESOLVED,
-            count.to_be_bytes().to_vec(),
+            unresolved.count.to_be_bytes().to_vec(),
             first_offset.to_be_bytes().to_vec()
         ],
     )?;
@@ -649,21 +808,21 @@ fn replace_rollback_unresolved(
 fn recompute_turn_revisions(
     transaction: &Transaction<'_>,
     session_id: i64,
-    facts: &SessionFactSnapshot,
-    effective_visibility: &BTreeMap<StableKey, ProviderVisibility>,
 ) -> Result<(), StorageError> {
-    for base_turn in &facts.turns {
-        let turn_key = base_turn.turn_key;
-        let mut closure = facts.turn_closure(&turn_key).ok_or_else(|| {
+    let mut statement =
+        transaction.prepare("SELECT turn_key FROM turns WHERE session_id=?1 ORDER BY turn_key")?;
+    let turn_key_rows = statement
+        .query_map([session_id], |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for turn_key in turn_key_rows {
+        let turn_key = stable_key_from_blob(turn_key, "stored Turn key is not 32 bytes")?;
+        let closure = transaction.read_turn_closure(&turn_key)?.ok_or_else(|| {
             StorageError::new(
                 "TS_INSIGHTS_STORAGE_CORRUPT",
                 "Turn disappeared from its logical session closure",
             )
         })?;
-        closure.turn.provider_visibility = effective_visibility
-            .get(&turn_key)
-            .copied()
-            .unwrap_or(closure.turn.provider_visibility);
         let revision_input = TurnRevisionInput {
             turn: &closure.turn,
             source_records: &closure.source_records,
@@ -708,26 +867,10 @@ fn compare_source_order(left: &SourceOrder, right: &SourceOrder) -> Ordering {
         .then_with(|| left.event_ordinal.cmp(&right.event_ordinal))
 }
 
-fn terminal_matches(terminal: Option<ProviderTerminal>, lifecycle: LifecycleState) -> bool {
-    matches!(
-        (terminal, lifecycle),
-        (Some(ProviderTerminal::Completed), LifecycleState::Completed)
-            | (Some(ProviderTerminal::Aborted), LifecycleState::Aborted)
-    )
-}
-
 fn timeline_kind_rank(kind: &TimelineKind) -> u8 {
     match kind {
-        TimelineKind::Rollback => 0,
+        TimelineKind::Rollback(_) => 0,
         TimelineKind::Seal(_) => 1,
-    }
-}
-
-fn visibility_text(value: ProviderVisibility) -> &'static str {
-    match value {
-        ProviderVisibility::Active => "active",
-        ProviderVisibility::RolledBack => "rolled-back",
-        ProviderVisibility::Unknown => "unknown",
     }
 }
 
@@ -742,4 +885,22 @@ fn turn_id(
             |row| row.get(0),
         )
         .optional()?)
+}
+
+fn stable_key_from_blob(value: Vec<u8>, message: &'static str) -> Result<StableKey, StorageError> {
+    Ok(StableKey::from_bytes(digest_from_blob(value, message)?))
+}
+
+fn digest_from_blob(value: Vec<u8>, message: &'static str) -> Result<[u8; 32], StorageError> {
+    value
+        .try_into()
+        .map_err(|_| StorageError::new("TS_INSIGHTS_STORAGE_CORRUPT", message))
+}
+
+fn wire_value_from_blob(
+    value: Vec<u8>,
+    message: &'static str,
+) -> Result<crate::fact_model::WireU64, StorageError> {
+    crate::fact_model::WireU64::from_be_blob(&value)
+        .map_err(|_| StorageError::new("TS_INSIGHTS_STORAGE_CORRUPT", message))
 }

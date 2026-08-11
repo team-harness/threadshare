@@ -413,6 +413,7 @@ impl EngineServer {
                             let session_key = message["session"]["sessionKey"].clone();
                             let delta_id = message["deltaId"].clone();
                             let accumulator = SessionAccumulator::begin(message)?;
+                            self.storage.clear_session_fact_staging()?;
                             Ok((
                                 State::InSession {
                                     accepted_contract: accepted_contract.clone(),
@@ -751,7 +752,7 @@ impl EngineServer {
                     }
                     match kind {
                         MessageKind::RetractFacts | MessageKind::UpsertFacts => {
-                            accumulator.apply_batch(&message)?;
+                            accumulator.apply_batch(&message, &mut self.storage)?;
                             let sequence = message["sequence"].clone();
                             Ok((
                                 State::InSession {
@@ -813,6 +814,7 @@ impl EngineServer {
                                     "ABORT_SESSION nextSequence does not match received batches",
                                 ));
                             }
+                            self.storage.clear_session_fact_staging()?;
                             Ok((
                                 State::Ready {
                                     accepted_contract: accepted_contract.clone(),
@@ -840,7 +842,7 @@ impl EngineServer {
                         Ok(response)
                     }
                     Err(error) => {
-                        // Session facts live only in the accumulator until COMMIT_SESSION.
+                        let _ = self.storage.clear_session_fact_staging();
                         self.state = State::Ready { accepted_contract };
                         Err(error)
                     }
@@ -962,6 +964,7 @@ mod tests {
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
     use threadshare_insights_engine::evidence_path::{
@@ -970,6 +973,7 @@ mod tests {
     };
     use threadshare_insights_engine::query::QueryError;
     use threadshare_insights_engine::storage::EngineStorage;
+    use threadshare_insights_engine::{canonical_json, hash_key};
 
     #[derive(Deserialize)]
     struct Fixture {
@@ -996,6 +1000,142 @@ mod tests {
 
     fn server() -> EngineServer {
         EngineServer::new(EngineStorage::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn large_session_delta() -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test/fixtures/insights-fact-mutations/v1-basic.json");
+        let fixture: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let mut delta = fixture["initial"].clone();
+        let template = delta["turns"][0].clone();
+        let problem_text = "x".repeat(64 * 1_024);
+        let mut turns = Vec::with_capacity(513);
+        for index in 0..513 {
+            let mut turn = template.clone();
+            if index > 0 {
+                turn["turnKey"] = Value::String(format!("{index:064x}"));
+            }
+            turn["turnStartOffset"] = Value::String(index.to_string());
+            turn["problemText"] = Value::String(problem_text.clone());
+            turns.push(turn);
+        }
+        delta["turns"] = Value::Array(turns);
+        let mut mutation = delta.clone();
+        mutation.as_object_mut().unwrap().remove("deltaId");
+        let mutation_digest = Sha256::digest(canonical_json(&mutation).as_bytes()).to_vec();
+        let root = delta.as_object().unwrap();
+        let session_key = hex::decode(root["session"]["sessionKey"].as_str().unwrap()).unwrap();
+        let expected = hash_key(
+            "delta",
+            &[
+                session_key,
+                root["expectedGeneration"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+                root["mode"].as_str().unwrap().as_bytes().to_vec(),
+                root["originSecretEpoch"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+                root["duplicatePolicyVersion"]
+                    .as_u64()
+                    .unwrap()
+                    .to_string()
+                    .into_bytes(),
+                mutation_digest,
+                root["checkpoint"]["completeOffset"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            ],
+        );
+        delta["deltaId"] = Value::String(expected);
+        delta
+    }
+
+    fn ingest_delta(server: &mut EngineServer, delta: &Value) -> Value {
+        server.handle_message(message("hello")).unwrap();
+        let template = message("begin-session");
+        let mut counts = serde_json::Map::new();
+        for collection in ["turnKeys", "orphanEventKeys", "authoritativeTurnKeys"] {
+            counts.insert(
+                collection.to_owned(),
+                Value::String(
+                    delta["retractions"][collection]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                        .to_string(),
+                ),
+            );
+        }
+        for collection in threadshare_insights_engine::engine::UPSERT_COLLECTIONS {
+            counts.insert(
+                collection.to_owned(),
+                Value::String(delta[collection].as_array().unwrap().len().to_string()),
+            );
+        }
+        let begin = json!({
+            "format": "threadshare-insights-protocol@v1",
+            "type": "BEGIN_SESSION",
+            "requestId": "2",
+            "deltaFormat": delta["format"],
+            "session": delta["session"],
+            "deltaId": delta["deltaId"],
+            "mode": delta["mode"],
+            "expectedGeneration": delta["expectedGeneration"],
+            "targetGeneration": delta["targetGeneration"],
+            "contract": template["contract"],
+            "counts": counts,
+        });
+        server.handle_message(begin).unwrap();
+
+        let mut sequence = 0_u64;
+        for (message_type, container, collections) in [
+            (
+                "RETRACT_FACTS",
+                &delta["retractions"],
+                &threadshare_insights_engine::engine::RETRACTION_COLLECTIONS[..],
+            ),
+            (
+                "UPSERT_FACTS",
+                delta,
+                &threadshare_insights_engine::engine::UPSERT_COLLECTIONS[..],
+            ),
+        ] {
+            for collection in collections {
+                let items = container[*collection].as_array().unwrap();
+                for chunk in items.chunks(32) {
+                    server
+                        .handle_message(json!({
+                            "format": "threadshare-insights-protocol@v1",
+                            "type": message_type,
+                            "requestId": "2",
+                            "sequence": sequence.to_string(),
+                            "collection": collection,
+                            "items": chunk,
+                        }))
+                        .unwrap();
+                    sequence += 1;
+                }
+            }
+        }
+        server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "COMMIT_SESSION",
+                "requestId": "2",
+                "nextSequence": sequence.to_string(),
+                "checkpoint": delta["checkpoint"],
+                "diagnostics": delta["diagnostics"],
+                "coverage": delta["coverage"],
+                "sourceState": null,
+            }))
+            .unwrap()
     }
 
     #[test]
@@ -1214,6 +1354,27 @@ mod tests {
         assert_eq!(response["type"], "SESSION_ABORTED");
         assert_eq!(server.storage.committed_session_count().unwrap(), 0);
         assert!(matches!(server.state, State::Ready { .. }));
+
+        server.handle_message(message("begin-session")).unwrap();
+        let repeated = server.handle_message(message("retract-facts")).unwrap();
+        assert_eq!(repeated["type"], "BATCH_ACCEPTED");
+    }
+
+    #[test]
+    fn protocol_error_clears_staged_facts_before_the_next_session() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+        server.handle_message(message("begin-session")).unwrap();
+        server.handle_message(message("retract-facts")).unwrap();
+        let mut invalid = message("retract-facts");
+        invalid["sequence"] = Value::String("0".to_owned());
+        let error = server.handle_message(invalid).unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME");
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        server.handle_message(message("begin-session")).unwrap();
+        let repeated = server.handle_message(message("retract-facts")).unwrap();
+        assert_eq!(repeated["type"], "BATCH_ACCEPTED");
     }
 
     #[test]
@@ -1225,5 +1386,17 @@ mod tests {
         assert!(matches!(server.state, State::InSession { .. }));
         assert_eq!(server.storage.committed_session_count().unwrap(), 0);
         drop(server);
+    }
+
+    #[test]
+    fn commits_a_session_larger_than_32_mib_through_disk_staging() {
+        let delta = large_session_delta();
+        assert!(canonical_json(&delta).len() > 32 * 1024 * 1024);
+        let mut server = server();
+        let response = ingest_delta(&mut server, &delta);
+        assert_eq!(response["type"], "SESSION_COMMITTED");
+        assert_eq!(response["idempotent"], false);
+        assert_eq!(server.storage.committed_session_count().unwrap(), 1);
+        assert!(matches!(server.state, State::Ready { .. }));
     }
 }

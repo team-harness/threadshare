@@ -1,6 +1,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
+use std::io::Write;
 use unicode_normalization::UnicodeNormalization;
 
 pub mod analyzer;
@@ -10,6 +11,7 @@ pub mod evidence_path;
 pub mod fact_model;
 mod fact_projection;
 pub mod fact_repository;
+pub mod fact_staging;
 pub mod fts_projection;
 pub mod insights_overview;
 pub mod normalized_repository;
@@ -39,10 +41,17 @@ pub fn hash_key(domain: &str, parts: &[Vec<u8>]) -> String {
 
 const CANONICAL_JSON_DOMAIN_ERROR: &str = "value is outside the canonical JSON domain";
 
-pub fn try_canonical_json(value: &Value) -> Result<String, &'static str> {
+pub fn try_write_canonical_json(
+    writer: &mut impl Write,
+    value: &Value,
+) -> Result<(), &'static str> {
     match value {
-        Value::Null => Ok("null".to_owned()),
-        Value::Bool(value) => Ok(value.to_string()),
+        Value::Null => writer
+            .write_all(b"null")
+            .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR),
+        Value::Bool(value) => writer
+            .write_all(value.to_string().as_bytes())
+            .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR),
         Value::Number(value) => {
             const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
             let is_safe_integer = value
@@ -54,16 +63,32 @@ pub fn try_canonical_json(value: &Value) -> Result<String, &'static str> {
             if !is_safe_integer {
                 return Err(CANONICAL_JSON_DOMAIN_ERROR);
             }
-            Ok(value.to_string())
+            writer
+                .write_all(value.to_string().as_bytes())
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)
         }
-        Value::String(value) => serde_json::to_string(&value.nfc().collect::<String>())
-            .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR),
+        Value::String(value) => {
+            let encoded = serde_json::to_string(&value.nfc().collect::<String>())
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+            writer
+                .write_all(encoded.as_bytes())
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)
+        }
         Value::Array(values) => {
-            let mut items = Vec::with_capacity(values.len());
-            for value in values {
-                items.push(try_canonical_json(value)?);
+            writer
+                .write_all(b"[")
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    writer
+                        .write_all(b",")
+                        .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+                }
+                try_write_canonical_json(writer, value)?;
             }
-            Ok(format!("[{}]", items.join(",")))
+            writer
+                .write_all(b"]")
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)
         }
         Value::Object(values) => {
             let mut entries = values
@@ -76,14 +101,33 @@ pub fn try_canonical_json(value: &Value) -> Result<String, &'static str> {
                     return Err(CANONICAL_JSON_DOMAIN_ERROR);
                 }
             }
-            let mut body = Vec::with_capacity(entries.len());
-            for (key, value) in entries {
+            writer
+                .write_all(b"{")
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    writer
+                        .write_all(b",")
+                        .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+                }
                 let key = serde_json::to_string(&key).map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
-                body.push(format!("{key}:{}", try_canonical_json(value)?));
+                writer
+                    .write_all(key.as_bytes())
+                    .and_then(|_| writer.write_all(b":"))
+                    .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)?;
+                try_write_canonical_json(writer, value)?;
             }
-            Ok(format!("{{{}}}", body.join(",")))
+            writer
+                .write_all(b"}")
+                .map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)
         }
     }
+}
+
+pub fn try_canonical_json(value: &Value) -> Result<String, &'static str> {
+    let mut bytes = Vec::new();
+    try_write_canonical_json(&mut bytes, value)?;
+    String::from_utf8(bytes).map_err(|_| CANONICAL_JSON_DOMAIN_ERROR)
 }
 
 pub fn canonical_json(value: &Value) -> String {

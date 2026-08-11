@@ -25,6 +25,7 @@ import {
 import { resolveInsightsEngine } from "./insights-engine-runtime.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_COMMIT_TIMEOUT_MS = 120_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_STDERR_LIMIT_BYTES = 16 * 1_024;
 const MAX_STDERR_LIMIT_BYTES = 1_048_576;
@@ -375,17 +376,19 @@ class InsightsEngineClient {
   #requiredContract;
   #resolved;
   #timeoutMs;
+  #commitTimeoutMs;
   #requestId = 2n;
   #tail = Promise.resolve();
   #closed = false;
   #broken = false;
   #closePromise = null;
 
-  constructor(transport, resolved, requiredContract, timeoutMs) {
+  constructor(transport, resolved, requiredContract, timeoutMs, commitTimeoutMs) {
     this.#transport = transport;
     this.#resolved = resolved;
     this.#requiredContract = requiredContract;
     this.#timeoutMs = timeoutMs;
+    this.#commitTimeoutMs = commitTimeoutMs;
   }
 
   async handshake(clientVersion) {
@@ -721,7 +724,7 @@ class InsightsEngineClient {
           requestId,
           { sessionKey: delta.session.sessionKey, deltaId: delta.deltaId },
           "waiting for SESSION_COMMITTED",
-          this.#timeoutMs,
+          this.#commitTimeoutMs,
         );
         committed = true;
         return {
@@ -1072,9 +1075,12 @@ class InsightsEngineClient {
 /** Resolves, starts, and performs protocol-v1 negotiation with one Insights Engine sidecar. */
 export async function createInsightsEngineClient(options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const commitTimeoutMs = options.commitTimeoutMs ??
+    (options.timeoutMs === undefined ? DEFAULT_COMMIT_TIMEOUT_MS : timeoutMs);
   const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
   const stderrLimitBytes = options.stderrLimitBytes ?? DEFAULT_STDERR_LIMIT_BYTES;
   assertPositiveInteger(timeoutMs, "timeoutMs");
+  assertPositiveInteger(commitTimeoutMs, "commitTimeoutMs");
   assertPositiveInteger(closeTimeoutMs, "closeTimeoutMs");
   assertPositiveInteger(stderrLimitBytes, "stderrLimitBytes", MAX_STDERR_LIMIT_BYTES);
   if (options.databasePath !== undefined &&
@@ -1102,6 +1108,7 @@ export async function createInsightsEngineClient(options = {}) {
     resolved,
     options.requiredContract,
     timeoutMs,
+    commitTimeoutMs,
   );
   try {
     await client.handshake(options.clientVersion ?? "threadshare-node@1");
