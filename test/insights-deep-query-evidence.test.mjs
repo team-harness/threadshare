@@ -15,6 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
   DEEP_QUERY_REPORTS,
   packageDeepQueryEvidence,
   validateDeepQueryEvidenceReports,
@@ -263,8 +264,7 @@ function realReport() {
 function reports() {
   return {
     [DEEP_QUERY_REPORTS[0]]: syntheticReport(25_000),
-    [DEEP_QUERY_REPORTS[1]]: syntheticReport(250_000),
-    [DEEP_QUERY_REPORTS[2]]: realReport(),
+    [DEEP_QUERY_REPORTS[1]]: realReport(),
   };
 }
 
@@ -326,7 +326,7 @@ test("Deep Query evidence packager preserves raw reports and verifies historical
       directory: output,
       repositoryRoot: root,
       readSourceFile,
-    }), 3);
+    }), 2);
     assert.deepEqual(
       (await readdir(output)).sort(),
       ["manifest.json", ...DEEP_QUERY_REPORTS].sort(),
@@ -335,6 +335,12 @@ test("Deep Query evidence packager preserves raw reports and verifies historical
       assert.deepEqual(await readFile(path.join(output, file)), await readFile(path.join(input, file)));
       assert.equal((await stat(path.join(output, file))).mode & 0o777, 0o600);
     }
+    const manifest = JSON.parse(await readFile(path.join(output, "manifest.json"), "utf8"));
+    assert.deepEqual(manifest.formalConfiguration.syntheticTurns, [25_000]);
+    assert.deepEqual(
+      manifest.formalConfiguration.deferredSyntheticTurns,
+      DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
+    );
   });
 });
 
@@ -345,16 +351,16 @@ test("Deep Query evidence rejects rehashed metric and coverage bypasses", async 
       value.deepQuery.records.roundTripMs.p99 = 100;
       value.deepQuery.records.roundTripMs.max = 100;
     }],
-    ["empty Recipe", DEEP_QUERY_REPORTS[1], (value) => {
+    ["empty Recipe", DEEP_QUERY_REPORTS[0], (value) => {
       value.deepQuery.recipes["solution-recall@1"].emptyResultCount = 100;
     }],
-    ["slow Recipe", DEEP_QUERY_REPORTS[1], (value) => {
+    ["slow Recipe", DEEP_QUERY_REPORTS[0], (value) => {
       value.deepQuery.recipes["solution-recall@1"].roundTripMs.p95 = 500;
       value.deepQuery.recipes["solution-recall@1"].roundTripMs.p99 = 1_000;
       value.deepQuery.recipes["solution-recall@1"].roundTripMs.max = 1_000;
       value.deepQuery.recipes["solution-recall@1"].roundTripMs.total = 100_000;
     }],
-    ["Evidence throughput", DEEP_QUERY_REPORTS[1], (value) => {
+    ["Evidence throughput", DEEP_QUERY_REPORTS[0], (value) => {
       value.deepQuery.evidence.payloadMiBPerSecond = 49.99;
     }],
     ["storage amplification", DEEP_QUERY_REPORTS[0], (value) => {
@@ -362,10 +368,10 @@ test("Deep Query evidence rejects rehashed metric and coverage bypasses", async 
       value.storage.postVacuum.databaseBytes = 1_900_000;
       value.storage.persistentStorageAmplification = 1.9;
     }],
-    ["real sample byte fraction", DEEP_QUERY_REPORTS[2], (value) => {
+    ["real sample byte fraction", DEEP_QUERY_REPORTS[1], (value) => {
       value.sampling.byteFraction = 0.24;
     }],
-    ["real sample history", DEEP_QUERY_REPORTS[2], (value) => {
+    ["real sample history", DEEP_QUERY_REPORTS[1], (value) => {
       value.deepQueryV2.rows.historyEvents = 0;
     }],
   ];
@@ -397,6 +403,17 @@ test("Deep Query evidence rejects provenance, file-set, and private-shape drift"
         repositoryRoot: root,
         readSourceFile,
       }), /script provenance/u);
+    });
+  });
+  await context.test("deferred 250k report", async () => {
+    await withFixture(async (root) => {
+      const { output } = await createPackagedEvidence(root);
+      await writeFile(path.join(output, "deep-query-250k.acceptance.json"), "{}\n");
+      await assert.rejects(() => verifyDeepQueryEvidenceDirectory({
+        directory: output,
+        repositoryRoot: root,
+        readSourceFile,
+      }), /file set/u);
     });
   });
   await context.test("extra file", async () => {
@@ -431,6 +448,21 @@ test("Deep Query report validation rejects a dirty or cross-build report set", (
   assert.throws(() => validateDeepQueryEvidenceReports(dirty), /clean tree/u);
 
   const mixed = reports();
-  mixed[DEEP_QUERY_REPORTS[2]].hashes.engineBinarySha256 = "f".repeat(64);
+  mixed[DEEP_QUERY_REPORTS[1]].hashes.engineBinarySha256 = "f".repeat(64);
   assert.throws(() => validateDeepQueryEvidenceReports(mixed), /one Engine identity/u);
+});
+
+test("Deep Query verifier requires the deferred 250k disclosure", async () => {
+  await withFixture(async (root) => {
+    const { output } = await createPackagedEvidence(root);
+    const manifestPath = path.join(output, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.formalConfiguration.deferredSyntheticTurns = [];
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await assert.rejects(() => verifyDeepQueryEvidenceDirectory({
+      directory: output,
+      repositoryRoot: root,
+      readSourceFile,
+    }), /formal configuration drifted/u);
+  });
 });

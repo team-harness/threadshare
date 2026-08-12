@@ -23,9 +23,9 @@ export const DEEP_QUERY_EVIDENCE_FORMAT =
   "threadshare-insights-deep-query-evidence-manifest@v1";
 export const DEEP_QUERY_REPORTS = Object.freeze([
   "deep-query-25k.acceptance.json",
-  "deep-query-250k.acceptance.json",
   "deep-query-real-sample-30pct.acceptance.json",
 ]);
+export const DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS = Object.freeze([250_000]);
 export const DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT = 1.8;
 export const DEEP_QUERY_FTS_AMPLIFICATION_LIMIT = 0.7;
 export const DEEP_QUERY_RECIPE_P95_LIMIT_MS = 500;
@@ -48,12 +48,6 @@ const SYNTHETIC_SCALES = Object.freeze({
     seed: "threadshare-insights-deep-query-25k-v1",
     p95Ms: 100,
     p99Ms: 250,
-  }),
-  250_000: Object.freeze({
-    file: DEEP_QUERY_REPORTS[1],
-    seed: "threadshare-insights-deep-query-250k-v1",
-    p95Ms: 200,
-    p99Ms: 500,
   }),
 });
 const RECIPE_NAMES = Object.freeze([
@@ -391,8 +385,7 @@ function validateRealSample(report) {
 export function validateDeepQueryEvidenceReports(reports, expected = {}) {
   exactKeys(reports, DEEP_QUERY_REPORTS, "Deep Query reports");
   validateSynthetic(reports[DEEP_QUERY_REPORTS[0]], 25_000);
-  validateSynthetic(reports[DEEP_QUERY_REPORTS[1]], 250_000);
-  validateRealSample(reports[DEEP_QUERY_REPORTS[2]]);
+  validateRealSample(reports[DEEP_QUERY_REPORTS[1]]);
   const values = Object.values(reports);
   const sourceRevision = values[0].sourceRevision;
   const engine = validateEngineIdentity(values[0].engineIdentity, "Deep Query Engine");
@@ -400,11 +393,10 @@ export function validateDeepQueryEvidenceReports(reports, expected = {}) {
     fail("Deep Query reports do not share one source revision");
   }
   const realEngine = {
-    ...reports[DEEP_QUERY_REPORTS[2]].engine,
-    binarySha256: reports[DEEP_QUERY_REPORTS[2]].hashes.engineBinarySha256,
+    ...reports[DEEP_QUERY_REPORTS[1]].engine,
+    binarySha256: reports[DEEP_QUERY_REPORTS[1]].hashes.engineBinarySha256,
   };
-  if (!isDeepStrictEqual(engine, reports[DEEP_QUERY_REPORTS[1]].engineIdentity) ||
-      !isDeepStrictEqual(engine, realEngine)) {
+  if (!isDeepStrictEqual(engine, realEngine)) {
     fail("Deep Query reports do not share one Engine identity");
   }
   if (expected.sourceRevision !== undefined && sourceRevision !== expected.sourceRevision) {
@@ -413,7 +405,7 @@ export function validateDeepQueryEvidenceReports(reports, expected = {}) {
   if (expected.scriptHashes) {
     if (reports[DEEP_QUERY_REPORTS[0]].benchmarkScriptSha256 !==
         expected.scriptHashes["scripts/benchmark-insights-engine.mjs"]?.sha256 ||
-        reports[DEEP_QUERY_REPORTS[2]].hashes.benchmarkScriptSha256 !==
+        reports[DEEP_QUERY_REPORTS[1]].hashes.benchmarkScriptSha256 !==
         expected.scriptHashes["scripts/benchmark-insights-real-sample.mjs"]?.sha256) {
       fail("Deep Query benchmark script identity drifted");
     }
@@ -534,7 +526,8 @@ export async function packageDeepQueryEvidence({
       sourceReports: loaded.sourceReports,
       artifacts,
       formalConfiguration: {
-        syntheticTurns: [25_000, 250_000],
+        syntheticTurns: [25_000],
+        deferredSyntheticTurns: DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
         measuredRuns: DEEP_QUERY_COUNT,
         warmupRuns: DEEP_QUERY_WARMUP_COUNT,
         realSampleFraction: 0.30,
@@ -608,12 +601,13 @@ export async function verifyDeepQueryEvidenceDirectory({
   },
     "Deep Query design provenance drifted");
   exactKeys(manifest.formalConfiguration, [
-    "syntheticTurns", "measuredRuns", "warmupRuns", "realSampleFraction",
+    "syntheticTurns", "deferredSyntheticTurns", "measuredRuns", "warmupRuns", "realSampleFraction",
     "persistentStorageAmplificationLimit", "historyFtsAmplificationLimit",
     "recipeP95LimitMs", "recipeP99LimitMs", "sidecarRssLimitBytes",
   ], "Deep Query formalConfiguration");
   equal(manifest.formalConfiguration, {
-    syntheticTurns: [25_000, 250_000],
+    syntheticTurns: [25_000],
+    deferredSyntheticTurns: DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
     measuredRuns: DEEP_QUERY_COUNT,
     warmupRuns: DEEP_QUERY_WARMUP_COUNT,
     realSampleFraction: 0.30,

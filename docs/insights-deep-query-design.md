@@ -1,6 +1,6 @@
 # Local Insights Deep Query 设计
 
-状态：Accepted；功能、契约、clean-install 与正式 evidence pipeline 已完成，正式 Fact V2 运行待 clean checkpoint  
+状态：Accepted；功能、契约、clean-install 与正式 evidence pipeline 已完成，当前迭代以 25k + 30% 真实样本验收，250k 延期
 日期：2026-08-12  
 适用范围：本机 Threadshare Insights；不改变云端 share、Viewer 或 `threadshare-history@v1`
 
@@ -12,7 +12,7 @@
 
 采纳建议中的 `dataSource/estimatedFields`、有界降级诊断、完整性状态、lifecycle-only Turn、compaction 独立事件、文件工作流信号与 Agent-native 查询入口。没有照搬任意 SQL/jq、位置型失败启发式或“一种分析一条命令”；这些能力由类型化 Query、可靠 attempt chain 与 Recipe 层承载。
 
-实施状态（2026-08-12）：Stage 1–4 已完成；README、Skill、62-file release allowlist 与 tarball clean-install smoke 已通过。Stage 5 的非空 Fact V2 合成语料、固定 work budget、正式 runner、双层 fail-closed packager/verifier 与 800-Turn 真实 sidecar smoke 已完成；25k/250k 与至少 30% 本机真实 Session byte sample 必须从 clean checkpoint 运行并归档。历史 Fact V1 evidence 与仅携带空 history collection 的 V2 envelope smoke 均不得冒充该证据。
+实施状态（2026-08-13）：Stage 1–4 已完成；README、Skill、62-file release allowlist 与 tarball clean-install smoke 已通过。Stage 5 的非空 Fact V2 合成语料、固定 work budget、正式 runner、双层 fail-closed packager/verifier 与 800-Turn 真实 sidecar smoke 已完成；当前迭代从 clean checkpoint 运行并归档 25k 与至少 30% 本机真实 Session byte sample。250k 长期规模档由 owner 明确延期到后续迭代，不得标记为已测或由 25k 外推。历史 Fact V1 evidence 与仅携带空 history collection 的 V2 envelope smoke 均不得冒充该证据。
 
 ## 1. 决策摘要
 
@@ -619,7 +619,7 @@ validate request
 - `token_usage(model, observed_at, event_key)`
 - `error_occurrences(signature, observed_at, event_key)`
 
-最终索引必须由 25k/250k EXPLAIN、延迟、RSS 与写放大证据决定；不能仅凭列表全部加入。
+当前索引必须由 25k EXPLAIN、延迟、RSS 与写放大证据决定；后续 250k 迭代用同一组证据重新验证长期规模，不能仅凭列表全部加入。
 
 ### 16.3 Work budget
 
@@ -715,9 +715,9 @@ Node 不实现统计逻辑，不解析 SQL，也不重新计算 Rust 返回的 m
 
 现有 ITEM-4/5 的 6 GiB Fact、8 GiB derived state、400 MiB FTS 证据只覆盖裁剪后的 Fact V1，**不能冒充 Fact V2 的容量证明**。
 
-V2 必须重新建立正式证据：
+V2 当前迭代必须重新建立正式证据：
 
-- 25k 与 250k Turn 合成语料；
+- 25k Turn 合成语料；
 - 至少 30% 的本机真实 Session byte sample；
 - 两个已知 >32 MiB Session 和单 Session 512 MiB logical payload 边界；
 - synthetic 写入按每 Session commit ACK 报告 P50/P95/P99；真实 30% sample 的每 Session
@@ -726,10 +726,10 @@ V2 必须重新建立正式证据：
 - sidecar RSS 继续以 128 MiB 为硬上限；
 - 存储分别报告 event metadata、payload、FTS、projection、WAL/staging，禁止只给总量。
 
-初始工程目标而非既成验收事实：
+当前验收门槛：
 
-- records/aggregate 在 25k P95 <100 ms，250k P95 <200 ms、P99 <500 ms；
-- 每个版本化 recipe 在 25k/250k 均须 P95 <500 ms、P99 <1,000 ms；任一 recipe
+- records/aggregate 在 25k P95 <100 ms、P99 <250 ms；
+- 每个版本化 recipe 在 25k 须 P95 <500 ms、P99 <1,000 ms；任一 recipe
   超限即使返回非空结果也不能通过正式 evidence gate；
 - evidence 首页 P95 <100 ms；
 - payload paging 吞吐 >=50 MiB/s；
@@ -737,6 +737,11 @@ V2 必须重新建立正式证据：
 - FTS 目标 <= searchable UTF-8 bytes 的 0.7 倍。
 
 最后两个比率必须经 prototype 与正式 evidence 冻结；达不到时先调整存储/索引设计，不能在报告中放宽门槛。
+
+250k 是后续迭代的长期规模验收，继续保留 records/aggregate P95 <200 ms、P99 <500 ms，
+每个 Recipe P95 <500 ms、P99 <1,000 ms，及相同的 RSS、paging、storage 与 query-plan
+门槛。当前 manifest 必须用 `deferredSyntheticTurns: [250000]` 显式披露该缺口；25k 通过不能
+外推为 250k 已通过。
 
 ## 22. 测试与验收
 
@@ -799,7 +804,7 @@ V2 必须重新建立正式证据：
 
 ### Stage 3：Aggregate 与 Recipe
 
-实现有界 group/metrics、provenance/coverage 和首批 Recipe；用 differential oracle 与 25k/250k evidence 冻结语义和预算。
+实现有界 group/metrics、provenance/coverage 和首批 Recipe；用 differential oracle 与 25k evidence 冻结当前语义和预算，250k 长期规模档在后续迭代单独验收。
 
 ### Stage 4：MCP 与兼容适配器
 
@@ -851,6 +856,6 @@ V2 必须重新建立正式证据：
 Owner 确认本设计后，实施计划只需再冻结两个工程参数，不改变产品语义：
 
 1. PayloadStore 的物理压缩策略与 chunk size，以 prototype 的存储放大/吞吐结果选择。
-2. 250k 正式 benchmark 的 exact work-budget 数值，以真实 query plan 和 128 MiB RSS 硬门槛确定。
+2. 后续 250k 正式 benchmark 的 exact work-budget 数值，以真实 query plan 和 128 MiB RSS 硬门槛确定；当前迭代不宣称完成。
 
 除此之外，命令、资源、Query AST、Recipe、完整性、证据、迁移与 MCP 边界视为已定设计；实现中如需改名或改变语义，必须先修订本文并重新 review。
