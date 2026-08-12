@@ -1280,8 +1280,8 @@ function storageOwner(name) {
     "history_token_rollups_session",
     "history_token_rollups_day",
     "history_capability_rollups_day",
-    "history_capability_representatives_day",
-    "history_capability_cooccurrences_day",
+    "history_capability_representatives_capability_day",
+    "history_capability_cooccurrences_capability_day",
   ].includes(name)) return "projection";
   if (SOURCE_STATE_TABLES.has(owner)) return "sourceState";
   if (name === "sqlite_schema" || name === "sqlite_sequence") return "sqliteInternal";

@@ -995,8 +995,6 @@ fn projected_capability_contexts(
     }
     drop(rows);
     drop(statement);
-    let representatives = projected_capability_representatives(connection, request)?;
-    let co_occurring = projected_capability_cooccurrences(connection, request)?;
     let mut result = groups
         .into_iter()
         .map(|(capability_key, group)| {
@@ -1008,11 +1006,6 @@ fn projected_capability_contexts(
                     .then_with(|| left.0.is_none().cmp(&right.0.is_none()))
                     .then_with(|| left.0.cmp(&right.0))
             });
-            let representative_turns = representatives
-                .items
-                .get(&capability_key)
-                .cloned()
-                .unwrap_or_default();
             Ok(json!({
                 "capability": {
                     "capabilityKey":capability_key.clone(),"provider":group.provider,
@@ -1020,8 +1013,7 @@ fn projected_capability_contexts(
                 },
                 "recordedInvocationCount":group.invocations.to_string(),
                 "recordedFailingInvocationCount":group.failures.to_string(),
-                "distinctTurnCount":representatives.distinct_turn_counts
-                    .get(&capability_key).copied().unwrap_or(0).to_string(),
+                "distinctTurnCount":"0",
                 "distinctSessionCount":group.sessions.len().to_string(),
                 "distinctDedupeGroupCount":group.groups.len().to_string(),
                 "groupedInvocationCount":group.grouped_invocations.to_string(),
@@ -1039,11 +1031,9 @@ fn projected_capability_contexts(
                 "topProjects":projects.into_iter().take(5).map(|(project_key,count)| json!({
                     "projectKey":project_key,"recordedInvocationCount":count.to_string(),
                 })).collect::<Vec<_>>(),
-                "coOccurringCapabilities":co_occurring.get(&capability_key).cloned().unwrap_or_default(),
-                "representativeTurns":representative_turns,
-                "evidence":representatives.items.get(&capability_key)
-                    .and_then(|items| items.first())
-                    .and_then(|item| item.get("evidence")).cloned().unwrap_or(Value::Null),
+                "coOccurringCapabilities":[],
+                "representativeTurns":[],
+                "evidence":Value::Null,
             }))
         })
         .collect::<Result<Vec<_>, QueryError>>()?;
@@ -1060,6 +1050,44 @@ fn projected_capability_contexts(
                     .cmp(&right["capability"]["capabilityKey"].as_str())
             })
     });
+    let mut detail_request = request.clone();
+    detail_request.filters.capability_keys = result
+        .iter()
+        .take(usize::from(request.limit))
+        .filter_map(|item| item.pointer("/capability/capabilityKey")?.as_str())
+        .map(str::to_owned)
+        .collect();
+    if !detail_request.filters.capability_keys.is_empty() {
+        let representatives = projected_capability_representatives(connection, &detail_request)?;
+        let mut co_occurring = projected_capability_cooccurrences(connection, &detail_request)?;
+        for item in result.iter_mut().take(usize::from(request.limit)) {
+            let capability_key = item["capability"]["capabilityKey"]
+                .as_str()
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "capability key is missing"))?
+                .to_owned();
+            let representative_turns = representatives
+                .items
+                .get(&capability_key)
+                .cloned()
+                .unwrap_or_default();
+            item["distinctTurnCount"] = Value::String(
+                representatives
+                    .distinct_turn_counts
+                    .get(&capability_key)
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string(),
+            );
+            item["coOccurringCapabilities"] =
+                Value::Array(co_occurring.remove(&capability_key).unwrap_or_default());
+            item["representativeTurns"] = Value::Array(representative_turns.clone());
+            item["evidence"] = representative_turns
+                .first()
+                .and_then(|value| value.get("evidence"))
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
+    }
     Ok(result)
 }
 
@@ -1074,168 +1102,142 @@ struct ProjectedCapabilityRepresentatives {
     distinct_turn_counts: BTreeMap<String, u64>,
 }
 
-#[derive(Default)]
-struct ProjectedTurnRepresentative {
-    turn_key: String,
-    revision: Option<String>,
-    problem: String,
-    final_answer: Option<String>,
-    invocations: u64,
-    used_at: String,
-}
-
 fn projected_capability_representatives(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<ProjectedCapabilityRepresentatives, QueryError> {
-    let (scope, values) = projected_capability_scope(request, "representative")?;
-    let sql = format!(
-        "SELECT lower(hex(c.capability_key)),representative.turn_id,
-                lower(hex(t.turn_key)),
-                CASE WHEN t.revision IS NULL THEN NULL ELSE lower(hex(t.revision)) END,
-                t.problem_text,t.final_answer_excerpt,
-                representative.invocation_count,representative.used_at
-         FROM history_capability_representatives representative
-         JOIN sessions s ON s.session_id=representative.session_id
-         JOIN capabilities c ON c.capability_id=representative.capability_id
-         JOIN turns t ON t.turn_id=representative.turn_id
-         WHERE {scope}
-         ORDER BY c.capability_key,representative.turn_id,representative.bucket_day"
-    );
+    let (sql, values) = projected_capability_representatives_statement(request)?;
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
     let mut rows = statement
         .query(params_from_iter(values))
         .map_err(query_failed)?;
-    let mut grouped = BTreeMap::<(String, i64), ProjectedTurnRepresentative>::new();
+    let mut result = ProjectedCapabilityRepresentatives::default();
     while let Some(row) = rows.next().map_err(query_failed)? {
         let capability_key: String = row.get(0).map_err(query_failed)?;
-        let turn_id: i64 = row.get(1).map_err(query_failed)?;
-        let entry = grouped.entry((capability_key, turn_id)).or_default();
-        if entry.turn_key.is_empty() {
-            entry.turn_key = row.get(2).map_err(query_failed)?;
-            entry.revision = row.get(3).map_err(query_failed)?;
-            entry.problem = row.get(4).map_err(query_failed)?;
-            entry.final_answer = row.get(5).map_err(query_failed)?;
-        }
-        entry.invocations = checked_recipe_add(
-            entry.invocations,
-            query_nonnegative_u64(row.get(6).map_err(query_failed)?)?,
-            "representative invocations",
-        )?;
-        let used_at: String = row.get(7).map_err(query_failed)?;
-        if entry.used_at.is_empty() || used_at > entry.used_at {
-            entry.used_at = used_at;
-        }
-    }
-    drop(rows);
-    drop(statement);
-
-    let mut by_capability = BTreeMap::<String, Vec<ProjectedTurnRepresentative>>::new();
-    for ((capability_key, _), representative) in grouped {
-        by_capability
-            .entry(capability_key)
-            .or_default()
-            .push(representative);
-    }
-    let mut result = ProjectedCapabilityRepresentatives::default();
-    for (capability_key, mut representatives) in by_capability {
         result.distinct_turn_counts.insert(
             capability_key.clone(),
-            u64::try_from(representatives.len())
-                .map_err(|_| QueryError::new("QUERY_FAILED", "distinct turn count overflowed"))?,
+            query_nonnegative_u64(row.get(1).map_err(query_failed)?)?,
         );
-        representatives.retain(|representative| representative.revision.is_some());
-        representatives.sort_by(|left, right| {
-            right
-                .invocations
-                .cmp(&left.invocations)
-                .then_with(|| right.used_at.cmp(&left.used_at))
-                .then_with(|| left.turn_key.cmp(&right.turn_key))
-        });
-        result.items.insert(
-            capability_key,
-            representatives
-                .into_iter()
-                .take(5)
-                .map(|representative| {
-                    let revision = representative.revision.expect("filtered revision");
-                    json!({
-                        "turnKey":representative.turn_key,
-                        "usedAt":representative.used_at,
-                        "recordedInvocationCount":representative.invocations.to_string(),
-                        "context":{
-                            "problem":representative.problem,
-                            "finalAnswer":representative.final_answer,
-                        },
-                        "evidence":{
-                            "kind":"turn","turnKey":representative.turn_key,
-                            "revision":revision,
-                        },
-                    })
-                })
-                .collect(),
-        );
+        if row
+            .get::<_, Option<i64>>(2)
+            .map_err(query_failed)?
+            .is_none()
+        {
+            continue;
+        }
+        let turn_key: String = row.get(3).map_err(query_failed)?;
+        let revision: String = row.get(4).map_err(query_failed)?;
+        result.items.entry(capability_key).or_default().push(json!({
+            "turnKey":turn_key,
+            "usedAt":row.get::<_, String>(8).map_err(query_failed)?,
+            "recordedInvocationCount":query_nonnegative_u64(
+                row.get(7).map_err(query_failed)?
+            )?.to_string(),
+            "context":{
+                "problem":row.get::<_, String>(5).map_err(query_failed)?,
+                "finalAnswer":row.get::<_, Option<String>>(6).map_err(query_failed)?,
+            },
+            "evidence":{"kind":"turn","turnKey":turn_key,"revision":revision},
+        }));
     }
     Ok(result)
+}
+
+fn projected_capability_representatives_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = projected_capability_scope(request, "representative")?;
+    let sql = format!(
+        "WITH grouped AS MATERIALIZED (
+           SELECT representative.capability_id,representative.turn_id,
+                  SUM(representative.invocation_count) AS invocation_count,
+                  MAX(representative.used_at) AS used_at
+           FROM history_capability_representatives representative
+           JOIN sessions s ON s.session_id=representative.session_id
+           JOIN capabilities c ON c.capability_id=representative.capability_id
+           WHERE {scope}
+           GROUP BY representative.capability_id,representative.turn_id
+         ), counts AS MATERIALIZED (
+           SELECT capability_id,COUNT(*) AS distinct_turn_count
+           FROM grouped GROUP BY capability_id
+         ), ranked AS MATERIALIZED (
+           SELECT grouped.capability_id,grouped.turn_id,grouped.invocation_count,
+                  grouped.used_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY grouped.capability_id
+                    ORDER BY grouped.invocation_count DESC,grouped.used_at DESC,t.turn_key ASC
+                  ) AS representative_rank
+           FROM grouped JOIN turns t ON t.turn_id=grouped.turn_id
+           WHERE t.revision IS NOT NULL
+         )
+         SELECT lower(hex(c.capability_key)),counts.distinct_turn_count,
+                ranked.turn_id,lower(hex(t.turn_key)),lower(hex(t.revision)),
+                t.problem_text,t.final_answer_excerpt,
+                ranked.invocation_count,ranked.used_at
+         FROM counts JOIN capabilities c ON c.capability_id=counts.capability_id
+         LEFT JOIN ranked ON ranked.capability_id=counts.capability_id
+          AND ranked.representative_rank<=5
+         LEFT JOIN turns t ON t.turn_id=ranked.turn_id
+         ORDER BY c.capability_key,ranked.representative_rank"
+    );
+    Ok((sql, values))
 }
 
 fn projected_capability_cooccurrences(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<BTreeMap<String, Vec<Value>>, QueryError> {
-    let (scope, values) = projected_capability_scope(request, "cooccurrence")?;
-    let sql = format!(
-        "SELECT lower(hex(c.capability_key)),lower(hex(other.capability_key)),
-                other.capability_kind,other.canonical_name,cooccurrence.turn_id
-         FROM history_capability_cooccurrences cooccurrence
-         JOIN sessions s ON s.session_id=cooccurrence.session_id
-         JOIN capabilities c ON c.capability_id=cooccurrence.capability_id
-         JOIN capabilities other ON other.capability_id=cooccurrence.other_capability_id
-         WHERE {scope}
-         ORDER BY c.capability_key,other.capability_key,cooccurrence.turn_id"
-    );
+    let (sql, values) = projected_capability_cooccurrences_statement(request)?;
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
     let mut rows = statement
         .query(params_from_iter(values))
         .map_err(query_failed)?;
-    let mut identities = BTreeMap::<(String, String), (String, String)>::new();
-    let mut turns = BTreeMap::<(String, String), BTreeSet<i64>>::new();
+    let mut result = BTreeMap::<String, Vec<Value>>::new();
     while let Some(row) = rows.next().map_err(query_failed)? {
         let capability_key: String = row.get(0).map_err(query_failed)?;
-        let other_key: String = row.get(1).map_err(query_failed)?;
-        let key = (capability_key, other_key);
-        identities.entry(key.clone()).or_insert((
-            row.get(2).map_err(query_failed)?,
-            row.get(3).map_err(query_failed)?,
-        ));
-        turns
-            .entry(key)
-            .or_default()
-            .insert(row.get(4).map_err(query_failed)?);
-    }
-    let mut result = BTreeMap::<String, Vec<Value>>::new();
-    for ((capability_key, other_key), turn_ids) in turns {
-        let (kind, canonical_name) = identities
-            .remove(&(capability_key.clone(), other_key.clone()))
-            .ok_or_else(|| QueryError::new("QUERY_FAILED", "capability identity is missing"))?;
         result.entry(capability_key).or_default().push(json!({
-            "capabilityKey":other_key,"kind":kind,"canonicalName":canonical_name,
-            "distinctTurnCount":turn_ids.len().to_string(),
+            "capabilityKey":row.get::<_, String>(1).map_err(query_failed)?,
+            "kind":row.get::<_, String>(2).map_err(query_failed)?,
+            "canonicalName":row.get::<_, String>(3).map_err(query_failed)?,
+            "distinctTurnCount":query_nonnegative_u64(
+                row.get(4).map_err(query_failed)?
+            )?.to_string(),
         }));
     }
-    for items in result.values_mut() {
-        items.sort_by(|left, right| {
-            decimal_json(right.pointer("/distinctTurnCount"))
-                .cmp(&decimal_json(left.pointer("/distinctTurnCount")))
-                .then_with(|| {
-                    left["capabilityKey"]
-                        .as_str()
-                        .cmp(&right["capabilityKey"].as_str())
-                })
-        });
-        items.truncate(5);
-    }
     Ok(result)
+}
+
+fn projected_capability_cooccurrences_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = projected_capability_scope(request, "cooccurrence")?;
+    let sql = format!(
+        "WITH grouped AS MATERIALIZED (
+           SELECT cooccurrence.capability_id,cooccurrence.other_capability_id,
+                  COUNT(DISTINCT cooccurrence.turn_id) AS distinct_turn_count
+           FROM history_capability_cooccurrences cooccurrence
+           JOIN sessions s ON s.session_id=cooccurrence.session_id
+           JOIN capabilities c ON c.capability_id=cooccurrence.capability_id
+           WHERE {scope}
+           GROUP BY cooccurrence.capability_id,cooccurrence.other_capability_id
+         ), ranked AS MATERIALIZED (
+           SELECT grouped.capability_id,grouped.other_capability_id,
+                  grouped.distinct_turn_count,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY grouped.capability_id
+                    ORDER BY grouped.distinct_turn_count DESC,other.capability_key ASC
+                  ) AS cooccurrence_rank
+           FROM grouped JOIN capabilities other
+             ON other.capability_id=grouped.other_capability_id
+         )
+         SELECT lower(hex(c.capability_key)),lower(hex(other.capability_key)),
+                other.capability_kind,other.canonical_name,ranked.distinct_turn_count
+         FROM ranked JOIN capabilities c ON c.capability_id=ranked.capability_id
+         JOIN capabilities other ON other.capability_id=ranked.other_capability_id
+         WHERE ranked.cooccurrence_rank<=5
+         ORDER BY c.capability_key,ranked.cooccurrence_rank"
+    );
+    Ok((sql, values))
 }
 
 fn capability_representatives(
@@ -3243,7 +3245,9 @@ mod tests {
     use rusqlite::{Connection, params_from_iter};
 
     use super::{
-        RecipeFilters, RecipeName, RecipeRequest, RecipeWindow, solution_recall_statement,
+        RecipeFilters, RecipeName, RecipeRequest, RecipeWindow,
+        projected_capability_cooccurrences_statement,
+        projected_capability_representatives_statement, solution_recall_statement,
     };
 
     fn solution_recall_request() -> RecipeRequest {
@@ -3263,6 +3267,76 @@ mod tests {
             limit: 10,
             allow_degraded: false,
             evaluated_at: "2026-01-02T01:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn capability_contexts_request() -> RecipeRequest {
+        RecipeRequest {
+            format: super::RECIPE_REQUEST_FORMAT.to_owned(),
+            name: RecipeName::CapabilityContexts,
+            window: RecipeWindow {
+                after: "2026-01-01T00:00:00.000Z".to_owned(),
+                before: "2026-01-02T00:00:00.000Z".to_owned(),
+            },
+            comparison_window: None,
+            filters: RecipeFilters {
+                capability_keys: vec!["11".repeat(32)],
+                ..RecipeFilters::default()
+            },
+            limit: 10,
+            allow_degraded: false,
+            evaluated_at: "2026-01-02T01:00:00.000Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn projected_capability_details_use_capability_first_indexes() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES
+                   ('snapshot_seq','0'),
+                   ('database_uuid','00000000-0000-4000-8000-000000000000');",
+            )
+            .unwrap();
+        crate::normalized_repository::initialize_schema(&mut connection).unwrap();
+        crate::source_state::initialize_schema(&connection).unwrap();
+        let request = capability_contexts_request();
+        for (statement, expected_index, forbidden_scan) in [
+            (
+                projected_capability_representatives_statement(&request).unwrap(),
+                "history_capability_representatives_capability_day",
+                "SCAN representative",
+            ),
+            (
+                projected_capability_cooccurrences_statement(&request).unwrap(),
+                "history_capability_cooccurrences_capability_day",
+                "SCAN cooccurrence",
+            ),
+        ] {
+            let (sql, values) = statement;
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let details = statement
+                .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                details.iter().any(|detail| detail.contains(expected_index)),
+                "projected capability detail must use {expected_index}: {details:?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains(forbidden_scan)),
+                "projected capability detail must not scan the rollup: {details:?}"
+            );
         }
     }
 

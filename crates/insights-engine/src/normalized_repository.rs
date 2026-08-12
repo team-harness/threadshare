@@ -360,8 +360,11 @@ CREATE TABLE IF NOT EXISTS history_capability_representatives (
   used_at TEXT NOT NULL,
   PRIMARY KEY(session_id,capability_id,bucket_day,turn_id)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS history_capability_representatives_day
-  ON history_capability_representatives(bucket_day,capability_id,invocation_count,used_at,turn_id);
+DROP INDEX IF EXISTS history_capability_representatives_day;
+CREATE INDEX IF NOT EXISTS history_capability_representatives_capability_day
+  ON history_capability_representatives(
+    capability_id,bucket_day,turn_id,session_id,invocation_count,used_at
+  );
 
 CREATE TABLE IF NOT EXISTS history_capability_cooccurrences (
   session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -371,9 +374,10 @@ CREATE TABLE IF NOT EXISTS history_capability_cooccurrences (
   turn_id INTEGER NOT NULL REFERENCES turns(turn_id) ON DELETE CASCADE,
   PRIMARY KEY(session_id,capability_id,other_capability_id,bucket_day,turn_id)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS history_capability_cooccurrences_day
+DROP INDEX IF EXISTS history_capability_cooccurrences_day;
+CREATE INDEX IF NOT EXISTS history_capability_cooccurrences_capability_day
   ON history_capability_cooccurrences(
-    bucket_day,capability_id,other_capability_id,session_id,turn_id
+    capability_id,bucket_day,other_capability_id,turn_id,session_id
   );
 
 CREATE TABLE IF NOT EXISTS file_activity (

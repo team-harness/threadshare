@@ -36,6 +36,8 @@ capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 
 首次 clean 25k 正式运行暴露 `solution-recall@1` 单请求约 20 秒：旧 SQL 对每个候选事件重复执行全局 FTS MATCH，且 coverage 即使零命中仍扫描整个 HistoryEvent 窗口。该运行已主动终止，未生成或归档报告。修复后，session-scoped 查询以 scope rowid 约束 FTS，全局查询从 FTS match 起步；结果与 coverage 复用同一匹配 CTE，coverage 现在统计匹配全集而非整段历史。保留 25k 数据库上的 release 探针结果为：全局零 DF P95 1.08 ms（修复前约 2.38 秒），session-scoped 700 条宽匹配 P95 94.37 ms；执行计划测试分别锁定 `INDEX 0:M1` 与 `INDEX 0:=M1`。
 
+第二次 clean 25k 正式运行暴露 `capability-contexts@1` 的详情富化仍对全部 capability 的代表 Turn 和共现投影做宽行外部排序：运行约 26 分钟时 Engine RSS 已达 318 MiB，调用栈停在 `projected_capability_representatives` 的 SQLite sorter。该运行同样主动终止，未生成或归档报告。修复后先用小型 capability rollup 确定最终前 `limit` 项，再仅为这些项聚合、排名和读取前 5 个代表 Turn/共现项；两张详情索引改为 capability-first，并在升级时删除旧 day-first 索引。保留 25k 数据库上的 release 实测为：120 次真实协议请求 P50 138.34 ms、P95 152.21 ms、P99 183.31 ms、max 303.37 ms，采样 Engine 峰值 30,288 KiB（修复前约 318 MiB）。执行计划测试锁定两张 capability-first 索引并拒绝详情投影表扫描，现有投影/精确事件路径差分测试保持全字段相等。
+
 ## 验收守卫
 
 - Node/Rust/shared schema 对 event/payload key、revision、digest、completeness 逐字节一致。
