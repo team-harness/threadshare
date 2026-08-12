@@ -116,6 +116,8 @@ const LONG_TERM_ENGINE_RSS_LIMIT_BYTES = 128 * 1024 * 1024;
 const DETAIL_FULL_FTS_LIMIT_BYTES = 400 * 1024 * 1024;
 const DEEP_STORAGE_AMPLIFICATION_LIMIT = 1.8;
 const DEEP_FTS_AMPLIFICATION_LIMIT = 0.7;
+export const DEEP_QUERY_RECIPE_P95_LIMIT_MS = 500;
+export const DEEP_QUERY_RECIPE_P99_LIMIT_MS = 1_000;
 const QUERY_BUDGETS = Object.freeze({
   current: Object.freeze({
     maximumTurns: 25_000,
@@ -132,7 +134,7 @@ const QUERY_BUDGETS = Object.freeze({
     derivedStateBytes: 8 * GIB,
   }),
 });
-const CAPACITY_CORPUS_VERSION = 6;
+const CAPACITY_CORPUS_VERSION = 7;
 const CAPACITY_TOPIC_COUNT = 47;
 const CAPACITY_DENSITY = Object.freeze({
   sourceRecordsPerTurn: 10,
@@ -840,8 +842,12 @@ function createCapacitySession(plan, sessionIndex, {
         inputFingerprint,
         fileActivities: [capacityFileActivity(globalIndex, useIndex, "attempted")],
       });
+      const solutionRecallMarker = failed && globalIndex === 0 && useIndex === 0
+        ? " solutionrecallprobe"
+        : "";
       const resultText = failed
-        ? `benchmark retry error topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)} ` +
+        ? `benchmark retry error${solutionRecallMarker} ` +
+          `topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)} ` +
           `for ${name} at turn ${globalIndex}`
         : `benchmark result completed topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)} ` +
           `for ${name} at turn ${globalIndex}`;
@@ -2451,7 +2457,6 @@ function deepRecipeRequest(name, plan, sessionKey) {
   const sessionScoped = new Set([
     "failure-chains@1",
     "file-workflow-signals@1",
-    "solution-recall@1",
     "session-timeline@1",
   ]).has(name);
   return {
@@ -2465,7 +2470,7 @@ function deepRecipeRequest(name, plan, sessionKey) {
       capabilityKeys: [],
       sessionKeys: sessionScoped ? [sessionKey] : [],
       eventKinds: [],
-      text: name === "solution-recall@1" ? "benchmark retry error" : null,
+      text: name === "solution-recall@1" ? "solutionrecallprobe" : null,
       bucket: name === "activity-shifts@1" ? "day" : null,
     },
     limit: 10,
@@ -2657,6 +2662,10 @@ async function benchmarkDeepQuery({ runtime, plan, queryCount, warmupCount }) {
     [...recipes].map(([name, values]) => [name, latencySummary(values, "ms")]),
   );
   const allRecipesExercised = Object.values(recipeEmptyCounts).every((count) => count === 0);
+  const allRecipesWithinLimit = Object.values(recipeLatency).every(
+    ({ p95, p99 }) =>
+      p95 < DEEP_QUERY_RECIPE_P95_LIMIT_MS && p99 < DEEP_QUERY_RECIPE_P99_LIMIT_MS,
+  );
   const allDeepQueryPathsExercised =
     recordsEmptyCount === 0 && aggregateEmptyCount === 0 && allRecipesExercised &&
     evidenceReadCount === queryCount && evidenceMultiPageReadCount === queryCount;
@@ -2664,7 +2673,7 @@ async function benchmarkDeepQuery({ runtime, plan, queryCount, warmupCount }) {
     allDeepQueryPathsExercised &&
     recordLatency.p95 < budget.p95Ms && recordLatency.p99 < budget.p99Ms &&
     aggregateLatency.p95 < budget.p95Ms && aggregateLatency.p99 < budget.p99Ms &&
-    evidenceFirstPageLatency.p95 < 100 && evidenceMiBPerSecond >= 50;
+    allRecipesWithinLimit && evidenceFirstPageLatency.p95 < 100 && evidenceMiBPerSecond >= 50;
   return {
     measuredRequestCount: queryCount,
     warmupRequestCount: warmupCount,
@@ -2701,6 +2710,7 @@ async function benchmarkDeepQuery({ runtime, plan, queryCount, warmupCount }) {
       allRecordsReturnedResults: recordsEmptyCount === 0,
       allAggregatesReturnedGroups: aggregateEmptyCount === 0,
       allRecipesExercised,
+      allRecipesWithinLimit,
       allEvidenceReadsCompleted:
         evidenceReadCount === queryCount && evidenceMultiPageReadCount === queryCount,
       allDeepQueryPathsExercised,

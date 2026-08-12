@@ -516,6 +516,7 @@ fn solution_recall_links_a_matching_failure_to_the_later_successful_attempt() {
 
     let response = storage.read_recipe(&request).unwrap();
     assert_eq!(response.total_item_count, "1");
+    assert_eq!(response.coverage.matching.full_record_count, "1");
     assert_eq!(response.items[0]["eventKind"], "capability-result");
     assert_eq!(
         response.items[0]["subsequentSuccess"]["eventKey"],

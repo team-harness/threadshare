@@ -30,7 +30,9 @@ status: active
 
 功能与发布候选验证已完成。Fact V2、七类 typed resource、records/aggregate、七个 Recipe、Evidence v2、CLI 与 stdio MCP 已落地；V1 查询命令与云端 share 边界保持兼容。Stage 5 已具备非空 V2 合成语料、固定 work budget、正式 runner、原始聚合报告打包器和历史 Git object verifier；当前只剩从 clean checkpoint 运行并归档正式 evidence。
 
-capacity corpus v6 每 Turn 生成 10 个 history event、8 个 payload 与 8 个 chunk，并为每个 Session 记录真实 commit ACK；额外用 2 MiB provider payload 驱动多页 Evidence。正式 100 次 records/aggregate/七 Recipe/Evidence 预算、25k/250k 延迟门槛、128 MiB RSS、1.8x persistent amplification、0.7x history FTS amplification、50 MiB/s paging 与 query-plan gate 均由 runner 和 packager 双向重算。30% 真实 Session runner 记录逐 Session commit ACK、单次 sync wall time、V2 storage/coverage 与 FTS integrity。历史 ITEM-4/5 evidence 只覆盖 Fact V1，不能作为本功能的正式 V2 容量证明。
+capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 个 chunk，并为每个 Session 记录真实 commit ACK；额外用 2 MiB provider payload 驱动多页 Evidence，并用唯一 `solutionrecallprobe` 标记验证全局 Solution Recall。正式 100 次 records/aggregate/七 Recipe/Evidence 预算、25k/250k 延迟门槛、每个 Recipe P95 <500 ms/P99 <1,000 ms、128 MiB RSS、1.8x persistent amplification、0.7x history FTS amplification、50 MiB/s paging 与 query-plan gate 均由 runner 和 packager 双向重算。30% 真实 Session runner 记录逐 Session commit ACK、单次 sync wall time、V2 storage/coverage 与 FTS integrity。历史 ITEM-4/5 evidence 只覆盖 Fact V1，不能作为本功能的正式 V2 容量证明。
+
+首次 clean 25k 正式运行暴露 `solution-recall@1` 单请求约 20 秒：旧 SQL 对每个候选事件重复执行全局 FTS MATCH，且 coverage 即使零命中仍扫描整个 HistoryEvent 窗口。该运行已主动终止，未生成或归档报告。修复后，session-scoped 查询以 scope rowid 约束 FTS，全局查询从 FTS match 起步；结果与 coverage 复用同一匹配 CTE，coverage 现在统计匹配全集而非整段历史。保留 25k 数据库上的 release 探针结果为：全局零 DF P95 1.08 ms（修复前约 2.38 秒），session-scoped 700 条宽匹配 P95 94.37 ms；执行计划测试分别锁定 `INDEX 0:M1` 与 `INDEX 0:=M1`。
 
 ## 验收守卫
 
@@ -41,8 +43,8 @@ capacity corpus v6 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 
 ## 已完成验证
 
-- Rust：全 crate 单元、集成与 doctest 通过，含 lib 94/94、Fact V2 transaction/crash/migration、deep query 与 recipe 集成测试。
-- Node：Insights 262/262；`npm run test:cli` 185/185；`npm run test:release` 66/66；Deep Query evidence 负例 13/13。
+- Rust：全 crate 单元、集成与 doctest 通过，含 lib 96/96、Fact V2 transaction/crash/migration、deep query 与 recipe 集成测试。
+- Node：Insights 262/262；Deep Query 定向 82/82；`npm run test:cli` 185/185；`npm run test:release` 66/66；Deep Query evidence 负例 14/14。
 - 质量：`cargo fmt --check`、Clippy `-D warnings`、`git diff --check` 与 `npm run validate:skill` 通过。
 - 发布候选：`npm pack --dry-run --ignore-scripts --json` 为精确 62 文件；`verify:release -- source --tag 0.7.4` 通过。
 - clean install：从 tarball 安装后 CLI help 与 stdio MCP 三工具可用；18 份 schema 全部经 Ajv 编译，其中 Agent Insights schema 15 份。

@@ -1951,72 +1951,7 @@ fn solution_recall(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<Vec<Value>, QueryError> {
-    let query = request.filters.text.as_deref().expect("validated text");
-    let analyzed = analyze_query(query).map_err(|error| match error {
-        AnalyzerError::QueryTooLong => QueryError::new("TS_QUERY_TOO_LONG", "query is too long"),
-        AnalyzerError::QueryTooBroad => QueryError::new("TS_QUERY_TOO_BROAD", "query is too broad"),
-    })?;
-    let expression =
-        HistoryFtsMatchExpression::from_query_terms(&analyzed.terms).map_err(query_failed)?;
-    let (scope, mut values) = event_scope(
-        request,
-        Some(
-            "EXISTS (SELECT 1 FROM history_event_fts_documents hfd
-                 JOIN history_payloads matched_payload ON matched_payload.payload_key=hfd.payload_key
-                 JOIN history_event_fts ON history_event_fts.rowid=hfd.document_id
-                 WHERE matched_payload.event_key=he.event_key AND history_event_fts MATCH ?)",
-        ),
-    )?;
-    values.push(SqlValue::Text(expression.as_str().to_owned()));
-    let sql = format!(
-        "SELECT lower(hex(he.event_key)),lower(hex(he.revision)),
-                (SELECT lower(hex(hp.payload_key)) FROM history_payloads hp
-                 WHERE hp.event_key=he.event_key ORDER BY hp.payload_key LIMIT 1),
-                CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END,
-                CASE WHEN t.revision IS NULL THEN NULL ELSE lower(hex(t.revision)) END,
-                t.final_answer_excerpt,he.event_kind,he.observed_timestamp,s.provider,
-                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
-                CASE WHEN matched_chain.chain_key IS NULL THEN NULL
-                     ELSE lower(hex(matched_chain.chain_key)) END,
-                CASE WHEN success_event.event_key IS NULL THEN NULL
-                     ELSE lower(hex(success_event.event_key)) END,
-                CASE WHEN success_event.revision IS NULL THEN NULL
-                     ELSE lower(hex(success_event.revision)) END,
-                success_event.observed_timestamp,
-                (SELECT lower(hex(success_payload.payload_key))
-                 FROM history_payloads success_payload
-                 WHERE success_payload.event_key=success_event.event_key
-                 ORDER BY success_payload.payload_key LIMIT 1)
-         FROM history_events he
-         JOIN sessions s ON s.session_id=he.session_id
-         LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
-         LEFT JOIN attempt_chain_events matched_chain ON matched_chain.event_key=he.event_key
-         LEFT JOIN history_events success_event ON success_event.event_key=(
-           SELECT later.event_key
-           FROM attempt_chain_events later_chain
-           JOIN history_events later ON later.event_key=later_chain.event_key
-           WHERE later_chain.chain_key=matched_chain.chain_key
-             AND later.event_kind='capability-result'
-             AND json_extract(later.metadata_json,'$.providerState')='completed'
-             AND (
-               later.record_start_offset>he.record_start_offset OR
-               (later.record_start_offset=he.record_start_offset
-                AND later.content_index>he.content_index) OR
-               (later.record_start_offset=he.record_start_offset
-                AND later.content_index=he.content_index
-                AND later.event_ordinal>he.event_ordinal) OR
-               (later.record_start_offset=he.record_start_offset
-                AND later.content_index=he.content_index
-                AND later.event_ordinal=he.event_ordinal
-                AND later.event_key>he.event_key)
-             )
-           ORDER BY later.record_start_offset,later.content_index,
-                    later.event_ordinal,later.event_key
-           LIMIT 1
-         )
-         WHERE {scope}
-         ORDER BY he.observed_timestamp IS NULL,he.observed_timestamp DESC,he.event_key"
-    );
+    let (sql, values) = solution_recall_statement(request)?;
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
     statement
         .query_map(params_from_iter(values), |row| {
@@ -2056,6 +1991,119 @@ fn solution_recall(
         .map_err(query_failed)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(query_failed)
+}
+
+fn solution_recall_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (matched_events, result_scope, values) = solution_recall_match(request)?;
+    let sql = format!(
+        "WITH {matched_events}
+         SELECT lower(hex(he.event_key)),lower(hex(he.revision)),
+                (SELECT lower(hex(hp.payload_key)) FROM history_payloads hp
+                 WHERE hp.event_key=he.event_key ORDER BY hp.payload_key LIMIT 1),
+                CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END,
+                CASE WHEN t.revision IS NULL THEN NULL ELSE lower(hex(t.revision)) END,
+                t.final_answer_excerpt,he.event_kind,he.observed_timestamp,s.provider,
+                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                CASE WHEN matched_chain.chain_key IS NULL THEN NULL
+                     ELSE lower(hex(matched_chain.chain_key)) END,
+                CASE WHEN success_event.event_key IS NULL THEN NULL
+                     ELSE lower(hex(success_event.event_key)) END,
+                CASE WHEN success_event.revision IS NULL THEN NULL
+                     ELSE lower(hex(success_event.revision)) END,
+                success_event.observed_timestamp,
+                (SELECT lower(hex(success_payload.payload_key))
+                 FROM history_payloads success_payload
+                 WHERE success_payload.event_key=success_event.event_key
+                 ORDER BY success_payload.payload_key LIMIT 1)
+         FROM matched_events matched
+         JOIN history_events he ON he.event_key=matched.event_key
+         JOIN sessions s ON s.session_id=he.session_id
+         LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
+         LEFT JOIN attempt_chain_events matched_chain ON matched_chain.event_key=he.event_key
+         LEFT JOIN history_events success_event ON success_event.event_key=(
+           SELECT later.event_key
+           FROM attempt_chain_events later_chain
+           JOIN history_events later ON later.event_key=later_chain.event_key
+           WHERE later_chain.chain_key=matched_chain.chain_key
+             AND later.event_kind='capability-result'
+             AND json_extract(later.metadata_json,'$.providerState')='completed'
+             AND (
+               later.record_start_offset>he.record_start_offset OR
+               (later.record_start_offset=he.record_start_offset
+                AND later.content_index>he.content_index) OR
+               (later.record_start_offset=he.record_start_offset
+                AND later.content_index=he.content_index
+                AND later.event_ordinal>he.event_ordinal) OR
+               (later.record_start_offset=he.record_start_offset
+                AND later.content_index=he.content_index
+                AND later.event_ordinal=he.event_ordinal
+                AND later.event_key>he.event_key)
+             )
+           ORDER BY later.record_start_offset,later.content_index,
+                    later.event_ordinal,later.event_key
+           LIMIT 1
+         )
+         {result_scope}
+         ORDER BY he.observed_timestamp IS NULL,he.observed_timestamp DESC,he.event_key
+         LIMIT {}",
+        MAX_RECIPE_ITEMS + 1,
+    );
+    Ok((sql, values))
+}
+
+fn solution_recall_match(
+    request: &RecipeRequest,
+) -> Result<(String, String, Vec<SqlValue>), QueryError> {
+    let query = request.filters.text.as_deref().expect("validated text");
+    let analyzed = analyze_query(query).map_err(|error| match error {
+        AnalyzerError::QueryTooLong => QueryError::new("TS_QUERY_TOO_LONG", "query is too long"),
+        AnalyzerError::QueryTooBroad => QueryError::new("TS_QUERY_TOO_BROAD", "query is too broad"),
+    })?;
+    let expression =
+        HistoryFtsMatchExpression::from_query_terms(&analyzed.terms).map_err(query_failed)?;
+    let (scope, scope_values) = event_scope(request, None)?;
+    let mut values = vec![SqlValue::Text(expression.as_str().to_owned())];
+    values.extend(scope_values);
+    let (matched_documents, result_scope) = if request.filters.session_keys.is_empty() {
+        (
+            "SELECT rowid FROM history_event_fts
+             WHERE history_event_fts MATCH ?"
+                .to_owned(),
+            format!("WHERE {scope}"),
+        )
+    } else {
+        (
+            format!(
+                "SELECT rowid FROM history_event_fts
+                 WHERE history_event_fts MATCH ?
+                   AND rowid IN (
+                     SELECT hfd.document_id
+                     FROM history_events he
+                     JOIN sessions s ON s.session_id=he.session_id
+                     JOIN history_payloads scoped_payload
+                       ON scoped_payload.event_key=he.event_key
+                     JOIN history_event_fts_documents hfd
+                       ON hfd.payload_key=scoped_payload.payload_key
+                     WHERE {scope}
+                   )"
+            ),
+            String::new(),
+        )
+    };
+    let matched_events = format!(
+        "matched_documents(document_id) AS MATERIALIZED (
+           {matched_documents}
+         ), matched_events(event_key) AS MATERIALIZED (
+           SELECT DISTINCT matched_payload.event_key
+           FROM matched_documents matched_document
+           JOIN history_event_fts_documents hfd
+             ON hfd.document_id=matched_document.document_id
+           JOIN history_payloads matched_payload ON matched_payload.payload_key=hfd.payload_key
+         )"
+    );
+    Ok((matched_events, result_scope, values))
 }
 
 fn session_timeline(
@@ -2116,16 +2164,31 @@ fn read_recipe_coverage(
         RecipeName::TokenHotspots => {
             Some("EXISTS (SELECT 1 FROM token_usage tu WHERE tu.event_key=he.event_key)")
         }
-        RecipeName::SolutionRecall => Some(
-            "EXISTS (SELECT 1 FROM history_payloads hp
-                     JOIN history_event_fts_documents hfd ON hfd.payload_key=hp.payload_key
-                     WHERE hp.event_key=he.event_key)",
-        ),
+        RecipeName::SolutionRecall => None,
         RecipeName::ActivityShifts | RecipeName::SessionTimeline => None,
     };
-    let (scope, values) = event_scope(request, extra)?;
+    let (with_clause, event_source, where_clause, values) =
+        if request.name == RecipeName::SolutionRecall {
+            let (matched_events, result_scope, values) = solution_recall_match(request)?;
+            (
+                format!("WITH {matched_events}"),
+                "matched_events matched JOIN history_events he ON he.event_key=matched.event_key"
+                    .to_owned(),
+                result_scope,
+                values,
+            )
+        } else {
+            let (scope, values) = event_scope(request, extra)?;
+            (
+                String::new(),
+                "history_events he".to_owned(),
+                format!("WHERE {scope}"),
+                values,
+            )
+        };
     let sql = format!(
-        "SELECT
+        "{with_clause}
+         SELECT
            SUM(CASE WHEN he.completeness='full' THEN 1 ELSE 0 END),
            SUM(CASE WHEN he.completeness='summary' THEN 1 ELSE 0 END),
            SUM(CASE WHEN he.completeness='unloaded' THEN 1 ELSE 0 END),
@@ -2159,9 +2222,9 @@ fn read_recipe_coverage(
                SELECT 1 FROM history_payloads hp
                WHERE hp.event_key=he.event_key AND hp.payload_kind='provider-payload'
              ) THEN 1 ELSE 0 END)
-         FROM history_events he JOIN sessions s ON s.session_id=he.session_id
+         FROM {event_source} JOIN sessions s ON s.session_id=he.session_id
          LEFT JOIN token_usage tu ON tu.event_key=he.event_key
-         WHERE {scope}"
+         {where_clause}"
     );
     let counts = connection
         .query_row(&sql, params_from_iter(values), |row| {
@@ -2523,4 +2586,113 @@ fn is_hex_key(value: &str) -> bool {
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::new("TS_INSIGHTS_REQUEST_INVALID", message)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, params_from_iter};
+
+    use super::{
+        RecipeFilters, RecipeName, RecipeRequest, RecipeWindow, solution_recall_statement,
+    };
+
+    fn solution_recall_request() -> RecipeRequest {
+        RecipeRequest {
+            format: super::RECIPE_REQUEST_FORMAT.to_owned(),
+            name: RecipeName::SolutionRecall,
+            window: RecipeWindow {
+                after: "2026-01-01T00:00:00.000Z".to_owned(),
+                before: "2026-01-02T00:00:00.000Z".to_owned(),
+            },
+            comparison_window: None,
+            filters: RecipeFilters {
+                session_keys: vec!["11".repeat(32)],
+                text: Some("benchmark retry error".to_owned()),
+                ..RecipeFilters::default()
+            },
+            limit: 10,
+            allow_degraded: false,
+            evaluated_at: "2026-01-02T01:00:00.000Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn solution_recall_constrains_history_fts_by_rowid_and_match() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES
+                   ('snapshot_seq','0'),
+                   ('database_uuid','00000000-0000-4000-8000-000000000000');",
+            )
+            .unwrap();
+        crate::normalized_repository::initialize_schema(&mut connection).unwrap();
+        crate::source_state::initialize_schema(&connection).unwrap();
+        let request = solution_recall_request();
+        request.validate().unwrap();
+        let (sql, values) = solution_recall_statement(&request).unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let details = statement
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| { detail.contains("history_event_fts VIRTUAL TABLE INDEX 0:=M1") }),
+            "solution recall must combine the rowid and MATCH constraints: {details:?}"
+        );
+    }
+
+    #[test]
+    fn global_solution_recall_starts_from_the_fts_match() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES
+                   ('snapshot_seq','0'),
+                   ('database_uuid','00000000-0000-4000-8000-000000000000');",
+            )
+            .unwrap();
+        crate::normalized_repository::initialize_schema(&mut connection).unwrap();
+        crate::source_state::initialize_schema(&connection).unwrap();
+        let mut request = solution_recall_request();
+        request.filters.session_keys.clear();
+        request.validate().unwrap();
+        let (sql, values) = solution_recall_statement(&request).unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let details = statement
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let fts_steps = details
+            .iter()
+            .filter(|detail| detail.contains("history_event_fts VIRTUAL TABLE"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fts_steps.len(),
+            1,
+            "global solution recall must execute one FTS query: {details:?}"
+        );
+        assert!(
+            fts_steps[0].contains("INDEX 0:M1"),
+            "global solution recall must start from the FTS match: {details:?}"
+        );
+    }
 }

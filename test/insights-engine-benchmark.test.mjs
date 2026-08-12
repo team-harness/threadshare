@@ -74,7 +74,7 @@ test("capacity corpus streams deterministic high-density Facts with bounded rete
   assert.equal(firstSession.delta.session.dedupeFingerprint === null, false);
   assert.equal(firstSession.delta.session.duplicateConfidence, "strong");
   assert.equal(firstSession.delta.session.dedupeEvidenceEventKeys.length, 3);
-  assert.equal(first.corpusVersion, 6);
+  assert.equal(first.corpusVersion, 7);
   assert.equal(firstSession.delta.sourceRecords.length, 4 * 10 + 1);
   assert.equal(firstSession.delta.evidenceEvents.length, 4 * 9);
   assert.equal(firstSession.delta.turnEvidence.length, 4 * 3);
@@ -370,7 +370,7 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(report.environment.hostLoad.atStart.oneMinute >= 0, true);
   assert.equal(report.environment.hostLoad.atReport.oneMinute >= 0, true);
   assert.equal(report.corpus.turns, turnCount);
-  assert.equal(report.corpus.corpusVersion, 6);
+  assert.equal(report.corpus.corpusVersion, 7);
   assert.equal(report.corpus.density.evidenceEventsPerTurn, 9);
   const audit = report.rustSidecar.capacity;
   assert.equal(audit.rowCounts.turns, turnCount);
@@ -475,6 +475,7 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(deepQuery.evidence.firstPageRoundTripMs.count, 2);
   assert.equal(deepQuery.evidence.payloadMiBPerSecond > 0, true);
   assert.equal(deepQuery.gates.allDeepQueryPathsExercised, true);
+  assert.equal(deepQuery.gates.allRecipesWithinLimit, true);
   const deepReport = createDeepQueryBenchmarkReport(report);
   assert.equal(deepReport.format, "threadshare-insights-deep-query-benchmark@v1");
   assert.equal(

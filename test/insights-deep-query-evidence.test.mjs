@@ -103,7 +103,7 @@ function syntheticReport(turns) {
     sourceWorktreeDirty: false,
     benchmarkScriptSha256: sha256(SOURCE_FILES.get("scripts/benchmark-insights-engine.mjs")),
     corpus: {
-      corpusVersion: 6,
+      corpusVersion: 7,
       seed: `threadshare-insights-deep-query-${turns === 25_000 ? "25k" : "250k"}-v1`,
       turns,
       sessions,
@@ -157,6 +157,7 @@ function syntheticReport(turns) {
         allRecordsReturnedResults: true,
         allAggregatesReturnedGroups: true,
         allRecipesExercised: true,
+        allRecipesWithinLimit: true,
         allEvidenceReadsCompleted: true,
         allDeepQueryPathsExercised: true,
         allMeasuredDeepQueryGatesPassed: true,
@@ -346,6 +347,12 @@ test("Deep Query evidence rejects rehashed metric and coverage bypasses", async 
     }],
     ["empty Recipe", DEEP_QUERY_REPORTS[1], (value) => {
       value.deepQuery.recipes["solution-recall@1"].emptyResultCount = 100;
+    }],
+    ["slow Recipe", DEEP_QUERY_REPORTS[1], (value) => {
+      value.deepQuery.recipes["solution-recall@1"].roundTripMs.p95 = 500;
+      value.deepQuery.recipes["solution-recall@1"].roundTripMs.p99 = 1_000;
+      value.deepQuery.recipes["solution-recall@1"].roundTripMs.max = 1_000;
+      value.deepQuery.recipes["solution-recall@1"].roundTripMs.total = 100_000;
     }],
     ["Evidence throughput", DEEP_QUERY_REPORTS[1], (value) => {
       value.deepQuery.evidence.payloadMiBPerSecond = 49.99;

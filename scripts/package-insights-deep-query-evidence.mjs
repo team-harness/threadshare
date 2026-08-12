@@ -28,6 +28,8 @@ export const DEEP_QUERY_REPORTS = Object.freeze([
 ]);
 export const DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT = 1.8;
 export const DEEP_QUERY_FTS_AMPLIFICATION_LIMIT = 0.7;
+export const DEEP_QUERY_RECIPE_P95_LIMIT_MS = 500;
+export const DEEP_QUERY_RECIPE_P99_LIMIT_MS = 1_000;
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -239,7 +241,7 @@ function validateSynthetic(report, turns) {
   hex(report.sourceRevision, `${name}.sourceRevision`, [40, 64]);
   hex(report.benchmarkScriptSha256, `${name}.benchmarkScriptSha256`);
   const corpus = object(report.corpus, `${name}.corpus`);
-  if (corpus.corpusVersion !== 6 || corpus.turns !== turns || corpus.sessions !== turns / 100 ||
+  if (corpus.corpusVersion !== 7 || corpus.turns !== turns || corpus.sessions !== turns / 100 ||
       corpus.turnsPerSession !== 100 || corpus.seed !== scale.seed) {
     fail(`${name} corpus drifted`);
   }
@@ -280,7 +282,7 @@ function validateSynthetic(report, turns) {
     "budget", "recordsWithinLimit", "aggregateWithinLimit",
     "evidenceFirstPageWithinLimit", "evidencePagingAtLeast50MiBPerSecond",
     "allRecordsReturnedResults", "allAggregatesReturnedGroups", "allRecipesExercised",
-    "allEvidenceReadsCompleted", "allDeepQueryPathsExercised",
+    "allRecipesWithinLimit", "allEvidenceReadsCompleted", "allDeepQueryPathsExercised",
     "allMeasuredDeepQueryGatesPassed",
   ], `${name}.deepQuery.gates`);
   const expectedBudget = turns === 25_000 ? "current-25k" : "long-term-250k";
@@ -291,7 +293,15 @@ function validateSynthetic(report, turns) {
   exactKeys(deep.recipes, RECIPE_NAMES, `${name}.recipes`);
   for (const recipe of RECIPE_NAMES) {
     if (deep.recipes[recipe].emptyResultCount !== 0) fail(`${name}.${recipe} was empty`);
-    validateLatency(deep.recipes[recipe].roundTripMs, `${name}.${recipe}`, DEEP_QUERY_COUNT);
+    const latency = validateLatency(
+      deep.recipes[recipe].roundTripMs,
+      `${name}.${recipe}`,
+      DEEP_QUERY_COUNT,
+    );
+    if (latency.p95 >= DEEP_QUERY_RECIPE_P95_LIMIT_MS ||
+        latency.p99 >= DEEP_QUERY_RECIPE_P99_LIMIT_MS) {
+      fail(`${name}.${recipe} exceeded the frozen Recipe latency limit`);
+    }
   }
   const evidence = object(deep.evidence, `${name}.evidence`);
   const firstPage = validateLatency(
@@ -530,6 +540,8 @@ export async function packageDeepQueryEvidence({
         realSampleFraction: 0.30,
         persistentStorageAmplificationLimit: DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT,
         historyFtsAmplificationLimit: DEEP_QUERY_FTS_AMPLIFICATION_LIMIT,
+        recipeP95LimitMs: DEEP_QUERY_RECIPE_P95_LIMIT_MS,
+        recipeP99LimitMs: DEEP_QUERY_RECIPE_P99_LIMIT_MS,
         sidecarRssLimitBytes: RSS_LIMIT_BYTES,
       },
       privacy: {
@@ -598,7 +610,7 @@ export async function verifyDeepQueryEvidenceDirectory({
   exactKeys(manifest.formalConfiguration, [
     "syntheticTurns", "measuredRuns", "warmupRuns", "realSampleFraction",
     "persistentStorageAmplificationLimit", "historyFtsAmplificationLimit",
-    "sidecarRssLimitBytes",
+    "recipeP95LimitMs", "recipeP99LimitMs", "sidecarRssLimitBytes",
   ], "Deep Query formalConfiguration");
   equal(manifest.formalConfiguration, {
     syntheticTurns: [25_000, 250_000],
@@ -607,6 +619,8 @@ export async function verifyDeepQueryEvidenceDirectory({
     realSampleFraction: 0.30,
     persistentStorageAmplificationLimit: DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT,
     historyFtsAmplificationLimit: DEEP_QUERY_FTS_AMPLIFICATION_LIMIT,
+    recipeP95LimitMs: DEEP_QUERY_RECIPE_P95_LIMIT_MS,
+    recipeP99LimitMs: DEEP_QUERY_RECIPE_P99_LIMIT_MS,
     sidecarRssLimitBytes: RSS_LIMIT_BYTES,
   }, "Deep Query formal configuration drifted");
   equal(manifest.privacy, {

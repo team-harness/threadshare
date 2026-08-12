@@ -726,6 +726,8 @@ V2 必须重新建立正式证据：
 初始工程目标而非既成验收事实：
 
 - records/aggregate 在 25k P95 <100 ms，250k P95 <200 ms、P99 <500 ms；
+- 每个版本化 recipe 在 25k/250k 均须 P95 <500 ms、P99 <1,000 ms；任一 recipe
+  超限即使返回非空结果也不能通过正式 evidence gate；
 - evidence 首页 P95 <100 ms；
 - payload paging 吞吐 >=50 MiB/s；
 - persistent storage amplification 目标 <= canonical indexed source bytes 的 1.8 倍；
