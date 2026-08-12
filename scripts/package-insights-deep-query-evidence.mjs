@@ -334,7 +334,7 @@ function validateSynthetic(report, turns) {
     fail(`${name} exceeded the 128 MiB sidecar RSS limit`);
   }
   if (!report.explain?.recordsByEventKind?.some((detail) =>
-    detail.includes("history_events_kind_observed")) ||
+    detail.includes("history_events_kind_order")) ||
     report.explain.recordsByEventKind.some((detail) => /\bSCAN he\b/u.test(detail))) {
     fail(`${name} records query plan is invalid`);
   }

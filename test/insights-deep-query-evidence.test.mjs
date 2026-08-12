@@ -175,7 +175,7 @@ function syntheticReport(turns) {
       history_event_fts_documents: turns * 8,
     },
     explain: {
-      recordsByEventKind: ["SEARCH he USING INDEX history_events_kind_observed"],
+      recordsByEventKind: ["SEARCH he USING INDEX history_events_kind_order"],
     },
     gates: {
       v2CorpusComplete: true,

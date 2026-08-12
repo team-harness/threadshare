@@ -798,6 +798,9 @@ fn capability_contexts(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<Vec<Value>, QueryError> {
+    if complete_day_window(&request.window)?.is_some() {
+        return projected_capability_contexts(connection, request);
+    }
     let (scope, values) = capability_scope(request)?;
     let sql = format!(
         "SELECT lower(hex(c.capability_key)),c.provider,c.capability_kind,c.canonical_name,
@@ -818,13 +821,12 @@ fn capability_contexts(
          JOIN turns t ON t.turn_id=cu.turn_id
          JOIN sessions s ON s.session_id=cu.session_id
          JOIN capabilities c ON c.capability_id=cu.capability_id
-         LEFT JOIN history_events invocation_event ON invocation_event.event_key=(
-           SELECT ace.event_key FROM attempt_chain_events ace
-           JOIN history_events chain_event ON chain_event.event_key=ace.event_key
-           WHERE ace.session_id=cu.session_id AND ace.correlation_digest=cu.correlation_digest
-             AND chain_event.event_kind='capability-invocation'
-           ORDER BY chain_event.record_start_offset,chain_event.content_index,
-                    chain_event.event_ordinal,chain_event.event_key LIMIT 1
+         LEFT JOIN evidence_events invocation_event ON invocation_event.event_id=(
+           SELECT linked_event.event_id FROM capability_use_evidence invocation_link
+           JOIN evidence_events linked_event ON linked_event.event_id=invocation_link.event_id
+           WHERE invocation_link.use_id=cu.use_id AND invocation_link.role='invocation'
+           ORDER BY linked_event.record_start_offset,linked_event.content_index,
+                    linked_event.event_ordinal,linked_event.event_key LIMIT 1
          )
          WHERE {scope}
          GROUP BY c.capability_id
@@ -887,6 +889,355 @@ fn capability_contexts(
     Ok(result)
 }
 
+#[derive(Default)]
+struct CapabilityContextRollup {
+    provider: String,
+    kind: String,
+    canonical_name: String,
+    invocations: u64,
+    failures: u64,
+    sessions: BTreeSet<i64>,
+    groups: BTreeSet<String>,
+    grouped_invocations: u64,
+    ungrouped_invocations: u64,
+    last_used_at: Option<String>,
+    strong_invocations: u64,
+    weak_invocations: u64,
+    terminal: [u64; 5],
+    projects: BTreeMap<Option<String>, u64>,
+}
+
+fn projected_capability_contexts(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<Vec<Value>, QueryError> {
+    let (scope, values) = projected_capability_scope(request, "rollup")?;
+    let sql = format!(
+        "SELECT lower(hex(c.capability_key)),c.provider,c.capability_kind,c.canonical_name,
+                rollup.session_id,
+                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                lower(hex(s.duplicate_group_key)),s.duplicate_confidence,
+                rollup.invocation_count,rollup.failing_invocation_count,
+                rollup.last_used_at,
+                rollup.pending_count,rollup.completed_count,rollup.cancelled_count,
+                rollup.unknown_count
+         FROM history_capability_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         JOIN capabilities c ON c.capability_id=rollup.capability_id
+         WHERE {scope}
+         ORDER BY c.capability_key,rollup.session_id,rollup.bucket_day"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut groups = BTreeMap::<String, CapabilityContextRollup>::new();
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let capability_key: String = row.get(0).map_err(query_failed)?;
+        let group = groups.entry(capability_key).or_default();
+        if group.provider.is_empty() {
+            group.provider = row.get(1).map_err(query_failed)?;
+            group.kind = row.get(2).map_err(query_failed)?;
+            group.canonical_name = row.get(3).map_err(query_failed)?;
+        }
+        group.sessions.insert(row.get(4).map_err(query_failed)?);
+        let project_key: Option<String> = row.get(5).map_err(query_failed)?;
+        let duplicate_group: Option<String> = row.get(6).map_err(query_failed)?;
+        let confidence: Option<String> = row.get(7).map_err(query_failed)?;
+        let invocations = query_nonnegative_u64(row.get(8).map_err(query_failed)?)?;
+        group.invocations = checked_recipe_add(group.invocations, invocations, "invocations")?;
+        group.failures = checked_recipe_add(
+            group.failures,
+            query_nonnegative_u64(row.get(9).map_err(query_failed)?)?,
+            "failures",
+        )?;
+        let last_used: String = row.get(10).map_err(query_failed)?;
+        if group
+            .last_used_at
+            .as_ref()
+            .is_none_or(|current| last_used > *current)
+        {
+            group.last_used_at = Some(last_used);
+        }
+        if let Some(duplicate_group) = duplicate_group.filter(|value| !value.is_empty()) {
+            group.groups.insert(duplicate_group);
+            group.grouped_invocations = checked_recipe_add(
+                group.grouped_invocations,
+                invocations,
+                "grouped invocations",
+            )?;
+            if confidence.as_deref() == Some("strong") {
+                group.strong_invocations = checked_recipe_add(
+                    group.strong_invocations,
+                    invocations,
+                    "strong invocations",
+                )?;
+            } else if confidence.as_deref() == Some("weak") {
+                group.weak_invocations =
+                    checked_recipe_add(group.weak_invocations, invocations, "weak invocations")?;
+            }
+        } else {
+            group.ungrouped_invocations = checked_recipe_add(
+                group.ungrouped_invocations,
+                invocations,
+                "ungrouped invocations",
+            )?;
+        }
+        let project_count = group.projects.entry(project_key).or_default();
+        *project_count = checked_recipe_add(*project_count, invocations, "project invocations")?;
+        for (index, column) in [11, 12, 9, 13, 14].into_iter().enumerate() {
+            group.terminal[index] = checked_recipe_add(
+                group.terminal[index],
+                query_nonnegative_u64(row.get(column).map_err(query_failed)?)?,
+                "terminal count",
+            )?;
+        }
+    }
+    drop(rows);
+    drop(statement);
+    let representatives = projected_capability_representatives(connection, request)?;
+    let co_occurring = projected_capability_cooccurrences(connection, request)?;
+    let mut result = groups
+        .into_iter()
+        .map(|(capability_key, group)| {
+            let mut projects = group.projects.into_iter().collect::<Vec<_>>();
+            projects.sort_by(|left, right| {
+                right
+                    .1
+                    .cmp(&left.1)
+                    .then_with(|| left.0.is_none().cmp(&right.0.is_none()))
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            let representative_turns = representatives
+                .items
+                .get(&capability_key)
+                .cloned()
+                .unwrap_or_default();
+            Ok(json!({
+                "capability": {
+                    "capabilityKey":capability_key.clone(),"provider":group.provider,
+                    "kind":group.kind,"canonicalName":group.canonical_name,
+                },
+                "recordedInvocationCount":group.invocations.to_string(),
+                "recordedFailingInvocationCount":group.failures.to_string(),
+                "distinctTurnCount":representatives.distinct_turn_counts
+                    .get(&capability_key).copied().unwrap_or(0).to_string(),
+                "distinctSessionCount":group.sessions.len().to_string(),
+                "distinctDedupeGroupCount":group.groups.len().to_string(),
+                "groupedInvocationCount":group.grouped_invocations.to_string(),
+                "ungroupedInvocationCount":group.ungrouped_invocations.to_string(),
+                "lastUsedAt":group.last_used_at,
+                "strongGroupMemberInvocationCount":group.strong_invocations.to_string(),
+                "weakGroupMemberInvocationCount":group.weak_invocations.to_string(),
+                "invocationTerminalCounts": {
+                    "pending":group.terminal[0].to_string(),
+                    "completed":group.terminal[1].to_string(),
+                    "failed":group.terminal[2].to_string(),
+                    "cancelled":group.terminal[3].to_string(),
+                    "unknown":group.terminal[4].to_string(),
+                },
+                "topProjects":projects.into_iter().take(5).map(|(project_key,count)| json!({
+                    "projectKey":project_key,"recordedInvocationCount":count.to_string(),
+                })).collect::<Vec<_>>(),
+                "coOccurringCapabilities":co_occurring.get(&capability_key).cloned().unwrap_or_default(),
+                "representativeTurns":representative_turns,
+                "evidence":representatives.items.get(&capability_key)
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.get("evidence")).cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+    result.sort_by(|left, right| {
+        decimal_json(right.pointer("/distinctDedupeGroupCount"))
+            .cmp(&decimal_json(left.pointer("/distinctDedupeGroupCount")))
+            .then_with(|| {
+                decimal_json(right.pointer("/recordedInvocationCount"))
+                    .cmp(&decimal_json(left.pointer("/recordedInvocationCount")))
+            })
+            .then_with(|| {
+                left["capability"]["capabilityKey"]
+                    .as_str()
+                    .cmp(&right["capability"]["capabilityKey"].as_str())
+            })
+    });
+    Ok(result)
+}
+
+fn checked_recipe_add(left: u64, right: u64, label: &str) -> Result<u64, QueryError> {
+    left.checked_add(right)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", format!("{label} overflowed")))
+}
+
+#[derive(Default)]
+struct ProjectedCapabilityRepresentatives {
+    items: BTreeMap<String, Vec<Value>>,
+    distinct_turn_counts: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct ProjectedTurnRepresentative {
+    turn_key: String,
+    revision: Option<String>,
+    problem: String,
+    final_answer: Option<String>,
+    invocations: u64,
+    used_at: String,
+}
+
+fn projected_capability_representatives(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<ProjectedCapabilityRepresentatives, QueryError> {
+    let (scope, values) = projected_capability_scope(request, "representative")?;
+    let sql = format!(
+        "SELECT lower(hex(c.capability_key)),representative.turn_id,
+                lower(hex(t.turn_key)),
+                CASE WHEN t.revision IS NULL THEN NULL ELSE lower(hex(t.revision)) END,
+                t.problem_text,t.final_answer_excerpt,
+                representative.invocation_count,representative.used_at
+         FROM history_capability_representatives representative
+         JOIN sessions s ON s.session_id=representative.session_id
+         JOIN capabilities c ON c.capability_id=representative.capability_id
+         JOIN turns t ON t.turn_id=representative.turn_id
+         WHERE {scope}
+         ORDER BY c.capability_key,representative.turn_id,representative.bucket_day"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut grouped = BTreeMap::<(String, i64), ProjectedTurnRepresentative>::new();
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let capability_key: String = row.get(0).map_err(query_failed)?;
+        let turn_id: i64 = row.get(1).map_err(query_failed)?;
+        let entry = grouped.entry((capability_key, turn_id)).or_default();
+        if entry.turn_key.is_empty() {
+            entry.turn_key = row.get(2).map_err(query_failed)?;
+            entry.revision = row.get(3).map_err(query_failed)?;
+            entry.problem = row.get(4).map_err(query_failed)?;
+            entry.final_answer = row.get(5).map_err(query_failed)?;
+        }
+        entry.invocations = checked_recipe_add(
+            entry.invocations,
+            query_nonnegative_u64(row.get(6).map_err(query_failed)?)?,
+            "representative invocations",
+        )?;
+        let used_at: String = row.get(7).map_err(query_failed)?;
+        if entry.used_at.is_empty() || used_at > entry.used_at {
+            entry.used_at = used_at;
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut by_capability = BTreeMap::<String, Vec<ProjectedTurnRepresentative>>::new();
+    for ((capability_key, _), representative) in grouped {
+        by_capability
+            .entry(capability_key)
+            .or_default()
+            .push(representative);
+    }
+    let mut result = ProjectedCapabilityRepresentatives::default();
+    for (capability_key, mut representatives) in by_capability {
+        result.distinct_turn_counts.insert(
+            capability_key.clone(),
+            u64::try_from(representatives.len())
+                .map_err(|_| QueryError::new("QUERY_FAILED", "distinct turn count overflowed"))?,
+        );
+        representatives.retain(|representative| representative.revision.is_some());
+        representatives.sort_by(|left, right| {
+            right
+                .invocations
+                .cmp(&left.invocations)
+                .then_with(|| right.used_at.cmp(&left.used_at))
+                .then_with(|| left.turn_key.cmp(&right.turn_key))
+        });
+        result.items.insert(
+            capability_key,
+            representatives
+                .into_iter()
+                .take(5)
+                .map(|representative| {
+                    let revision = representative.revision.expect("filtered revision");
+                    json!({
+                        "turnKey":representative.turn_key,
+                        "usedAt":representative.used_at,
+                        "recordedInvocationCount":representative.invocations.to_string(),
+                        "context":{
+                            "problem":representative.problem,
+                            "finalAnswer":representative.final_answer,
+                        },
+                        "evidence":{
+                            "kind":"turn","turnKey":representative.turn_key,
+                            "revision":revision,
+                        },
+                    })
+                })
+                .collect(),
+        );
+    }
+    Ok(result)
+}
+
+fn projected_capability_cooccurrences(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<BTreeMap<String, Vec<Value>>, QueryError> {
+    let (scope, values) = projected_capability_scope(request, "cooccurrence")?;
+    let sql = format!(
+        "SELECT lower(hex(c.capability_key)),lower(hex(other.capability_key)),
+                other.capability_kind,other.canonical_name,cooccurrence.turn_id
+         FROM history_capability_cooccurrences cooccurrence
+         JOIN sessions s ON s.session_id=cooccurrence.session_id
+         JOIN capabilities c ON c.capability_id=cooccurrence.capability_id
+         JOIN capabilities other ON other.capability_id=cooccurrence.other_capability_id
+         WHERE {scope}
+         ORDER BY c.capability_key,other.capability_key,cooccurrence.turn_id"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut identities = BTreeMap::<(String, String), (String, String)>::new();
+    let mut turns = BTreeMap::<(String, String), BTreeSet<i64>>::new();
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let capability_key: String = row.get(0).map_err(query_failed)?;
+        let other_key: String = row.get(1).map_err(query_failed)?;
+        let key = (capability_key, other_key);
+        identities.entry(key.clone()).or_insert((
+            row.get(2).map_err(query_failed)?,
+            row.get(3).map_err(query_failed)?,
+        ));
+        turns
+            .entry(key)
+            .or_default()
+            .insert(row.get(4).map_err(query_failed)?);
+    }
+    let mut result = BTreeMap::<String, Vec<Value>>::new();
+    for ((capability_key, other_key), turn_ids) in turns {
+        let (kind, canonical_name) = identities
+            .remove(&(capability_key.clone(), other_key.clone()))
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "capability identity is missing"))?;
+        result.entry(capability_key).or_default().push(json!({
+            "capabilityKey":other_key,"kind":kind,"canonicalName":canonical_name,
+            "distinctTurnCount":turn_ids.len().to_string(),
+        }));
+    }
+    for items in result.values_mut() {
+        items.sort_by(|left, right| {
+            decimal_json(right.pointer("/distinctTurnCount"))
+                .cmp(&decimal_json(left.pointer("/distinctTurnCount")))
+                .then_with(|| {
+                    left["capabilityKey"]
+                        .as_str()
+                        .cmp(&right["capabilityKey"].as_str())
+                })
+        });
+        items.truncate(5);
+    }
+    Ok(result)
+}
+
 fn capability_representatives(
     connection: &Connection,
     request: &RecipeRequest,
@@ -902,13 +1253,12 @@ fn capability_representatives(
          JOIN turns t ON t.turn_id=cu.turn_id
          JOIN sessions s ON s.session_id=cu.session_id
          JOIN capabilities c ON c.capability_id=cu.capability_id
-         LEFT JOIN history_events invocation_event ON invocation_event.event_key=(
-           SELECT ace.event_key FROM attempt_chain_events ace
-           JOIN history_events chain_event ON chain_event.event_key=ace.event_key
-           WHERE ace.session_id=cu.session_id AND ace.correlation_digest=cu.correlation_digest
-             AND chain_event.event_kind='capability-invocation'
-           ORDER BY chain_event.record_start_offset,chain_event.content_index,
-                    chain_event.event_ordinal,chain_event.event_key LIMIT 1
+         LEFT JOIN evidence_events invocation_event ON invocation_event.event_id=(
+           SELECT linked_event.event_id FROM capability_use_evidence invocation_link
+           JOIN evidence_events linked_event ON linked_event.event_id=invocation_link.event_id
+           WHERE invocation_link.use_id=cu.use_id AND invocation_link.role='invocation'
+           ORDER BY linked_event.record_start_offset,linked_event.content_index,
+                    linked_event.event_ordinal,linked_event.event_key LIMIT 1
          )
          WHERE {scope} AND t.revision IS NOT NULL
          GROUP BY c.capability_id,t.turn_id
@@ -956,13 +1306,12 @@ fn capability_top_projects(
          JOIN turns t ON t.turn_id=cu.turn_id
          JOIN sessions s ON s.session_id=cu.session_id
          JOIN capabilities c ON c.capability_id=cu.capability_id
-         LEFT JOIN history_events invocation_event ON invocation_event.event_key=(
-           SELECT ace.event_key FROM attempt_chain_events ace
-           JOIN history_events chain_event ON chain_event.event_key=ace.event_key
-           WHERE ace.session_id=cu.session_id AND ace.correlation_digest=cu.correlation_digest
-             AND chain_event.event_kind='capability-invocation'
-           ORDER BY chain_event.record_start_offset,chain_event.content_index,
-                    chain_event.event_ordinal,chain_event.event_key LIMIT 1
+         LEFT JOIN evidence_events invocation_event ON invocation_event.event_id=(
+           SELECT linked_event.event_id FROM capability_use_evidence invocation_link
+           JOIN evidence_events linked_event ON linked_event.event_id=invocation_link.event_id
+           WHERE invocation_link.use_id=cu.use_id AND invocation_link.role='invocation'
+           ORDER BY linked_event.record_start_offset,linked_event.content_index,
+                    linked_event.event_ordinal,linked_event.event_key LIMIT 1
          )
          WHERE {scope}
          GROUP BY c.capability_id,s.project_key
@@ -1001,13 +1350,12 @@ fn capability_co_occurrences(
          JOIN turns t ON t.turn_id=cu.turn_id
          JOIN sessions s ON s.session_id=cu.session_id
          JOIN capabilities c ON c.capability_id=cu.capability_id
-         LEFT JOIN history_events invocation_event ON invocation_event.event_key=(
-           SELECT ace.event_key FROM attempt_chain_events ace
-           JOIN history_events chain_event ON chain_event.event_key=ace.event_key
-           WHERE ace.session_id=cu.session_id AND ace.correlation_digest=cu.correlation_digest
-             AND chain_event.event_kind='capability-invocation'
-           ORDER BY chain_event.record_start_offset,chain_event.content_index,
-                    chain_event.event_ordinal,chain_event.event_key LIMIT 1
+         LEFT JOIN evidence_events invocation_event ON invocation_event.event_id=(
+           SELECT linked_event.event_id FROM capability_use_evidence invocation_link
+           JOIN evidence_events linked_event ON linked_event.event_id=invocation_link.event_id
+           WHERE invocation_link.use_id=cu.use_id AND invocation_link.role='invocation'
+           ORDER BY linked_event.record_start_offset,linked_event.content_index,
+                    linked_event.event_ordinal,linked_event.event_key LIMIT 1
          )
          JOIN capability_uses other_use ON other_use.turn_id=cu.turn_id
           AND other_use.origin_scope='main' AND other_use.capability_id<>cu.capability_id
@@ -1584,6 +1932,12 @@ fn read_activity_buckets(
             "unknownDedupeSessionCount": row.support.unknown_dedupe_session_count,
         }));
     }
+    if complete_day_window(&request.window)?.is_some()
+        && projected_activity_order_is_exact(connection, request)?
+    {
+        enrich_projected_activity_buckets(connection, request, bounds, width_ms, &mut buckets)?;
+        return Ok(buckets);
+    }
     let (scope, values) = event_scope(request, None)?;
     let sql = format!(
         "SELECT he.observed_timestamp,lower(hex(s.session_key)),
@@ -1658,6 +2012,137 @@ fn read_activity_buckets(
         }
     }
     Ok(buckets)
+}
+
+fn enrich_projected_activity_buckets(
+    connection: &Connection,
+    request: &RecipeRequest,
+    bounds: WindowBounds,
+    width_ms: u64,
+    buckets: &mut BTreeMap<u64, ActivityBucketState>,
+) -> Result<(), QueryError> {
+    let (scope, values) = projected_rollup_scope(request, None)?;
+    let sql = format!(
+        "SELECT rollup.bucket_day,lower(hex(s.session_key)),
+                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                lower(hex(sc.canonical_digest)),rollup.first_observed_timestamp
+         FROM history_activity_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         JOIN session_commits sc ON sc.session_id=rollup.session_id
+         WHERE {scope}
+         ORDER BY rollup.first_observed_timestamp,s.session_key"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut last_project = None::<String>;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let day = row.get::<_, String>(0).map_err(query_failed)?;
+        let observed_ms =
+            parse_canonical_timestamp(&format!("{day}T00:00:00.000Z"), "projected bucket day")?;
+        let start = bounds.after_ms + ((observed_ms - bounds.after_ms) / width_ms) * width_ms;
+        let state = buckets.entry(start).or_default();
+        let session_key: String = row.get(1).map_err(query_failed)?;
+        let project_key: Option<String> = row.get(2).map_err(query_failed)?;
+        let revision: String = row.get(3).map_err(query_failed)?;
+        if let Some(project_key) = &project_key {
+            state.projects.insert(project_key.clone());
+            if last_project
+                .as_ref()
+                .is_some_and(|last| last != project_key)
+            {
+                state.context_switches += 1;
+            }
+            last_project = Some(project_key.clone());
+        }
+        state.evidence.get_or_insert_with(
+            || json!({"kind":"session","sessionKey":session_key,"revision":revision}),
+        );
+    }
+    drop(rows);
+    drop(statement);
+
+    let (scope, values) = projected_rollup_scope(request, None)?;
+    let sql = format!(
+        "SELECT rollup.bucket_day,rollup.event_count,
+                rollup.input_total,rollup.cached_input_total,
+                rollup.cache_write_input_total,rollup.output_total,
+                rollup.reasoning_total,rollup.total_total,
+                rollup.input_present,rollup.cached_input_present,
+                rollup.cache_write_input_present,rollup.output_present,
+                rollup.reasoning_present,rollup.total_present
+         FROM history_token_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         WHERE {scope} ORDER BY rollup.bucket_day,rollup.rollup_id"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let day = row.get::<_, String>(0).map_err(query_failed)?;
+        let observed_ms =
+            parse_canonical_timestamp(&format!("{day}T00:00:00.000Z"), "projected bucket day")?;
+        let start = bounds.after_ms + ((observed_ms - bounds.after_ms) / width_ms) * width_ms;
+        let state = buckets.entry(start).or_default();
+        state.token_events = state
+            .token_events
+            .checked_add(query_nonnegative_u64(row.get(1).map_err(query_failed)?)?)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "token event count overflowed"))?;
+        for index in 0..6 {
+            state.token_values[index] = state.token_values[index]
+                .checked_add(parse_u128_text(
+                    &row.get::<_, String>(2 + index).map_err(query_failed)?,
+                    "token rollup total",
+                )?)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "token total overflowed"))?;
+            state.token_present[index] = state.token_present[index]
+                .checked_add(query_nonnegative_u64(
+                    row.get(8 + index).map_err(query_failed)?,
+                )?)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "token coverage overflowed"))?;
+        }
+    }
+    Ok(())
+}
+
+fn projected_activity_order_is_exact(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<bool, QueryError> {
+    let (scope, values) = projected_rollup_scope(request, None)?;
+    let sql = format!(
+        "SELECT coverage.first_history_event_at,coverage.last_history_event_at
+         FROM history_activity_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         JOIN history_query_session_coverage coverage
+           ON coverage.session_id=rollup.session_id
+         WHERE {scope}
+         GROUP BY rollup.session_id
+         ORDER BY coverage.first_history_event_at,s.session_key"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut previous_end = None::<String>;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let Some(start) = row.get::<_, Option<String>>(0).map_err(query_failed)? else {
+            return Ok(false);
+        };
+        let Some(end) = row.get::<_, Option<String>>(1).map_err(query_failed)? else {
+            return Ok(false);
+        };
+        if previous_end
+            .as_ref()
+            .is_some_and(|previous| previous >= &start)
+        {
+            return Ok(false);
+        }
+        previous_end = Some(end);
+    }
+    Ok(true)
 }
 
 fn activity_bucket_value(
@@ -1855,6 +2340,9 @@ fn token_hotspots(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<Vec<Value>, QueryError> {
+    if complete_day_window(&request.window)?.is_some() {
+        return projected_token_hotspots(connection, request);
+    }
     let (scope, values) = token_scope(request)?;
     let sql = format!(
         "SELECT s.provider,tu.model,
@@ -1945,6 +2433,123 @@ fn token_hotspots(
             .then_with(|| left.to_string().cmp(&right.to_string()))
     });
     Ok(result)
+}
+
+fn projected_token_hotspots(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<Vec<Value>, QueryError> {
+    let (scope, values) = projected_rollup_scope(request, None)?;
+    let sql = format!(
+        "SELECT s.provider,rollup.model,
+                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                rollup.event_count,rollup.input_total,rollup.cached_input_total,
+                rollup.cache_write_input_total,rollup.output_total,
+                rollup.reasoning_total,rollup.total_total,
+                rollup.input_present,rollup.cached_input_present,
+                rollup.cache_write_input_present,rollup.output_present,
+                rollup.reasoning_present,rollup.total_present,
+                lower(hex(rollup.evidence_event_key)),lower(hex(rollup.evidence_revision))
+         FROM history_token_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         WHERE {scope}
+         ORDER BY s.provider,rollup.model,s.project_key,rollup.evidence_event_key"
+    );
+    #[derive(Default)]
+    struct Totals {
+        events: u64,
+        values: [u128; 6],
+        present: [u64; 6],
+        evidence: Option<Value>,
+    }
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut groups = BTreeMap::<(String, Option<String>, Option<String>), Totals>::new();
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let key = (
+            row.get(0).map_err(query_failed)?,
+            row.get(1).map_err(query_failed)?,
+            row.get(2).map_err(query_failed)?,
+        );
+        let group = groups.entry(key).or_default();
+        group.events = group
+            .events
+            .checked_add(query_nonnegative_u64(row.get(3).map_err(query_failed)?)?)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "token event count overflowed"))?;
+        for index in 0..6 {
+            group.values[index] = group.values[index]
+                .checked_add(parse_u128_text(
+                    &row.get::<_, String>(4 + index).map_err(query_failed)?,
+                    "token rollup total",
+                )?)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "token total overflowed"))?;
+            group.present[index] = group.present[index]
+                .checked_add(query_nonnegative_u64(
+                    row.get(10 + index).map_err(query_failed)?,
+                )?)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "token coverage overflowed"))?;
+        }
+        let event_key: String = row.get(16).map_err(query_failed)?;
+        let revision: String = row.get(17).map_err(query_failed)?;
+        group
+            .evidence
+            .get_or_insert_with(|| event_evidence(&event_key, &revision, None));
+    }
+    drop(rows);
+    drop(statement);
+    let names = [
+        "input",
+        "cachedInput",
+        "cacheWriteInput",
+        "output",
+        "reasoning",
+        "total",
+    ];
+    let mut result = Vec::with_capacity(groups.len());
+    for ((provider, model, project_key), group) in groups {
+        let mut totals = Map::new();
+        let mut coverage = Map::new();
+        for (index, name) in names.iter().enumerate() {
+            totals.insert(
+                (*name).to_owned(),
+                if group.present[index] == group.events {
+                    Value::String(group.values[index].to_string())
+                } else {
+                    Value::Null
+                },
+            );
+            coverage.insert(
+                (*name).to_owned(),
+                json!({"presentEventCount":group.present[index].to_string(),
+                       "totalEventCount":group.events.to_string()}),
+            );
+        }
+        result.push(json!({
+            "provider":provider,"model":model,"projectKey":project_key,
+            "capability":null,"capabilityAttribution":"unavailable",
+            "recordedTokenTotals":totals,"metricCoverage":coverage,
+            "evidence":group.evidence.unwrap_or(Value::Null),
+        }));
+    }
+    result.sort_by(|left, right| {
+        decimal_json(right.pointer("/recordedTokenTotals/total"))
+            .cmp(&decimal_json(left.pointer("/recordedTokenTotals/total")))
+            .then_with(|| left.to_string().cmp(&right.to_string()))
+    });
+    Ok(result)
+}
+
+fn query_nonnegative_u64(value: i64) -> Result<u64, QueryError> {
+    u64::try_from(value)
+        .map_err(|_| QueryError::new("QUERY_FAILED", "stored aggregate count is invalid"))
+}
+
+fn parse_u128_text(value: &str, label: &str) -> Result<u128, QueryError> {
+    value
+        .parse::<u128>()
+        .map_err(|_| QueryError::new("QUERY_FAILED", format!("stored {label} is invalid")))
 }
 
 fn solution_recall(
@@ -2158,12 +2763,8 @@ fn read_recipe_coverage(
         RecipeName::CapabilityContexts | RecipeName::FailureChains => {
             Some("he.event_kind IN ('capability-invocation','capability-result')")
         }
-        RecipeName::FileWorkflowSignals => {
-            Some("EXISTS (SELECT 1 FROM file_activity fa WHERE fa.event_key=he.event_key)")
-        }
-        RecipeName::TokenHotspots => {
-            Some("EXISTS (SELECT 1 FROM token_usage tu WHERE tu.event_key=he.event_key)")
-        }
+        RecipeName::FileWorkflowSignals => Some("he.has_file_activity=1"),
+        RecipeName::TokenHotspots => Some("he.has_token_usage=1"),
         RecipeName::SolutionRecall => None,
         RecipeName::ActivityShifts | RecipeName::SessionTimeline => None,
     };
@@ -2172,7 +2773,8 @@ fn read_recipe_coverage(
             let (matched_events, result_scope, values) = solution_recall_match(request)?;
             (
                 format!("WITH {matched_events}"),
-                "matched_events matched JOIN history_events he ON he.event_key=matched.event_key"
+                "matched_events matched JOIN history_event_coverage he
+                   ON he.event_key=matched.event_key"
                     .to_owned(),
                 result_scope,
                 values,
@@ -2181,7 +2783,7 @@ fn read_recipe_coverage(
             let (scope, values) = event_scope(request, extra)?;
             (
                 String::new(),
-                "history_events he".to_owned(),
+                "history_event_coverage he".to_owned(),
                 format!("WHERE {scope}"),
                 values,
             )
@@ -2195,35 +2797,8 @@ fn read_recipe_coverage(
            SUM(CASE WHEN he.completeness='truncated' THEN 1 ELSE 0 END),
            SUM(CASE WHEN he.completeness='unavailable' THEN 1 ELSE 0 END),
            SUM(CASE WHEN he.observed_timestamp IS NULL THEN 1 ELSE 0 END),
-           SUM(CASE WHEN he.revision IS NULL THEN 1 ELSE 0 END),
-           SUM(CASE WHEN tu.event_key IS NOT NULL THEN
-             (tu.input_tokens IS NULL) + (tu.cached_input_tokens IS NULL) +
-             (tu.cache_write_input_tokens IS NULL) + (tu.output_tokens IS NULL) +
-             (tu.reasoning_tokens IS NULL) + (tu.total_tokens IS NULL)
-           ELSE 0 END),
-           SUM(CASE
-             WHEN he.event_kind='visible-message' AND NOT EXISTS (
-               SELECT 1 FROM history_payloads hp
-               WHERE hp.event_key=he.event_key AND hp.payload_kind='message-content'
-             ) THEN 1
-             WHEN he.event_kind='capability-invocation' AND NOT EXISTS (
-               SELECT 1 FROM history_payloads hp
-               WHERE hp.event_key=he.event_key AND hp.payload_kind='tool-input'
-             ) THEN 1
-             WHEN he.event_kind='capability-result'
-                  AND (json_extract(he.metadata_json,'$.providerState')='failed'
-                       OR json_type(he.metadata_json,'$.outputBytes') IS NOT NULL
-                       OR json_type(he.metadata_json,'$.errorSignature') IS NOT NULL)
-                  AND NOT EXISTS (
-               SELECT 1 FROM history_payloads hp WHERE hp.event_key=he.event_key
-                 AND hp.payload_kind IN ('tool-output','error-content')
-             ) THEN 1
-             WHEN he.event_kind='provider-unknown' AND NOT EXISTS (
-               SELECT 1 FROM history_payloads hp
-               WHERE hp.event_key=he.event_key AND hp.payload_kind='provider-payload'
-             ) THEN 1 ELSE 0 END)
+           SUM(he.missing_revision),SUM(he.missing_token_metric),SUM(he.missing_payload)
          FROM {event_source} JOIN sessions s ON s.session_id=he.session_id
-         LEFT JOIN token_usage tu ON tu.event_key=he.event_key
          {where_clause}"
     );
     let counts = connection
@@ -2313,6 +2888,74 @@ fn file_scope(request: &RecipeRequest) -> Result<(String, Vec<SqlValue>), QueryE
 
 fn token_scope(request: &RecipeRequest) -> Result<(String, Vec<SqlValue>), QueryError> {
     scope_for(request, "tu.observed_timestamp", None)
+}
+
+fn complete_day_window(window: &RecipeWindow) -> Result<Option<(String, String)>, QueryError> {
+    let bounds = window.bounds("window")?;
+    const DAY_MS: u64 = 86_400_000;
+    if !bounds.after_ms.is_multiple_of(DAY_MS) || !bounds.before_ms.is_multiple_of(DAY_MS) {
+        return Ok(None);
+    }
+    Ok(Some((
+        window.after[..10].to_owned(),
+        window.before[..10].to_owned(),
+    )))
+}
+
+fn projected_rollup_scope(
+    request: &RecipeRequest,
+    table_alias: Option<&str>,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (after_day, before_day) = complete_day_window(&request.window)?
+        .ok_or_else(|| invalid("projected recipe window must align to complete UTC days"))?;
+    let alias = table_alias.unwrap_or("rollup");
+    let mut clauses = vec![
+        "s.eligibility='eligible'".to_owned(),
+        "s.session_scope='main'".to_owned(),
+        "NOT EXISTS (SELECT 1 FROM source_purge_states purge WHERE purge.session_key=s.session_key)"
+            .to_owned(),
+        format!("{alias}.bucket_day>=?"),
+        format!("{alias}.bucket_day<?"),
+    ];
+    let mut values = vec![SqlValue::Text(after_day), SqlValue::Text(before_day)];
+    push_text_filter(
+        &mut clauses,
+        &mut values,
+        "s.provider",
+        &request.filters.providers,
+    );
+    push_blob_filter(
+        &mut clauses,
+        &mut values,
+        "s.project_key",
+        &request.filters.project_keys,
+    )?;
+    push_blob_filter(
+        &mut clauses,
+        &mut values,
+        "s.session_key",
+        &request.filters.session_keys,
+    )?;
+    Ok((clauses.join(" AND "), values))
+}
+
+fn projected_capability_scope(
+    request: &RecipeRequest,
+    table_alias: &str,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let mut scoped = projected_rollup_scope(request, Some(table_alias))?;
+    if !request.filters.capability_keys.is_empty() {
+        scoped.0.push_str(&format!(
+            " AND c.capability_key IN ({})",
+            placeholders(request.filters.capability_keys.len())
+        ));
+        for item in &request.filters.capability_keys {
+            scoped
+                .1
+                .push(SqlValue::Blob(decode_key(item, "filters.capabilityKeys")?));
+        }
+    }
+    Ok(scoped)
 }
 
 fn capability_scope(request: &RecipeRequest) -> Result<(String, Vec<SqlValue>), QueryError> {
@@ -2509,10 +3152,17 @@ fn payload_for_kind(
 fn require_fact_v2(connection: &Connection) -> Result<(), QueryError> {
     let version = crate::normalized_repository::read_database_fact_schema_version(connection)
         .map_err(|_| QueryError::new("QUERY_FAILED", "Fact schema identity could not be read"))?;
-    if version != Some(2) {
+    let coverage_ready = crate::normalized_repository::deep_query_coverage_ready(connection)
+        .map_err(|_| {
+            QueryError::new(
+                "QUERY_FAILED",
+                "Deep Query projection identity could not be read",
+            )
+        })?;
+    if version != Some(2) || !coverage_ready {
         return Err(QueryError::new(
             "TS_INSIGHTS_QUERY_V2_NOT_READY",
-            "recipe requires a completed Fact V2 shadow rebuild",
+            "recipe requires a completed Fact V2 shadow rebuild with deep-query-coverage@2",
         ));
     }
     Ok(())

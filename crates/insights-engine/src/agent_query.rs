@@ -27,6 +27,19 @@ pub const DAY_MS: u64 = 86_400_000;
 pub const WEEK_MS: u64 = 7 * DAY_MS;
 const INVALID: &str = "TS_INSIGHTS_REQUEST_INVALID";
 
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn stored_u64(value: Vec<u8>) -> Result<u64, QueryError> {
+    value
+        .try_into()
+        .map(u64::from_be_bytes)
+        .map_err(|_| QueryError::new("QUERY_FAILED", "stored uint64 is invalid"))
+}
+
 // ---------------------------------------------------------------------------
 // Canonical timestamps
 // ---------------------------------------------------------------------------
@@ -728,44 +741,21 @@ pub(crate) fn read_coverage(
             )
             .map_err(query_failed)?,
         None => {
-            let (undated_turns, unrevisioned_turns) = connection
+            connection
                 .query_row(
-                    &format!(
-                        "SELECT SUM(CASE WHEN t.observed_timestamp IS NULL THEN 1 ELSE 0 END),
-                                SUM(CASE WHEN t.revision IS NULL THEN 1 ELSE 0 END)
-                         {FROM_TURNS} WHERE {base}"
-                    ),
+                    "SELECT COALESCE(SUM(coverage.undated_turn_count),0),
+                            COALESCE(SUM(coverage.unrevisioned_turn_count),0),
+                            COALESCE(SUM(coverage.undated_invocation_count),0),
+                            COALESCE(SUM(coverage.unrevisioned_invocation_count),0)
+                     FROM history_query_session_coverage coverage
+                     JOIN sessions s ON s.session_id=coverage.session_id
+                     WHERE s.eligibility='eligible' AND s.session_scope='main'
+                       AND NOT EXISTS (SELECT 1 FROM source_purge_states purge
+                                       WHERE purge.session_key=s.session_key)",
                     [],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        ))
-                    },
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
-                .map_err(query_failed)?;
-            let (undated_uses, unrevisioned_uses) = connection
-                .query_row(
-                    &format!(
-                        "SELECT SUM(CASE WHEN t.observed_timestamp IS NULL THEN 1 ELSE 0 END),
-                                SUM(CASE WHEN t.revision IS NULL THEN 1 ELSE 0 END)
-                         {FROM_USES} WHERE {base} AND u.origin_scope='main'"
-                    ),
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        ))
-                    },
-                )
-                .map_err(query_failed)?;
-            (
-                undated_turns,
-                unrevisioned_turns,
-                undated_uses,
-                unrevisioned_uses,
-            )
+                .map_err(query_failed)?
         }
     };
     let fully_excluded = match kind {
@@ -1549,6 +1539,9 @@ pub(crate) fn read_activity_buckets_in_snapshot(
     connection: &Connection,
     request: &ActivityRequest,
 ) -> Result<Vec<ActivityBucketRow>, QueryError> {
+    if request.closure_states.is_empty() {
+        return read_projected_activity_buckets(connection, request);
+    }
     let bounds = request.bounds()?;
     let mut buckets: BTreeMap<i64, ActivityBucketAccumulator> = BTreeMap::new();
 
@@ -1721,6 +1714,168 @@ pub(crate) fn read_activity_buckets_in_snapshot(
             })
         })
         .collect::<Result<Vec<_>, QueryError>>()
+}
+
+fn read_projected_activity_buckets(
+    connection: &Connection,
+    request: &ActivityRequest,
+) -> Result<Vec<ActivityBucketRow>, QueryError> {
+    let bounds = request.bounds()?;
+    let after = canonical_timestamp(bounds.after_unix_ms)?;
+    let before = canonical_timestamp(bounds.before_unix_ms)?;
+    let mut filters = vec![
+        "rollup.first_observed_timestamp<?".to_owned(),
+        "rollup.last_observed_timestamp>=?".to_owned(),
+        "s.eligibility='eligible'".to_owned(),
+        "s.session_scope='main'".to_owned(),
+        "NOT EXISTS (SELECT 1 FROM source_purge_states purge WHERE purge.session_key=s.session_key)"
+            .to_owned(),
+    ];
+    let mut values = vec![Value::Text(before.clone()), Value::Text(after.clone())];
+    if !request.providers.is_empty() {
+        filters.push(format!(
+            "s.provider IN ({})",
+            placeholders(request.providers.len())
+        ));
+        values.extend(request.providers.iter().cloned().map(Value::Text));
+    }
+    if !request.project_keys.is_empty() {
+        filters.push(format!(
+            "s.project_key IN ({})",
+            placeholders(request.project_keys.len())
+        ));
+        values.extend(stable_key_values(&request.project_keys)?);
+    }
+    let sql = format!(
+        "SELECT rollup.bucket_day,rollup.session_id,rollup.active_turn_count,
+                rollup.hard_sealed_turn_count,rollup.provider_completed_turn_count,
+                rollup.abandoned_turn_count,rollup.unknown_turn_count,
+                rollup.tool_invocation_count,rollup.skill_invocation_count,
+                lower(hex(s.duplicate_group_key)),s.dedupe_closure,s.duplicate_method,
+                sc.eof_observed,sc.source_mtime_ns
+         FROM history_activity_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         JOIN source_checkpoints sc ON sc.session_id=rollup.session_id
+         WHERE {} ORDER BY rollup.bucket_day,rollup.session_id",
+        filters.join(" AND ")
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    let mut buckets = BTreeMap::<i64, ActivityBucketAccumulator>::new();
+    let mut bucket_sessions = BTreeMap::<i64, BTreeSet<i64>>::new();
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let day = row.get::<_, String>(0).map_err(query_failed)?;
+        let day_ms = parse_canonical_timestamp(&format!("{day}T00:00:00.000Z"), "bucket day")?;
+        if day_ms < bounds.after_unix_ms || day_ms >= bounds.before_unix_ms {
+            continue;
+        }
+        let bucket_index = i64::try_from((day_ms - bounds.after_unix_ms) / bounds.width_ms)
+            .map_err(|_| QueryError::new("QUERY_FAILED", "activity bucket index is invalid"))?;
+        let entry = buckets.entry(bucket_index).or_default();
+        let session_id = row.get::<_, i64>(1).map_err(query_failed)?;
+        bucket_sessions
+            .entry(bucket_index)
+            .or_default()
+            .insert(session_id);
+        entry.distinct_turns += row.get::<_, i64>(2).map_err(query_failed)?;
+        let hard = row.get::<_, i64>(3).map_err(query_failed)?;
+        entry.hard_sealed += hard;
+        let non_hard = row
+            .get::<_, i64>(2)
+            .map_err(query_failed)?
+            .checked_sub(hard)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "activity closure count is invalid"))?;
+        let eof_observed = row.get::<_, i64>(12).map_err(query_failed)?;
+        let threshold_ns = request
+            .now_unix_ms
+            .saturating_sub(u64::from(request.quiescence_seconds) * 1_000)
+            .saturating_mul(1_000_000);
+        let mtime_ns = stored_u64(row.get::<_, Vec<u8>>(13).map_err(query_failed)?)?;
+        if eof_observed == 1 && mtime_ns <= threshold_ns {
+            entry.quiescent += non_hard;
+        } else {
+            entry.open += non_hard;
+        }
+        entry.provider_completed += row.get::<_, i64>(4).map_err(query_failed)?;
+        entry.abandoned += row.get::<_, i64>(5).map_err(query_failed)?;
+        entry.unknown += row.get::<_, i64>(6).map_err(query_failed)?;
+        entry.tools += row.get::<_, i64>(7).map_err(query_failed)?;
+        entry.skills += row.get::<_, i64>(8).map_err(query_failed)?;
+        let group = row.get::<_, Option<String>>(9).map_err(query_failed)?;
+        match group.filter(|value| !value.is_empty()) {
+            Some(group) => {
+                if row
+                    .get::<_, Option<String>>(10)
+                    .map_err(query_failed)?
+                    .as_deref()
+                    == Some("observed-eof")
+                    && row
+                        .get::<_, Option<String>>(11)
+                        .map_err(query_failed)?
+                        .as_deref()
+                        == Some("exact-first-turn-prefix")
+                {
+                    entry.provisional_groups.insert(group.clone());
+                }
+                entry.groups.insert(group);
+            }
+            None => {
+                entry.unknown_sessions.insert(session_id);
+            }
+        }
+    }
+    drop(rows);
+    drop(statement);
+    let all_groups = buckets
+        .values()
+        .flat_map(|entry| entry.groups.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let confidences = read_group_confidences(connection, &all_groups)?;
+    (0..bounds.bucket_count)
+        .map(|index| {
+            let empty = ActivityBucketAccumulator::default();
+            let entry = buckets.get(&i64::from(index)).unwrap_or(&empty);
+            let start = bounds.after_unix_ms + u64::from(index) * bounds.width_ms;
+            let strong = entry
+                .groups
+                .iter()
+                .filter(|group| confidences.get(*group) == Some(&DedupeConfidence::Strong))
+                .count() as i64;
+            Ok(ActivityBucketRow {
+                bucket_start: canonical_timestamp(start)?,
+                bucket_end: canonical_timestamp(start + bounds.width_ms)?,
+                distinct_session_count: decimal(
+                    bucket_sessions
+                        .get(&i64::from(index))
+                        .map_or(0, |sessions| sessions.len() as i64),
+                ),
+                distinct_turn_count: decimal(entry.distinct_turns),
+                current_closure_counts: ClosureCounts {
+                    hard_sealed: decimal(entry.hard_sealed),
+                    quiescent: decimal(entry.quiescent),
+                    open: decimal(entry.open),
+                },
+                turn_result_evidence_counts: TurnResultEvidenceCounts {
+                    provider_completed: decimal(entry.provider_completed),
+                    abandoned: decimal(entry.abandoned),
+                    unknown: decimal(entry.unknown),
+                },
+                recorded_tool_invocation_count: decimal(entry.tools),
+                recorded_skill_invocation_count: decimal(entry.skills),
+                support: ActivitySupport {
+                    distinct_dedupe_group_count: decimal(entry.groups.len() as i64),
+                    strong_dedupe_group_count: decimal(strong),
+                    weak_dedupe_group_count: decimal(entry.groups.len() as i64 - strong),
+                    observed_eof_provisional_group_count: decimal(
+                        entry.provisional_groups.len() as i64
+                    ),
+                    unknown_dedupe_session_count: decimal(entry.unknown_sessions.len() as i64),
+                },
+            })
+        })
+        .collect()
 }
 
 pub fn read_activity(

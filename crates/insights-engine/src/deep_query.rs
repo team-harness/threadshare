@@ -583,18 +583,40 @@ pub fn read_deep_query(
     }
 
     let total_match_count = if request.count == CountMode::Exact {
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM history_events he
-             JOIN sessions s ON s.session_id=he.session_id
-             LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
-             WHERE {where_sql_without_cursor}",
-            where_sql_without_cursor = where_without_cursor(request.predicate.as_ref())?.0,
-        );
-        let count_values = compile_event_predicate(request.predicate.as_ref())?.values;
-        let count: i64 = transaction
-            .query_row(&count_sql, params_from_iter(count_values), |row| row.get(0))
-            .map_err(query_failed)?;
-        Some(nonnegative(count, "query count")?.to_string())
+        let count = if let Some(event_kind) = exact_event_kind_predicate(request.predicate.as_ref())
+        {
+            projected_event_kind_count(&transaction, event_kind)?
+        } else {
+            let coverage_predicate = event_coverage_predicate(request.predicate.as_ref())?;
+            let (count_from, count_where, count_values) = if let Some(predicate) =
+                coverage_predicate
+            {
+                let mut where_sql = event_visibility_sql().to_owned();
+                if !predicate.sql.is_empty() {
+                    where_sql.push_str(" AND (");
+                    where_sql.push_str(&predicate.sql);
+                    where_sql.push(')');
+                }
+                (
+                    "history_event_coverage he JOIN sessions s ON s.session_id=he.session_id",
+                    where_sql,
+                    predicate.values,
+                )
+            } else {
+                let (where_sql, values) = where_without_cursor(request.predicate.as_ref())?;
+                (
+                    "history_events he JOIN sessions s ON s.session_id=he.session_id LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id",
+                    where_sql,
+                    values,
+                )
+            };
+            let count_sql = format!("SELECT COUNT(*) FROM {count_from} WHERE {count_where}");
+            let count: i64 = transaction
+                .query_row(&count_sql, params_from_iter(count_values), |row| row.get(0))
+                .map_err(query_failed)?;
+            nonnegative(count, "query count")?
+        };
+        Some(count.to_string())
     } else {
         None
     };
@@ -1704,6 +1726,18 @@ fn read_aggregate_query(
         unreachable!("aggregate reader requires an aggregate shape")
     };
     let metrics = parse_aggregate_metrics(request.resource, metrics)?;
+    if token_provider_rollup_supported(request, group_by, &metrics) {
+        return read_token_provider_rollup(
+            connection,
+            request,
+            group_by,
+            &metrics,
+            database_uuid,
+            snapshot_seq,
+            request_digest,
+            cursor,
+        );
+    }
     let predicate = compile_resource_predicate(request.resource, request.predicate.as_ref())?;
     let mut where_sql = resource_visibility_sql(request.resource).to_owned();
     if !predicate.sql.is_empty() {
@@ -1848,6 +1882,211 @@ fn read_aggregate_query(
             &predicate.values,
         )?
     };
+    Ok(DeepQueryResponse {
+        format: QUERY_RESPONSE_FORMAT.to_owned(),
+        database_uuid: database_uuid.to_owned(),
+        snapshot_seq: snapshot_seq.to_owned(),
+        resource: request.resource,
+        records: NullableRecordPage::none(),
+        groups: Some(page),
+        next_cursor,
+        total_match_count: Some(candidate_count.to_string()),
+        total_group_count: Some(total_group_count.to_string()),
+        truncated,
+        coverage,
+        provenance: DeepProvenance {
+            default: "recorded".to_owned(),
+            fields: metrics
+                .iter()
+                .map(|metric| DeepProvenanceField {
+                    path: format!("groups.*.metrics.{}", metric.name),
+                    kind: "derived".to_owned(),
+                    method: "typed-aggregate@1".to_owned(),
+                })
+                .collect(),
+        },
+        limits: DeepQueryLimits {
+            page_bytes: MAX_QUERY_PAGE_BYTES.to_string(),
+            payloads_may_require_evidence_paging: false,
+        },
+    })
+}
+
+fn token_provider_rollup_supported(
+    request: &DeepQueryRequest,
+    group_by: &[String],
+    metrics: &[AggregateMetric],
+) -> bool {
+    request.resource == DeepResource::TokenUsage
+        && request.predicate.is_none()
+        && group_by == ["provider"]
+        && metrics.len() == 2
+        && metrics.iter().any(|metric| {
+            metric.name == "total-token-count"
+                && metric.operator == AggregateMetricOperator::Sum
+                && metric.field.as_deref() == Some("token.total")
+        })
+        && metrics.iter().any(|metric| {
+            metric.name == "event-count"
+                && metric.operator == AggregateMetricOperator::Count
+                && metric.field.is_none()
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_token_provider_rollup(
+    connection: &Connection,
+    request: &DeepQueryRequest,
+    group_by: &[String],
+    metrics: &[AggregateMetric],
+    database_uuid: &str,
+    snapshot_seq: &str,
+    request_digest: &str,
+    cursor: Option<&QueryCursor>,
+) -> Result<DeepQueryResponse, QueryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT s.provider,rollup.event_count,rollup.total_total,rollup.total_present,
+                    rollup.complete_metric_event_count
+             FROM history_token_rollups rollup
+             JOIN sessions s ON s.session_id=rollup.session_id
+             WHERE s.eligibility='eligible' AND s.session_scope='main'
+               AND NOT EXISTS (SELECT 1 FROM source_purge_states purge
+                               WHERE purge.session_key=s.session_key)
+             ORDER BY s.provider,rollup.rollup_id",
+        )
+        .map_err(query_failed)?;
+    let mut rows = statement.query([]).map_err(query_failed)?;
+    let mut groups = BTreeMap::<Vec<AggregateValue>, Vec<AggregateMetricState>>::new();
+    let mut candidate_count = 0_u64;
+    let mut missing_metric_event_count = 0_u64;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let event_count = nonnegative(row.get(1).map_err(query_failed)?, "token event count")?;
+        candidate_count = candidate_count
+            .checked_add(event_count)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "aggregate count overflowed"))?;
+        let complete_metric_event_count = nonnegative(
+            row.get(4).map_err(query_failed)?,
+            "complete token metric event count",
+        )?;
+        let missing_in_rollup = event_count
+            .checked_sub(complete_metric_event_count)
+            .ok_or_else(|| {
+                QueryError::new("QUERY_FAILED", "token coverage count is inconsistent")
+            })?;
+        missing_metric_event_count = missing_metric_event_count
+            .checked_add(missing_in_rollup)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "coverage count overflowed"))?;
+        let key = vec![AggregateValue::Text(row.get(0).map_err(query_failed)?)];
+        let states = groups
+            .entry(key)
+            .or_insert_with(|| metrics.iter().map(initial_metric_state).collect());
+        for (metric, state) in metrics.iter().zip(states.iter_mut()) {
+            match (metric.name.as_str(), state) {
+                ("event-count", AggregateMetricState::Count(count)) => {
+                    *count = count.checked_add(event_count).ok_or_else(|| {
+                        QueryError::new("QUERY_FAILED", "aggregate count overflowed")
+                    })?;
+                }
+                ("total-token-count", AggregateMetricState::Sum { total, count }) => {
+                    *total = total
+                        .checked_add(
+                            row.get::<_, String>(2)
+                                .map_err(query_failed)?
+                                .parse::<u128>()
+                                .map_err(|_| {
+                                    QueryError::new("QUERY_FAILED", "token rollup total is invalid")
+                                })?,
+                        )
+                        .ok_or_else(|| {
+                            QueryError::new("QUERY_FAILED", "aggregate sum overflowed")
+                        })?;
+                    *count = count
+                        .checked_add(nonnegative(
+                            row.get(3).map_err(query_failed)?,
+                            "token coverage count",
+                        )?)
+                        .ok_or_else(|| {
+                            QueryError::new("QUERY_FAILED", "aggregate denominator overflowed")
+                        })?;
+                }
+                _ => {
+                    return Err(QueryError::new(
+                        "QUERY_FAILED",
+                        "token rollup metric is inconsistent",
+                    ));
+                }
+            }
+        }
+    }
+    drop(rows);
+    drop(statement);
+    if candidate_count > MAX_AGGREGATE_CANDIDATES {
+        return Err(QueryError::new(
+            "TS_QUERY_TOO_BROAD",
+            "aggregate candidate set exceeds its exact work budget",
+        ));
+    }
+    let primary_metric = metrics
+        .iter()
+        .position(|metric| metric.name == request.order_by[0].field)
+        .ok_or_else(|| invalid("aggregate order metric is missing"))?;
+    let direction = request.order_by[0].direction;
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        let metric = compare_metric_state(
+            &metrics[primary_metric],
+            &left.1[primary_metric],
+            &right.1[primary_metric],
+        );
+        let metric = if direction == Direction::Desc {
+            metric.reverse()
+        } else {
+            metric
+        };
+        metric.then_with(|| compare_group_keys(&left.0, &right.0))
+    });
+    let total_group_count = groups.len() as u64;
+    let start = usize::try_from(cursor.map_or(0, |cursor| cursor.ordinal))
+        .map_err(|_| stale("aggregate cursor offset is invalid"))?;
+    if start > groups.len() {
+        return Err(stale("aggregate cursor offset is outside the result set"));
+    }
+    let end = start
+        .saturating_add(usize::from(request.limit))
+        .min(groups.len());
+    let page = groups[start..end]
+        .iter()
+        .map(|(group, states)| aggregate_group_value(group_by, group, metrics, states))
+        .collect::<Result<Vec<_>, _>>()?;
+    if canonical_json(&Value::Array(page.clone())).len() > MAX_QUERY_PAGE_BYTES {
+        return Err(QueryError::new(
+            "TS_QUERY_TOO_BROAD",
+            "aggregate response exceeds the bounded response page",
+        ));
+    }
+    let truncated = end < groups.len();
+    let next_cursor = truncated
+        .then(|| {
+            encode_cursor(&QueryCursor {
+                version: 1,
+                database_uuid: database_uuid.to_owned(),
+                snapshot_seq: snapshot_seq.to_owned(),
+                request_digest: request_digest.to_owned(),
+                observed_at: None,
+                stable_key: "0".repeat(64),
+                ordinal: end as u64,
+            })
+        })
+        .transpose()?;
+    let candidate_count_i64 = i64::try_from(candidate_count)
+        .map_err(|_| QueryError::new("QUERY_FAILED", "aggregate count exceeds SQLite"))?;
+    let missing_token_i64 = i64::try_from(missing_metric_event_count)
+        .map_err(|_| QueryError::new("QUERY_FAILED", "token coverage exceeds SQLite"))?;
+    let coverage = coverage_from_counts(
+        connection,
+        (candidate_count_i64, 0, 0, 0, 0, 0, 0, missing_token_i64, 0),
+    )?;
     Ok(DeepQueryResponse {
         format: QUERY_RESPONSE_FORMAT.to_owned(),
         database_uuid: database_uuid.to_owned(),
@@ -2836,10 +3075,17 @@ fn validate_evidence_request(request: &DeepEvidenceRequest) -> Result<(), QueryE
 fn require_fact_v2(connection: &Connection) -> Result<(), QueryError> {
     let version = crate::normalized_repository::read_database_fact_schema_version(connection)
         .map_err(|_| QueryError::new("QUERY_FAILED", "Fact schema identity could not be read"))?;
-    if version != Some(2) {
+    let coverage_ready = crate::normalized_repository::deep_query_coverage_ready(connection)
+        .map_err(|_| {
+            QueryError::new(
+                "QUERY_FAILED",
+                "Deep Query projection identity could not be read",
+            )
+        })?;
+    if version != Some(2) || !coverage_ready {
         return Err(QueryError::new(
             "TS_INSIGHTS_QUERY_V2_NOT_READY",
-            "deep query requires a completed Fact V2 shadow rebuild",
+            "deep query requires a completed Fact V2 shadow rebuild with deep-query-coverage@2",
         ));
     }
     Ok(())
@@ -3416,6 +3662,65 @@ fn where_without_cursor(
     Ok((sql, predicate.values))
 }
 
+fn event_visibility_sql() -> &'static str {
+    "s.eligibility='eligible' AND s.session_scope='main' AND NOT EXISTS (
+       SELECT 1 FROM source_purge_states purge WHERE purge.session_key=s.session_key
+     )"
+}
+
+fn exact_event_kind_predicate(predicate: Option<&DeepPredicate>) -> Option<&str> {
+    let DeepPredicate::Leaf {
+        field,
+        operator: PredicateOperator::Eq,
+        value: Some(value),
+    } = predicate?
+    else {
+        return None;
+    };
+    (field == "event.kind").then(|| value.as_str()).flatten()
+}
+
+fn projected_event_kind_count(
+    connection: &Connection,
+    event_kind: &str,
+) -> Result<u64, QueryError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(SUM(rollup.record_count),0)
+             FROM history_event_kind_rollups rollup
+             JOIN sessions s ON s.session_id=rollup.session_id
+             WHERE rollup.event_kind=?1 AND s.eligibility='eligible'
+               AND s.session_scope='main'
+               AND NOT EXISTS (SELECT 1 FROM source_purge_states purge
+                               WHERE purge.session_key=s.session_key)",
+            [event_kind],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(query_failed)
+        .and_then(|value| nonnegative(value, "event count"))
+}
+
+fn event_coverage_predicate(
+    predicate: Option<&DeepPredicate>,
+) -> Result<Option<SqlPredicate>, QueryError> {
+    if predicate.is_some_and(|predicate| !event_coverage_predicate_supported(predicate)) {
+        return Ok(None);
+    }
+    compile_event_predicate(predicate).map(Some)
+}
+
+fn event_coverage_predicate_supported(predicate: &DeepPredicate) -> bool {
+    match predicate {
+        DeepPredicate::And { and } => and.iter().all(event_coverage_predicate_supported),
+        DeepPredicate::Or { or } => or.iter().all(event_coverage_predicate_supported),
+        DeepPredicate::Not { not } => event_coverage_predicate_supported(not),
+        DeepPredicate::Leaf { field, .. } => matches!(
+            field.as_str(),
+            "provider" | "projectKey" | "sessionKey" | "observedAt" | "completeness" | "event.kind"
+        ),
+    }
+}
+
 fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     let metadata_json: String = row.get(10)?;
     let metadata = serde_json::from_str(&metadata_json).map_err(|error| {
@@ -3633,6 +3938,9 @@ fn read_event_coverage(
     connection: &Connection,
     predicate: Option<&DeepPredicate>,
 ) -> Result<DeepCoverage, QueryError> {
+    if let Some(predicate) = event_coverage_predicate(predicate)? {
+        return read_projected_event_coverage(connection, predicate);
+    }
     let (where_sql, values) = where_without_cursor(predicate)?;
     let sql = format!(
         "SELECT
@@ -3698,6 +4006,86 @@ fn read_event_coverage(
         missing_payload_count: nonnegative(counts.8, "payload coverage count")?.to_string(),
     };
     assemble_coverage(connection, matching, "TS_INSIGHTS_COVERAGE_INCOMPLETE")
+}
+
+fn read_projected_event_coverage(
+    connection: &Connection,
+    predicate: SqlPredicate,
+) -> Result<DeepCoverage, QueryError> {
+    if predicate.sql == "he.event_kind=?" && predicate.values.len() == 1 {
+        let SqlValue::Text(event_kind) = &predicate.values[0] else {
+            return Err(QueryError::new(
+                "QUERY_FAILED",
+                "event kind coverage predicate is invalid",
+            ));
+        };
+        let counts = connection
+            .query_row(
+                "SELECT COALESCE(SUM(rollup.full_count),0),
+                        COALESCE(SUM(rollup.summary_count),0),
+                        COALESCE(SUM(rollup.unloaded_count),0),
+                        COALESCE(SUM(rollup.truncated_count),0),
+                        COALESCE(SUM(rollup.unavailable_count),0),
+                        COALESCE(SUM(rollup.missing_timestamp_count),0),
+                        COALESCE(SUM(rollup.missing_revision_count),0),
+                        COALESCE(SUM(rollup.missing_token_metric_count),0),
+                        COALESCE(SUM(rollup.missing_payload_count),0)
+                 FROM history_event_kind_rollups rollup
+                 JOIN sessions s ON s.session_id=rollup.session_id
+                 WHERE rollup.event_kind=?1 AND s.eligibility='eligible'
+                   AND s.session_scope='main'
+                   AND NOT EXISTS (SELECT 1 FROM source_purge_states purge
+                                   WHERE purge.session_key=s.session_key)",
+                [event_kind],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .map_err(query_failed)?;
+        return coverage_from_counts(connection, counts);
+    }
+    let mut where_sql = event_visibility_sql().to_owned();
+    if !predicate.sql.is_empty() {
+        where_sql.push_str(" AND (");
+        where_sql.push_str(&predicate.sql);
+        where_sql.push(')');
+    }
+    let sql = format!(
+        "SELECT
+           SUM(he.completeness='full'),SUM(he.completeness='summary'),
+           SUM(he.completeness='unloaded'),SUM(he.completeness='truncated'),
+           SUM(he.completeness='unavailable'),SUM(he.observed_timestamp IS NULL),
+           SUM(he.missing_revision),SUM(he.missing_token_metric),SUM(he.missing_payload)
+         FROM history_event_coverage he
+         JOIN sessions s ON s.session_id=he.session_id
+         WHERE {where_sql}"
+    );
+    let counts = connection
+        .query_row(&sql, params_from_iter(predicate.values), |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+            ))
+        })
+        .map_err(query_failed)?;
+    coverage_from_counts(connection, counts)
 }
 
 fn read_payload_page(

@@ -458,6 +458,25 @@ fn activity_emits_complete_empty_buckets_and_keeps_turn_and_invocation_axes_sepa
 }
 
 #[test]
+fn activity_projection_accepts_an_open_turn_without_a_provider_terminal() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut delta = fixture_delta();
+    delta.turns[0].raw_closure.provider_terminal = None;
+    storage.apply_session_facts(delta).unwrap();
+
+    let response = storage.read_insights_activity(&activity_request()).unwrap();
+    assert_eq!(response.buckets.len(), 1);
+    assert_eq!(response.buckets[0].distinct_turn_count, "1");
+    assert_eq!(
+        response.buckets[0]
+            .turn_result_evidence_counts
+            .provider_completed,
+        "0"
+    );
+    assert_eq!(response.buckets[0].turn_result_evidence_counts.unknown, "1");
+}
+
+#[test]
 fn usage_comparison_keeps_baseline_only_capability_identity_and_signed_delta() {
     let mut storage = EngineStorage::open_in_memory().unwrap();
     storage.apply_session_facts(fixture_delta()).unwrap();

@@ -30,6 +30,8 @@ status: active
 
 功能与发布候选验证已完成。Fact V2、七类 typed resource、records/aggregate、七个 Recipe、Evidence v2、CLI 与 stdio MCP 已落地；V1 查询命令与云端 share 边界保持兼容。Stage 5 已具备非空 V2 合成语料、固定 work budget、正式 runner、原始聚合报告打包器和历史 Git object verifier；当前只剩从 clean checkpoint 运行并归档正式 evidence。
 
+25k 首轮性能探针促成 `deep-query-coverage@2`：event kind、Activity、token、coverage、capability context 与共现都在 Session 事实事务内生成精确 rollup。records/aggregate 读取 coverage projection；Capability/Token/Activity Recipe 仅在完整 UTC day 与可证明排序等价时走 rollup，否则回退 exact typed SQL。Activity rollup 的 nullable provider terminal 使用显式 `COALESCE(SUM(...),0)`；Rust 回归和 Node real-sidecar 样本均覆盖 open Turn，不再把合法 NULL 聚合成 SQLite NOT NULL 失败。
+
 capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 个 chunk，并为每个 Session 记录真实 commit ACK；额外用 2 MiB provider payload 驱动多页 Evidence，并用唯一 `solutionrecallprobe` 标记验证全局 Solution Recall。正式 100 次 records/aggregate/七 Recipe/Evidence 预算、25k/250k 延迟门槛、每个 Recipe P95 <500 ms/P99 <1,000 ms、128 MiB RSS、1.8x persistent amplification、0.7x history FTS amplification、50 MiB/s paging 与 query-plan gate 均由 runner 和 packager 双向重算。30% 真实 Session runner 记录逐 Session commit ACK、单次 sync wall time、V2 storage/coverage 与 FTS integrity。历史 ITEM-4/5 evidence 只覆盖 Fact V1，不能作为本功能的正式 V2 容量证明。
 
 首次 clean 25k 正式运行暴露 `solution-recall@1` 单请求约 20 秒：旧 SQL 对每个候选事件重复执行全局 FTS MATCH，且 coverage 即使零命中仍扫描整个 HistoryEvent 窗口。该运行已主动终止，未生成或归档报告。修复后，session-scoped 查询以 scope rowid 约束 FTS，全局查询从 FTS match 起步；结果与 coverage 复用同一匹配 CTE，coverage 现在统计匹配全集而非整段历史。保留 25k 数据库上的 release 探针结果为：全局零 DF P95 1.08 ms（修复前约 2.38 秒），session-scoped 700 条宽匹配 P95 94.37 ms；执行计划测试分别锁定 `INDEX 0:M1` 与 `INDEX 0:=M1`。
@@ -51,4 +53,4 @@ capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 
 ## Next Action
 
-创建 clean checkpoint；用 release Engine 依次生成 25k、250k 与至少 30% 本机真实 Session byte sample 报告，原样打包进日期化 evidence 目录，接入根 verifier 后完成 Stage 5。
+提交 `deep-query-coverage@2` clean checkpoint；用该提交的 release Engine 依次生成 25k、250k 与至少 30% 本机真实 Session byte sample 报告，原样打包进日期化 evidence 目录，接入根 verifier 后完成 Stage 5。

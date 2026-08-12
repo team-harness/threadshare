@@ -168,6 +168,10 @@ CREATE INDEX IF NOT EXISTS history_events_observed
   ON history_events(observed_timestamp,event_key);
 CREATE INDEX IF NOT EXISTS history_events_kind_observed
   ON history_events(event_kind,observed_timestamp,event_key);
+CREATE INDEX IF NOT EXISTS history_events_kind_order
+  ON history_events(
+    event_kind,observed_timestamp IS NULL,observed_timestamp DESC,event_key ASC
+  );
 
 CREATE TABLE IF NOT EXISTS attempt_chain_events (
   event_key BLOB PRIMARY KEY REFERENCES history_events(event_key) ON DELETE CASCADE
@@ -233,6 +237,144 @@ CREATE TABLE IF NOT EXISTS history_coverage_rollups (
   fts_stored_not_searchable_payload_bytes INTEGER NOT NULL
     CHECK(fts_stored_not_searchable_payload_bytes>=0)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS history_event_coverage (
+  event_key BLOB PRIMARY KEY REFERENCES history_events(event_key) ON DELETE CASCADE
+    CHECK(length(event_key)=32),
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  event_kind TEXT NOT NULL,
+  observed_timestamp TEXT,
+  completeness TEXT NOT NULL,
+  missing_revision INTEGER NOT NULL CHECK(missing_revision IN (0,1)),
+  missing_token_metric INTEGER NOT NULL CHECK(missing_token_metric>=0),
+  missing_payload INTEGER NOT NULL CHECK(missing_payload IN (0,1)),
+  has_file_activity INTEGER NOT NULL CHECK(has_file_activity IN (0,1)),
+  has_token_usage INTEGER NOT NULL CHECK(has_token_usage IN (0,1))
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_event_coverage_kind
+  ON history_event_coverage(
+    event_kind,session_id,observed_timestamp,completeness,missing_revision,
+    missing_token_metric,missing_payload,has_file_activity,has_token_usage
+  );
+CREATE INDEX IF NOT EXISTS history_event_coverage_observed
+  ON history_event_coverage(
+    observed_timestamp,session_id,event_kind,completeness,missing_revision,
+    missing_token_metric,missing_payload,has_file_activity,has_token_usage
+  );
+
+CREATE TABLE IF NOT EXISTS history_event_kind_rollups (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  event_kind TEXT NOT NULL,
+  record_count INTEGER NOT NULL CHECK(record_count>=0),
+  full_count INTEGER NOT NULL CHECK(full_count>=0),
+  summary_count INTEGER NOT NULL CHECK(summary_count>=0),
+  unloaded_count INTEGER NOT NULL CHECK(unloaded_count>=0),
+  truncated_count INTEGER NOT NULL CHECK(truncated_count>=0),
+  unavailable_count INTEGER NOT NULL CHECK(unavailable_count>=0),
+  missing_timestamp_count INTEGER NOT NULL CHECK(missing_timestamp_count>=0),
+  missing_revision_count INTEGER NOT NULL CHECK(missing_revision_count>=0),
+  missing_token_metric_count INTEGER NOT NULL CHECK(missing_token_metric_count>=0),
+  missing_payload_count INTEGER NOT NULL CHECK(missing_payload_count>=0),
+  PRIMARY KEY(session_id,event_kind)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_event_kind_rollups_kind
+  ON history_event_kind_rollups(event_kind,session_id);
+
+CREATE TABLE IF NOT EXISTS history_activity_rollups (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
+  first_observed_timestamp TEXT NOT NULL,
+  last_observed_timestamp TEXT NOT NULL,
+  active_turn_count INTEGER NOT NULL CHECK(active_turn_count>=0),
+  hard_sealed_turn_count INTEGER NOT NULL CHECK(hard_sealed_turn_count>=0),
+  provider_completed_turn_count INTEGER NOT NULL CHECK(provider_completed_turn_count>=0),
+  abandoned_turn_count INTEGER NOT NULL CHECK(abandoned_turn_count>=0),
+  unknown_turn_count INTEGER NOT NULL CHECK(unknown_turn_count>=0),
+  tool_invocation_count INTEGER NOT NULL CHECK(tool_invocation_count>=0),
+  skill_invocation_count INTEGER NOT NULL CHECK(skill_invocation_count>=0),
+  PRIMARY KEY(session_id,bucket_day)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_activity_rollups_day
+  ON history_activity_rollups(bucket_day,session_id);
+
+CREATE TABLE IF NOT EXISTS history_token_rollups (
+  rollup_id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  bucket_day TEXT,
+  model TEXT,
+  event_count INTEGER NOT NULL CHECK(event_count>=0),
+  input_total TEXT NOT NULL,
+  cached_input_total TEXT NOT NULL,
+  cache_write_input_total TEXT NOT NULL,
+  output_total TEXT NOT NULL,
+  reasoning_total TEXT NOT NULL,
+  total_total TEXT NOT NULL,
+  input_present INTEGER NOT NULL CHECK(input_present>=0),
+  cached_input_present INTEGER NOT NULL CHECK(cached_input_present>=0),
+  cache_write_input_present INTEGER NOT NULL CHECK(cache_write_input_present>=0),
+  output_present INTEGER NOT NULL CHECK(output_present>=0),
+  reasoning_present INTEGER NOT NULL CHECK(reasoning_present>=0),
+  total_present INTEGER NOT NULL CHECK(total_present>=0),
+  complete_metric_event_count INTEGER NOT NULL CHECK(complete_metric_event_count>=0),
+  evidence_event_key BLOB NOT NULL CHECK(length(evidence_event_key)=32),
+  evidence_revision BLOB NOT NULL CHECK(length(evidence_revision)=32)
+);
+CREATE INDEX IF NOT EXISTS history_token_rollups_session
+  ON history_token_rollups(session_id,bucket_day,model);
+CREATE INDEX IF NOT EXISTS history_token_rollups_day
+  ON history_token_rollups(bucket_day,session_id,model);
+
+CREATE TABLE IF NOT EXISTS history_query_session_coverage (
+  session_id INTEGER PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+  undated_turn_count INTEGER NOT NULL CHECK(undated_turn_count>=0),
+  unrevisioned_turn_count INTEGER NOT NULL CHECK(unrevisioned_turn_count>=0),
+  undated_invocation_count INTEGER NOT NULL CHECK(undated_invocation_count>=0),
+  unrevisioned_invocation_count INTEGER NOT NULL CHECK(unrevisioned_invocation_count>=0),
+  first_history_event_at TEXT,
+  last_history_event_at TEXT
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS history_capability_rollups (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  capability_id INTEGER NOT NULL REFERENCES capabilities(capability_id),
+  bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
+  invocation_count INTEGER NOT NULL CHECK(invocation_count>=0),
+  failing_invocation_count INTEGER NOT NULL CHECK(failing_invocation_count>=0),
+  distinct_turn_count INTEGER NOT NULL CHECK(distinct_turn_count>=0),
+  last_used_at TEXT NOT NULL,
+  pending_count INTEGER NOT NULL CHECK(pending_count>=0),
+  completed_count INTEGER NOT NULL CHECK(completed_count>=0),
+  cancelled_count INTEGER NOT NULL CHECK(cancelled_count>=0),
+  unknown_count INTEGER NOT NULL CHECK(unknown_count>=0),
+  PRIMARY KEY(session_id,capability_id,bucket_day)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_capability_rollups_day
+  ON history_capability_rollups(bucket_day,capability_id,session_id);
+
+CREATE TABLE IF NOT EXISTS history_capability_representatives (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  capability_id INTEGER NOT NULL REFERENCES capabilities(capability_id),
+  bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
+  turn_id INTEGER NOT NULL REFERENCES turns(turn_id) ON DELETE CASCADE,
+  invocation_count INTEGER NOT NULL CHECK(invocation_count>=0),
+  used_at TEXT NOT NULL,
+  PRIMARY KEY(session_id,capability_id,bucket_day,turn_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_capability_representatives_day
+  ON history_capability_representatives(bucket_day,capability_id,invocation_count,used_at,turn_id);
+
+CREATE TABLE IF NOT EXISTS history_capability_cooccurrences (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  capability_id INTEGER NOT NULL REFERENCES capabilities(capability_id),
+  other_capability_id INTEGER NOT NULL REFERENCES capabilities(capability_id),
+  bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
+  turn_id INTEGER NOT NULL REFERENCES turns(turn_id) ON DELETE CASCADE,
+  PRIMARY KEY(session_id,capability_id,other_capability_id,bucket_day,turn_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_capability_cooccurrences_day
+  ON history_capability_cooccurrences(
+    bucket_day,capability_id,other_capability_id,session_id,turn_id
+  );
 
 CREATE TABLE IF NOT EXISTS file_activity (
   event_key BLOB NOT NULL REFERENCES history_events(event_key) ON DELETE CASCADE,
@@ -447,6 +589,8 @@ CREATE TABLE IF NOT EXISTS fact_coverage (
 "#;
 
 const FACT_SCHEMA_METADATA_KEY: &str = "fact_schema_version";
+const DEEP_QUERY_COVERAGE_METADATA_KEY: &str = "deep_query_coverage_projection";
+const DEEP_QUERY_COVERAGE_VERSION: &str = "2";
 
 fn validate_history_fts_layout(connection: &Connection) -> Result<(), StorageError> {
     let schema = connection.query_row(
@@ -529,6 +673,35 @@ pub(crate) fn read_database_fact_schema_version(
     database_fact_schema_version(connection)
 }
 
+pub(crate) fn deep_query_coverage_ready(connection: &Connection) -> Result<bool, StorageError> {
+    let version = connection
+        .query_row(
+            "SELECT value FROM engine_metadata WHERE key=?1",
+            [DEEP_QUERY_COVERAGE_METADATA_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(version.as_deref() == Some(DEEP_QUERY_COVERAGE_VERSION))
+}
+
+fn initialize_deep_query_coverage_identity(connection: &Connection) -> Result<(), StorageError> {
+    let metadata_exists = connection
+        .prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='engine_metadata'")?
+        .exists([])?;
+    if !metadata_exists {
+        return Ok(());
+    }
+    connection.execute(
+        "INSERT OR IGNORE INTO engine_metadata(key,value)
+         SELECT ?1,?2 WHERE NOT EXISTS (SELECT 1 FROM history_events)",
+        params![
+            DEEP_QUERY_COVERAGE_METADATA_KEY,
+            DEEP_QUERY_COVERAGE_VERSION
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
     let legacy_receipt = connection
         .prepare(
@@ -537,6 +710,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
         .exists([])?;
     if !legacy_receipt {
         connection.execute_batch(NORMALIZED_SCHEMA)?;
+        initialize_deep_query_coverage_identity(connection)?;
         validate_history_fts_layout(connection)?;
         crate::projection::initialize_projection_schema(connection)?;
         crate::search_projection::initialize_search_projection_schema(connection)?;
@@ -595,6 +769,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
     }
     transaction.execute_batch("DROP TABLE legacy_session_commits_v0;")?;
     transaction.commit()?;
+    initialize_deep_query_coverage_identity(connection)?;
     validate_history_fts_layout(connection)?;
     crate::projection::initialize_projection_schema(connection)?;
     crate::search_projection::initialize_search_projection_schema(connection)?;
@@ -716,6 +891,7 @@ pub(crate) fn apply_session_facts(
         ],
     )?;
     recompute_session_derivations(&transaction, session_id)?;
+    rebuild_deep_query_rollups(&transaction, session_id)?;
     let after_projection =
         capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
     let is_forced_turn_key = |turn_key| Ok(forced_turn_keys.contains(&turn_key));
@@ -886,6 +1062,7 @@ pub(crate) fn apply_staged_session_facts(
         ],
     )?;
     recompute_session_derivations(&transaction, session_id)?;
+    rebuild_deep_query_rollups(&transaction, session_id)?;
     let after_projection =
         capture_session_projection_snapshot(&transaction, delta.session.session_key)?;
     let is_forced_turn_key = |turn_key| {
@@ -1785,40 +1962,56 @@ fn rebuild_history_coverage_rollup(
     transaction: &Transaction<'_>,
     session_id: i64,
 ) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM history_event_coverage WHERE session_id=?1",
+        [session_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO history_event_coverage(
+           event_key,session_id,event_kind,observed_timestamp,completeness,
+           missing_revision,missing_token_metric,missing_payload,
+           has_file_activity,has_token_usage
+         )
+         SELECT he.event_key,he.session_id,he.event_kind,he.observed_timestamp,he.completeness,
+                he.revision IS NULL,
+                CASE WHEN tu.event_key IS NULL THEN 0 ELSE
+                  (tu.input_tokens IS NULL) + (tu.cached_input_tokens IS NULL) +
+                  (tu.cache_write_input_tokens IS NULL) + (tu.output_tokens IS NULL) +
+                  (tu.reasoning_tokens IS NULL) + (tu.total_tokens IS NULL)
+                END,
+                CASE
+                  WHEN he.event_kind='visible-message' AND NOT EXISTS (
+                    SELECT 1 FROM history_payloads hp
+                    WHERE hp.event_key=he.event_key AND hp.payload_kind='message-content'
+                  ) THEN 1
+                  WHEN he.event_kind='capability-invocation' AND NOT EXISTS (
+                    SELECT 1 FROM history_payloads hp
+                    WHERE hp.event_key=he.event_key AND hp.payload_kind='tool-input'
+                  ) THEN 1
+                  WHEN he.event_kind='capability-result'
+                       AND (json_extract(he.metadata_json,'$.providerState')='failed'
+                            OR json_type(he.metadata_json,'$.outputBytes') IS NOT NULL
+                            OR json_type(he.metadata_json,'$.errorSignature') IS NOT NULL)
+                       AND NOT EXISTS (
+                    SELECT 1 FROM history_payloads hp WHERE hp.event_key=he.event_key
+                      AND hp.payload_kind IN ('tool-output','error-content')
+                  ) THEN 1
+                  WHEN he.event_kind='provider-unknown' AND NOT EXISTS (
+                    SELECT 1 FROM history_payloads hp
+                    WHERE hp.event_key=he.event_key AND hp.payload_kind='provider-payload'
+                  ) THEN 1 ELSE 0 END,
+                EXISTS(SELECT 1 FROM file_activity fa WHERE fa.event_key=he.event_key),
+                tu.event_key IS NOT NULL
+         FROM history_events he
+         LEFT JOIN token_usage tu ON tu.event_key=he.event_key
+         WHERE he.session_id=?1",
+        [session_id],
+    )?;
     let (missing_payload_event_count, missing_token_metric_event_count): (i64, i64) = transaction
         .query_row(
-        "SELECT
-               COALESCE(SUM(CASE
-                 WHEN he.event_kind='visible-message' AND NOT EXISTS (
-                   SELECT 1 FROM history_payloads hp
-                   WHERE hp.event_key=he.event_key AND hp.payload_kind='message-content'
-                 ) THEN 1
-                 WHEN he.event_kind='capability-invocation' AND NOT EXISTS (
-                   SELECT 1 FROM history_payloads hp
-                   WHERE hp.event_key=he.event_key AND hp.payload_kind='tool-input'
-                 ) THEN 1
-             WHEN he.event_kind='capability-result'
-                  AND (json_extract(he.metadata_json,'$.providerState')='failed'
-                       OR json_type(he.metadata_json,'$.outputBytes') IS NOT NULL
-                       OR json_type(he.metadata_json,'$.errorSignature') IS NOT NULL)
-                      AND NOT EXISTS (
-                   SELECT 1 FROM history_payloads hp
-                   WHERE hp.event_key=he.event_key
-                     AND hp.payload_kind IN ('tool-output','error-content')
-                 ) THEN 1
-                 WHEN he.event_kind='provider-unknown' AND NOT EXISTS (
-                   SELECT 1 FROM history_payloads hp
-                   WHERE hp.event_key=he.event_key AND hp.payload_kind='provider-payload'
-                 ) THEN 1
-                 ELSE 0 END),0),
-               COALESCE(SUM(CASE WHEN tu.event_key IS NOT NULL THEN
-                 (tu.input_tokens IS NULL) + (tu.cached_input_tokens IS NULL) +
-                 (tu.cache_write_input_tokens IS NULL) + (tu.output_tokens IS NULL) +
-                 (tu.reasoning_tokens IS NULL) + (tu.total_tokens IS NULL)
-               ELSE 0 END),0)
-             FROM history_events he
-             LEFT JOIN token_usage tu ON tu.event_key=he.event_key
-             WHERE he.session_id=?1",
+        "SELECT COALESCE(SUM(missing_payload),0),
+                COALESCE(SUM(missing_token_metric),0)
+         FROM history_event_coverage WHERE session_id=?1",
         [session_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -1892,6 +2085,314 @@ fn rebuild_history_coverage_rollup(
             i64::try_from(not_searchable_bytes)
                 .map_err(|_| corrupt("history non-searchable payload bytes exceeded SQLite"))?,
         ],
+    )?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct TokenRollup {
+    events: u64,
+    totals: [u128; 6],
+    present: [u64; 6],
+    complete_metric_events: u64,
+    evidence_event_key: Vec<u8>,
+    evidence_revision: Vec<u8>,
+}
+
+fn rebuild_deep_query_rollups(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM history_event_kind_rollups WHERE session_id=?1",
+        [session_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO history_event_kind_rollups(
+           session_id,event_kind,record_count,full_count,summary_count,unloaded_count,
+           truncated_count,unavailable_count,missing_timestamp_count,
+           missing_revision_count,missing_token_metric_count,missing_payload_count
+         )
+         SELECT session_id,event_kind,COUNT(*),
+                SUM(completeness='full'),SUM(completeness='summary'),
+                SUM(completeness='unloaded'),SUM(completeness='truncated'),
+                SUM(completeness='unavailable'),SUM(observed_timestamp IS NULL),
+                SUM(missing_revision),SUM(missing_token_metric),SUM(missing_payload)
+         FROM history_event_coverage WHERE session_id=?1
+         GROUP BY session_id,event_kind",
+        [session_id],
+    )?;
+
+    transaction.execute(
+        "DELETE FROM history_activity_rollups WHERE session_id=?1",
+        [session_id],
+    )?;
+    let hard = crate::query::hard_sealed_sql();
+    transaction.execute(
+        &format!(
+            "INSERT INTO history_activity_rollups(
+               session_id,bucket_day,first_observed_timestamp,last_observed_timestamp,
+               active_turn_count,
+               hard_sealed_turn_count,provider_completed_turn_count,abandoned_turn_count,
+               unknown_turn_count,tool_invocation_count,skill_invocation_count
+             )
+             SELECT t.session_id,substr(t.observed_timestamp,1,10),
+                    MIN(t.observed_timestamp),MAX(t.observed_timestamp),
+                    COUNT(*),COALESCE(SUM({hard}),0),
+                    COALESCE(SUM(t.provider_terminal='completed'),0),
+                    COALESCE(SUM(t.provider_terminal='aborted'),0),
+                    COALESCE(SUM(t.provider_terminal IS NULL),0),0,0
+             FROM turns t
+             WHERE t.session_id=?1 AND t.effective_provider_visibility='active'
+               AND t.revision IS NOT NULL AND t.observed_timestamp IS NOT NULL
+             GROUP BY t.session_id,substr(t.observed_timestamp,1,10)"
+        ),
+        [session_id],
+    )?;
+    transaction.execute(
+        "UPDATE history_activity_rollups AS rollup SET
+           tool_invocation_count=COALESCE((
+             SELECT SUM(c.capability_kind='tool') FROM capability_uses u
+             JOIN capabilities c ON c.capability_id=u.capability_id
+             JOIN turns t ON t.turn_id=u.turn_id
+             WHERE u.session_id=rollup.session_id AND u.origin_scope='main'
+               AND t.effective_provider_visibility='active' AND t.revision IS NOT NULL
+               AND substr(t.observed_timestamp,1,10)=rollup.bucket_day
+           ),0),
+           skill_invocation_count=COALESCE((
+             SELECT SUM(c.capability_kind='skill') FROM capability_uses u
+             JOIN capabilities c ON c.capability_id=u.capability_id
+             JOIN turns t ON t.turn_id=u.turn_id
+             WHERE u.session_id=rollup.session_id AND u.origin_scope='main'
+               AND t.effective_provider_visibility='active' AND t.revision IS NOT NULL
+               AND substr(t.observed_timestamp,1,10)=rollup.bucket_day
+           ),0)
+         WHERE rollup.session_id=?1",
+        [session_id],
+    )?;
+
+    transaction.execute(
+        "INSERT INTO history_query_session_coverage(
+           session_id,undated_turn_count,unrevisioned_turn_count,
+           undated_invocation_count,unrevisioned_invocation_count,
+           first_history_event_at,last_history_event_at
+         )
+         SELECT ?1,
+                COALESCE((SELECT SUM(t.effective_provider_visibility='active'
+                                     AND t.observed_timestamp IS NULL)
+                          FROM turns t WHERE t.session_id=?1),0),
+                COALESCE((SELECT SUM(t.effective_provider_visibility='active'
+                                     AND t.revision IS NULL)
+                          FROM turns t WHERE t.session_id=?1),0),
+                COALESCE((SELECT COUNT(*) FROM capability_uses u
+                  JOIN turns use_turn ON use_turn.turn_id=u.turn_id
+                  WHERE u.session_id=?1 AND u.origin_scope='main'
+                    AND use_turn.effective_provider_visibility='active'
+                    AND use_turn.observed_timestamp IS NULL),0),
+                COALESCE((SELECT COUNT(*) FROM capability_uses u
+                  JOIN turns use_turn ON use_turn.turn_id=u.turn_id
+                  WHERE u.session_id=?1 AND u.origin_scope='main'
+                    AND use_turn.effective_provider_visibility='active'
+                    AND use_turn.revision IS NULL),0),
+                (SELECT MIN(he.observed_timestamp) FROM history_events he
+                  WHERE he.session_id=?1),
+                (SELECT MAX(he.observed_timestamp) FROM history_events he
+                  WHERE he.session_id=?1)
+         WHERE 1
+         ON CONFLICT(session_id) DO UPDATE SET
+           undated_turn_count=excluded.undated_turn_count,
+           unrevisioned_turn_count=excluded.unrevisioned_turn_count,
+           undated_invocation_count=excluded.undated_invocation_count,
+           unrevisioned_invocation_count=excluded.unrevisioned_invocation_count,
+           first_history_event_at=excluded.first_history_event_at,
+           last_history_event_at=excluded.last_history_event_at",
+        [session_id],
+    )?;
+
+    rebuild_token_rollups(transaction, session_id)?;
+    rebuild_capability_rollups(transaction, session_id)
+}
+
+fn rebuild_token_rollups(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM history_token_rollups WHERE session_id=?1",
+        [session_id],
+    )?;
+    let mut statement = transaction.prepare(
+        "SELECT tu.observed_timestamp,tu.model,
+                tu.input_tokens,tu.cached_input_tokens,tu.cache_write_input_tokens,
+                tu.output_tokens,tu.reasoning_tokens,tu.total_tokens,
+                he.event_key,he.revision
+         FROM token_usage tu
+         JOIN history_events he ON he.event_key=tu.event_key
+         WHERE he.session_id=?1
+         ORDER BY tu.observed_timestamp,tu.model,he.event_key",
+    )?;
+    let mut rows = statement.query([session_id])?;
+    let mut groups = BTreeMap::<(Option<String>, Option<String>), TokenRollup>::new();
+    while let Some(row) = rows.next()? {
+        let observed: Option<String> = row.get(0)?;
+        let bucket_day = observed
+            .as_deref()
+            .map(|value| {
+                value
+                    .get(..10)
+                    .filter(|day| day.as_bytes().get(4) == Some(&b'-'))
+                    .map(str::to_owned)
+                    .ok_or_else(|| corrupt("stored token timestamp is invalid"))
+            })
+            .transpose()?;
+        let model: Option<String> = row.get(1)?;
+        let group = groups.entry((bucket_day, model)).or_default();
+        group.events = group
+            .events
+            .checked_add(1)
+            .ok_or_else(|| corrupt("token rollup event count overflowed"))?;
+        let mut all_present = true;
+        for index in 0..6 {
+            let value: Option<Vec<u8>> = row.get(2 + index)?;
+            if let Some(value) = value {
+                let value = WireU64::from_be_blob(&value)
+                    .map_err(|_| corrupt("stored token count is invalid"))?
+                    .get();
+                group.totals[index] = group.totals[index]
+                    .checked_add(u128::from(value))
+                    .ok_or_else(|| corrupt("token rollup total overflowed"))?;
+                group.present[index] = group.present[index]
+                    .checked_add(1)
+                    .ok_or_else(|| corrupt("token rollup coverage count overflowed"))?;
+            } else {
+                all_present = false;
+            }
+        }
+        if all_present {
+            group.complete_metric_events = group
+                .complete_metric_events
+                .checked_add(1)
+                .ok_or_else(|| corrupt("token rollup complete metric count overflowed"))?;
+        }
+        if group.evidence_event_key.is_empty() {
+            group.evidence_event_key = row.get(8)?;
+            group.evidence_revision = row.get(9)?;
+        }
+    }
+    drop(rows);
+    drop(statement);
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO history_token_rollups(
+           session_id,bucket_day,model,event_count,
+           input_total,cached_input_total,cache_write_input_total,
+           output_total,reasoning_total,total_total,
+           input_present,cached_input_present,cache_write_input_present,
+           output_present,reasoning_present,total_present,complete_metric_event_count,
+           evidence_event_key,evidence_revision
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+    )?;
+    for ((bucket_day, model), group) in groups {
+        insert.execute(params![
+            session_id,
+            bucket_day,
+            model,
+            i64::try_from(group.events).map_err(|_| corrupt("token event count is invalid"))?,
+            group.totals[0].to_string(),
+            group.totals[1].to_string(),
+            group.totals[2].to_string(),
+            group.totals[3].to_string(),
+            group.totals[4].to_string(),
+            group.totals[5].to_string(),
+            i64::try_from(group.present[0]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.present[1]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.present[2]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.present[3]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.present[4]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.present[5]).map_err(|_| corrupt("token coverage is invalid"))?,
+            i64::try_from(group.complete_metric_events)
+                .map_err(|_| corrupt("token coverage is invalid"))?,
+            group.evidence_event_key,
+            group.evidence_revision,
+        ])?;
+    }
+    Ok(())
+}
+
+fn rebuild_capability_rollups(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+) -> Result<(), StorageError> {
+    for table in [
+        "history_capability_cooccurrences",
+        "history_capability_representatives",
+        "history_capability_rollups",
+    ] {
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE session_id=?1"),
+            [session_id],
+        )?;
+    }
+    let scoped = "WITH scoped AS (
+       SELECT cu.use_id,cu.session_id,cu.turn_id,cu.capability_id,
+              cu.provider_terminal_state,
+              COALESCE((
+                SELECT linked_event.observed_timestamp
+                FROM capability_use_evidence invocation_link
+                JOIN evidence_events linked_event ON linked_event.event_id=invocation_link.event_id
+                WHERE invocation_link.use_id=cu.use_id AND invocation_link.role='invocation'
+                ORDER BY linked_event.record_start_offset,linked_event.content_index,
+                         linked_event.event_ordinal,linked_event.event_key LIMIT 1
+              ),t.observed_timestamp) AS used_at
+       FROM capability_uses cu JOIN turns t ON t.turn_id=cu.turn_id
+       WHERE cu.session_id=?1 AND cu.origin_scope='main'
+     )";
+    transaction.execute(
+        &format!(
+            "{scoped}
+             INSERT INTO history_capability_rollups(
+               session_id,capability_id,bucket_day,invocation_count,
+               failing_invocation_count,distinct_turn_count,last_used_at,
+               pending_count,completed_count,cancelled_count,unknown_count
+             )
+             SELECT session_id,capability_id,substr(used_at,1,10),COUNT(*),
+                    SUM(provider_terminal_state='failed'),COUNT(DISTINCT turn_id),MAX(used_at),
+                    SUM(provider_terminal_state='pending'),
+                    SUM(provider_terminal_state='completed'),
+                    SUM(provider_terminal_state='cancelled'),
+                    SUM(provider_terminal_state NOT IN ('pending','completed','failed','cancelled'))
+             FROM scoped WHERE used_at IS NOT NULL
+             GROUP BY session_id,capability_id,substr(used_at,1,10)"
+        ),
+        [session_id],
+    )?;
+    transaction.execute(
+        &format!(
+            "{scoped}
+             INSERT INTO history_capability_representatives(
+               session_id,capability_id,bucket_day,turn_id,invocation_count,used_at
+             )
+             SELECT scoped.session_id,scoped.capability_id,substr(scoped.used_at,1,10),
+                    scoped.turn_id,COUNT(*),MAX(scoped.used_at)
+             FROM scoped
+             WHERE scoped.used_at IS NOT NULL
+             GROUP BY scoped.session_id,scoped.capability_id,
+                      substr(scoped.used_at,1,10),scoped.turn_id"
+        ),
+        [session_id],
+    )?;
+    transaction.execute(
+        &format!(
+            "{scoped}
+             INSERT INTO history_capability_cooccurrences(
+               session_id,capability_id,other_capability_id,bucket_day,turn_id
+             )
+             SELECT DISTINCT scoped.session_id,scoped.capability_id,other.capability_id,
+                    substr(scoped.used_at,1,10),scoped.turn_id
+             FROM scoped JOIN capability_uses other ON other.turn_id=scoped.turn_id
+               AND other.origin_scope='main' AND other.capability_id<>scoped.capability_id
+             WHERE scoped.used_at IS NOT NULL"
+        ),
+        [session_id],
     )?;
     Ok(())
 }

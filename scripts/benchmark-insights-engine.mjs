@@ -199,7 +199,10 @@ const PROJECTION_TABLES = new Set([
   "capability_retry_contributions", "retry_projection_build_cursor",
   "turn_search_build_cursor", "overview_rollup_state", "overview_session_rollups",
   "overview_session_capabilities", "overview_session_fact_signals",
-  "history_coverage_rollups",
+  "history_coverage_rollups", "history_event_coverage",
+  "history_event_kind_rollups", "history_activity_rollups", "history_token_rollups",
+  "history_query_session_coverage", "history_capability_rollups",
+  "history_capability_representatives", "history_capability_cooccurrences",
 ]);
 const SOURCE_STATE_TABLES = new Set([
   "source_ingestion_states", "source_ingestion_staging", "source_purge_states",
@@ -1243,6 +1246,7 @@ function storageOwner(name) {
     "history_events_occurred_turn",
     "history_events_observed",
     "history_events_kind_observed",
+    "history_events_kind_order",
     "attempt_chain_events_chain",
     "attempt_chain_events_correlation",
     "history_payloads_event",
@@ -1269,6 +1273,15 @@ function storageOwner(name) {
     "overview_session_dedupe",
     "overview_capability_kind_key",
     "overview_fact_signal_lookup",
+    "history_event_coverage_kind",
+    "history_event_coverage_observed",
+    "history_event_kind_rollups_kind",
+    "history_activity_rollups_day",
+    "history_token_rollups_session",
+    "history_token_rollups_day",
+    "history_capability_rollups_day",
+    "history_capability_representatives_day",
+    "history_capability_cooccurrences_day",
   ].includes(name)) return "projection";
   if (SOURCE_STATE_TABLES.has(owner)) return "sourceState";
   if (name === "sqlite_schema" || name === "sqlite_sequence") return "sqliteInternal";
@@ -3891,7 +3904,7 @@ export function createDeepQueryBenchmarkReport(capacity) {
     storage.historyFtsAmplification <= DEEP_FTS_AMPLIFICATION_LIMIT;
   const recordsPlan = capacity.rustSidecar.capacity.explain.recordsByEventKind;
   const queryPlanUsesEventKindIndex =
-    recordsPlan.some((detail) => detail.includes("history_events_kind_observed")) &&
+    recordsPlan.some((detail) => detail.includes("history_events_kind_order")) &&
     !recordsPlan.some((detail) => /\bSCAN he\b/u.test(detail));
   const gates = {
     v2CorpusComplete,

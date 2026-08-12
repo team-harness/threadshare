@@ -336,6 +336,33 @@ fn all_named_recipes_return_typed_results_with_coverage_and_evidence() {
 }
 
 #[test]
+fn projected_capability_and_token_recipes_match_the_exact_event_path() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let delta = fixture_delta_v2_with_typed_resources();
+    let session_key = delta.session.session_key;
+    storage.apply_session_facts(delta).unwrap();
+
+    for name in [RecipeName::CapabilityContexts, RecipeName::TokenHotspots] {
+        let projected = storage
+            .read_recipe(&recipe_request(name, session_key))
+            .unwrap();
+        let mut exact_request = recipe_request(name, session_key);
+        exact_request.window.after = "2026-08-01T00:00:00.001Z".to_owned();
+        exact_request.window.before = "2026-08-31T23:59:59.999Z".to_owned();
+        let exact = storage.read_recipe(&exact_request).unwrap();
+
+        assert_eq!(
+            projected.items, exact.items,
+            "{name:?} projected items drifted"
+        );
+        assert_eq!(
+            projected.coverage, exact.coverage,
+            "{name:?} coverage drifted"
+        );
+    }
+}
+
+#[test]
 fn recipe_response_rejects_an_unreviewed_item_field() {
     let mut storage = EngineStorage::open_in_memory().unwrap();
     let delta = fixture_delta_v2_with_typed_resources();
@@ -1315,4 +1342,58 @@ fn aggregate_preserves_u64_sums_and_represents_average_as_a_rational() {
         response["groups"][0]["metrics"]["inputAverage"],
         json!({"sum":"9007199254740993","count":"1"})
     );
+}
+
+#[test]
+fn projected_token_provider_aggregate_matches_the_exact_event_path() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut delta = fixture_delta_v2_with_typed_resources();
+    let token_event = delta
+        .history_events
+        .iter_mut()
+        .find(|event| event.kind == "token-usage")
+        .unwrap();
+    token_event.metadata["totalTokens"] = json!("19");
+    token_event.revision = expected_history_event_revision(token_event, &[]).unwrap();
+    storage.apply_session_facts(delta).unwrap();
+
+    let mut projected_request = DeepQueryRequest {
+        format: "threadshare-insights-query-request@v2".to_owned(),
+        resource: DeepResource::TokenUsage,
+        predicate: None,
+        shape: DeepQueryShape::Aggregate {
+            group_by: vec!["provider".to_owned()],
+            metrics: vec![
+                json!({"name":"total-token-count","op":"sum","field":"token.total"}),
+                json!({"name":"event-count","op":"count"}),
+            ],
+        },
+        order_by: vec![
+            DeepOrderBy {
+                field: "total-token-count".to_owned(),
+                direction: Direction::Desc,
+            },
+            DeepOrderBy {
+                field: "provider".to_owned(),
+                direction: Direction::Asc,
+            },
+        ],
+        limit: 50,
+        cursor: None,
+        count: CountMode::Exact,
+        evaluated_at: "2026-08-12T00:00:00.000Z".to_owned(),
+    };
+    let projected = storage.read_deep_query(&projected_request).unwrap();
+    projected_request.predicate = Some(DeepPredicate::Leaf {
+        field: "provider".to_owned(),
+        operator: PredicateOperator::Eq,
+        value: Some(json!("codex")),
+    });
+    let exact = storage.read_deep_query(&projected_request).unwrap();
+
+    assert_eq!(projected.groups, exact.groups);
+    assert_eq!(projected.total_match_count, exact.total_match_count);
+    assert_eq!(projected.total_group_count, exact.total_group_count);
+    assert_eq!(projected.coverage, exact.coverage);
+    assert_eq!(projected.provenance, exact.provenance);
 }
