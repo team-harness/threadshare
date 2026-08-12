@@ -7,12 +7,18 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  createDeepQueryBenchmarkReport,
   createBenchmarkCorpus,
   createCapacityBenchmarkPlan,
   evaluateCapacityGates,
   evaluateInsightsQueryGates,
   evaluateOverviewLatencyGate,
+  FORMAL_DEEP_QUERY_COUNT,
+  FORMAL_DEEP_QUERY_SEEDS,
+  FORMAL_DEEP_QUERY_WARMUP_COUNT,
+  parseBenchmarkArguments,
   runInsightsCapacityBenchmark,
+  runInsightsDeepQueryBenchmark,
   runInsightsEngineBenchmark,
   runInsightsQueryBenchmark,
   runInsightsRawBackfillBenchmark,
@@ -68,12 +74,29 @@ test("capacity corpus streams deterministic high-density Facts with bounded rete
   assert.equal(firstSession.delta.session.dedupeFingerprint === null, false);
   assert.equal(firstSession.delta.session.duplicateConfidence, "strong");
   assert.equal(firstSession.delta.session.dedupeEvidenceEventKeys.length, 3);
-  assert.equal(firstSession.delta.sourceRecords.length, 4 * 9);
+  assert.equal(first.corpusVersion, 6);
+  assert.equal(firstSession.delta.sourceRecords.length, 4 * 10 + 1);
   assert.equal(firstSession.delta.evidenceEvents.length, 4 * 9);
   assert.equal(firstSession.delta.turnEvidence.length, 4 * 3);
   assert.equal(firstSession.delta.capabilityUses.length, 4 * 3);
   assert.equal(firstSession.delta.capabilityUseEvidence.length, 4 * 6);
-  assert.equal(new Set(firstSession.delta.sourceRecords.map((item) => item.sourceRecordKey)).size, 36);
+  assert.equal(firstSession.delta.historyEvents.length, 4 * 10 + 1);
+  assert.equal(firstSession.delta.historyPayloads.length, 4 * 8 + 1);
+  assert.equal(firstSession.delta.historyPayloadChunks.length, 4 * 8 + 32);
+  assert.equal(
+    firstSession.delta.historyEvents.some(({ metadata }) => metadata.usageScope === "delta"),
+    true,
+  );
+  assert.equal(
+    firstSession.delta.historyEvents.some(({ metadata }) => metadata.fileActivities?.length > 0),
+    true,
+  );
+  assert.equal(
+    firstSession.delta.historyEvents.some(({ metadata }) =>
+      metadata.errorSignatureVersion === "error-signature@1"),
+    true,
+  );
+  assert.equal(new Set(firstSession.delta.sourceRecords.map((item) => item.sourceRecordKey)).size, 41);
   const replacement = first.sessionAt(0, { generation: 2, replacement: true });
   assert.equal(replacement.delta.session.sessionKey, firstSession.delta.session.sessionKey);
   assert.deepEqual(
@@ -112,6 +135,56 @@ test("capacity gates mechanically require packed Facts only above frozen limits"
     factBytes: 1,
     steadyStateBytes: 8 * gib + 1,
   }).packedFactsRequired, true);
+});
+
+test("Deep Query benchmark CLI freezes formal defaults without overriding explicit inputs", () => {
+  const formal = parseBenchmarkArguments([
+    "--deep-query-benchmark", "--formal", "--turns", "250000",
+  ]);
+  assert.equal(formal.queryCount, FORMAL_DEEP_QUERY_COUNT);
+  assert.equal(formal.warmupCount, FORMAL_DEEP_QUERY_WARMUP_COUNT);
+  assert.equal(formal.seed, FORMAL_DEEP_QUERY_SEEDS[250000]);
+
+  const explicit = parseBenchmarkArguments([
+    "--deep-query-benchmark", "--turns", "800", "--queries", "3",
+    "--warmup", "2", "--seed", "explicit-deep-seed",
+  ]);
+  assert.equal(explicit.queryCount, 3);
+  assert.equal(explicit.warmupCount, 2);
+  assert.equal(explicit.seed, "explicit-deep-seed");
+});
+
+test("formal Deep Query benchmark rejects non-frozen corpus and work budgets before launch", async () => {
+  await assert.rejects(
+    runInsightsDeepQueryBenchmark({ turnCount: 800, formal: true }),
+    /exactly 25000 or 250000 Turns/u,
+  );
+  await assert.rejects(
+    runInsightsDeepQueryBenchmark({
+      turnCount: 25_000,
+      turnsPerSession: 50,
+      seed: FORMAL_DEEP_QUERY_SEEDS[25000],
+      formal: true,
+    }),
+    /exactly 100 Turns per session/u,
+  );
+  await assert.rejects(
+    runInsightsDeepQueryBenchmark({
+      turnCount: 25_000,
+      seed: "wrong-deep-seed",
+      formal: true,
+    }),
+    /requires seed threadshare-insights-deep-query-25k-v1/u,
+  );
+  await assert.rejects(
+    runInsightsDeepQueryBenchmark({
+      turnCount: 25_000,
+      queryCount: FORMAL_DEEP_QUERY_COUNT - 1,
+      seed: FORMAL_DEEP_QUERY_SEEDS[25000],
+      formal: true,
+    }),
+    /exactly 100 measured runs/u,
+  );
 });
 
 test("overview latency gate fails closed at the 25k and 250k budgets", () => {
@@ -271,7 +344,7 @@ test("small benchmark compares the real Rust commit protocol with node:sqlite", 
 });
 
 test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle mutations", {
-  timeout: 180_000,
+  timeout: 240_000,
   skip: Number(process.versions.node.split(".")[0]) < 22 || !existsSync(DEBUG_ENGINE_PATH)
     ? "requires Node 22.5+ and a debug Insights Engine build"
     : false,
@@ -284,6 +357,8 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
     turnsPerSession: 100,
     queryCount: 8,
     warmupCount: 2,
+    deepQueryCount: 2,
+    deepQueryWarmupCount: 1,
     mutationQueryEquivalenceCount: 8,
     seed: "capacity-e2e-test",
     binaryPath: DEBUG_ENGINE_PATH,
@@ -295,11 +370,16 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(report.environment.hostLoad.atStart.oneMinute >= 0, true);
   assert.equal(report.environment.hostLoad.atReport.oneMinute >= 0, true);
   assert.equal(report.corpus.turns, turnCount);
+  assert.equal(report.corpus.corpusVersion, 6);
   assert.equal(report.corpus.density.evidenceEventsPerTurn, 9);
   const audit = report.rustSidecar.capacity;
   assert.equal(audit.rowCounts.turns, turnCount);
-  assert.equal(audit.rowCounts.source_records, turnCount * 9);
+  assert.equal(audit.rowCounts.source_records, turnCount * 10 + 1);
   assert.equal(audit.rowCounts.evidence_events, turnCount * 9);
+  assert.equal(audit.rowCounts.history_events, turnCount * 10 + 1);
+  assert.equal(audit.rowCounts.history_payloads, turnCount * 8 + 1);
+  assert.equal(audit.rowCounts.history_payload_chunks, turnCount * 8 + 32);
+  assert.equal(audit.deepHistory.ftsIntegrity, "ok");
   assert.equal(audit.rowCounts.capability_uses, turnCount * 3);
   assert.equal(audit.rowCounts.turn_fts_documents, turnCount);
   assert.equal(audit.rowCounts.turn_rollup_contributions >= turnCount, true);
@@ -345,6 +425,9 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(audit.fileFormatPages.lockBytePageBytes, 0);
   assert.equal(audit.fileFormatPages.freelistBytes, 0);
   assert.deepEqual(audit.unclassifiedObjects, []);
+  assert.equal(audit.byObject.history_events.category, "fact");
+  assert.equal(audit.byObject.history_event_fts_data.category, "fts");
+  assert.equal(audit.byObject.history_coverage_rollups.category, "projection");
   assert.equal(audit.categories.unclassified.bytes, 0);
   assert.equal(audit.compactedSteadyStateBytes > audit.postVacuumPersistentBytes, true);
   assert.equal(
@@ -377,7 +460,44 @@ test("small capacity benchmark audits real Fact, FTS, Projection, and lifecycle 
   assert.equal(report.rustSidecar.overview.snapshotMismatchCount, 0);
   assert.equal(report.rustSidecar.overview.gates.allMeasuredOverviewGatesPassed, true);
   assert.match(report.rustSidecar.overview.measurement, /transactional rollups/u);
+  const deepQuery = report.rustSidecar.deepQuery;
+  assert.equal(deepQuery.measuredRequestCount, 2);
+  assert.equal(deepQuery.warmupRequestCount, 1);
+  assert.equal(deepQuery.records.emptyResultCount, 0);
+  assert.equal(deepQuery.aggregate.emptyResultCount, 0);
+  assert.equal(
+    Object.values(deepQuery.recipes).every(({ emptyResultCount }) => emptyResultCount === 0),
+    true,
+  );
+  assert.equal(deepQuery.evidence.completedReadCount, 2);
+  assert.equal(deepQuery.evidence.multiPageReadCount, 2);
+  assert.equal(deepQuery.evidence.returnedBytes > 2 * 1024 * 1024, true);
+  assert.equal(deepQuery.evidence.firstPageRoundTripMs.count, 2);
+  assert.equal(deepQuery.evidence.payloadMiBPerSecond > 0, true);
+  assert.equal(deepQuery.gates.allDeepQueryPathsExercised, true);
+  const deepReport = createDeepQueryBenchmarkReport(report);
+  assert.equal(deepReport.format, "threadshare-insights-deep-query-benchmark@v1");
+  assert.equal(
+    deepReport.measuredScope,
+    "local-insights-fact-v2-deep-query-capacity-and-performance",
+  );
+  assert.equal(deepReport.rowCounts.history_events, turnCount * 10 + 1);
+  assert.equal(deepReport.rowCounts.history_payloads, turnCount * 8 + 1);
+  assert.equal(deepReport.storage.historyEventMetadataBytes > 0, true);
+  assert.equal(deepReport.storage.historyPayloadBytes > 0, true);
+  assert.equal(deepReport.storage.historyFtsBytes > 0, true);
+  assert.equal(deepReport.storage.persistentStorageAmplification > 0, true);
+  assert.equal(deepReport.storage.historyFtsAmplification > 0, true);
+  assert.equal(deepReport.gates.v2CorpusComplete, true);
+  assert.equal(deepReport.gates.deepQueryPathsComplete, true);
+  assert.equal(deepReport.gates.historyFtsIntegrityPassed, true);
+  assert.equal(deepReport.gates.storageClassificationComplete, true);
+  assert.equal(deepReport.gates.queryPlanUsesEventKindIndex, true);
   const backfill = report.rustSidecar.backfill;
+  assert.equal(backfill.commitAckMs.count, turnCount / 100);
+  assert.equal(backfill.commitAckMs.p50 > 0, true);
+  assert.equal(backfill.commitAckMs.p50 <= backfill.commitAckMs.p95, true);
+  assert.equal(backfill.commitAckMs.p95 <= backfill.commitAckMs.p99, true);
   assert.equal(backfill.corpusGenerationMs > 0, true);
   assert.equal(backfill.protocolPreparationMs > 0, true);
   assert.equal(backfill.engineBackfillMs > 0, true);

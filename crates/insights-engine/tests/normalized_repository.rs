@@ -1,17 +1,19 @@
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use threadshare_insights_engine::fact_model::{
-    Eligibility, EventCommon, EvidenceEvent, EvidencePointer, LifecycleState, MessageRole,
-    MutationMode, OriginScope, ProviderStatusEvent, ProviderStatusKind, ProviderStatusState,
-    ProviderTerminal, ProviderVisibility, RawClosure, SessionFactsDeltaV1, SourceOrder,
-    SourceRecordFact, StableKey, TurnEvidenceFact, TurnEvidenceRole, TurnFact, TurnLifecycleEvent,
-    VisibleMessageEvent, WireU64,
+    Completeness, Eligibility, EventCommon, EvidenceEvent, EvidencePointer, HistoryEventFact,
+    HistoryPayloadChunkFact, HistoryPayloadFact, HistoryPayloadKind, LifecycleState, MessageRole,
+    MutationMode, OriginScope, PayloadEncoding, ProviderStatusEvent, ProviderStatusKind,
+    ProviderStatusState, ProviderTerminal, ProviderVisibility, RawClosure, SessionFactsDeltaV1,
+    SourceOrder, SourceRecordFact, StableKey, TurnEvidenceFact, TurnEvidenceRole, TurnFact,
+    TurnLifecycleEvent, VisibleMessageEvent, WireU64, expected_history_event_revision,
 };
-use threadshare_insights_engine::hash_key;
 use threadshare_insights_engine::storage::EngineStorage;
+use threadshare_insights_engine::{hash_key, try_canonical_json};
 
 static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
 
@@ -45,6 +47,80 @@ fn fixture_delta() -> SessionFactsDeltaV1 {
     ))
     .unwrap();
     SessionFactsDeltaV1::try_from(fixture["initial"].clone()).unwrap()
+}
+
+fn fixture_delta_v2() -> SessionFactsDeltaV1 {
+    let mut delta = fixture_delta();
+    delta.format = "session-facts-delta@v2".to_owned();
+    delta.fact_schema_version = 2;
+    delta.provider_adapter_version = "codex@2".to_owned();
+    delta.privacy_policy_version = 2;
+    let event = delta.evidence_events[0].common();
+    let history_event_key = key(0x72);
+    let payload_key = key(0x71);
+    let content = "private payload 界";
+    let content_bytes = content.as_bytes();
+    let payload_sha256 = StableKey::from_bytes(Sha256::digest(content_bytes).into());
+    let mut history_event = HistoryEventFact {
+        event_key: history_event_key,
+        owner_session_key: event.owner_session_key,
+        occurred_turn_key: None,
+        source_record_key: event.source_record_key,
+        source_order: event.source_order.clone(),
+        origin_scope: event.origin_scope,
+        observed_timestamp: event.observed_timestamp.clone(),
+        kind: "visible-message".to_owned(),
+        completeness: Completeness::Full,
+        revision: key(0),
+        metadata: serde_json::json!({"role":"user"}),
+        payload_keys: vec![payload_key],
+    };
+    let payload = HistoryPayloadFact {
+        payload_key,
+        owner_session_key: delta.session.session_key,
+        event_key: history_event_key,
+        payload_kind: HistoryPayloadKind::MessageContent,
+        encoding: PayloadEncoding::Utf8,
+        byte_length: wire(content_bytes.len() as u64),
+        sha256: payload_sha256,
+        completeness: Completeness::Full,
+        chunk_count: wire(1),
+    };
+    history_event.revision = StableKey::from_bytes(
+        Sha256::digest(
+            try_canonical_json(&serde_json::json!({
+                "eventKey": history_event.event_key,
+                "ownerSessionKey": history_event.owner_session_key,
+                "occurredTurnKey": history_event.occurred_turn_key,
+                "sourceRecordKey": history_event.source_record_key,
+                "sourceOrder": history_event.source_order,
+                "originScope": history_event.origin_scope,
+                "observedTimestamp": history_event.observed_timestamp,
+                "kind": history_event.kind,
+                "completeness": history_event.completeness,
+                "metadata": history_event.metadata,
+                "payloads": [{
+                    "payloadKey": payload.payload_key,
+                    "sha256": payload.sha256,
+                    "byteLength": payload.byte_length,
+                }],
+            }))
+            .unwrap()
+            .as_bytes(),
+        )
+        .into(),
+    );
+    delta.history_events = vec![history_event];
+    delta.history_payloads = vec![payload];
+    delta.history_payload_chunks = vec![HistoryPayloadChunkFact {
+        payload_key,
+        owner_session_key: delta.session.session_key,
+        ordinal: wire(0),
+        content: content.to_owned(),
+        byte_length: wire(content_bytes.len() as u64),
+        sha256: payload_sha256,
+    }];
+    delta
 }
 
 fn clear_session_owned_facts(delta: &mut SessionFactsDeltaV1) {
@@ -257,6 +333,158 @@ fn commits_typed_normalized_facts_idempotently_and_reads_them_after_restart() {
     );
     assert_eq!(reopened.diagnostics, delta.diagnostics);
     assert_eq!(reopened.coverage, delta.coverage);
+}
+
+#[test]
+fn commits_fact_v2_history_payloads_and_reopens_losslessly() {
+    let database = TemporaryDatabase::new();
+    let delta = fixture_delta_v2();
+    {
+        let mut storage = EngineStorage::open(&database.path).unwrap();
+        let outcome = storage.apply_session_facts(delta).unwrap();
+        assert_eq!(outcome.snapshot_seq, "1");
+        assert_eq!(
+            storage.read_engine_status().unwrap().fact_storage_profile,
+            "normalized-row-v2"
+        );
+    }
+
+    let connection = Connection::open(&database.path).unwrap();
+    let event_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM history_events", [], |row| row.get(0))
+        .unwrap();
+    let payload_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM history_payloads", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let content: String = connection
+        .query_row(
+            "SELECT group_concat(content, '') FROM (
+               SELECT content FROM history_payload_chunks ORDER BY ordinal
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_count, 1);
+    assert_eq!(payload_count, 1);
+    assert_eq!(content, "private payload 界");
+}
+
+#[test]
+fn projects_fact_v2_file_token_and_error_metadata_transactionally() {
+    let database = TemporaryDatabase::new();
+    let mut delta = fixture_delta_v2();
+    let event = &mut delta.history_events[0];
+    event.kind = "capability-result".to_owned();
+    event.observed_timestamp = Some("2026-08-12T01:02:03.000Z".to_owned());
+    event.metadata = serde_json::json!({
+        "capabilityKey": key(0x81),
+        "providerState": "failed",
+        "fileActivities": [{
+            "action": "edit",
+            "phase": "failed",
+            "pathRole": "target",
+            "rawPath": "/private/project/src/lib.rs",
+            "normalizedPath": "/private/project/src/lib.rs",
+            "relativePath": "src/lib.rs",
+            "absolute": true,
+            "projectRelative": true
+        }],
+        "errorSignatureVersion": "error-signature@1",
+        "errorSignature": key(0x82),
+        "usageScope": "delta",
+        "model": "fixture-model",
+        "inputTokens": "12",
+        "cachedInputTokens": "4",
+        "outputTokens": "3"
+    });
+    event.revision = expected_history_event_revision(event, &[&delta.history_payloads[0]]).unwrap();
+
+    let mut storage = EngineStorage::open(&database.path).unwrap();
+    storage.apply_session_facts(delta).unwrap();
+    drop(storage);
+
+    let connection = Connection::open(&database.path).unwrap();
+    let file: (String, String, String, String, i64, i64) = connection
+        .query_row(
+            "SELECT action,phase,raw_path,relative_path,is_absolute,is_project_relative
+             FROM file_activity",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        file,
+        (
+            "edit".to_owned(),
+            "failed".to_owned(),
+            "/private/project/src/lib.rs".to_owned(),
+            "src/lib.rs".to_owned(),
+            1,
+            1
+        )
+    );
+    let tokens: (String, String, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT model,lower(hex(input_tokens)),lower(hex(cached_input_tokens)),
+                    CASE WHEN reasoning_tokens IS NULL THEN NULL
+                         ELSE lower(hex(reasoning_tokens)) END
+             FROM token_usage",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        tokens,
+        (
+            "fixture-model".to_owned(),
+            "000000000000000c".to_owned(),
+            Some("0000000000000004".to_owned()),
+            None
+        )
+    );
+    let error: (String, String) = connection
+        .query_row(
+            "SELECT signature_version,lower(hex(error_signature)) FROM error_occurrences",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        error,
+        ("error-signature@1".to_owned(), key(0x82).to_string())
+    );
+}
+
+#[test]
+fn database_fact_schema_identity_prevents_v1_v2_mixing() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+    assert_eq!(storage.database_fact_schema_version().unwrap(), Some(1));
+
+    let error = storage.apply_session_facts(fixture_delta_v2()).unwrap_err();
+    assert_eq!(error.code, "TS_INSIGHTS_FACT_SCHEMA_MIGRATION_REQUIRED");
+    assert_eq!(storage.database_fact_schema_version().unwrap(), Some(1));
+    assert_eq!(storage.committed_session_count().unwrap(), 1);
+}
+
+#[test]
+fn first_fact_v2_commit_binds_the_empty_database_identity() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    assert_eq!(storage.database_fact_schema_version().unwrap(), None);
+    storage.apply_session_facts(fixture_delta_v2()).unwrap();
+    assert_eq!(storage.database_fact_schema_version().unwrap(), Some(2));
 }
 
 #[test]

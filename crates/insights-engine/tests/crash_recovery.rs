@@ -118,7 +118,7 @@ fn protocol_ingest_messages() -> Vec<Value> {
             .message
             .clone()
     };
-    let mut delta = serde_json::to_value(fixture_delta()).unwrap();
+    let mut delta = fixture_delta().to_contract_value().unwrap();
     let mut begin = frame("begin-session");
     begin["session"] = json!({
         "sessionKey": delta["session"]["sessionKey"],

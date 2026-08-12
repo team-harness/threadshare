@@ -20,7 +20,12 @@ import {
   decodeProtocolFrames,
   encodeProtocolFrame,
 } from "../src/insights-engine-protocol.mjs";
-import { assertSessionFactsDelta, canonicalJson, hashKey } from "../src/session-facts.mjs";
+import {
+  assertSessionFactsDelta,
+  canonicalJson,
+  hashKey,
+  validateSessionFactsDeltaV2,
+} from "../src/session-facts.mjs";
 
 const ENGINE_NAME = process.platform === "win32"
   ? "threadshare-insights-engine.exe"
@@ -43,6 +48,17 @@ function handshakeContract() {
     projectionVersions: ["turn-search@2", "turn-summary@1"],
     analyzerCapabilities: ["mixed-cjk-code@1"],
     rankerVersion: 1,
+  };
+}
+
+function handshakeContractV2() {
+  return {
+    ...handshakeContract(),
+    factSchemaVersion: 2,
+    providerAdapterVersions: ["claude@2", "codex@2"],
+    privacyPolicyVersion: 2,
+    factStorageProfile: "normalized-row-v2",
+    storageSchemaVersion: 2,
   };
 }
 
@@ -95,6 +111,15 @@ function finalizeDelta(delta) {
     mutationDigest,
     delta.checkpoint.completeOffset,
   );
+  if (delta.factSchemaVersion === 2) {
+    const result = validateSessionFactsDeltaV2(delta);
+    if (!result.valid) {
+      throw new TypeError(
+        `Invalid SessionFactsDeltaV2: ${result.errors[0]?.message ?? "schema validation failed"}`,
+      );
+    }
+    return delta;
+  }
   return assertSessionFactsDelta(delta);
 }
 
@@ -147,6 +172,18 @@ function sampleDelta({
     diagnostics: [],
     coverage: {},
   });
+}
+
+function sampleDeltaV2() {
+  const delta = structuredClone(sampleDelta());
+  delta.format = "session-facts-delta@v2";
+  delta.factSchemaVersion = 2;
+  delta.providerAdapterVersion = "codex@2";
+  delta.privacyPolicyVersion = 2;
+  delta.historyEvents = [];
+  delta.historyPayloads = [];
+  delta.historyPayloadChunks = [];
+  return finalizeDelta(delta);
 }
 
 async function queryFixtureDelta({ withLifecycle = true } = {}) {
@@ -697,6 +734,43 @@ test("real Rust sidecar commits a delta and replays it idempotently after restar
     sessionKey: SESSION_KEY,
     idempotent: true,
   });
+});
+
+test("real Rust sidecar serves a strictly validated deep Query v2 through the Node client", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath, {
+    requiredContract: handshakeContractV2(),
+  }));
+  t.after(() => client.close());
+
+  assert.deepEqual(await client.applySessionFacts(sampleDeltaV2()), {
+    snapshotSeq: "1",
+    sessionKey: SESSION_KEY,
+    idempotent: false,
+  });
+  const response = await client.readInsightsQueryV2({
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    where: null,
+    shape: { kind: "records", select: ["eventKey"], payloadMode: "reference" },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 10,
+    cursor: null,
+    count: "exact",
+    evaluatedAt: "2026-08-12T00:00:00.000Z",
+  });
+  assert.equal(response.format, "threadshare-insights-query@v2");
+  assert.match(response.databaseUuid, /^[0-9a-f-]{36}$/u);
+  assert.equal(response.snapshotSeq, "1");
+  assert.deepEqual(response.records, []);
+  assert.equal(response.totalMatchCount, "0");
+  assert.equal(Object.isFrozen(response.coverage), true);
 });
 
 test("real Rust sidecar reports bounded content-free engine status", {

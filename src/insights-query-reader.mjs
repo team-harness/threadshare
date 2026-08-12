@@ -153,6 +153,9 @@ export function createInsightsQueryReader(options) {
     search(input, requestOptions) {
       return invoke("searchTurns", input, requestOptions);
     },
+    queryV2(input, requestOptions) {
+      return invoke("readInsightsQueryV2", input, requestOptions);
+    },
     usage(input, requestOptions) {
       return invoke("readCapabilityUsage", input, requestOptions);
     },
@@ -161,6 +164,12 @@ export function createInsightsQueryReader(options) {
     },
     evidence(input, requestOptions) {
       return invoke("readTurnEvidence", input, requestOptions);
+    },
+    evidenceV2(input, requestOptions) {
+      return invoke("readInsightsEvidenceV2", input, requestOptions);
+    },
+    recipe(input, requestOptions) {
+      return invoke("readInsightsRecipe", input, requestOptions);
     },
     async close() {
       if (closed) return;

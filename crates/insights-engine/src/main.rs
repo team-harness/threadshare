@@ -9,6 +9,7 @@ use threadshare_insights_engine::agent_query::{
     UsageWindow,
 };
 use threadshare_insights_engine::canonical_json;
+use threadshare_insights_engine::deep_query::{DeepEvidenceRequest, DeepQueryRequest};
 use threadshare_insights_engine::engine::{EngineError, SessionAccumulator};
 use threadshare_insights_engine::evidence_path::{
     EvidencePathReport, SafeEvidenceEvent, SafeEvidenceFact, TurnEvidencePage,
@@ -24,6 +25,7 @@ use threadshare_insights_engine::protocol::{
 use threadshare_insights_engine::query::{
     QueryError, SearchOrderBy, SearchRequest, SearchResponse, SearchTrace,
 };
+use threadshare_insights_engine::recipe::RecipeRequest;
 use threadshare_insights_engine::storage::{EngineStorage, StorageError};
 
 const ENGINE_VERSION: &str = match option_env!("THREADSHARE_RELEASE_VERSION") {
@@ -126,7 +128,7 @@ fn ready_message(
     request_id: &str,
     accepted_contract: Value,
 ) -> Result<Value, EngineError> {
-    Ok(json!({
+    let mut response = json!({
         "format": PROTOCOL_FORMAT,
         "type": "READY",
         "requestId": request_id,
@@ -137,7 +139,12 @@ fn ready_message(
         "sqliteCompileOptionsDigest": storage.compile_options_digest()?,
         "buildManifestDigest": build_manifest_digest(storage)?,
         "acceptedContract": accepted_contract,
-    }))
+    });
+    if response["acceptedContract"]["factSchemaVersion"].as_u64() == Some(2) {
+        response["databaseUuid"] = json!(storage.database_uuid()?);
+        response["databaseFactSchemaVersion"] = json!(storage.database_fact_schema_version()?);
+    }
+    Ok(response)
 }
 
 fn engine_error_response(error: &EngineError, request_id: &str) -> Value {
@@ -208,6 +215,32 @@ fn agent_query_engine_error(error: QueryError) -> EngineError {
             "validation",
             "Insights aggregate query could not be completed",
         ),
+    };
+    EngineError::new(error.code, category, message)
+}
+
+fn deep_query_engine_error(error: QueryError) -> EngineError {
+    let (category, message) = match error.code {
+        "QUERY_FAILED" => ("storage", "Local Insights query failed"),
+        "TS_INSIGHTS_REQUEST_INVALID" => ("validation", "Local Insights request is invalid"),
+        "TS_INSIGHTS_QUERY_V2_NOT_READY" => (
+            "conflict",
+            "Deep query requires a completed Fact V2 index; run threadshare insights sync",
+        ),
+        "TS_INSIGHTS_CURSOR_STALE" => (
+            "conflict",
+            "Local Insights cursor is stale; restart from the first page",
+        ),
+        "TS_INSIGHTS_EVIDENCE_CHANGED" => (
+            "conflict",
+            "Local Insights evidence changed; repeat the query",
+        ),
+        "TS_INSIGHTS_EVIDENCE_NOT_FOUND" => ("validation", "Local Insights evidence was not found"),
+        "TS_QUERY_TOO_BROAD" => (
+            "validation",
+            "Local Insights query exceeds its bounded work budget",
+        ),
+        _ => ("validation", "Local Insights query could not be completed"),
     };
     EngineError::new(error.code, category, message)
 }
@@ -960,6 +993,87 @@ impl EngineServer {
                                 evidence_page_wire(&request_id, &self.database_uuid, page),
                             ))
                         }
+                        MessageKind::ReadInsightsQueryV2 => {
+                            let request: DeepQueryRequest = serde_json::from_value(
+                                message["request"].clone(),
+                            )
+                            .map_err(|_| {
+                                EngineError::new(
+                                    "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                    "protocol",
+                                    "READ_INSIGHTS_QUERY_V2 request is invalid",
+                                )
+                            })?;
+                            let response = self
+                                .storage
+                                .read_deep_query(&request)
+                                .map_err(deep_query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "INSIGHTS_QUERY_V2",
+                                    "requestId": request_id,
+                                    "response": response,
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadInsightsEvidenceV2 => {
+                            let request: DeepEvidenceRequest = serde_json::from_value(
+                                message["request"].clone(),
+                            )
+                            .map_err(|_| {
+                                EngineError::new(
+                                    "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                    "protocol",
+                                    "READ_INSIGHTS_EVIDENCE_V2 request is invalid",
+                                )
+                            })?;
+                            let response = self
+                                .storage
+                                .read_deep_evidence(&request)
+                                .map_err(deep_query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "INSIGHTS_EVIDENCE_V2",
+                                    "requestId": request_id,
+                                    "response": response,
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadInsightsRecipe => {
+                            let request: RecipeRequest = serde_json::from_value(
+                                message["request"].clone(),
+                            )
+                            .map_err(|_| {
+                                EngineError::new(
+                                    "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                    "protocol",
+                                    "READ_INSIGHTS_RECIPE request is invalid",
+                                )
+                            })?;
+                            let response = self
+                                .storage
+                                .read_recipe(&request)
+                                .map_err(deep_query_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "INSIGHTS_RECIPE",
+                                    "requestId": request_id,
+                                    "response": response,
+                                }),
+                            ))
+                        }
                         _ => Err(EngineError::new(
                             "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
                             "protocol",
@@ -1640,6 +1754,50 @@ mod tests {
         );
         validate_protocol_message(&activity).unwrap();
         assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn deep_query_not_ready_is_structured_and_keeps_the_server_usable() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+        let error = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_INSIGHTS_QUERY_V2",
+                "requestId": "70",
+                "request": {
+                    "format": "threadshare-insights-query-request@v2",
+                    "resource": "event",
+                    "where": {"field":"event.kind","op":"eq","value":"visible-message"},
+                    "shape": {
+                        "kind":"records",
+                        "select":["eventKey"],
+                        "payloadMode":"reference"
+                    },
+                    "orderBy":[
+                        {"field":"observedAt","direction":"desc"},
+                        {"field":"eventKey","direction":"asc"}
+                    ],
+                    "limit":20,
+                    "cursor":null,
+                    "count":"none",
+                    "evaluatedAt":"2026-08-12T00:00:00.000Z"
+                }
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_QUERY_V2_NOT_READY");
+        assert_eq!(error.category, "conflict");
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let status = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_PURGE_STATUS",
+                "requestId": "71",
+                "sessionKey": null
+            }))
+            .unwrap();
+        assert_eq!(status["type"], "PURGE_STATUS");
     }
 
     #[test]

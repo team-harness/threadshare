@@ -9,6 +9,7 @@ import {
   createPrivacyContext,
   hashKey,
   validateSessionFactsDelta,
+  validateSessionFactsDeltaV2,
 } from "../src/session-facts.mjs";
 import {
   PROVIDER_RECORD_AUTHORITY_V1,
@@ -45,6 +46,20 @@ function privacyContext() {
     secret: SECRET,
     originSecretEpoch: "44444444-4444-4444-8444-444444444444",
   });
+}
+
+function historyPayloadContent(delta, payloadKind) {
+  const payload = delta.historyPayloads.find((item) => item.payloadKind === payloadKind);
+  assert.ok(payload, `missing ${payloadKind} payload`);
+  const chunks = delta.historyPayloadChunks
+    .filter((item) => item.payloadKey === payload.payloadKey)
+    .sort((left, right) => BigInt(left.ordinal) < BigInt(right.ordinal) ? -1 : 1);
+  assert.equal(chunks.length, Number(payload.chunkCount));
+  assert.equal(chunks.every((item) => Buffer.byteLength(item.content) <= 64 * 1024), true);
+  const content = chunks.map((item) => item.content).join("");
+  assert.equal(String(Buffer.byteLength(content)), payload.byteLength);
+  assert.equal(createHash("sha256").update(content).digest("hex"), payload.sha256);
+  return { payload, chunks, content };
 }
 
 test("stream reader preserves byte ranges and resumes an incomplete tail", async () => {
@@ -273,6 +288,202 @@ test("Codex adapter uses only authoritative records and keeps sensitive bodies o
     const serialized = JSON.stringify(delta);
     assert.doesNotMatch(serialized, /do-not-store|full secret skill body|\/secret\/alpha/u);
     assert.deepEqual(exportCodexJsonl(raw, { sessionId: IDS.codex, exportedAt: 0 }), before);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex Fact V2 preserves canonical Tool input and chunked unredacted output", async () => {
+  const output = `begin:${"界".repeat(30_000)}:end`;
+  const records = [
+    { type: "session_meta", payload: { id: IDS.codex } },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Inspect the private build" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        call_id: "v2-call",
+        name: "Bash",
+        arguments: "{\"token\":\"private\",\"command\":\"npm test\"}",
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:02.000Z",
+      payload: {
+        type: "function_call_output",
+        call_id: "v2-call",
+        output,
+        status: "completed",
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+    assert.equal(delta.format, "session-facts-delta@v2");
+    assert.equal(delta.factSchemaVersion, 2);
+    assert.equal(delta.providerAdapterVersion, "codex@2");
+    assert.equal(delta.historyEvents.length >= 3, true);
+
+    const input = historyPayloadContent(delta, "tool-input");
+    assert.equal(input.payload.encoding, "canonical-json");
+    assert.equal(input.content, "{\"command\":\"npm test\",\"token\":\"private\"}");
+    const result = historyPayloadContent(delta, "tool-output");
+    assert.equal(result.payload.encoding, "utf-8");
+    assert.equal(result.content, output);
+    assert.equal(result.chunks.length > 1, true);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex Fact V2 records file attempts, failed results, exact errors, and token usage", async () => {
+  const errorText = "Error 731: write failed at /tmp/threadshare-build-42";
+  const records = [
+    {
+      type: "session_meta",
+      payload: { id: IDS.codex, cwd: "/private/work/project" },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Update the source file" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        call_id: "file-call",
+        name: "Write",
+        arguments: JSON.stringify({ file_path: "/private/work/project/src/app.js", content: "private" }),
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:02.000Z",
+      payload: {
+        type: "function_call_output",
+        call_id: "file-call",
+        output: errorText,
+        status: "failed",
+      },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-01T00:00:03.000Z",
+      payload: {
+        type: "token_count",
+        info: {
+          last_token_usage: {
+            input_tokens: 120,
+            cached_input_tokens: 80,
+            output_tokens: 25,
+            reasoning_output_tokens: 5,
+            total_tokens: 150,
+          },
+        },
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+
+    const invocation = delta.historyEvents.find((event) => event.kind === "capability-invocation");
+    assert.deepEqual(invocation.metadata.fileActivities, [{
+      action: "write",
+      phase: "attempted",
+      pathRole: "target",
+      rawPath: "/private/work/project/src/app.js",
+      normalizedPath: "/private/work/project/src/app.js",
+      relativePath: "src/app.js",
+      absolute: true,
+      projectRelative: true,
+    }]);
+
+    const result = delta.historyEvents.find((event) => event.kind === "capability-result");
+    assert.equal(result.metadata.capabilityKey, invocation.metadata.capabilityKey);
+    assert.equal(result.metadata.fileActivities[0].phase, "failed");
+    assert.equal(result.metadata.errorSignatureVersion, "error-signature@1");
+    assert.match(result.metadata.errorSignature, /^[0-9a-f]{64}$/u);
+    assert.equal(historyPayloadContent(delta, "tool-output").content, errorText);
+
+    const tokens = delta.historyEvents.find((event) => event.kind === "token-usage");
+    assert.deepEqual(tokens.metadata, {
+      usageScope: "delta",
+      inputTokens: "120",
+      cachedInputTokens: "80",
+      outputTokens: "25",
+      reasoningTokens: "5",
+      totalTokens: "150",
+    });
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex Fact V2 preserves provider records without a V1 evidence projection", async () => {
+  const unknown = {
+    type: "future_provider_record",
+    payload: { nested: { private: "complete provider payload" } },
+  };
+  const fixture = await fixtureFile(
+    `rollout-${IDS.codex}.jsonl`,
+    jsonl([
+      { type: "session_meta", payload: { id: IDS.codex } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Preserve future records" }],
+        },
+      },
+      unknown,
+    ]),
+  );
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    const targetContent = canonicalJson(unknown);
+    const payload = delta.historyPayloads.find((candidate) => {
+      if (candidate.payloadKind !== "provider-payload") return false;
+      return delta.historyPayloadChunks
+        .filter((item) => item.payloadKey === candidate.payloadKey)
+        .sort((left, right) => Number(left.ordinal) - Number(right.ordinal))
+        .map((item) => item.content)
+        .join("") === targetContent;
+    });
+    assert.ok(payload);
+    const event = delta.historyEvents.find((item) => item.eventKey === payload.eventKey);
+    assert.equal(event?.kind, "provider-unknown");
+    assert.equal(delta.evidenceEvents.some((item) => item.eventKey === payload.eventKey), false);
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
@@ -1053,6 +1264,68 @@ test("Claude adapter keeps tool-result-only records inside the current Turn and 
     );
     assert.doesNotMatch(JSON.stringify(delta), /secret command|secret output|\/secret/u);
     assert.deepEqual(exportClaudeJsonl(raw, { sessionId: IDS.claude, exportedAt: 0 }), before);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude Fact V2 preserves Tool object input and result content", async () => {
+  const records = [
+    {
+      type: "user",
+      sessionId: IDS.claude,
+      uuid: "v2-u-1",
+      timestamp: "2026-08-01T01:00:00.000Z",
+      cwd: "/private/work/claude-v2",
+      message: { role: "user", content: [{ type: "text", text: "Run the private command" }] },
+    },
+    {
+      type: "assistant",
+      sessionId: IDS.claude,
+      uuid: "v2-a-1",
+      timestamp: "2026-08-01T01:00:01.000Z",
+      message: {
+        role: "assistant",
+        model: "claude-test-model",
+        usage: {
+          input_tokens: 40,
+          cache_read_input_tokens: 12,
+          cache_creation_input_tokens: 3,
+          output_tokens: 9,
+        },
+        content: [{ type: "tool_use", id: "v2-tool", name: "Bash", input: { token: "private", command: "pwd" } }],
+      },
+    },
+    {
+      type: "user",
+      sessionId: IDS.claude,
+      uuid: "v2-r-1",
+      timestamp: "2026-08-01T01:00:02.000Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "v2-tool", content: "private result", is_error: false }],
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`${IDS.claude}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("claude", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+    assert.equal(delta.providerAdapterVersion, "claude@2");
+    assert.equal(historyPayloadContent(delta, "tool-input").content, "{\"command\":\"pwd\",\"token\":\"private\"}");
+    assert.equal(historyPayloadContent(delta, "tool-output").content, "private result");
+    const tokenUsage = delta.historyEvents.find((event) => event.kind === "token-usage");
+    assert.deepEqual(tokenUsage.metadata, {
+      usageScope: "delta",
+      model: "claude-test-model",
+      inputTokens: "40",
+      cachedInputTokens: "12",
+      cacheWriteInputTokens: "3",
+      outputTokens: "9",
+    });
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

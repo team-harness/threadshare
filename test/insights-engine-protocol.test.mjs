@@ -10,6 +10,7 @@ import {
   MAX_PROTOCOL_PAYLOAD_BYTES,
   RETRACTION_COLLECTION_ORDER,
   UPSERT_COLLECTION_ORDER,
+  V2_UPSERT_COLLECTION_ORDER,
   ProtocolFrameDecoder,
   SessionBatchSequenceValidator,
   assertBeginSessionCompatible,
@@ -33,8 +34,14 @@ import {
   createReadEngineStatusMessage,
   createReadCapabilityUsageMessage,
   createReadInsightsActivityMessage,
+  createReadInsightsEvidenceV2Message,
+  createReadInsightsRecipeMessage,
+  createReadInsightsQueryV2Message,
   createCapabilityUsageMessage,
   createInsightsActivityMessage,
+  createInsightsEvidenceV2Message,
+  createInsightsRecipeMessage,
+  createInsightsQueryV2Message,
   createReadInsightsOverviewMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
@@ -62,6 +69,7 @@ import {
 } from "../src/insights-engine-protocol.mjs";
 
 const fixtureUrl = new URL("./fixtures/insights-protocol-v1/frames.json", import.meta.url);
+const recipeItemsUrl = new URL("./fixtures/insights-recipe-items.v1.json", import.meta.url);
 const SESSION_KEY = "a".repeat(64);
 const DELTA_ID = "b".repeat(64);
 const EPOCH = "11111111-2222-4333-8444-555555555555";
@@ -69,6 +77,171 @@ const COMPILE_OPTIONS_DIGEST = "c".repeat(64);
 const BUILD_MANIFEST_DIGEST = "d".repeat(64);
 const TURN_KEY = "e".repeat(64);
 const REVISION = "f".repeat(64);
+
+function deepQueryRequest(overrides = {}) {
+  return {
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    where: { field: "event.kind", op: "eq", value: "message" },
+    shape: {
+      kind: "records",
+      select: ["eventKey", "message.content"],
+      payloadMode: "reference",
+    },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 2,
+    cursor: null,
+    count: "exact",
+    evaluatedAt: "2026-08-12T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function deepEvidenceTarget() {
+  return {
+    kind: "event",
+    eventKey: TURN_KEY,
+    revision: REVISION,
+    payloadKey: "1".repeat(64),
+  };
+}
+
+function contentReference(overrides = {}) {
+  return {
+    byteLength: "7",
+    sha256: "2".repeat(64),
+    encoding: "utf-8",
+    inline: null,
+    reference: deepEvidenceTarget(),
+    complete: true,
+    ...overrides,
+  };
+}
+
+function deepCoverage() {
+  return {
+    matching: {
+      fullRecordCount: "1",
+      summaryRecordCount: "0",
+      unloadedRecordCount: "0",
+      truncatedRecordCount: "0",
+      unavailableRecordCount: "0",
+      missingTimestampCount: "0",
+      missingRevisionCount: "0",
+      missingTokenMetricCount: "0",
+      missingPayloadCount: "0",
+    },
+    indexedHistory: {
+      visibleSessionCount: "1",
+      excludedSessionCount: "0",
+      subagentExcludedSessionCount: "0",
+      unknownEligibilitySessionCount: "0",
+      pendingPurgeSessionCount: "0",
+      purgedSessionCount: "0",
+      missingCoverageRollupSessionCount: "0",
+      fts: {
+        searchableEventCount: "1",
+        storedNotSearchableEventCount: "0",
+        searchablePayloadBytes: "7",
+        storedNotSearchablePayloadBytes: "0",
+      },
+    },
+    degraded: false,
+    diagnostics: [],
+  };
+}
+
+function deepQueryResponse(overrides = {}) {
+  return {
+    format: "threadshare-insights-query@v2",
+    databaseUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    snapshotSeq: "7",
+    resource: "event",
+    records: [{ eventKey: TURN_KEY, message: { content: contentReference() } }],
+    groups: null,
+    nextCursor: null,
+    totalMatchCount: "1",
+    totalGroupCount: null,
+    truncated: false,
+    coverage: deepCoverage(),
+    provenance: { default: "recorded", fields: [] },
+    limits: { pageBytes: "3932160", payloadsMayRequireEvidencePaging: true },
+    ...overrides,
+  };
+}
+
+function recipeRequest(overrides = {}) {
+  return {
+    format: "threadshare-insights-recipe-request@v1",
+    name: "capability-contexts@1",
+    window: {
+      after: "2026-08-01T00:00:00.000Z",
+      before: "2026-09-01T00:00:00.000Z",
+    },
+    comparisonWindow: null,
+    filters: {
+      providers: [],
+      projectKeys: [],
+      capabilityKeys: [],
+      sessionKeys: [],
+      eventKinds: [],
+      text: null,
+      bucket: null,
+    },
+    limit: 20,
+    allowDegraded: false,
+    evaluatedAt: "2026-08-12T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function recipeResponse(overrides = {}) {
+  return {
+    format: "threadshare-insights-recipe@v1",
+    databaseUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    snapshotSeq: "7",
+    name: "capability-contexts@1",
+    window: recipeRequest().window,
+    comparisonWindow: null,
+    evaluatedAt: "2026-08-12T00:00:00.000Z",
+    items: [{
+      capability: {
+        capabilityKey: TURN_KEY, provider: "codex", kind: "tool", canonicalName: "Bash",
+      },
+      recordedInvocationCount: "1",
+      recordedFailingInvocationCount: "0",
+      distinctTurnCount: "1",
+      distinctSessionCount: "1",
+      distinctDedupeGroupCount: "0",
+      groupedInvocationCount: "0",
+      ungroupedInvocationCount: "1",
+      lastUsedAt: "2026-08-10T00:00:00.000Z",
+      strongGroupMemberInvocationCount: "0",
+      weakGroupMemberInvocationCount: "0",
+      invocationTerminalCounts: {
+        pending: "0", completed: "1", failed: "0", cancelled: "0", unknown: "0",
+      },
+      topProjects: [],
+      coOccurringCapabilities: [],
+      representativeTurns: [{
+        turnKey: TURN_KEY,
+        usedAt: "2026-08-10T00:00:00.000Z",
+        recordedInvocationCount: "1",
+        context: { problem: "run Bash", finalAnswer: null },
+        evidence: { kind: "turn", turnKey: TURN_KEY, revision: REVISION },
+      }],
+      evidence: { kind: "turn", turnKey: TURN_KEY, revision: REVISION },
+    }],
+    totalItemCount: "1",
+    truncated: false,
+    coverage: deepCoverage(),
+    provenance: { default: "recorded", fields: [] },
+    ...overrides,
+  };
+}
 
 function handshakeContract(overrides = {}) {
   return {
@@ -101,21 +274,58 @@ function sessionOptions(overrides = {}) {
 test("required contract builder owns every active Engine contract axis", () => {
   const contract = createInsightsRequiredContract(EPOCH);
   assert.deepEqual(contract, {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
+    factSchemaVersion: 2,
+    providerAdapterVersions: ["claude@2", "codex@2"],
+    privacyPolicyVersion: 2,
     originSecretEpoch: EPOCH,
     duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
+    factStorageProfile: "normalized-row-v2",
+    storageSchemaVersion: 2,
     projectionVersions: ["turn-search@2", "turn-summary@1"],
     analyzerCapabilities: ["mixed-cjk-code@1"],
     rankerVersion: 1,
+  });
+  assert.deepEqual(createInsightsRequiredContract(EPOCH, { factSchemaVersion: 1 }), {
+    ...contract,
+    factSchemaVersion: 1,
+    providerAdapterVersions: ["claude@1", "codex@1"],
+    privacyPolicyVersion: 1,
+    factStorageProfile: "normalized-row-v1",
+    storageSchemaVersion: 1,
   });
   assert.equal(Object.isFrozen(contract), true);
   assert.equal(Object.isFrozen(contract.providerAdapterVersions), true);
   assert.equal(Object.isFrozen(contract.projectionVersions), true);
   assert.equal(Object.isFrozen(contract.analyzerCapabilities), true);
+});
+
+test("Fact V2 READY requires the active database identity without widening V1", () => {
+  const contract = createInsightsRequiredContract(EPOCH);
+  const input = {
+    requestId: "1",
+    engineVersion: "threadshare-insights-engine@0.7.4",
+    target: "darwin-arm64",
+    sqliteVersion: "3.53.2",
+    sqliteCompileOptionsDigest: COMPILE_OPTIONS_DIGEST,
+    buildManifestDigest: BUILD_MANIFEST_DIGEST,
+    acceptedContract: contract,
+    databaseUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    databaseFactSchemaVersion: null,
+  };
+  const ready = createReadyMessage(input);
+  assert.equal(ready.databaseFactSchemaVersion, null);
+  assert.throws(
+    () => assertProtocolMessage({ ...ready, databaseUuid: undefined }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => assertProtocolMessage({ ...ready, databaseFactSchemaVersion: 3 }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  const v1 = readyMessage();
+  assert.equal(Object.hasOwn(v1, "databaseUuid"), false);
+  assert.equal(Object.hasOwn(v1, "databaseFactSchemaVersion"), false);
 });
 
 test("benchmark entry points use the canonical required contract builder", async () => {
@@ -157,6 +367,20 @@ function sampleDelta(overrides = {}) {
     checkpoint: { generation: "1", marker: "checkpoint" },
     diagnostics: [],
     coverage: {},
+    ...overrides,
+  };
+}
+
+function sampleDeltaV2(overrides = {}) {
+  return {
+    ...sampleDelta(),
+    format: "session-facts-delta@v2",
+    factSchemaVersion: 2,
+    providerAdapterVersion: "codex@2",
+    privacyPolicyVersion: 2,
+    historyEvents: [],
+    historyPayloads: [],
+    historyPayloadChunks: [],
     ...overrides,
   };
 }
@@ -1429,6 +1653,248 @@ test("session generator greedily batches actual canonical bytes in fixed collect
   for (const message of messages.slice(1)) validator.accept(message);
   assert.equal(validator.done, true);
   assert.equal(validator.nextSequence, String(batches.length));
+});
+
+test("Fact V2 session batches history metadata before payload chunks in fixed order", async () => {
+  assert.deepEqual(V2_UPSERT_COLLECTION_ORDER, [
+    "turns",
+    "sourceRecords",
+    "evidenceEvents",
+    "turnEvidence",
+    "capabilities",
+    "capabilityUses",
+    "capabilityUseEvidence",
+    "historyEvents",
+    "historyPayloads",
+    "historyPayloadChunks",
+  ]);
+  const eventKey = "7".repeat(64);
+  const payloadKey = "8".repeat(64);
+  const delta = sampleDeltaV2({
+    historyEvents: [{ eventKey }],
+    historyPayloads: [{ payloadKey, eventKey }],
+    historyPayloadChunks: [{ payloadKey, ordinal: "0", content: "private" }],
+  });
+  const messages = await collect(createSessionDeltaMessages(delta, sessionOptions()));
+  assert.deepEqual(
+    messages.slice(1, -1).map((message) => `${message.type}:${message.collection}`),
+    [
+      "UPSERT_FACTS:historyEvents",
+      "UPSERT_FACTS:historyPayloads",
+      "UPSERT_FACTS:historyPayloadChunks",
+    ],
+  );
+  assert.deepEqual(messages[0].counts, {
+    turnKeys: "0",
+    orphanEventKeys: "0",
+    authoritativeTurnKeys: "0",
+    turns: "0",
+    sourceRecords: "0",
+    evidenceEvents: "0",
+    turnEvidence: "0",
+    capabilities: "0",
+    capabilityUses: "0",
+    capabilityUseEvidence: "0",
+    historyEvents: "1",
+    historyPayloads: "1",
+    historyPayloadChunks: "1",
+  });
+});
+
+test("deep Query v2 protocol keeps requests exact and rejects forged response invariants", () => {
+  const request = deepQueryRequest();
+  const frame = createReadInsightsQueryV2Message({ requestId: "41", request });
+  assert.equal(frame.request, request);
+  assert.throws(
+    () => createReadInsightsQueryV2Message({
+      requestId: "41",
+      request: { ...request, sql: "SELECT * FROM history_events" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  const response = deepQueryResponse();
+  assert.equal(
+    createInsightsQueryV2Message({ requestId: "41", response }).response,
+    response,
+  );
+  assert.throws(
+    () => createInsightsQueryV2Message({
+      requestId: "41",
+      response: { ...response, totalMatchCount: "0" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsQueryV2Message({
+      requestId: "41",
+      response: {
+        ...response,
+        records: [{
+          eventKey: TURN_KEY,
+          message: { content: contentReference({ inline: "private" }) },
+        }],
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("deep Evidence v2 protocol binds revisions and UTF-8 byte ranges", () => {
+  const request = {
+    format: "threadshare-insights-evidence-request@v2",
+    target: deepEvidenceTarget(),
+    include: ["envelope", "payload"],
+    cursor: null,
+    maxBytes: 1024,
+  };
+  assert.equal(
+    createReadInsightsEvidenceV2Message({ requestId: "42", request }).request,
+    request,
+  );
+  const wholeEvent = {
+    ...request,
+    target: {
+      kind: "event",
+      eventKey: TURN_KEY,
+      revision: REVISION,
+    },
+  };
+  assert.equal(
+    createReadInsightsEvidenceV2Message({ requestId: "43", request: wholeEvent }).request,
+    wholeEvent,
+  );
+  assert.throws(
+    () => createReadInsightsEvidenceV2Message({
+      requestId: "42",
+      request: { ...request, include: ["payload", "envelope"] },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  const response = {
+    format: "threadshare-insights-evidence@v2",
+    databaseUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    snapshotSeq: "7",
+    target: request.target,
+    revision: REVISION,
+    payloadSha256: "2".repeat(64),
+    totalBytes: "7",
+    range: { start: "0", end: "7" },
+    content: "private",
+    nextCursor: null,
+    complete: true,
+  };
+  assert.equal(
+    createInsightsEvidenceV2Message({ requestId: "42", response }).response,
+    response,
+  );
+  assert.throws(
+    () => createInsightsEvidenceV2Message({
+      requestId: "42",
+      response: { ...response, range: { start: "0", end: "6" } },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+});
+
+test("Recipe protocol keeps requests exact and rejects forged response counts", async () => {
+  const request = recipeRequest();
+  assert.equal(
+    createReadInsightsRecipeMessage({ requestId: "43", request }).request,
+    request,
+  );
+  assert.throws(
+    () => createReadInsightsRecipeMessage({
+      requestId: "43",
+      request: { ...request, name: "arbitrary-sql@1" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createReadInsightsRecipeMessage({
+      requestId: "43",
+      request: { ...request, sql: "SELECT * FROM history_events" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  const response = recipeResponse();
+  assert.equal(
+    createInsightsRecipeMessage({ requestId: "43", response }).response,
+    response,
+  );
+  assert.equal(
+    createInsightsQueryV2Message({
+      requestId: "43",
+      response: deepQueryResponse({
+        records: [{
+          eventKey: TURN_KEY,
+          tool: { input: contentReference({ encoding: "canonical-json" }) },
+        }],
+      }),
+    }).response.records[0].tool.input.encoding,
+    "canonical-json",
+  );
+  assert.throws(
+    () => createInsightsRecipeMessage({
+      requestId: "43",
+      response: { ...response, totalItemCount: "0" },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsRecipeMessage({
+      requestId: "43",
+      response: {
+        ...response,
+        coverage: { ...response.coverage, truncatedRecordCount: "1", degraded: false },
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsRecipeMessage({
+      requestId: "43",
+      response: {
+        ...response,
+        coverage: {
+          ...response.coverage,
+          matching: { ...response.coverage.matching, missingTokenMetricCount: "7" },
+        },
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+  assert.throws(
+    () => createInsightsRecipeMessage({
+      requestId: "43",
+      response: {
+        ...response,
+        coverage: { ...response.coverage, diagnostics: ["TS_INSIGHTS_PARTIAL"] },
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  const recipes = JSON.parse(await readFile(recipeItemsUrl, "utf8"));
+  assert.equal(recipes.length, 7);
+  for (const { name, item } of recipes) {
+    const typed = recipeResponse({ name, items: [item] });
+    assert.equal(
+      createInsightsRecipeMessage({ requestId: "43", response: typed }).response,
+      typed,
+      name,
+    );
+    assert.throws(
+      () => createInsightsRecipeMessage({
+        requestId: "43",
+        response: { ...typed, items: [{ ...item, unreviewed: true }] },
+      }),
+      { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+      name,
+    );
+  }
 });
 
 test("session sequence rejects gaps, count mismatch, collection regression, and request mismatch", () => {

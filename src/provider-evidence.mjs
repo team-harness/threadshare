@@ -6,6 +6,7 @@ import {
   hashKey,
   toWellFormedUnicode,
   validateSessionFactsDelta,
+  validateSessionFactsDeltaV2,
 } from "./session-facts.mjs";
 import { visibleUserMarkdown, redactSecrets } from "./session-export.mjs";
 import {
@@ -21,7 +22,9 @@ import {
 } from "./session-record-reader.mjs";
 
 const FACT_SCHEMA_VERSION = 1;
+const FACT_SCHEMA_VERSION_V2 = 2;
 const PRIVACY_POLICY_VERSION = 1;
+const PRIVACY_POLICY_VERSION_V2 = 2;
 const DUPLICATE_POLICY_VERSION = 1;
 const IDENTITY_VERSION = 1;
 const MAX_PROBLEM_BYTES = 64 * 1024;
@@ -39,6 +42,7 @@ const MAX_METADATA_RECORDS = 256;
 const MAX_PROVIDER_RECORD_BYTES = 8 * 1024 * 1024;
 const MAX_CONTENT_ITEMS = 4_096;
 const MAX_TOOL_SUBTREE_BYTES = 1024 * 1024;
+const HISTORY_PAYLOAD_CHUNK_BYTES = 64 * 1024;
 const FACT_CAP_SLACK = Object.freeze({
   events: 512,
   uses: 256,
@@ -196,6 +200,41 @@ function outputByteLength(value) {
   }
 }
 
+function semanticPayload(value, { parseJsonString = false } = {}) {
+  if (value === undefined) return null;
+  if (typeof value === "string") {
+    if (parseJsonString) {
+      try {
+        return { content: canonicalJson(JSON.parse(value)), encoding: "canonical-json" };
+      } catch {
+        // Provider inputs that are not JSON remain exact UTF-8 text.
+      }
+    }
+    return { content: value, encoding: "utf-8" };
+  }
+  return { content: canonicalJson(value), encoding: "canonical-json" };
+}
+
+function chunkUtf8(value, maxBytes = HISTORY_PAYLOAD_CHUNK_BYTES) {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length === 0) return [""];
+  const chunks = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    let end = Math.min(offset + maxBytes, bytes.length);
+    while (end < bytes.length && end > offset && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    if (end === offset) throw new TypeError("history payload chunk boundary is invalid");
+    chunks.push(bytes.subarray(offset, end).toString("utf8"));
+    offset = end;
+  }
+  return chunks;
+}
+
+function historyMetadata(fields) {
+  const { kind: _kind, ...metadata } = fields;
+  return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined));
+}
+
 function validDecimal(value) {
   if (typeof value === "bigint") return value >= 0n ? String(value) : null;
   return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
@@ -211,6 +250,140 @@ function eventState(payload) {
     return "completed";
   }
   return "unknown";
+}
+
+function normalizedObservedPath(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const normalized = toWellFormedUnicode(value).normalize("NFC");
+  const portable = /^[A-Za-z]:[\\/]/u.test(normalized) || normalized.startsWith("\\\\")
+    ? normalized.replaceAll("\\", "/")
+    : normalized;
+  return path.posix.normalize(portable);
+}
+
+function observedPathDetails(rawPath, projectRoot, pathRole = "target") {
+  const normalizedPath = normalizedObservedPath(rawPath);
+  if (normalizedPath === null) return null;
+  const root = normalizedObservedPath(projectRoot);
+  const absolute = path.posix.isAbsolute(normalizedPath) || /^[A-Za-z]:\//u.test(normalizedPath) ||
+    normalizedPath.startsWith("//");
+  let relativePath = absolute ? null : normalizedPath;
+  let projectRelative = !absolute && root !== null;
+  if (absolute && root !== null) {
+    const relative = path.posix.relative(root, normalizedPath);
+    if (relative === "" || (relative !== ".." && !relative.startsWith("../") && !path.posix.isAbsolute(relative))) {
+      relativePath = relative || ".";
+      projectRelative = true;
+    }
+  }
+  return {
+    pathRole,
+    rawPath: toWellFormedUnicode(rawPath).normalize("NFC"),
+    normalizedPath,
+    relativePath,
+    absolute,
+    projectRelative,
+  };
+}
+
+function patchPaths(value) {
+  if (typeof value !== "string") return [];
+  const paths = [];
+  for (const match of value.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gmu)) {
+    paths.push({ value: match[1], role: "target" });
+  }
+  for (const match of value.matchAll(/^\*\*\* Move to: (.+)$/gmu)) {
+    paths.push({ value: match[1], role: "destination" });
+  }
+  return paths;
+}
+
+function toolFileActivities(provider, name, input, projectRoot) {
+  const parsed = parseJsonInput(input);
+  const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  const canonicalName = name.toLowerCase();
+  const action = new Map([
+    ["read", "read"], ["write", "write"], ["edit", "edit"], ["multiedit", "edit"],
+    ["notebookedit", "edit"], ["apply_patch", "edit"], ["delete", "delete"],
+    ["move", "move"], ["rename", "move"], ["grep", "search"], ["search", "search"],
+    ["glob", "search"], ["ls", "list"], ["list", "list"],
+  ]).get(canonicalName);
+  if (!action) return [];
+
+  const candidates = [];
+  if (canonicalName === "apply_patch") {
+    candidates.push(...patchPaths(typeof parsed === "string" ? parsed : object?.patch));
+  } else if (object) {
+    for (const field of ["file_path", "path", "notebook_path"]) {
+      if (typeof object[field] === "string") candidates.push({ value: object[field], role: "target" });
+    }
+    for (const field of ["source", "source_path", "from"]) {
+      if (typeof object[field] === "string") candidates.push({ value: object[field], role: "source" });
+    }
+    for (const field of ["destination", "destination_path", "to"]) {
+      if (typeof object[field] === "string") candidates.push({ value: object[field], role: "destination" });
+    }
+  }
+  const seen = new Set();
+  return candidates.flatMap(({ value, role }) => {
+    const details = observedPathDetails(value, projectRoot, role);
+    if (!details) return [];
+    const identity = `${role}\0${details.rawPath}`;
+    if (seen.has(identity)) return [];
+    seen.add(identity);
+    return [{ action, phase: "attempted", ...details }];
+  });
+}
+
+function resultFileActivities(activities, state) {
+  const phase = state === "completed" ? "confirmed" : state === "failed" ? "failed" : "unknown";
+  return activities.map((activity) => ({ ...activity, phase }));
+}
+
+function errorSignature(value) {
+  const semantic = semanticPayload(value, { parseJsonString: true });
+  if (semantic === null) return null;
+  const normalized = semantic.content
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/gu, "<uuid>")
+    .replace(/\b0x[0-9a-f]+\b/gu, "<hex>")
+    .replace(/(?:[A-Za-z]:[\\/]|\/)(?:[^\s:'"`]+[\\/])*[^\s:'"`]*/gu, "<path>")
+    .replace(/\b[0-9]+\b/gu, "<number>")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return sha256(Buffer.from(normalized, "utf8"));
+}
+
+function tokenMetadata(fields) {
+  const entries = Object.entries(fields).filter(([, value]) => value !== null);
+  return entries.length > 1 ? Object.fromEntries(entries) : null;
+}
+
+function codexTokenMetadata(payload) {
+  const usage = payload?.info?.last_token_usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  return tokenMetadata({
+    usageScope: "delta",
+    inputTokens: validDecimal(usage.input_tokens),
+    cachedInputTokens: validDecimal(usage.cached_input_tokens),
+    outputTokens: validDecimal(usage.output_tokens),
+    reasoningTokens: validDecimal(usage.reasoning_output_tokens),
+    totalTokens: validDecimal(usage.total_tokens),
+  });
+}
+
+function claudeTokenMetadata(message) {
+  const usage = message?.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  return tokenMetadata({
+    usageScope: "delta",
+    model: typeof message.model === "string" && message.model ? normalizeName(message.model) : null,
+    inputTokens: validDecimal(usage.input_tokens),
+    cachedInputTokens: validDecimal(usage.cache_read_input_tokens),
+    cacheWriteInputTokens: validDecimal(usage.cache_creation_input_tokens),
+    outputTokens: validDecimal(usage.output_tokens),
+  });
 }
 
 function sessionIdFromFile(file) {
@@ -353,6 +526,7 @@ class EvidenceBuilder {
   constructor(provider, file, privacyContext, options, metadata) {
     const priorState = options.checkpoint?.pendingState?.sessionState;
     this.provider = provider;
+    this.factSchemaVersion = options.factSchemaVersion ?? FACT_SCHEMA_VERSION;
     this.file = file;
     this.readResult = null;
     this.privacyContext = privacyContext;
@@ -373,6 +547,10 @@ class EvidenceBuilder {
     this.turns = [];
     this.turnByKey = new Map();
     this.evidenceEvents = [];
+    this.historyEvents = [];
+    this.historyEventByKey = new Map();
+    this.historyPayloads = [];
+    this.historyPayloadChunks = [];
     this.turnEvidence = [];
     this.turnEvidenceIds = new Set();
     this.capabilities = new Map();
@@ -566,7 +744,15 @@ class EvidenceBuilder {
     return source;
   }
 
-  addEvent(record, contentIndex, providerRecordClass, fields, occurredTurnKey = null, originScope = "main") {
+  addEvent(
+    record,
+    contentIndex,
+    providerRecordClass,
+    fields,
+    occurredTurnKey = null,
+    originScope = "main",
+    historyFields = {},
+  ) {
     const source = this.ensureSourceRecord(record, providerRecordClass);
     const eventOrdinal = this.nextOrdinal(record, contentIndex);
     const event = {
@@ -595,6 +781,24 @@ class EvidenceBuilder {
       ...fields,
     };
     this.evidenceEvents.push(event);
+    if (this.factSchemaVersion === FACT_SCHEMA_VERSION_V2) {
+      const historyEvent = {
+        eventKey: event.eventKey,
+        ownerSessionKey: event.ownerSessionKey,
+        occurredTurnKey: event.occurredTurnKey,
+        sourceRecordKey: event.sourceRecordKey,
+        sourceOrder: event.sourceOrder,
+        originScope: event.originScope,
+        observedTimestamp: event.observedTimestamp,
+        kind: event.kind,
+        completeness: "full",
+        revision: "0".repeat(64),
+        metadata: historyMetadata({ ...fields, ...historyFields }),
+        payloadKeys: [],
+      };
+      this.historyEvents.push(historyEvent);
+      this.historyEventByKey.set(event.eventKey, historyEvent);
+    }
     if (occurredTurnKey === null) {
       this.sessionEventPressure += 1;
       if (event.kind === "skill-catalog-entry") this.sessionCatalogPressure += 1;
@@ -614,6 +818,126 @@ class EvidenceBuilder {
       );
     }
     return event;
+  }
+
+  addHistoryEvent(
+    record,
+    contentIndex,
+    providerRecordClass,
+    fields,
+    occurredTurnKey = null,
+    originScope = "main",
+  ) {
+    if (this.factSchemaVersion !== FACT_SCHEMA_VERSION_V2) return null;
+    const source = this.ensureSourceRecord(record, providerRecordClass);
+    const eventOrdinal = this.nextOrdinal(record, contentIndex);
+    const event = {
+      eventKey: hashKey(
+        "event",
+        hexBytes(this.sessionKey),
+        uint64(record.startOffset),
+        int32(contentIndex),
+        uint16(eventOrdinal),
+      ),
+      ownerSessionKey: this.sessionKey,
+      occurredTurnKey,
+      sourceRecordKey: source.sourceRecordKey,
+      sourceOrder: {
+        recordStartOffset: record.startOffset,
+        contentIndex,
+        eventOrdinal,
+      },
+      originScope,
+      observedTimestamp: this.observeTimestamp(record.value.timestamp ?? record.value.payload?.timestamp),
+      kind: fields.kind,
+      completeness: "full",
+      revision: "0".repeat(64),
+      metadata: historyMetadata(fields),
+      payloadKeys: [],
+    };
+    this.historyEvents.push(event);
+    this.historyEventByKey.set(event.eventKey, event);
+    return event;
+  }
+
+  addHistoryPayload(event, payloadKind, value, options = {}) {
+    if (this.factSchemaVersion !== FACT_SCHEMA_VERSION_V2 || !event) return null;
+    const semantic = semanticPayload(value, options);
+    if (semantic === null) return null;
+    const historyEvent = this.historyEventByKey.get(event.eventKey);
+    if (!historyEvent) throw new TypeError("history payload event is missing");
+    const contentBytes = Buffer.from(semantic.content, "utf8");
+    const payloadKey = hashKey(
+      "history-payload",
+      hexBytes(event.eventKey),
+      payloadKind,
+    );
+    const chunks = chunkUtf8(semantic.content);
+    const payload = {
+      payloadKey,
+      ownerSessionKey: this.sessionKey,
+      eventKey: event.eventKey,
+      payloadKind,
+      encoding: semantic.encoding,
+      byteLength: String(contentBytes.length),
+      sha256: sha256(contentBytes),
+      completeness: "full",
+      chunkCount: String(chunks.length),
+    };
+    this.historyPayloads.push(payload);
+    for (let ordinal = 0; ordinal < chunks.length; ordinal += 1) {
+      const content = chunks[ordinal];
+      const chunkBytes = Buffer.from(content, "utf8");
+      this.historyPayloadChunks.push({
+        payloadKey,
+        ownerSessionKey: this.sessionKey,
+        ordinal: String(ordinal),
+        content,
+        byteLength: String(chunkBytes.length),
+        sha256: sha256(chunkBytes),
+      });
+    }
+    historyEvent.payloadKeys.push(payloadKey);
+    return payload;
+  }
+
+  preserveProviderRecord(record, firstHistoryEventIndex) {
+    if (this.factSchemaVersion !== FACT_SCHEMA_VERSION_V2) return;
+    let event = this.historyEvents[firstHistoryEventIndex] ?? null;
+    if (event === null) {
+      const source = this.ensureSourceRecord(
+        record,
+        normalizeName(record.value?.type ?? record.value?.kind, "provider-record"),
+      );
+      event = {
+        eventKey: hashKey(
+          "history-event",
+          hexBytes(this.sessionKey),
+          uint64(record.startOffset),
+          "provider-record",
+        ),
+        ownerSessionKey: this.sessionKey,
+        occurredTurnKey: this.currentTurn?.turnKey ?? null,
+        sourceRecordKey: source.sourceRecordKey,
+        sourceOrder: {
+          recordStartOffset: record.startOffset,
+          contentIndex: -1,
+          eventOrdinal: 65535,
+        },
+        originScope: "main",
+        observedTimestamp: this.observeTimestamp(
+          record.value.timestamp ?? record.value.payload?.timestamp,
+        ),
+        kind: "provider-unknown",
+        completeness: "full",
+        revision: "0".repeat(64),
+        metadata: {},
+        payloadKeys: [],
+      };
+      this.historyEvents.push(event);
+      this.historyEventByKey.set(event.eventKey, event);
+    }
+    this.addHistoryPayload(event, "provider-payload", record.value);
   }
 
   addTurnEvidence(turnKey, eventKey, role) {
@@ -821,6 +1145,7 @@ class EvidenceBuilder {
       { kind: "visible-message", role: "user" },
       turnKey,
     );
+    this.addHistoryPayload(event, "message-content", rawUserText);
     turn.boundaryEventKey = event.eventKey;
     this.addTurnEvidence(turnKey, event.eventKey, "boundary");
     if (previous) this.addTurnEvidence(previous.turnKey, event.eventKey, "follow-up");
@@ -843,6 +1168,7 @@ class EvidenceBuilder {
       this.currentTurn.turnKey,
       originScope,
     );
+    this.addHistoryPayload(event, "message-content", rawText);
     if (originScope === "main") {
       if (Buffer.byteLength(text) > MAX_EXCERPT_BYTES) {
         if (!this.currentTurn.factTruncation.includes("final-answer-excerpt")) {
@@ -988,6 +1314,12 @@ function processCodexInvocation(builder, record, payload) {
     capability.canonicalName,
     input,
   );
+  const fileActivities = toolFileActivities(
+    "codex",
+    name,
+    input,
+    builder.metadata.projectRoot,
+  );
   const event = builder.addEvent(
     record,
     -1,
@@ -999,6 +1331,14 @@ function processCodexInvocation(builder, record, payload) {
       ...(inputFingerprint ? { inputFingerprint } : {}),
     },
     builder.currentTurn?.turnKey ?? null,
+    "main",
+    fileActivities.length > 0 ? { fileActivities } : {},
+  );
+  builder.addHistoryPayload(
+    event,
+    "tool-input",
+    payload.arguments ?? payload.input,
+    { parseJsonString: true },
   );
   const use = builder.createUse({
     turn: builder.currentTurn,
@@ -1017,6 +1357,7 @@ function processCodexInvocation(builder, record, payload) {
       use,
       invocationEvent: event,
       name,
+      fileActivities,
       fullReadPathFingerprint: fullReadPath
         ? builder.privacyContext.pathFingerprint("codex", fullReadPath)
         : null,
@@ -1029,6 +1370,8 @@ function processCodexResult(builder, record, payload) {
   const correlation = correlationDigest(builder, payload.call_id ?? payload.id);
   const state = eventState(payload);
   const result = payload.error ?? payload.output;
+  const pending = correlation ? builder.pendingUses.get(correlation) : null;
+  const signature = state === "failed" ? errorSignature(result) : null;
   const event = builder.addEvent(
     record,
     -1,
@@ -1046,8 +1389,18 @@ function processCodexResult(builder, record, payload) {
         : {}),
     },
     builder.currentTurn?.turnKey ?? null,
+    "main",
+    {
+      ...(pending?.use ? { capabilityKey: pending.use.capabilityKey } : {}),
+      ...(pending?.fileActivities?.length > 0
+        ? { fileActivities: resultFileActivities(pending.fileActivities, state) }
+        : {}),
+      ...(signature
+        ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
+        : {}),
+    },
   );
-  const pending = correlation ? builder.pendingUses.get(correlation) : null;
+  builder.addHistoryPayload(event, "tool-output", result, { parseJsonString: true });
   if (!pending?.use) {
     builder.diagnose("orphan-tool-result", record);
     return;
@@ -1078,6 +1431,21 @@ function processCodexResult(builder, record, payload) {
 function processCodexLifecycle(builder, record, payload) {
   const subtype = payload.type;
   const providerRecordClass = `event_msg:${subtype}`;
+  if (subtype === "token_count") {
+    const metadata = codexTokenMetadata(payload);
+    if (metadata) {
+      builder.addHistoryEvent(
+        record,
+        -1,
+        providerRecordClass,
+        { kind: "token-usage", ...metadata },
+        builder.currentTurn?.turnKey ?? null,
+      );
+    } else {
+      builder.cover("token-usage-unavailable");
+    }
+    return;
+  }
   if (subtype === "task_started") {
     const turnDigest = providerTurnDigest(builder, payload.turn_id);
     const event = builder.addEvent(
@@ -1253,6 +1621,12 @@ function processClaudeInvocation(builder, record, part, contentIndex, originScop
     capability.canonicalName,
     input,
   );
+  const fileActivities = toolFileActivities(
+    "claude",
+    name,
+    input,
+    builder.metadata.projectRoot,
+  );
   const event = builder.addEvent(
     record,
     contentIndex,
@@ -1265,7 +1639,9 @@ function processClaudeInvocation(builder, record, part, contentIndex, originScop
     },
     builder.currentTurn?.turnKey ?? null,
     originScope,
+    fileActivities.length > 0 ? { fileActivities } : {},
   );
+  builder.addHistoryPayload(event, "tool-input", part.input, { parseJsonString: true });
   const use = builder.createUse({
     turn: builder.currentTurn,
     capability,
@@ -1282,6 +1658,7 @@ function processClaudeInvocation(builder, record, part, contentIndex, originScop
       use,
       invocationEvent: event,
       name,
+      fileActivities,
       originScope,
       skillName: name === "Skill" ? claudeSkillName(input) : null,
     });
@@ -1292,6 +1669,8 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
   const providerRecordClass = "user:tool_result";
   const correlation = correlationDigest(builder, part.tool_use_id);
   const state = eventState(part);
+  const pending = correlation ? builder.pendingUses.get(correlation) : null;
+  const signature = state === "failed" ? errorSignature(part.content) : null;
   const event = builder.addEvent(
     record,
     contentIndex,
@@ -1307,8 +1686,17 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
     },
     builder.currentTurn?.turnKey ?? null,
     originScope,
+    {
+      ...(pending?.use ? { capabilityKey: pending.use.capabilityKey } : {}),
+      ...(pending?.fileActivities?.length > 0
+        ? { fileActivities: resultFileActivities(pending.fileActivities, state) }
+        : {}),
+      ...(signature
+        ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
+        : {}),
+    },
   );
-  const pending = correlation ? builder.pendingUses.get(correlation) : null;
+  builder.addHistoryPayload(event, "tool-output", part.content, { parseJsonString: true });
   if (!pending?.use) {
     builder.diagnose("orphan-tool-result", record);
     return;
@@ -1485,7 +1873,20 @@ function processClaudeRecord(builder, record) {
   const role = value.message?.role === "assistant" || value.type === "assistant" ? "assistant" : "user";
   const content = value.message?.content;
   if (role === "user") processClaudeUser(builder, record, content, originScope);
-  else processClaudeAssistant(builder, record, content, originScope);
+  else {
+    processClaudeAssistant(builder, record, content, originScope);
+    const metadata = claudeTokenMetadata(value.message);
+    if (metadata) {
+      builder.addHistoryEvent(
+        record,
+        -1,
+        "assistant:token-usage",
+        { kind: "token-usage", ...metadata },
+        builder.currentTurn?.turnKey ?? null,
+        originScope,
+      );
+    }
+  }
 }
 
 function createMetadataSummary() {
@@ -1557,6 +1958,7 @@ function inspectMetadata(provider, file, summary, options, privacyContext) {
       projectKey: typeof meta?.cwd === "string"
         ? privacyContext.projectFingerprint("codex", meta.cwd)
         : prior?.projectKey ?? null,
+      projectRoot: typeof meta?.cwd === "string" ? meta.cwd : null,
       explicitLineageFingerprint: !isSubagent && typeof root === "string"
         ? privacyContext.lineageFingerprint("codex", root.toLowerCase())
         : null,
@@ -1585,6 +1987,7 @@ function inspectMetadata(provider, file, summary, options, privacyContext) {
     projectKey: typeof cwd === "string"
       ? privacyContext.projectFingerprint("claude", cwd)
       : prior?.projectKey ?? null,
+    projectRoot: typeof cwd === "string" ? cwd : null,
     explicitLineageFingerprint: null,
     priorDedupe: prior?.dedupe ?? null,
     isAgentFile,
@@ -1902,7 +2305,10 @@ function applyFactCaps(builder) {
     if (removedEventKeys.has(item.event.eventKey)) builder.catalogByPath.delete(pathFingerprint);
   }
 
-  const referencedSourceKeys = new Set(builder.evidenceEvents.map((event) => event.sourceRecordKey));
+  const referencedSourceKeys = new Set([
+    ...builder.evidenceEvents.map((event) => event.sourceRecordKey),
+    ...builder.historyEvents.map((event) => event.sourceRecordKey),
+  ]);
   builder.sourceRecords = new Map(
     [...builder.sourceRecords].filter(([, source]) => referencedSourceKeys.has(source.sourceRecordKey)),
   );
@@ -1936,6 +2342,49 @@ function publicLink(link) {
   return fact;
 }
 
+function finalizeHistoryFacts(builder) {
+  if (builder.factSchemaVersion !== FACT_SCHEMA_VERSION_V2) {
+    return { historyEvents: [], historyPayloads: [], historyPayloadChunks: [] };
+  }
+  const historyEvents = builder.historyEvents;
+  const retainedPayloadKeys = new Set(historyEvents.flatMap((event) => event.payloadKeys));
+  const historyPayloads = builder.historyPayloads.filter((payload) =>
+    retainedPayloadKeys.has(payload.payloadKey),
+  );
+  const payloadByKey = new Map(historyPayloads.map((payload) => [payload.payloadKey, payload]));
+  const historyPayloadChunks = builder.historyPayloadChunks.filter((chunk) =>
+    retainedPayloadKeys.has(chunk.payloadKey),
+  );
+  for (const event of historyEvents) {
+    event.payloadKeys.sort();
+    event.revision = sha256(canonicalJson({
+      eventKey: event.eventKey,
+      ownerSessionKey: event.ownerSessionKey,
+      occurredTurnKey: event.occurredTurnKey,
+      sourceRecordKey: event.sourceRecordKey,
+      sourceOrder: event.sourceOrder,
+      originScope: event.originScope,
+      observedTimestamp: event.observedTimestamp,
+      kind: event.kind,
+      completeness: event.completeness,
+      metadata: event.metadata,
+      payloads: event.payloadKeys.map((payloadKey) => {
+        const payload = payloadByKey.get(payloadKey);
+        if (!payload) throw new TypeError("history event references a missing payload");
+        return { payloadKey, sha256: payload.sha256, byteLength: payload.byteLength };
+      }),
+    }));
+  }
+  return {
+    historyEvents: stableSort(historyEvents, (item) => item.eventKey),
+    historyPayloads: stableSort(historyPayloads, (item) => item.payloadKey),
+    historyPayloadChunks: stableSort(
+      historyPayloadChunks,
+      (item) => `${item.payloadKey}:${item.ordinal.padStart(20, "0")}`,
+    ),
+  };
+}
+
 function finalizeDelta(builder, sourceSnapshot) {
   const stableEof = sourceSnapshot.stable;
   if (
@@ -1948,7 +2397,7 @@ function finalizeDelta(builder, sourceSnapshot) {
   if (builder.currentTurn && (builder.currentTurn.rawClosure.providerTerminal !== null || stableEof)) {
     builder.clearPendingUsesForTurn(builder.currentTurn.turnKey);
   }
-  applyFactCaps(builder);
+  if (builder.factSchemaVersion !== FACT_SCHEMA_VERSION_V2) applyFactCaps(builder);
   const dedupe = builder.sessionScope === "main" ? deriveDedupe(builder, stableEof) : {};
   const checkpointGeneration = builder.options.checkpoint?.generation;
   const configuredGeneration = builder.options.expectedGeneration;
@@ -2038,11 +2487,13 @@ function finalizeDelta(builder, sourceSnapshot) {
       : {}),
     ...dedupe,
   };
+  const historyFacts = finalizeHistoryFacts(builder);
+  const isV2 = builder.factSchemaVersion === FACT_SCHEMA_VERSION_V2;
   const delta = {
-    format: "session-facts-delta@v1",
-    factSchemaVersion: FACT_SCHEMA_VERSION,
-    providerAdapterVersion: `${builder.provider}@1`,
-    privacyPolicyVersion: PRIVACY_POLICY_VERSION,
+    format: isV2 ? "session-facts-delta@v2" : "session-facts-delta@v1",
+    factSchemaVersion: isV2 ? FACT_SCHEMA_VERSION_V2 : FACT_SCHEMA_VERSION,
+    providerAdapterVersion: `${builder.provider}@${isV2 ? 2 : 1}`,
+    privacyPolicyVersion: isV2 ? PRIVACY_POLICY_VERSION_V2 : PRIVACY_POLICY_VERSION,
     originSecretEpoch: builder.privacyContext.originSecretEpoch,
     duplicatePolicyVersion: DUPLICATE_POLICY_VERSION,
     expectedGeneration,
@@ -2065,6 +2516,7 @@ function finalizeDelta(builder, sourceSnapshot) {
       builder.capabilityUseEvidence.map(publicLink),
       (item) => `${item.useKey}:${item.eventKey}:${item.role}`,
     ),
+    ...(isV2 ? historyFacts : {}),
     checkpoint,
     diagnostics: aggregateDiagnostics(builder.diagnosticItems.values()),
     coverage: Object.fromEntries(Object.entries(builder.coverage).sort(([a], [b]) => a.localeCompare(b))),
@@ -2094,6 +2546,9 @@ function finalizeDelta(builder, sourceSnapshot) {
 
 export async function readProviderSessionDelta(provider, source, options = {}) {
   assertProvider(provider);
+  if (options.factSchemaVersion !== undefined && ![1, 2].includes(options.factSchemaVersion)) {
+    throw new TypeError("factSchemaVersion must be 1 or 2");
+  }
   if (!options.privacyContext || typeof options.privacyContext.fingerprint !== "function") {
     throw new TypeError("privacyContext is required");
   }
@@ -2149,9 +2604,16 @@ export async function readProviderSessionDelta(provider, source, options = {}) {
           builder.cover("invalid-unicode-replaced", unicode.replacements);
           builder.diagnose("invalid-unicode-replaced", record);
         }
+        const firstHistoryEventIndex = builder.historyEvents.length;
         if (provider === "codex") processCodexRecord(builder, record);
         else processClaudeRecord(builder, record);
-        if (builder.factCapsDue) applyFactCaps(builder);
+        builder.preserveProviderRecord(record, firstHistoryEventIndex);
+        if (
+          builder.factSchemaVersion !== FACT_SCHEMA_VERSION_V2 &&
+          builder.factCapsDue
+        ) {
+          applyFactCaps(builder);
+        }
       }
     },
   );
@@ -2176,13 +2638,17 @@ export async function readProviderSessionDelta(provider, source, options = {}) {
     size: after.size,
     mtimeNs: after.mtimeNs,
   });
-  const validation = validateSessionFactsDelta(delta);
+  const validation = delta.factSchemaVersion === FACT_SCHEMA_VERSION_V2
+    ? validateSessionFactsDeltaV2(delta)
+    : validateSessionFactsDelta(delta);
   if (!validation.valid) {
     const detail = validation.errors
       .slice(0, 8)
       .map((item) => `${item.instancePath || "/"} ${item.message}`)
       .join("; ");
-    const error = new TypeError(`Provider adapter produced an invalid SessionFactsDeltaV1: ${detail}`);
+    const error = new TypeError(
+      `Provider adapter produced an invalid SessionFactsDeltaV${delta.factSchemaVersion}: ${detail}`,
+    );
     error.validationErrors = validation.errors;
     throw error;
   }

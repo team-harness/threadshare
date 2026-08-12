@@ -134,7 +134,7 @@ test("Dashboard serves the committed snapshot before starting background reconci
   assert.equal(capturedStatus.state, "ready");
   assert.equal(capturedStatus.overview.snapshotSeq, "8");
   assert.equal(capturedStatus.engine.snapshotSeq, "8");
-  assert.equal(capturedStatus.engine.factStorageProfile, "normalized-row-v1");
+  assert.equal(capturedStatus.engine.factStorageProfile, "normalized-row-v2");
   assert.equal(capturedStatus.index.location, "Platform state directory");
   assert.equal(JSON.stringify(capturedStatus).includes("/private/insights"), false);
   assert.equal(capturedStatus.worker, null);

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   assertSessionFactsDelta,
+  assertSessionFactsDeltaV2,
   canonicalJson,
   hashKey,
 } from "./session-facts.mjs";
@@ -33,7 +34,8 @@ function verifyDeltaIdentity(delta) {
 
 function validateCommitEnvelope(delta) {
   try {
-    assertSessionFactsDelta(delta);
+    if (delta?.factSchemaVersion === 2) assertSessionFactsDeltaV2(delta);
+    else assertSessionFactsDelta(delta);
   } catch (cause) {
     const error = engineError("TS_INSIGHTS_INVALID_DELTA", cause.message);
     error.cause = cause;

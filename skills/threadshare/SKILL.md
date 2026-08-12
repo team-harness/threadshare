@@ -16,7 +16,8 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
 - List local native sessions: `threadshare sessions <codex|claude> --format json`
 - Analyze one local native session without uploading: `threadshare analyze <codex|claude> <session> --format json`
-- Query committed local history: `threadshare insights <overview|search|capabilities|usage|activity|evidence> ... --format json`
+- Query committed local history: `threadshare insights <overview|search|capabilities|usage|activity|query|recipe|evidence> ... --format json`
+- Expose the same deep read contracts to an Agent: `threadshare insights mcp --stdio`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
 - Preflight without uploading: `threadshare share <provider> <session-or-agent> --dry-run --report --json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
@@ -62,8 +63,16 @@ Sessions. Reserve `threadshare insights reindex` for an explicit complete rebuil
 5. Describe invocation terminal counts separately from containing-Turn outcomes. They are different axes
    with different denominators; never say a Tool or Skill caused success, failure, improvement, or decline.
 
-Use `threadshare insights <action> --help` for request files, filters, limits, and cursor syntax. Never put
-raw Tool arguments, Tool output, system/thinking content, local paths, or internal digests into a summary.
+Use `query` for typed records or exact aggregates over session, turn, event, capability-use,
+file-activity, token-usage, and error-occurrence resources. Use a versioned `recipe` when the question
+matches capability contexts, failure chains, file workflow signals, activity shifts, token hotspots,
+solution recall, or a session timeline. Follow each returned evidence target with the v2 `evidence
+--request` form when the answer needs the complete recorded content.
+
+Use `threadshare insights <action> --help` for request files, filters, limits, and cursor syntax. Deep
+Query may return raw Tool arguments/output, system/developer/analysis content, provider payloads, and
+local paths. Treat them as local context: quote only what the answer needs, and never pass them to
+`share`, `publish`, a remote MCP server, or another network service unless the user explicitly asks.
 
 ## Choose A Start Turn
 

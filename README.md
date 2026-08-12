@@ -136,8 +136,9 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 ### Query Local Insights with an Agent
 
 Initialize or incrementally update the local Insights index with `sync`, then use the JSON-only query
-actions to inspect committed, privacy-trimmed history without uploading it or rereading provider
-session files during queries:
+actions to inspect committed local history without uploading it or rereading provider session files
+during queries. Deep Query can return complete local messages, analysis, Tool input/output, errors, and
+file paths; treat stdout as sensitive local data:
 
 ```bash
 threadshare insights status
@@ -145,6 +146,10 @@ threadshare insights sync
 threadshare insights search --query 'database timeout' --format json
 threadshare insights usage skill --request usage.json --format json
 threadshare insights activity --request activity.json --format json
+threadshare insights query --request query.json --format json
+threadshare insights recipe solution-recall@1 --request recipe.json --format json
+threadshare insights evidence --request evidence.json --format json
+threadshare insights mcp --stdio
 ```
 
 `sync` creates the index when it is missing and otherwise commits only new, changed, deleted, or newly
@@ -153,23 +158,26 @@ when you explicitly need a complete atomic rebuild or origin-secret recovery.
 
 Use `threadshare insights --help` and each action's help for the canonical request shape. The query
 surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filtered Turn search,
-capability discovery, and revision-checked evidence pages. Responses include the committed snapshot
-identity needed to cite results and detect an atomic reindex between pages.
+capability discovery, typed records and aggregates across seven local resources, versioned recipes,
+and revision-checked full evidence pages. The stdio MCP server exposes the same Query, Recipe, and
+Evidence contracts as three Agent tools; it does not listen on a network port. Responses include the
+committed snapshot identity needed to cite results and detect an atomic reindex between pages.
 
-High-value questions for an agent include:
+High-value questions map to versioned recipes:
 
-- **Reuse a previous solution:** "Have we handled a similar database timeout before, and what did we
-  try?" Search finds related Turns; revision-checked evidence grounds the answer in the visible problem
-  and final outcome instead of making the agent rediscover the same path.
-- **Choose a Skill or Tool:** "Which Skills have I used most recently, in what situations, and which
-  Tools show repeated failed invocations?" Usage ranks recorded activity; Search and Evidence add the
-  surrounding problem and outcome needed to make the ranking actionable.
-- **Find recurring engineering friction:** "Which failures, retries, or abandoned tasks keep
-  recurring?" Filtered Search connects repeated symptoms across sessions so an agent can identify
-  brittle tests, environment problems, and repeated rework.
-- **Measure a workflow change:** "After introducing a new Skill, what changed compared with the
-  previous period?" Usage comparison windows and UTC Activity buckets show changes in invocation and
-  work patterns without uploading the underlying sessions.
+| Question | Recipe |
+|---|---|
+| Which Skills or Tools do I use most, and in which contexts? | `capability-contexts@1` |
+| Which Tool attempts kept failing, and did the same attempt chain later succeed? | `failure-chains@1` |
+| Which sessions were research-heavy, implementation-heavy, or lacked supporting docs? | `file-workflow-signals@1` |
+| When did activity or project switching change compared with a prior UTC window? | `activity-shifts@1` |
+| Which provider, model, and project combinations consumed the most recorded tokens? | `token-hotspots@1` |
+| Where did a similar error occur before, and what successful attempt followed it? | `solution-recall@1` |
+| What exactly happened around compaction, rollback, resume, Tool calls, and lifecycle events? | `session-timeline@1` |
+
+Recipes return structured facts, provenance, coverage, and directly readable evidence targets rather
+than a natural-language verdict. An Agent forms the answer and should distinguish recorded facts,
+derived signals, estimates, and co-occurrence.
 
 Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
 core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
@@ -178,8 +186,9 @@ available in the 0.7.x release line while the owner-only Windows ACL adapter rem
 Usage counts are recorded invocations, not inferred independent uses. Agents must report grouped and
 ungrouped invocations with the returned dedupe support, and must describe Capability terminal states
 separately from the outcome of the containing Turn. Co-occurrence is not evidence that a Tool or Skill
-caused a Turn to succeed or fail. Query responses may include bounded visible problem and final-answer
-excerpts, but never raw Tool payloads, system/thinking content, provider pointers, or local paths.
+caused a Turn to succeed or fail. Deep Query and Evidence may return raw Tool payloads,
+system/developer/analysis content, provider payloads, and local paths. They remain local unless the
+user separately asks to share or publish them.
 
 ### Use Another Threadshare Server
 

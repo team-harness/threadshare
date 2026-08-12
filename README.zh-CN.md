@@ -135,8 +135,9 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### 让 Agent 查询本地 Insights
 
-先用 `sync` 初始化或增量更新本地 Insights 索引，再通过 JSON-only 查询动作分析已提交、经过隐私裁剪的历史；
-查询本身不会上传数据，也不会重新扫描 provider session 文件：
+先用 `sync` 初始化或增量更新本地 Insights 索引，再通过 JSON-only 查询动作分析已提交的本地历史；
+查询本身不会上传数据，也不会重新扫描 provider session 文件。Deep Query 可以返回完整本地消息、
+analysis、Tool 输入输出、错误和文件路径，因此应把 stdout 视为本机敏感数据：
 
 ```bash
 threadshare insights status
@@ -144,6 +145,10 @@ threadshare insights sync
 threadshare insights search --query 'database timeout' --format json
 threadshare insights usage skill --request usage.json --format json
 threadshare insights activity --request activity.json --format json
+threadshare insights query --request query.json --format json
+threadshare insights recipe solution-recall@1 --request recipe.json --format json
+threadshare insights evidence --request evidence.json --format json
+threadshare insights mcp --stdio
 ```
 
 `sync` 会在索引不存在时创建它；索引已存在时只提交新增、变更、删除或刚被排除的 Session。
@@ -151,20 +156,25 @@ threadshare insights activity --request activity.json --format json
 `reindex`。
 
 规范请求形状以 `threadshare insights --help` 和各 action 的 help 为准。查询面包括 Overview、
-Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录，以及带 revision
-校验的证据分页。响应包含用于引用结果、检测分页期间原子 reindex 的 committed snapshot 身份。
+Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录、七类本地资源的类型化
+记录与聚合、版本化 Recipe，以及带 revision 校验的完整证据分页。stdio MCP server 把同一套
+Query、Recipe、Evidence 契约暴露为三个 Agent tool，不监听网络端口。响应包含用于引用结果、检测
+分页期间原子 reindex 的 committed snapshot 身份。
 
-适合交给 Agent 的高价值问题包括：
+最有价值的问题可直接映射到版本化 Recipe：
 
-- **复用过去的解决方案：**“以前处理过类似的数据库超时吗？当时尝试了什么？”Search 找到相关
-  Turn，带 revision 校验的 Evidence 用可见问题和最终结果支撑回答，避免 Agent 重复探索同一路径。
-- **选择 Skill 或 Tool：**“最近最常用哪些 Skill，分别用在什么情况下？哪些 Tool 反复出现失败
-  invocation？”Usage 给出已记录活动的排行，Search 与 Evidence 补充问题背景和结果，让排行可以转化
-  为实际选择。
-- **发现反复出现的工程阻力：**“哪些失败、retry 或中止任务一直重复出现？”带过滤条件的 Search
-  串联跨 Session 的重复症状，帮助 Agent 识别脆弱测试、环境问题和重复返工。
-- **衡量工作流调整：**“引入一个新 Skill 后，与上一周期相比发生了什么变化？”Usage 的对比窗口
-  和 UTC Activity 分桶展示 invocation 与工作模式的变化，同时不上传底层 Session。
+| 问题 | Recipe |
+|---|---|
+| 哪些 Skill/Tool 最常用，分别用在什么上下文？ | `capability-contexts@1` |
+| 哪些 Tool attempt 反复失败，同一 attempt chain 后来成功了吗？ | `failure-chains@1` |
+| 哪些 Session 偏研究、偏实现，或缺少配套文档？ | `file-workflow-signals@1` |
+| 与上一 UTC 时间窗相比，活动量或项目切换何时发生变化？ | `activity-shifts@1` |
+| 哪些 provider/model/project 组合消耗了最多已记录 token？ | `token-hotspots@1` |
+| 以前哪里出现过相似错误，随后哪个 attempt 成功了？ | `solution-recall@1` |
+| compaction、rollback、resume、Tool 调用和 lifecycle 前后究竟发生了什么？ | `session-timeline@1` |
+
+Recipe 返回结构化事实、provenance、coverage 与可直接读取的 evidence target，而不是自然语言结论。
+Agent 负责形成回答，并区分 recorded fact、derived signal、estimate 与 co-occurrence。
 
 本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
 `share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，
@@ -172,8 +182,9 @@ Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Ca
 
 Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 必须同时报告 grouped、
 ungrouped invocation 与返回的 dedupe support；Capability 调用终态和所在 Turn 的结果必须分开陈述，
-共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。查询结果可以包含有界的可见问题与最终
-回答摘录，但不会包含原始 Tool payload、system/thinking 内容、provider pointer 或本地路径。
+共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。Deep Query 与 Evidence 可以返回原始
+Tool payload、system/developer/analysis 内容、provider payload 与本地路径；除非用户另行要求
+share 或 publish，这些内容始终只留在本机。
 
 ### 使用其他 Threadshare 服务端
 

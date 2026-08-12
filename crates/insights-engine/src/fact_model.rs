@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 use std::str::FromStr;
@@ -235,6 +236,36 @@ pub enum OriginScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum Completeness {
+    Full,
+    Summary,
+    Unloaded,
+    Truncated,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryPayloadKind {
+    MessageContent,
+    AnalysisContent,
+    ToolInput,
+    ToolOutput,
+    ErrorContent,
+    ProviderPayload,
+    CompactionContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PayloadEncoding {
+    #[serde(rename = "utf-8")]
+    Utf8,
+    CanonicalJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MessageRole {
     User,
     Assistant,
@@ -425,6 +456,48 @@ pub struct EventCommon {
     pub pointer: EvidencePointer,
     pub origin_scope: OriginScope,
     pub observed_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryEventFact {
+    pub event_key: StableKey,
+    pub owner_session_key: StableKey,
+    pub occurred_turn_key: Option<StableKey>,
+    pub source_record_key: StableKey,
+    pub source_order: SourceOrder,
+    pub origin_scope: OriginScope,
+    pub observed_timestamp: Option<String>,
+    pub kind: String,
+    pub completeness: Completeness,
+    pub revision: StableKey,
+    pub metadata: Value,
+    pub payload_keys: Vec<StableKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryPayloadFact {
+    pub payload_key: StableKey,
+    pub owner_session_key: StableKey,
+    pub event_key: StableKey,
+    pub payload_kind: HistoryPayloadKind,
+    pub encoding: PayloadEncoding,
+    pub byte_length: WireU64,
+    pub sha256: StableKey,
+    pub completeness: Completeness,
+    pub chunk_count: WireU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryPayloadChunkFact {
+    pub payload_key: StableKey,
+    pub owner_session_key: StableKey,
+    pub ordinal: WireU64,
+    pub content: String,
+    pub byte_length: WireU64,
+    pub sha256: StableKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -698,21 +771,56 @@ pub struct SessionFactsDeltaV1 {
     pub capabilities: Vec<CapabilityFact>,
     pub capability_uses: Vec<CapabilityUseFact>,
     pub capability_use_evidence: Vec<CapabilityUseEvidenceFact>,
+    #[serde(default)]
+    pub history_events: Vec<HistoryEventFact>,
+    #[serde(default)]
+    pub history_payloads: Vec<HistoryPayloadFact>,
+    #[serde(default)]
+    pub history_payload_chunks: Vec<HistoryPayloadChunkFact>,
     pub checkpoint: Checkpoint,
     pub diagnostics: Vec<DiagnosticFact>,
     pub coverage: BTreeMap<String, u64>,
 }
 
 impl SessionFactsDeltaV1 {
+    pub fn to_contract_value(&self) -> Result<Value, FactModelError> {
+        let mut value = serde_json::to_value(self)
+            .map_err(|_| FactModelError::invalid("delta is outside the canonical JSON domain"))?;
+        if self.format == "session-facts-delta@v1" {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| FactModelError::invalid("delta must be an object"))?;
+            object.remove("historyEvents");
+            object.remove("historyPayloads");
+            object.remove("historyPayloadChunks");
+        }
+        Ok(value)
+    }
+
     pub fn validate(&self) -> Result<(), FactModelError> {
-        if self.format != "session-facts-delta@v1"
-            || self.fact_schema_version != 1
-            || self.privacy_policy_version != 1
+        let v1 = self.format == "session-facts-delta@v1"
+            && self.fact_schema_version == 1
+            && self.privacy_policy_version == 1
+            && matches!(
+                self.provider_adapter_version.as_str(),
+                "codex@1" | "claude@1"
+            )
+            && self.history_events.is_empty()
+            && self.history_payloads.is_empty()
+            && self.history_payload_chunks.is_empty();
+        let v2 = self.format == "session-facts-delta@v2"
+            && self.fact_schema_version == 2
+            && self.privacy_policy_version == 2
+            && matches!(
+                self.provider_adapter_version.as_str(),
+                "codex@2" | "claude@2"
+            );
+        if (!v1 && !v2)
             || self.duplicate_policy_version != 1
             || self.session.duplicate_policy_version != 1
         {
             return Err(FactModelError::invalid(
-                "unsupported SessionFactsDeltaV1 contract version",
+                "unsupported SessionFactsDelta contract version",
             ));
         }
         if self.provider_adapter_version.is_empty()
@@ -840,6 +948,17 @@ impl SessionFactsDeltaV1 {
                     .iter()
                     .map(|link| (link.use_key, link.event_key, link.role)),
             )
+            || !all_unique(self.history_events.iter().map(|event| event.event_key))
+            || !all_unique(
+                self.history_payloads
+                    .iter()
+                    .map(|payload| payload.payload_key),
+            )
+            || !all_unique(
+                self.history_payload_chunks
+                    .iter()
+                    .map(|chunk| (chunk.payload_key, chunk.ordinal)),
+            )
             || !all_unique(
                 self.diagnostics
                     .iter()
@@ -850,8 +969,145 @@ impl SessionFactsDeltaV1 {
                 "delta contains duplicate fact or retraction identities",
             ));
         }
+        if v2 {
+            self.validate_history_facts()?;
+        }
         Ok(())
     }
+
+    fn validate_history_facts(&self) -> Result<(), FactModelError> {
+        let session_key = self.session.session_key;
+        let history_events = self
+            .history_events
+            .iter()
+            .map(|event| (event.event_key, event))
+            .collect::<HashMap<_, _>>();
+        let payloads = self
+            .history_payloads
+            .iter()
+            .map(|payload| (payload.payload_key, payload))
+            .collect::<HashMap<_, _>>();
+
+        for event in &self.history_events {
+            if event.owner_session_key != session_key
+                || event.kind.is_empty()
+                || !event.metadata.is_object()
+                || !all_unique(event.payload_keys.iter().copied())
+                || event.payload_keys.windows(2).any(|pair| pair[0] >= pair[1])
+                || event.payload_keys.iter().any(|key| {
+                    payloads
+                        .get(key)
+                        .is_none_or(|payload| payload.event_key != event.event_key)
+                })
+            {
+                return Err(FactModelError::invalid(
+                    "delta contains an invalid history event",
+                ));
+            }
+            let event_payloads = event
+                .payload_keys
+                .iter()
+                .map(|key| payloads[key])
+                .collect::<Vec<_>>();
+            if expected_history_event_revision(event, &event_payloads)? != event.revision {
+                return Err(FactModelError::invalid(
+                    "history event revision does not match its envelope and payloads",
+                ));
+            }
+        }
+
+        let mut chunks_by_payload = HashMap::<StableKey, Vec<&HistoryPayloadChunkFact>>::new();
+        for chunk in &self.history_payload_chunks {
+            if chunk.owner_session_key != session_key
+                || chunk.content.len() > 64 * 1024
+                || chunk.content.len() != chunk.byte_length.get() as usize
+                || Sha256::digest(chunk.content.as_bytes()).as_slice() != chunk.sha256.as_bytes()
+            {
+                return Err(FactModelError::invalid(
+                    "delta contains an invalid history payload chunk",
+                ));
+            }
+            chunks_by_payload
+                .entry(chunk.payload_key)
+                .or_default()
+                .push(chunk);
+        }
+
+        for payload in &self.history_payloads {
+            if payload.owner_session_key != session_key
+                || history_events
+                    .get(&payload.event_key)
+                    .is_none_or(|event| !event.payload_keys.contains(&payload.payload_key))
+            {
+                return Err(FactModelError::invalid(
+                    "delta contains an invalid history payload",
+                ));
+            }
+            let mut chunks = chunks_by_payload
+                .remove(&payload.payload_key)
+                .unwrap_or_default();
+            chunks.sort_by_key(|chunk| chunk.ordinal);
+            if chunks.len() != payload.chunk_count.get() as usize
+                || chunks
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, chunk)| chunk.ordinal.get() != ordinal as u64)
+            {
+                return Err(FactModelError::invalid(
+                    "history payload chunks are not contiguous",
+                ));
+            }
+            let mut digest = Sha256::new();
+            let mut byte_length = 0_u64;
+            for chunk in chunks {
+                byte_length = byte_length
+                    .checked_add(chunk.byte_length.get())
+                    .ok_or_else(|| FactModelError::invalid("history payload is too large"))?;
+                digest.update(chunk.content.as_bytes());
+            }
+            if byte_length != payload.byte_length.get()
+                || digest.finalize().as_slice() != payload.sha256.as_bytes()
+            {
+                return Err(FactModelError::invalid(
+                    "history payload digest or byte length does not match its chunks",
+                ));
+            }
+        }
+        if !chunks_by_payload.is_empty() {
+            return Err(FactModelError::invalid(
+                "history payload chunk references a missing payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn expected_history_event_revision(
+    event: &HistoryEventFact,
+    payloads: &[&HistoryPayloadFact],
+) -> Result<StableKey, FactModelError> {
+    let value = serde_json::json!({
+        "eventKey": event.event_key,
+        "ownerSessionKey": event.owner_session_key,
+        "occurredTurnKey": event.occurred_turn_key,
+        "sourceRecordKey": event.source_record_key,
+        "sourceOrder": event.source_order,
+        "originScope": event.origin_scope,
+        "observedTimestamp": event.observed_timestamp,
+        "kind": event.kind,
+        "completeness": event.completeness,
+        "metadata": event.metadata,
+        "payloads": payloads.iter().map(|payload| serde_json::json!({
+            "payloadKey": payload.payload_key,
+            "sha256": payload.sha256,
+            "byteLength": payload.byte_length,
+        })).collect::<Vec<_>>(),
+    });
+    let canonical = crate::try_canonical_json(&value)
+        .map_err(|_| FactModelError::invalid("history event revision input is invalid"))?;
+    Ok(StableKey::from_bytes(
+        Sha256::digest(canonical.as_bytes()).into(),
+    ))
 }
 
 fn all_unique<T>(values: impl IntoIterator<Item = T>) -> bool

@@ -37,7 +37,10 @@ import {
   createExcludeSourceMessage,
   createHelloMessage,
   createReadEngineStatusMessage,
+  createReadInsightsEvidenceV2Message,
   createReadInsightsOverviewMessage,
+  createReadInsightsQueryV2Message,
+  createReadInsightsRecipeMessage,
   createRemoveSourceMessage,
   createRunPurgeMaintenanceMessage,
   createSearchTurnsMessage,
@@ -46,7 +49,7 @@ import {
   encodeProtocolFrame,
 } from "../src/insights-engine-protocol.mjs";
 import {
-  assertSessionFactsDelta,
+  assertSessionFactsDeltaV2,
   canonicalJson,
   createPrivacyContext,
   hashKey,
@@ -88,6 +91,7 @@ const BENCHMARK_FORMAT = "threadshare-insights-engine-benchmark@v1";
 const CAPACITY_BENCHMARK_FORMAT = "threadshare-insights-capacity-benchmark@v1";
 const RAW_BACKFILL_BENCHMARK_FORMAT = "threadshare-insights-raw-backfill-benchmark@v1";
 const QUERY_BENCHMARK_FORMAT = "threadshare-insights-query-benchmark@v1";
+const DEEP_QUERY_BENCHMARK_FORMAT = "threadshare-insights-deep-query-benchmark@v1";
 export const FORMAL_QUERY_BENCHMARK_TURN_COUNTS = Object.freeze([25_000, 250_000]);
 export const FORMAL_QUERY_BENCHMARK_QUERY_COUNT = 1_000;
 export const FORMAL_QUERY_BENCHMARK_WARMUP_COUNT = 100;
@@ -95,6 +99,12 @@ export const FORMAL_MUTATION_QUERY_EQUIVALENCE_COUNT = 100;
 export const FORMAL_QUERY_BENCHMARK_SEEDS = Object.freeze({
   25000: "threadshare-insights-query-25k-v1",
   250000: "threadshare-insights-query-250k-v1",
+});
+export const FORMAL_DEEP_QUERY_COUNT = 100;
+export const FORMAL_DEEP_QUERY_WARMUP_COUNT = 20;
+export const FORMAL_DEEP_QUERY_SEEDS = Object.freeze({
+  25000: "threadshare-insights-deep-query-25k-v1",
+  250000: "threadshare-insights-deep-query-250k-v1",
 });
 const BASE_TIME_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
 const GIB = 1024 ** 3;
@@ -104,6 +114,8 @@ const STEADY_STATE_LIMIT_BYTES = 8 * GIB;
 const CURRENT_ENGINE_RSS_LIMIT_BYTES = 96 * 1024 * 1024;
 const LONG_TERM_ENGINE_RSS_LIMIT_BYTES = 128 * 1024 * 1024;
 const DETAIL_FULL_FTS_LIMIT_BYTES = 400 * 1024 * 1024;
+const DEEP_STORAGE_AMPLIFICATION_LIMIT = 1.8;
+const DEEP_FTS_AMPLIFICATION_LIMIT = 0.7;
 const QUERY_BUDGETS = Object.freeze({
   current: Object.freeze({
     maximumTurns: 25_000,
@@ -120,14 +132,21 @@ const QUERY_BUDGETS = Object.freeze({
     derivedStateBytes: 8 * GIB,
   }),
 });
-const CAPACITY_CORPUS_VERSION = 4;
+const CAPACITY_CORPUS_VERSION = 6;
 const CAPACITY_TOPIC_COUNT = 47;
 const CAPACITY_DENSITY = Object.freeze({
-  sourceRecordsPerTurn: 9,
+  sourceRecordsPerTurn: 10,
   evidenceEventsPerTurn: 9,
   turnEvidencePerTurn: 3,
   capabilityUsesPerTurn: 3,
   capabilityUseEvidencePerTurn: 6,
+  historyEventsPerTurn: 10,
+  historyPayloadsPerTurn: 8,
+  historyPayloadChunksPerTurn: 8,
+  evidencePagingProbeBytes: 2 * 1024 * 1024,
+  evidencePagingProbeEvents: 1,
+  evidencePagingProbePayloads: 1,
+  evidencePagingProbeChunks: 32,
   capabilitiesPerProvider: 12,
   naturalTermsPerTurn: 135,
   uniqueNaturalTermsPerTurn: 6,
@@ -163,9 +182,12 @@ const FACT_TABLES = new Set([
   "capability_uses", "capability_use_evidence", "checkpoint_turn_pins",
   "checkpoint_event_pins", "checkpoint_use_pins", "checkpoint_capability_pins",
   "session_dedupe_evidence", "fact_diagnostics", "fact_coverage",
+  "history_events", "history_payloads", "history_payload_chunks",
+  "attempt_chain_events", "file_activity", "token_usage", "error_occurrences",
 ]);
 const FTS_TABLES = new Set([
   "turn_fts_documents",
+  "history_event_fts_documents",
   "field_stats",
   "fts_analyzer_identity",
   "turn_analyzer_diagnostics",
@@ -175,6 +197,7 @@ const PROJECTION_TABLES = new Set([
   "capability_retry_contributions", "retry_projection_build_cursor",
   "turn_search_build_cursor", "overview_rollup_state", "overview_session_rollups",
   "overview_session_capabilities", "overview_session_fact_signals",
+  "history_coverage_rollups",
 ]);
 const SOURCE_STATE_TABLES = new Set([
   "source_ingestion_states", "source_ingestion_staging", "source_purge_states",
@@ -342,6 +365,118 @@ function commonEvent(record, turnKey, kind, pointerKind, timestamp) {
   };
 }
 
+function capacityHistoryEvent(event, metadata) {
+  return {
+    eventKey: event.eventKey,
+    ownerSessionKey: event.ownerSessionKey,
+    occurredTurnKey: event.occurredTurnKey,
+    sourceRecordKey: event.sourceRecordKey,
+    sourceOrder: event.sourceOrder,
+    originScope: event.originScope,
+    observedTimestamp: event.observedTimestamp,
+    kind: event.kind,
+    completeness: "full",
+    revision: "0".repeat(64),
+    metadata,
+    payloadKeys: [],
+  };
+}
+
+function addCapacityHistoryPayload({
+  event,
+  ownerSessionKey,
+  payloadKind,
+  content,
+  encoding,
+  payloads,
+  chunks,
+}) {
+  const bytes = Buffer.from(content, "utf8");
+  const payloadKey = hashKey(
+    "history-payload",
+    Buffer.from(event.eventKey, "hex"),
+    payloadKind,
+  );
+  const payloadChunks = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    let end = Math.min(offset + 64 * 1_024, bytes.length);
+    while (end < bytes.length && end > offset && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    if (end === offset) throw new TypeError("capacity payload chunk boundary is invalid");
+    payloadChunks.push(bytes.subarray(offset, end).toString("utf8"));
+    offset = end;
+  }
+  if (payloadChunks.length === 0) payloadChunks.push("");
+  payloads.push({
+    payloadKey,
+    ownerSessionKey,
+    eventKey: event.eventKey,
+    payloadKind,
+    encoding,
+    byteLength: String(bytes.length),
+    sha256: sha256(bytes),
+    completeness: "full",
+    chunkCount: String(payloadChunks.length),
+  });
+  for (let ordinal = 0; ordinal < payloadChunks.length; ordinal += 1) {
+    const chunk = payloadChunks[ordinal];
+    const chunkBytes = Buffer.from(chunk, "utf8");
+    chunks.push({
+      payloadKey,
+      ownerSessionKey,
+      ordinal: String(ordinal),
+      content: chunk,
+      byteLength: String(chunkBytes.length),
+      sha256: sha256(chunkBytes),
+    });
+  }
+  event.payloadKeys.push(payloadKey);
+}
+
+function finalizeCapacityHistory(events, payloads, chunks) {
+  const payloadByKey = new Map(payloads.map((payload) => [payload.payloadKey, payload]));
+  for (const event of events) {
+    event.payloadKeys.sort();
+    event.revision = sha256(canonicalJson({
+      eventKey: event.eventKey,
+      ownerSessionKey: event.ownerSessionKey,
+      occurredTurnKey: event.occurredTurnKey,
+      sourceRecordKey: event.sourceRecordKey,
+      sourceOrder: event.sourceOrder,
+      originScope: event.originScope,
+      observedTimestamp: event.observedTimestamp,
+      kind: event.kind,
+      completeness: event.completeness,
+      metadata: event.metadata,
+      payloads: event.payloadKeys.map((payloadKey) => {
+        const payload = payloadByKey.get(payloadKey);
+        if (!payload) throw new TypeError("capacity history event references a missing payload");
+        return { payloadKey, sha256: payload.sha256, byteLength: payload.byteLength };
+      }),
+    }));
+  }
+  events.sort((left, right) => left.eventKey.localeCompare(right.eventKey));
+  payloads.sort((left, right) => left.payloadKey.localeCompare(right.payloadKey));
+  chunks.sort((left, right) =>
+    left.payloadKey.localeCompare(right.payloadKey) || Number(left.ordinal) - Number(right.ordinal));
+}
+
+function capacityFileActivity(globalIndex, useIndex, phase) {
+  const relativePath = useIndex === 0
+    ? `docs/topic-${globalIndex % CAPACITY_TOPIC_COUNT}.md`
+    : `src/module-${globalIndex % 97}.${useIndex === 1 ? "rs" : "mjs"}`;
+  return {
+    action: useIndex === 0 ? "read" : useIndex === 1 ? "edit" : "search",
+    phase,
+    pathRole: "target",
+    rawPath: `/benchmark/project-${globalIndex % 29}/${relativePath}`,
+    normalizedPath: `/benchmark/project-${globalIndex % 29}/${relativePath}`,
+    relativePath,
+    absolute: true,
+    projectRelative: true,
+  };
+}
+
 function checkpoint(sessionKey, generation, completeOffset) {
   return {
     completeOffset,
@@ -391,7 +526,7 @@ function finalizeDelta(delta) {
     mutationDigest,
     delta.checkpoint.completeOffset,
   );
-  assertSessionFactsDelta(delta);
+  assertSessionFactsDeltaV2(delta);
   return {
     delta,
     canonical: canonicalJson(delta),
@@ -448,10 +583,10 @@ export function createBenchmarkCorpus({
     const lastTurnIndex = nextTurn + sessionTurnCount - 1;
     const completeOffset = String((lastTurnIndex + 1) * 1_024);
     const finalized = finalizeDelta({
-      format: "session-facts-delta@v1",
-      factSchemaVersion: 1,
-      providerAdapterVersion: sessionIndex % 2 === 0 ? "codex@1" : "claude@1",
-      privacyPolicyVersion: 1,
+      format: "session-facts-delta@v2",
+      factSchemaVersion: 2,
+      providerAdapterVersion: sessionIndex % 2 === 0 ? "codex@2" : "claude@2",
+      privacyPolicyVersion: 2,
       originSecretEpoch: ORIGIN_SECRET_EPOCH,
       duplicatePolicyVersion: 1,
       expectedGeneration: "0",
@@ -489,6 +624,9 @@ export function createBenchmarkCorpus({
       capabilities: [],
       capabilityUses: [],
       capabilityUseEvidence: [],
+      historyEvents: [],
+      historyPayloads: [],
+      historyPayloadChunks: [],
       checkpoint: checkpoint(sessionKey, "1", completeOffset),
       diagnostics: [],
       coverage: {},
@@ -531,6 +669,9 @@ function createCapacitySession(plan, sessionIndex, {
   const turnEvidence = [];
   const capabilityUses = [];
   const capabilityUseEvidence = [];
+  const historyEvents = [];
+  const historyPayloads = [];
+  const historyPayloadChunks = [];
   const usedCapabilities = new Map();
 
   for (let localIndex = 0; localIndex < sessionTurnCount; localIndex += 1) {
@@ -539,15 +680,17 @@ function createCapacitySession(plan, sessionIndex, {
     const turnKey = hashKey("turn", Buffer.from(sessionKey, "hex"), uint64(turnStartOffset));
     const timestamp = new Date(BASE_TIME_MS + globalIndex * 1_000).toISOString();
     const replacementMarker = replacement && localIndex === 0 ? " replacement-v2" : "";
+    const problemText = capacityProblemText(globalIndex, provider, replacementMarker);
+    const finalAnswerExcerpt = sizedText(
+      `capacity answer ${globalIndex} outcome-${globalIndex % 17}`,
+      CAPACITY_DENSITY.finalAnswerCharacters,
+    );
     turns.push({
       turnKey,
       ownerSessionKey: sessionKey,
       turnStartOffset: String(turnStartOffset),
-      problemText: capacityProblemText(globalIndex, provider, replacementMarker),
-      finalAnswerExcerpt: sizedText(
-        `capacity answer ${globalIndex} outcome-${globalIndex % 17}`,
-        CAPACITY_DENSITY.finalAnswerCharacters,
-      ),
+      problemText,
+      finalAnswerExcerpt,
       observedTimestamp: timestamp,
       rawClosure: {
         nextUserBoundary: localIndex + 1 < sessionTurnCount,
@@ -599,7 +742,42 @@ function createCapacitySession(plan, sessionIndex, {
       { ownerSessionKey: sessionKey, turnKey, eventKey: assistant.eventKey, role: "result" },
       { ownerSessionKey: sessionKey, turnKey, eventKey: lifecycle.eventKey, role: "lifecycle" },
     );
+    const userHistory = capacityHistoryEvent(user, { role: "user" });
+    const assistantHistory = capacityHistoryEvent(assistant, { role: "assistant" });
+    historyEvents.push(
+      userHistory,
+      assistantHistory,
+      capacityHistoryEvent(lifecycle, {
+        lifecycleState: lifecycle.lifecycleState,
+        providerTurnDigest: lifecycle.providerTurnDigest,
+      }),
+    );
+    addCapacityHistoryPayload({
+      event: userHistory,
+      ownerSessionKey: sessionKey,
+      payloadKind: "message-content",
+      content: problemText,
+      encoding: "utf-8",
+      payloads: historyPayloads,
+      chunks: historyPayloadChunks,
+    });
+    addCapacityHistoryPayload({
+      event: assistantHistory,
+      ownerSessionKey: sessionKey,
+      payloadKind: "message-content",
+      content: finalAnswerExcerpt,
+      encoding: "utf-8",
+      payloads: historyPayloads,
+      chunks: historyPayloadChunks,
+    });
 
+    const retryCorrelationDigest = globalIndex % 7 === 0
+      ? hashKey(
+        "benchmark-retry-correlation",
+        Buffer.from(sessionKey, "hex"),
+        String(globalIndex),
+      )
+      : null;
     for (let useIndex = 0; useIndex < CAPACITY_DENSITY.capabilityUsesPerTurn; useIndex += 1) {
       // Keep one Tool path per topic across independent sessions so the
       // per-family evidence threshold is measurable instead of globally pooled.
@@ -653,11 +831,129 @@ function createCapacitySession(plan, sessionIndex, {
         { ownerSessionKey: sessionKey, useKey, eventKey: invocation.eventKey, role: "invocation" },
         { ownerSessionKey: sessionKey, useKey, eventKey: result.eventKey, role: "result" },
       );
+      const historyCorrelationDigest = retryCorrelationDigest !== null && useIndex < 2
+        ? retryCorrelationDigest
+        : correlationDigest;
+      const invocationHistory = capacityHistoryEvent(invocation, {
+        capabilityKey: tool.capabilityKey,
+        correlationDigest: historyCorrelationDigest,
+        inputFingerprint,
+        fileActivities: [capacityFileActivity(globalIndex, useIndex, "attempted")],
+      });
+      const resultText = failed
+        ? `benchmark retry error topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)} ` +
+          `for ${name} at turn ${globalIndex}`
+        : `benchmark result completed topic${alphabeticOrdinal(globalIndex % CAPACITY_TOPIC_COUNT)} ` +
+          `for ${name} at turn ${globalIndex}`;
+      const resultHistory = capacityHistoryEvent(result, {
+        capabilityKey: tool.capabilityKey,
+        correlationDigest: historyCorrelationDigest,
+        providerState: result.providerState,
+        exitCode: result.exitCode,
+        outputBytes: result.outputBytes,
+        durationMs: result.durationMs,
+        fileActivities: [capacityFileActivity(
+          globalIndex,
+          useIndex,
+          failed ? "failed" : "confirmed",
+        )],
+        ...(failed
+          ? {
+            errorSignatureVersion: "error-signature@1",
+            errorSignature: sha256(resultText.toLowerCase()),
+          }
+          : {}),
+      });
+      historyEvents.push(invocationHistory, resultHistory);
+      addCapacityHistoryPayload({
+        event: invocationHistory,
+        ownerSessionKey: sessionKey,
+        payloadKind: "tool-input",
+        content: canonicalJson({
+          path: capacityFileActivity(globalIndex, useIndex, "attempted").rawPath,
+          topic: globalIndex % CAPACITY_TOPIC_COUNT,
+          useIndex,
+        }),
+        encoding: "canonical-json",
+        payloads: historyPayloads,
+        chunks: historyPayloadChunks,
+      });
+      addCapacityHistoryPayload({
+        event: resultHistory,
+        ownerSessionKey: sessionKey,
+        payloadKind: failed ? "error-content" : "tool-output",
+        content: resultText,
+        encoding: "utf-8",
+        payloads: historyPayloads,
+        chunks: historyPayloadChunks,
+      });
     }
+
+    const tokenRecord = sourceRecord(
+      sessionKey,
+      turnStartOffset + 9 * 1_024 + 1,
+      "benchmark:token-usage",
+      `${plan.seed}:${sessionIndex}:${globalIndex}:token:${replacementMarker}`,
+    );
+    const tokenEvent = capacityHistoryEvent({
+      ...commonEvent(tokenRecord, turnKey, "token-usage", "benchmark:token-usage", timestamp),
+      kind: "token-usage",
+    }, {
+      usageScope: "delta",
+      model: provider === "codex" ? "gpt-benchmark" : "claude-benchmark",
+      inputTokens: String(1_000 + globalIndex % 2_000),
+      cachedInputTokens: String(200 + globalIndex % 500),
+      cacheWriteInputTokens: String(50 + globalIndex % 100),
+      outputTokens: String(300 + globalIndex % 700),
+      reasoningTokens: String(100 + globalIndex % 300),
+      totalTokens: String(1_650 + globalIndex % 3_600),
+    });
+    sourceRecords.push(tokenRecord);
+    historyEvents.push(tokenEvent);
   }
 
+  if (sessionIndex === 0) {
+    const probeStartOffset = sessionTurnCount * 16_384 + 1;
+    const probeContent = sizedText(
+      "benchmark evidence paging probe provider payload ",
+      CAPACITY_DENSITY.evidencePagingProbeBytes,
+    );
+    const probeRecord = sourceRecord(
+      sessionKey,
+      probeStartOffset,
+      "benchmark:provider-unknown",
+      `${plan.seed}:evidence-paging-probe:${replacement ? "replacement" : "initial"}`,
+    );
+    probeRecord.endOffset = String(probeStartOffset + Buffer.byteLength(probeContent, "utf8"));
+    const probeEvent = capacityHistoryEvent({
+      ...commonEvent(
+        probeRecord,
+        turns[0].turnKey,
+        "provider-unknown",
+        "benchmark:provider-unknown",
+        observedStart,
+      ),
+      kind: "provider-unknown",
+    }, {});
+    sourceRecords.push(probeRecord);
+    historyEvents.push(probeEvent);
+    addCapacityHistoryPayload({
+      event: probeEvent,
+      ownerSessionKey: sessionKey,
+      payloadKind: "provider-payload",
+      content: probeContent,
+      encoding: "utf-8",
+      payloads: historyPayloads,
+      chunks: historyPayloadChunks,
+    });
+  }
+  finalizeCapacityHistory(historyEvents, historyPayloads, historyPayloadChunks);
+
   const lastGlobalTurn = firstGlobalTurn + sessionTurnCount - 1;
-  const completeOffset = String(sessionTurnCount * 16_384);
+  const completeOffset = String(
+    sessionTurnCount * 16_384 +
+    (sessionIndex === 0 ? CAPACITY_DENSITY.evidencePagingProbeBytes + 1 : 0),
+  );
   const targetGeneration = String(generation);
   const expectedGeneration = String(generation - 1);
   const projectKey = hashKey("project", "benchmark-capacity", String(sessionIndex % 29));
@@ -684,10 +980,10 @@ function createCapacitySession(plan, sessionIndex, {
     },
   });
   const finalized = finalizeDelta({
-    format: "session-facts-delta@v1",
-    factSchemaVersion: 1,
-    providerAdapterVersion: `${provider}@1`,
-    privacyPolicyVersion: 1,
+    format: "session-facts-delta@v2",
+    factSchemaVersion: 2,
+    providerAdapterVersion: `${provider}@2`,
+    privacyPolicyVersion: 2,
     originSecretEpoch: ORIGIN_SECRET_EPOCH,
     duplicatePolicyVersion: 1,
     expectedGeneration,
@@ -724,6 +1020,9 @@ function createCapacitySession(plan, sessionIndex, {
       left.useKey < right.useKey ? -1 : left.useKey > right.useKey ? 1 : 0),
     capabilityUseEvidence: capabilityUseEvidence.sort((left, right) =>
       left.useKey.localeCompare(right.useKey) || left.eventKey.localeCompare(right.eventKey)),
+    historyEvents,
+    historyPayloads,
+    historyPayloadChunks,
     checkpoint: sourceCheckpoint,
     diagnostics: [],
     coverage: {
@@ -880,20 +1179,33 @@ function startRssSampler(pid) {
 }
 
 async function databaseFootprint(databasePath) {
-  let bytes = 0;
-  for (const suffix of ["", "-wal", "-shm"]) {
+  const files = await databaseGroupFootprint(databasePath);
+  return files.databaseBytes + files.walBytes + files.shmBytes;
+}
+
+async function databaseGroupFootprint(databasePath) {
+  const files = { databaseBytes: 0, walBytes: 0, shmBytes: 0 };
+  for (const [suffix, field] of [
+    ["", "databaseBytes"],
+    ["-wal", "walBytes"],
+    ["-shm", "shmBytes"],
+  ]) {
     try {
-      bytes += (await stat(`${databasePath}${suffix}`)).size;
+      files[field] = (await stat(`${databasePath}${suffix}`)).size;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
-  return bytes;
+  return files;
+}
+
+function sqliteObjectOwner(name) {
+  const autoIndex = /^sqlite_autoindex_(.+)_[0-9]+$/u.exec(name)?.[1] ?? null;
+  return autoIndex ?? name;
 }
 
 function storageOwner(name) {
-  const autoIndex = /^sqlite_autoindex_(.+)_[0-9]+$/u.exec(name)?.[1] ?? null;
-  const owner = autoIndex ?? name;
+  const owner = sqliteObjectOwner(name);
   if (FACT_TABLES.has(owner) || [
     "turns_session_order",
     "source_records_session_order",
@@ -919,8 +1231,24 @@ function storageOwner(name) {
     "sessions_query_filters",
     "turns_query_filters",
     "capability_uses_query_filter",
+    "history_events_session_revision",
+    "history_events_session_order",
+    "history_events_source_record",
+    "history_events_occurred_turn",
+    "history_events_observed",
+    "history_events_kind_observed",
+    "attempt_chain_events_chain",
+    "attempt_chain_events_correlation",
+    "history_payloads_event",
+    "file_activity_path_observed",
+    "file_activity_observed",
+    "token_usage_model_observed",
+    "token_usage_observed",
+    "error_occurrences_signature_observed",
+    "error_occurrences_observed",
   ].includes(name)) return "fact";
-  if (FTS_TABLES.has(owner) || owner === "turns_fts" || owner.startsWith("turns_fts_")) {
+  if (FTS_TABLES.has(owner) || owner === "turns_fts" || owner.startsWith("turns_fts_") ||
+      owner === "history_event_fts" || owner.startsWith("history_event_fts_")) {
     return "fts";
   }
   if (PROJECTION_TABLES.has(owner) || [
@@ -962,7 +1290,7 @@ export function evaluateCapacityGates({ factBytes, steadyStateBytes }) {
     packedFactsRequired,
     decision: packedFactsRequired
       ? "packed-facts-v1-required"
-      : "normalized-row-v1-within-capacity-gates",
+      : "normalized-row-v2-within-capacity-gates",
   });
 }
 
@@ -971,7 +1299,9 @@ async function auditCapacityDatabase(databasePath, {
   rss,
   turnCount,
 }) {
-  const preVacuumPersistentBytes = await databaseFootprint(databasePath);
+  const preVacuumFiles = await databaseGroupFootprint(databasePath);
+  const preVacuumPersistentBytes =
+    preVacuumFiles.databaseBytes + preVacuumFiles.walBytes + preVacuumFiles.shmBytes;
   const database = await openNodeDatabase(databasePath);
   const vacuumStarted = performance.now();
   database.exec("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
@@ -1083,15 +1413,51 @@ async function auditCapacityDatabase(databasePath, {
   };
   const integrity = database.prepare("PRAGMA integrity_check").all()
     .map((row) => row.integrity_check);
+  let historyFtsIntegrity = "not-present";
+  if (existingTables.has("history_event_fts")) {
+    database.exec(
+      "INSERT INTO history_event_fts(history_event_fts) VALUES('integrity-check')",
+    );
+    historyFtsIntegrity = "ok";
+  }
   const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all().length;
   const pageCount = Number(database.prepare("PRAGMA page_count").get().page_count);
   const pageSize = Number(database.prepare("PRAGMA page_size").get().page_size);
   const freelistCount = Number(
     database.prepare("PRAGMA freelist_count").get().freelist_count,
   );
+  const deepHistory = existingTables.has("history_coverage_rollups")
+    ? database.prepare(
+      `SELECT COALESCE(SUM(fts_searchable_payload_bytes),0) AS searchablePayloadBytes,
+              COALESCE(SUM(fts_stored_not_searchable_payload_bytes),0)
+                AS storedNotSearchablePayloadBytes,
+              COALESCE(SUM(fts_searchable_event_count),0) AS searchableEventCount,
+              COALESCE(SUM(fts_stored_not_searchable_event_count),0)
+                AS storedNotSearchableEventCount
+         FROM history_coverage_rollups`,
+    ).get()
+    : {
+      searchablePayloadBytes: 0,
+      storedNotSearchablePayloadBytes: 0,
+      searchableEventCount: 0,
+      storedNotSearchableEventCount: 0,
+    };
+  const explainDeepQuery = existingTables.has("history_events")
+    ? database.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT he.event_key FROM history_events he
+       JOIN sessions s ON s.session_id=he.session_id
+       WHERE s.eligibility='eligible' AND s.session_scope='main'
+         AND he.event_kind='capability-result'
+       ORDER BY he.observed_timestamp IS NULL ASC,
+                he.observed_timestamp DESC,he.event_key ASC LIMIT 20`,
+    ).all().map((row) => row.detail)
+    : [];
   database.close();
 
-  const postVacuumPersistentBytes = await databaseFootprint(databasePath);
+  const postVacuumFiles = await databaseGroupFootprint(databasePath);
+  const postVacuumPersistentBytes =
+    postVacuumFiles.databaseBytes + postVacuumFiles.walBytes + postVacuumFiles.shmBytes;
   const dbstatBytes = Object.values(categories)
     .reduce((total, category) => total + category.bytes, 0);
   const databasePageBytes = pageCount * pageSize;
@@ -1131,7 +1497,9 @@ async function auditCapacityDatabase(databasePath, {
       "pre-maintenance persistent peak plus bounded staging for the 8 GiB gate; " +
       "VACUUM then dbstat for category attribution",
     vacuumMs,
+    preVacuumFiles,
     preVacuumPersistentBytes,
+    postVacuumFiles,
     postVacuumPersistentBytes,
     dbstatBytes,
     dbstatAccountedPageBytes,
@@ -1141,7 +1509,7 @@ async function auditCapacityDatabase(databasePath, {
     freelistCount,
     fileFormatPages,
     stagingUpperBoundBytes,
-    stagingMeasurement: "maximum canonical SessionFactsDeltaV1 bytes",
+    stagingMeasurement: "maximum canonical SessionFactsDeltaV2 bytes",
     observedPersistentPeakBytes,
     compactedSteadyStateBytes,
     observedDerivedStatePeakBytes,
@@ -1157,6 +1525,16 @@ async function auditCapacityDatabase(databasePath, {
     unclassifiedObjects,
     rowCounts,
     ftsMetrics,
+    deepHistory: {
+      searchablePayloadBytes: Number(deepHistory.searchablePayloadBytes),
+      storedNotSearchablePayloadBytes: Number(deepHistory.storedNotSearchablePayloadBytes),
+      searchableEventCount: Number(deepHistory.searchableEventCount),
+      storedNotSearchableEventCount: Number(deepHistory.storedNotSearchableEventCount),
+      ftsIntegrity: historyFtsIntegrity,
+    },
+    explain: {
+      recordsByEventKind: explainDeepQuery,
+    },
     integrity,
     foreignKeyViolations,
     gates: {
@@ -1530,8 +1908,8 @@ async function benchmarkRustSidecar({
       const prepareStart = performance.now();
       for await (const message of createSessionDeltaMessages(delta, {
         requestId,
-        factStorageProfile: "normalized-row-v1",
-        storageSchemaVersion: 1,
+        factStorageProfile: "normalized-row-v2",
+        storageSchemaVersion: 2,
         projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
         analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
         rankerVersion: 1,
@@ -1663,10 +2041,11 @@ async function openCapacitySidecar(binaryPath, databasePath, { sampleRss = true 
 async function sendCapacityDelta(runtime, delta, requestId) {
   let committed = null;
   let prepareCursor = performance.now();
+  const started = prepareCursor;
   const messages = createSessionDeltaMessages(delta, {
     requestId,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
+    factStorageProfile: "normalized-row-v2",
+    storageSchemaVersion: 2,
     projectionVersions: [...ACTIVE_INSIGHTS_PROJECTION_VERSIONS],
     analyzerCapabilities: [...ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES],
     rankerVersion: 1,
@@ -1690,19 +2069,25 @@ async function sendCapacityDelta(runtime, delta, requestId) {
     prepareCursor = performance.now();
   }
   if (committed === null) throw new Error("capacity delta did not commit");
-  return committed;
+  return { response: committed, roundTripMs: performance.now() - started };
 }
 
-async function sendCapacityRequest(runtime, message, expectedType) {
+async function exchangeCapacityRequest(runtime, message, expectedType) {
+  const started = performance.now();
   const frame = encodeProtocolFrame(message);
   runtime.stats.requestFrames += 1;
   runtime.stats.requestBytes += frame.length;
   await writeEncodedFrame(runtime.child.stdin, frame);
   const response = await nextResponse(runtime.responses, expectedType, message.requestId);
+  const roundTripMs = performance.now() - started;
   const responseFrame = encodeProtocolFrame(response);
   runtime.stats.responseFrames += 1;
   runtime.stats.responseBytes += responseFrame.length;
-  return response;
+  return { response, roundTripMs };
+}
+
+async function sendCapacityRequest(runtime, message, expectedType) {
+  return (await exchangeCapacityRequest(runtime, message, expectedType)).response;
 }
 
 function capacitySearchFilters() {
@@ -2034,6 +2419,292 @@ async function benchmarkCapacityOverview(
       payloadStable,
       allMeasuredOverviewGatesPassed:
         latencyGate.withinLimit && requestsComplete && snapshotStable && payloadStable,
+    },
+  };
+}
+
+const DEEP_QUERY_RECIPE_NAMES = Object.freeze([
+  "capability-contexts@1",
+  "failure-chains@1",
+  "file-workflow-signals@1",
+  "activity-shifts@1",
+  "token-hotspots@1",
+  "solution-recall@1",
+  "session-timeline@1",
+]);
+
+function deepQueryClock(plan) {
+  const dayMs = 24 * 60 * 60 * 1_000;
+  const after = BASE_TIME_MS;
+  const before = Math.ceil((BASE_TIME_MS + (plan.turnCount + 1) * 1_000) / dayMs) * dayMs;
+  return Object.freeze({
+    window: Object.freeze({
+      after: new Date(after).toISOString(),
+      before: new Date(before).toISOString(),
+    }),
+    evaluatedAt: new Date(before + 60 * 60 * 1_000).toISOString(),
+  });
+}
+
+function deepRecipeRequest(name, plan, sessionKey) {
+  const clock = deepQueryClock(plan);
+  const sessionScoped = new Set([
+    "failure-chains@1",
+    "file-workflow-signals@1",
+    "solution-recall@1",
+    "session-timeline@1",
+  ]).has(name);
+  return {
+    format: "threadshare-insights-recipe-request@v1",
+    name,
+    window: clock.window,
+    comparisonWindow: null,
+    filters: {
+      providers: [],
+      projectKeys: [],
+      capabilityKeys: [],
+      sessionKeys: sessionScoped ? [sessionKey] : [],
+      eventKinds: [],
+      text: name === "solution-recall@1" ? "benchmark retry error" : null,
+      bucket: name === "activity-shifts@1" ? "day" : null,
+    },
+    limit: 10,
+    allowDegraded: false,
+    evaluatedAt: clock.evaluatedAt,
+  };
+}
+
+function deepRecordsRequest(plan) {
+  return {
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    where: { field: "event.kind", op: "eq", value: "capability-result" },
+    shape: {
+      kind: "records",
+      select: ["eventKey", "turnKey", "observedAt", "event.kind", "payloadRef"],
+      payloadMode: "reference",
+    },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 20,
+    cursor: null,
+    count: "exact",
+    evaluatedAt: deepQueryClock(plan).evaluatedAt,
+  };
+}
+
+function deepAggregateRequest(plan) {
+  return {
+    format: "threadshare-insights-query-request@v2",
+    resource: "token-usage",
+    where: null,
+    shape: {
+      kind: "aggregate",
+      groupBy: ["provider"],
+      metrics: [
+        { name: "total-token-count", op: "sum", field: "token.total" },
+        { name: "event-count", op: "count" },
+      ],
+    },
+    orderBy: [
+      { field: "total-token-count", direction: "desc" },
+      { field: "provider", direction: "asc" },
+    ],
+    limit: 20,
+    cursor: null,
+    count: "exact",
+    evaluatedAt: deepQueryClock(plan).evaluatedAt,
+  };
+}
+
+function deepEvidenceTarget(plan) {
+  const first = plan.sessionAt(0);
+  const payload = first.delta.historyPayloads.reduce((largest, candidate) =>
+    BigInt(candidate.byteLength) > BigInt(largest.byteLength) ? candidate : largest);
+  const event = first.delta.historyEvents.find(({ eventKey }) => eventKey === payload.eventKey);
+  if (!event) throw new Error("capacity evidence target event is missing");
+  return {
+    target: {
+      kind: "event",
+      eventKey: event.eventKey,
+      revision: event.revision,
+      payloadKey: payload.payloadKey,
+    },
+    payloadBytes: Number(payload.byteLength),
+  };
+}
+
+async function benchmarkDeepQuery({ runtime, plan, queryCount, warmupCount }) {
+  const total = queryCount + warmupCount;
+  const digest = createHash("sha256");
+  const records = [];
+  const aggregates = [];
+  const recipes = new Map(DEEP_QUERY_RECIPE_NAMES.map((name) => [name, []]));
+  const evidenceFirstPages = [];
+  const evidencePages = [];
+  const evidenceReads = [];
+  let requestId = 3_000_000;
+  let recordsEmptyCount = 0;
+  let aggregateEmptyCount = 0;
+  const recipeEmptyCounts = Object.fromEntries(DEEP_QUERY_RECIPE_NAMES.map((name) => [name, 0]));
+  let evidenceReadCount = 0;
+  let evidenceMultiPageReadCount = 0;
+  let evidencePayloadBytes = 0;
+  const sessionKey = plan.sessionKey(0);
+  const evidence = deepEvidenceTarget(plan);
+
+  for (let index = 0; index < total; index += 1) {
+    const measured = index >= warmupCount;
+    const recordsExchange = await exchangeCapacityRequest(
+      runtime,
+      createReadInsightsQueryV2Message({
+        requestId: String(requestId++),
+        request: deepRecordsRequest(plan),
+      }),
+      "INSIGHTS_QUERY_V2",
+    );
+    const recordsResponse = recordsExchange.response;
+    if (recordsResponse.response.records.length === 0) recordsEmptyCount += measured ? 1 : 0;
+    if (measured) {
+      records.push(recordsExchange.roundTripMs);
+      digest.update(canonicalJson(recordsResponse.response));
+    }
+
+    const aggregateExchange = await exchangeCapacityRequest(
+      runtime,
+      createReadInsightsQueryV2Message({
+        requestId: String(requestId++),
+        request: deepAggregateRequest(plan),
+      }),
+      "INSIGHTS_QUERY_V2",
+    );
+    const aggregateResponse = aggregateExchange.response;
+    if (aggregateResponse.response.groups.length === 0) aggregateEmptyCount += measured ? 1 : 0;
+    if (measured) {
+      aggregates.push(aggregateExchange.roundTripMs);
+      digest.update(canonicalJson(aggregateResponse.response));
+    }
+
+    for (const name of DEEP_QUERY_RECIPE_NAMES) {
+      const recipeExchange = await exchangeCapacityRequest(
+        runtime,
+        createReadInsightsRecipeMessage({
+          requestId: String(requestId++),
+          request: deepRecipeRequest(name, plan, sessionKey),
+        }),
+        "INSIGHTS_RECIPE",
+      );
+      const recipeResponse = recipeExchange.response;
+      if (recipeResponse.response.items.length === 0) {
+        recipeEmptyCounts[name] += measured ? 1 : 0;
+      }
+      if (measured) {
+        recipes.get(name).push(recipeExchange.roundTripMs);
+        digest.update(canonicalJson(recipeResponse.response));
+      }
+    }
+
+    let cursor = null;
+    let pageCount = 0;
+    let readBytes = 0;
+    let readMs = 0;
+    do {
+      const evidenceExchange = await exchangeCapacityRequest(
+        runtime,
+        createReadInsightsEvidenceV2Message({
+          requestId: String(requestId++),
+          request: {
+            format: "threadshare-insights-evidence-request@v2",
+            target: evidence.target,
+            include: ["envelope", "payload"],
+            cursor,
+            maxBytes: 1_024 * 1_024,
+          },
+        }),
+        "INSIGHTS_EVIDENCE_V2",
+      );
+      const evidenceResponse = evidenceExchange.response;
+      pageCount += 1;
+      readMs += evidenceExchange.roundTripMs;
+      readBytes += Buffer.byteLength(evidenceResponse.response.content, "utf8");
+      cursor = evidenceResponse.response.nextCursor;
+      if (measured) {
+        if (pageCount === 1) evidenceFirstPages.push(evidenceExchange.roundTripMs);
+        evidencePages.push(evidenceExchange.roundTripMs);
+        digest.update(canonicalJson(evidenceResponse.response));
+      }
+    } while (cursor !== null);
+    if (measured) {
+      evidenceReadCount += 1;
+      if (pageCount > 1) evidenceMultiPageReadCount += 1;
+      evidencePayloadBytes += readBytes;
+      evidenceReads.push({ bytes: readBytes, wallMs: readMs });
+    }
+  }
+
+  const budget = queryBudget(plan.turnCount);
+  const recordLatency = latencySummary(records, "ms");
+  const aggregateLatency = latencySummary(aggregates, "ms");
+  const evidenceFirstPageLatency = latencySummary(evidenceFirstPages, "ms");
+  const evidencePageLatency = latencySummary(evidencePages, "ms");
+  const evidenceReadWallMs = evidenceReads.reduce((sum, read) => sum + read.wallMs, 0);
+  const evidenceMiBPerSecond = evidenceReadWallMs === 0
+    ? 0
+    : (evidencePayloadBytes / 1_048_576) / (evidenceReadWallMs / 1_000);
+  const recipeLatency = Object.fromEntries(
+    [...recipes].map(([name, values]) => [name, latencySummary(values, "ms")]),
+  );
+  const allRecipesExercised = Object.values(recipeEmptyCounts).every((count) => count === 0);
+  const allDeepQueryPathsExercised =
+    recordsEmptyCount === 0 && aggregateEmptyCount === 0 && allRecipesExercised &&
+    evidenceReadCount === queryCount && evidenceMultiPageReadCount === queryCount;
+  const allMeasuredDeepQueryGatesPassed =
+    allDeepQueryPathsExercised &&
+    recordLatency.p95 < budget.p95Ms && recordLatency.p99 < budget.p99Ms &&
+    aggregateLatency.p95 < budget.p95Ms && aggregateLatency.p99 < budget.p99Ms &&
+    evidenceFirstPageLatency.p95 < 100 && evidenceMiBPerSecond >= 50;
+  return {
+    measuredRequestCount: queryCount,
+    warmupRequestCount: warmupCount,
+    records: {
+      emptyResultCount: recordsEmptyCount,
+      roundTripMs: recordLatency,
+    },
+    aggregate: {
+      emptyResultCount: aggregateEmptyCount,
+      roundTripMs: aggregateLatency,
+    },
+    recipes: Object.fromEntries(DEEP_QUERY_RECIPE_NAMES.map((name) => [name, {
+      emptyResultCount: recipeEmptyCounts[name],
+      roundTripMs: recipeLatency[name],
+    }])),
+    evidence: {
+      targetPayloadBytes: evidence.payloadBytes,
+      completedReadCount: evidenceReadCount,
+      multiPageReadCount: evidenceMultiPageReadCount,
+      returnedBytes: evidencePayloadBytes,
+      firstPageRoundTripMs: evidenceFirstPageLatency,
+      pageRoundTripMs: evidencePageLatency,
+      readWallMs: evidenceReadWallMs,
+      payloadMiBPerSecond: evidenceMiBPerSecond,
+    },
+    resultDigest: digest.digest("hex"),
+    gates: {
+      budget: budget.name,
+      recordsWithinLimit: recordLatency.p95 < budget.p95Ms && recordLatency.p99 < budget.p99Ms,
+      aggregateWithinLimit:
+        aggregateLatency.p95 < budget.p95Ms && aggregateLatency.p99 < budget.p99Ms,
+      evidenceFirstPageWithinLimit: evidenceFirstPageLatency.p95 < 100,
+      evidencePagingAtLeast50MiBPerSecond: evidenceMiBPerSecond >= 50,
+      allRecordsReturnedResults: recordsEmptyCount === 0,
+      allAggregatesReturnedGroups: aggregateEmptyCount === 0,
+      allRecipesExercised,
+      allEvidenceReadsCompleted:
+        evidenceReadCount === queryCount && evidenceMultiPageReadCount === queryCount,
+      allDeepQueryPathsExercised,
+      allMeasuredDeepQueryGatesPassed,
     },
   };
 }
@@ -2404,6 +3075,8 @@ async function benchmarkCapacitySidecar({
   plan,
   queryCount,
   warmupCount,
+  deepQueryCount,
+  deepQueryWarmupCount,
 }) {
   const runtime = await openCapacitySidecar(binaryPath, databasePath);
   const digest = createHash("sha256");
@@ -2412,6 +3085,7 @@ async function benchmarkCapacitySidecar({
   let maxSessionCanonicalBytes = 0;
   let lastCommittedSnapshotSeq = null;
   let corpusGenerationMs = 0;
+  const commitAckLatencies = [];
   const started = performance.now();
   try {
     const sessions = plan.stream()[Symbol.iterator]();
@@ -2429,11 +3103,13 @@ async function benchmarkCapacitySidecar({
       maxSessionCanonicalBytes = Math.max(maxSessionCanonicalBytes, bytes);
       sessionKeys.push(session.delta.session.sessionKey);
       corpusGenerationMs += performance.now() - generationStarted;
-      const response = await sendCapacityDelta(
+      const committed = await sendCapacityDelta(
         runtime,
         session.delta,
         String(session.sessionIndex + 2),
       );
+      const response = committed.response;
+      commitAckLatencies.push(committed.roundTripMs);
       if (response.idempotent !== false) {
         throw new Error("fresh capacity corpus unexpectedly produced an idempotent commit");
       }
@@ -2446,6 +3122,7 @@ async function benchmarkCapacitySidecar({
   const backfillMs = performance.now() - started;
   let search;
   let overview;
+  let deepQuery = null;
   let rss;
   try {
     search = await benchmarkCapacitySearch(runtime, plan, queryCount, warmupCount);
@@ -2456,6 +3133,14 @@ async function benchmarkCapacitySidecar({
       warmupCount,
       lastCommittedSnapshotSeq,
     );
+    if (deepQueryCount > 0) {
+      deepQuery = await benchmarkDeepQuery({
+        runtime,
+        plan,
+        queryCount: deepQueryCount,
+        warmupCount: deepQueryWarmupCount,
+      });
+    }
     rss = await closeCapacitySidecar(runtime);
   } catch (error) {
     runtime.child.kill();
@@ -2542,6 +3227,7 @@ async function benchmarkCapacitySidecar({
     maxSessionCanonicalBytes,
     backfill: {
       wallMs: backfillMs,
+      commitAckMs: latencySummary(commitAckLatencies, "ms"),
       corpusGenerationMs,
       protocolPreparationMs: runtime.stats.protocolPreparationMs,
       engineBackfillMs,
@@ -2567,6 +3253,7 @@ async function benchmarkCapacitySidecar({
     },
     search: searchWithGates,
     overview,
+    ...(deepQuery === null ? {} : { deepQuery }),
     capacity,
   };
 }
@@ -2639,7 +3326,7 @@ async function runCapacityMutationTrace({
   try {
     const replacement = plan.sessionAt(0, { generation: 2, replacement: true });
     await time("replace-session", async () => {
-      const response = await sendCapacityDelta(runtime, replacement.delta, "10");
+      const { response } = await sendCapacityDelta(runtime, replacement.delta, "10");
       return { committed: response.idempotent === false, snapshotSeq: response.snapshotSeq };
     });
     await time("delete-source", async () => {
@@ -2939,6 +3626,8 @@ export async function runInsightsCapacityBenchmark({
   turnsPerSession = 100,
   queryCount = 100,
   warmupCount = 20,
+  deepQueryCount = 0,
+  deepQueryWarmupCount = 0,
   seed = `${DEFAULT_SEED}-capacity`,
   binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
   workingDirectory,
@@ -2950,6 +3639,15 @@ export async function runInsightsCapacityBenchmark({
   positiveInteger(turnsPerSession, "turnsPerSession");
   positiveInteger(queryCount, "queryCount");
   positiveInteger(warmupCount, "warmupCount");
+  if (!Number.isSafeInteger(deepQueryCount) || deepQueryCount < 0) {
+    throw new RangeError("deepQueryCount must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(deepQueryWarmupCount) || deepQueryWarmupCount < 0) {
+    throw new RangeError("deepQueryWarmupCount must be a non-negative safe integer");
+  }
+  if (deepQueryCount === 0 && deepQueryWarmupCount !== 0) {
+    throw new RangeError("deepQueryWarmupCount requires deepQueryCount");
+  }
   if (
     !Number.isSafeInteger(mutationQueryEquivalenceCount) ||
     mutationQueryEquivalenceCount < 0
@@ -2969,6 +3667,8 @@ export async function runInsightsCapacityBenchmark({
       plan,
       queryCount,
       warmupCount,
+      deepQueryCount,
+      deepQueryWarmupCount,
     });
     const mutations = mutationTrace
       ? await runCapacityMutationTrace({
@@ -2996,13 +3696,13 @@ export async function runInsightsCapacityBenchmark({
         density: plan.density,
         canonicalBytes: rust.canonicalBytes,
         maxSessionCanonicalBytes: rust.maxSessionCanonicalBytes,
-        boundedMemoryModel: "one generated SessionFactsDeltaV1 plus one protocol batch",
+        boundedMemoryModel: "one generated SessionFactsDeltaV2 plus one protocol batch",
       },
       rustSidecar: rust,
       mutations,
       packedFactsDecision: rust.capacity.gates,
       notMeasured: [
-        "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV1",
+        "raw provider JSONL parsing throughput; this corpus starts at SessionFactsDeltaV2",
         "Recall@300, Top-20 Recall/NDCG, and ranker ablations; capacity search latency is in rustSidecar.search",
         "packed-facts-v1 comparison unless the mechanical 6/8 GiB gates require that branch",
         "crash injection and projection shadow rebuild, which have dedicated integration suites",
@@ -3106,6 +3806,174 @@ export async function runInsightsQueryBenchmark({
       "posting traversal and SQL filter intersection remain one honestly labelled Engine timing",
     ],
   };
+}
+
+function deepStorageSummary(capacity) {
+  const audit = capacity.rustSidecar.capacity;
+  const canonicalIndexedSourceBytes = capacity.corpus.canonicalBytes;
+  const persistentBytes = audit.postVacuumPersistentBytes;
+  const searchablePayloadBytes = audit.deepHistory.searchablePayloadBytes;
+  const historyFtsBytes = Object.entries(audit.byObject)
+    .filter(([name, value]) =>
+      value.category === "fts" && sqliteObjectOwner(name).startsWith("history_event_fts"))
+    .reduce((total, [, value]) => total + value.bytes, 0);
+  const historyPayloadBytes = Object.entries(audit.byObject)
+    .filter(([name]) => {
+      const owner = sqliteObjectOwner(name);
+      return owner === "history_payloads" || owner === "history_payload_chunks" ||
+        name === "history_payloads_event";
+    })
+    .reduce((total, [, value]) => total + value.bytes, 0);
+  const historyEventMetadataBytes = Object.entries(audit.byObject)
+    .filter(([name]) => {
+      const owner = sqliteObjectOwner(name);
+      return owner === "history_events" || owner === "attempt_chain_events" ||
+        owner === "file_activity" || owner === "token_usage" ||
+        owner === "error_occurrences" || name.startsWith("history_events_") ||
+        name.startsWith("attempt_chain_events_") || name.startsWith("file_activity_") ||
+        name.startsWith("token_usage_") || name.startsWith("error_occurrences_");
+    })
+    .reduce((total, [, value]) => total + value.bytes, 0);
+  const persistentStorageAmplification = ratio(persistentBytes, canonicalIndexedSourceBytes);
+  const historyFtsAmplification = ratio(historyFtsBytes, searchablePayloadBytes);
+  return {
+    canonicalIndexedSourceBytes,
+    preVacuum: audit.preVacuumFiles,
+    postVacuum: audit.postVacuumFiles,
+    persistentBytes,
+    stagingUpperBoundBytes: audit.stagingUpperBoundBytes,
+    historyEventMetadataBytes,
+    historyPayloadBytes,
+    historyFtsBytes,
+    projectionBytes: audit.categories.projection.bytes,
+    searchablePayloadBytes,
+    storedNotSearchablePayloadBytes: audit.deepHistory.storedNotSearchablePayloadBytes,
+    persistentStorageAmplification,
+    historyFtsAmplification,
+    limits: {
+      persistentStorageAmplification: DEEP_STORAGE_AMPLIFICATION_LIMIT,
+      historyFtsAmplification: DEEP_FTS_AMPLIFICATION_LIMIT,
+    },
+  };
+}
+
+export function createDeepQueryBenchmarkReport(capacity) {
+  if (capacity?.format !== CAPACITY_BENCHMARK_FORMAT || capacity.rustSidecar?.deepQuery === undefined) {
+    throw new TypeError("Deep Query evidence requires a completed capacity report");
+  }
+  const turnCount = capacity.corpus.turns;
+  const deepQuery = capacity.rustSidecar.deepQuery;
+  const storage = deepStorageSummary(capacity);
+  const rows = capacity.rustSidecar.capacity.rowCounts;
+  const density = capacity.corpus.density;
+  const v2CorpusComplete =
+    rows.history_events === turnCount * density.historyEventsPerTurn +
+      density.evidencePagingProbeEvents &&
+    rows.history_payloads === turnCount * density.historyPayloadsPerTurn +
+      density.evidencePagingProbePayloads &&
+    rows.history_payload_chunks === turnCount * density.historyPayloadChunksPerTurn +
+      density.evidencePagingProbeChunks;
+  const storageAmplificationWithinLimit =
+    storage.persistentStorageAmplification !== null &&
+    storage.persistentStorageAmplification <= DEEP_STORAGE_AMPLIFICATION_LIMIT;
+  const historyFtsAmplificationWithinLimit =
+    storage.historyFtsAmplification !== null &&
+    storage.historyFtsAmplification <= DEEP_FTS_AMPLIFICATION_LIMIT;
+  const recordsPlan = capacity.rustSidecar.capacity.explain.recordsByEventKind;
+  const queryPlanUsesEventKindIndex =
+    recordsPlan.some((detail) => detail.includes("history_events_kind_observed")) &&
+    !recordsPlan.some((detail) => /\bSCAN he\b/u.test(detail));
+  const gates = {
+    v2CorpusComplete,
+    deepQueryPathsComplete: deepQuery.gates.allDeepQueryPathsExercised,
+    deepQueryPerformanceWithinLimit: deepQuery.gates.allMeasuredDeepQueryGatesPassed,
+    historyFtsIntegrityPassed:
+      capacity.rustSidecar.capacity.deepHistory.ftsIntegrity === "ok",
+    engineRssWithin128MiB:
+      capacity.rustSidecar.capacity.engineRss.sidecarPeakBytes > 0 &&
+      capacity.rustSidecar.capacity.engineRss.sidecarPeakBytes <= LONG_TERM_ENGINE_RSS_LIMIT_BYTES,
+    storageAmplificationWithinLimit,
+    historyFtsAmplificationWithinLimit,
+    storageClassificationComplete:
+      capacity.rustSidecar.capacity.gates.storageClassificationComplete,
+    queryPlanUsesEventKindIndex,
+  };
+  gates.allMeasuredDeepQueryEvidenceGatesPassed = Object.values(gates)
+    .every((value) => value === true);
+  return {
+    format: DEEP_QUERY_BENCHMARK_FORMAT,
+    measuredScope: "local-insights-fact-v2-deep-query-capacity-and-performance",
+    sourceRevision: capacity.sourceRevision,
+    sourceWorktreeDirty: capacity.sourceWorktreeDirty,
+    benchmarkScriptSha256: capacity.benchmarkScriptSha256,
+    environment: capacity.environment,
+    corpus: capacity.corpus,
+    engineIdentity: capacity.rustSidecar.engineIdentity,
+    backfill: capacity.rustSidecar.backfill,
+    protocol: capacity.rustSidecar.protocol,
+    rss: capacity.rustSidecar.rss,
+    deepQuery,
+    storage,
+    rowCounts: Object.fromEntries([
+      "history_events", "history_payloads", "history_payload_chunks", "attempt_chain_events",
+      "file_activity", "token_usage", "error_occurrences", "history_event_fts_documents",
+    ].map((name) => [name, rows[name] ?? 0])),
+    explain: capacity.rustSidecar.capacity.explain,
+    gates,
+    notMeasured: [
+      "raw provider parsing; the synthetic corpus starts at SessionFactsDeltaV2",
+      "30% real Session byte sample; it is recorded as an independent evidence artifact",
+      "single-Session 512 MiB logical payload boundary; the dedicated Rust boundary test owns it",
+    ],
+  };
+}
+
+export async function runInsightsDeepQueryBenchmark({
+  turnCount = 25_000,
+  turnsPerSession = 100,
+  queryCount = FORMAL_DEEP_QUERY_COUNT,
+  warmupCount = FORMAL_DEEP_QUERY_WARMUP_COUNT,
+  seed = FORMAL_DEEP_QUERY_SEEDS[turnCount] ?? `${DEFAULT_SEED}-deep-query`,
+  binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
+  workingDirectory,
+  formal = false,
+} = {}) {
+  positiveInteger(queryCount, "queryCount");
+  positiveInteger(warmupCount, "warmupCount");
+  if (formal && !FORMAL_QUERY_BENCHMARK_TURN_COUNTS.includes(turnCount)) {
+    throw new RangeError("formal Deep Query evidence requires exactly 25000 or 250000 Turns");
+  }
+  if (formal && turnsPerSession !== 100) {
+    throw new RangeError("formal Deep Query evidence requires exactly 100 Turns per session");
+  }
+  if (formal && seed !== FORMAL_DEEP_QUERY_SEEDS[turnCount]) {
+    throw new RangeError(
+      `formal Deep Query evidence requires seed ${FORMAL_DEEP_QUERY_SEEDS[turnCount]}`,
+    );
+  }
+  if (formal && queryCount !== FORMAL_DEEP_QUERY_COUNT) {
+    throw new RangeError(
+      `formal Deep Query evidence requires exactly ${FORMAL_DEEP_QUERY_COUNT} measured runs`,
+    );
+  }
+  if (formal && warmupCount !== FORMAL_DEEP_QUERY_WARMUP_COUNT) {
+    throw new RangeError(
+      `formal Deep Query evidence requires exactly ${FORMAL_DEEP_QUERY_WARMUP_COUNT} warmups`,
+    );
+  }
+  const capacity = await runInsightsCapacityBenchmark({
+    turnCount,
+    turnsPerSession,
+    queryCount: Math.min(queryCount, 100),
+    warmupCount: Math.min(warmupCount, 20),
+    deepQueryCount: queryCount,
+    deepQueryWarmupCount: warmupCount,
+    seed,
+    binaryPath,
+    workingDirectory,
+    mutationTrace: false,
+  });
+  return createDeepQueryBenchmarkReport(capacity);
 }
 
 function deterministicUuid(seed, index) {
@@ -3756,7 +4624,7 @@ export async function runInsightsRawBackfillBenchmark({
   }
 }
 
-function parseArguments(argv) {
+export function parseBenchmarkArguments(argv) {
   const options = {
     turnCount: 25_000,
     turnsPerSession: 100,
@@ -3769,6 +4637,7 @@ function parseArguments(argv) {
     nodeReferenceWorker: false,
     capacity: false,
     queryBenchmark: false,
+    deepQueryBenchmark: false,
     formal: false,
     rawBackfill: false,
     sessionCount: 10_000,
@@ -3776,12 +4645,16 @@ function parseArguments(argv) {
     mutationTrace: true,
     databasePath: null,
   };
+  let explicitQueryCount = false;
+  let explicitWarmupCount = false;
+  let explicitSeed = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") options.json = true;
     else if (argument === "--formal") options.formal = true;
     else if (argument === "--capacity") options.capacity = true;
     else if (argument === "--query-benchmark") options.queryBenchmark = true;
+    else if (argument === "--deep-query-benchmark") options.deepQueryBenchmark = true;
     else if (argument === "--raw-backfill") options.rawBackfill = true;
     else if (argument === "--skip-mutations") options.mutationTrace = false;
     else if (argument === "--node-reference-worker") options.nodeReferenceWorker = true;
@@ -3792,19 +4665,33 @@ function parseArguments(argv) {
       options.rawTextCharacters = positiveInteger(argv[++index], "--raw-text-characters");
     } else if (argument === "--turns-per-session") {
       options.turnsPerSession = positiveInteger(argv[++index], "--turns-per-session");
-    } else if (argument === "--queries") options.queryCount = positiveInteger(argv[++index], "--queries");
-    else if (argument === "--warmup") options.warmupCount = positiveInteger(argv[++index], "--warmup");
-    else if (argument === "--seed") options.seed = argv[++index];
+    } else if (argument === "--queries") {
+      options.queryCount = positiveInteger(argv[++index], "--queries");
+      explicitQueryCount = true;
+    } else if (argument === "--warmup") {
+      options.warmupCount = positiveInteger(argv[++index], "--warmup");
+      explicitWarmupCount = true;
+    } else if (argument === "--seed") {
+      options.seed = argv[++index];
+      explicitSeed = true;
+    }
     else if (argument === "--engine") options.binaryPath = argv[++index];
     else if (argument === "--output") options.outputPath = argv[++index];
     else if (argument === "--db") options.databasePath = argv[++index];
     else throw new Error(`unknown argument: ${argument}`);
   }
+  if (options.deepQueryBenchmark) {
+    if (!explicitQueryCount) options.queryCount = FORMAL_DEEP_QUERY_COUNT;
+    if (!explicitWarmupCount) options.warmupCount = FORMAL_DEEP_QUERY_WARMUP_COUNT;
+    if (!explicitSeed) {
+      options.seed = FORMAL_DEEP_QUERY_SEEDS[options.turnCount] ?? `${DEFAULT_SEED}-deep-query`;
+    }
+  }
   return options;
 }
 
 async function main() {
-  const options = parseArguments(process.argv.slice(2));
+  const options = parseBenchmarkArguments(process.argv.slice(2));
   if (options.nodeReferenceWorker) {
     if (!options.databasePath) throw new Error("--db is required for the reference worker");
     const result = await benchmarkNodeSqliteReference({
@@ -3821,11 +4708,13 @@ async function main() {
 
   const result = options.rawBackfill
     ? await runInsightsRawBackfillBenchmark(options)
-    : options.queryBenchmark
-      ? await runInsightsQueryBenchmark(options)
-      : options.capacity
-        ? await runInsightsCapacityBenchmark(options)
-        : await runInsightsEngineBenchmark(options);
+    : options.deepQueryBenchmark
+      ? await runInsightsDeepQueryBenchmark(options)
+      : options.queryBenchmark
+        ? await runInsightsQueryBenchmark(options)
+        : options.capacity
+          ? await runInsightsCapacityBenchmark(options)
+          : await runInsightsEngineBenchmark(options);
   const rendered = options.json ? JSON.stringify(result) : `${JSON.stringify(result, null, 2)}\n`;
   if (options.outputPath) await writeFile(options.outputPath, `${JSON.stringify(result, null, 2)}\n`);
   process.stdout.write(options.json ? `${rendered}\n` : rendered);
@@ -3834,6 +4723,12 @@ async function main() {
     !result.formalEvidenceGates?.allFormalEvidenceGatesPassed
   ) {
     throw new Error("ITEM-5 query benchmark gates failed");
+  }
+  if (
+    options.deepQueryBenchmark && options.formal &&
+    !result.gates.allMeasuredDeepQueryEvidenceGatesPassed
+  ) {
+    throw new Error("Deep Query v2 benchmark gates failed");
   }
 }
 

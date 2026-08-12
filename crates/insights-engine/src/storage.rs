@@ -447,6 +447,10 @@ impl EngineStorage {
         Ok(value)
     }
 
+    pub fn database_fact_schema_version(&self) -> Result<Option<u8>, StorageError> {
+        crate::normalized_repository::read_database_fact_schema_version(&self.connection)
+    }
+
     pub fn compile_options(&self) -> Result<Vec<String>, StorageError> {
         let mut statement = self.connection.prepare("PRAGMA compile_options")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
@@ -944,6 +948,27 @@ impl EngineStorage {
         request: &crate::agent_query::ActivityRequest,
     ) -> Result<crate::agent_query::ActivityResponse, crate::query::QueryError> {
         crate::agent_query::read_activity(&self.connection, request)
+    }
+
+    pub fn read_deep_query(
+        &self,
+        request: &crate::deep_query::DeepQueryRequest,
+    ) -> Result<crate::deep_query::DeepQueryResponse, crate::query::QueryError> {
+        crate::deep_query::read_deep_query(&self.connection, request)
+    }
+
+    pub fn read_deep_evidence(
+        &self,
+        request: &crate::deep_query::DeepEvidenceRequest,
+    ) -> Result<crate::deep_query::DeepEvidenceResponse, crate::query::QueryError> {
+        crate::deep_query::read_deep_evidence(&self.connection, request)
+    }
+
+    pub fn read_recipe(
+        &self,
+        request: &crate::recipe::RecipeRequest,
+    ) -> Result<crate::recipe::RecipeResponse, crate::query::QueryError> {
+        crate::recipe::read_recipe(&self.connection, request)
     }
 
     pub fn maintain_search_projection(

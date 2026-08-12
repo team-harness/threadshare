@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/session-facts-delta.v2.schema.json",
+  "title": "SessionFactsDeltaV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "factSchemaVersion", "providerAdapterVersion", "privacyPolicyVersion", "originSecretEpoch", "duplicatePolicyVersion", "expectedGeneration", "targetGeneration", "mode", "deltaId", "session", "retractions", "turns", "sourceRecords", "evidenceEvents", "turnEvidence", "capabilities", "capabilityUses", "capabilityUseEvidence", "historyEvents", "historyPayloads", "historyPayloadChunks", "checkpoint", "diagnostics", "coverage"],
+  "properties": {
+    "format": { "const": "session-facts-delta@v2" },
+    "factSchemaVersion": { "const": 2 },
+    "providerAdapterVersion": { "enum": ["claude@2", "codex@2"] },
+    "privacyPolicyVersion": { "const": 2 },
+    "originSecretEpoch": { "$ref": "session-facts-delta.v1.schema.json#/$defs/uuid" },
+    "duplicatePolicyVersion": { "const": 1 },
+    "expectedGeneration": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+    "targetGeneration": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+    "mode": { "enum": ["append", "replace-session"] },
+    "deltaId": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+    "session": { "$ref": "session-facts-delta.v1.schema.json#/$defs/session" },
+    "retractions": { "$ref": "session-facts-delta.v1.schema.json#/$defs/retractions" },
+    "turns": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/turn" } },
+    "sourceRecords": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/sourceRecord" } },
+    "evidenceEvents": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/evidenceEvent" } },
+    "turnEvidence": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/turnEvidence" } },
+    "capabilities": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/capability" } },
+    "capabilityUses": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/capabilityUse" } },
+    "capabilityUseEvidence": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/capabilityUseEvidence" } },
+    "historyEvents": { "type": "array", "items": { "$ref": "#/$defs/historyEvent" } },
+    "historyPayloads": { "type": "array", "items": { "$ref": "#/$defs/historyPayload" } },
+    "historyPayloadChunks": { "type": "array", "items": { "$ref": "#/$defs/historyPayloadChunk" } },
+    "checkpoint": { "$ref": "session-facts-delta.v1.schema.json#/$defs/checkpoint" },
+    "diagnostics": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/diagnostic" } },
+    "coverage": { "$ref": "session-facts-delta.v1.schema.json#/$defs/coverage" }
+  },
+  "$defs": {
+    "completeness": { "enum": ["full", "summary", "unloaded", "truncated", "unavailable"] },
+    "historyEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventKey", "ownerSessionKey", "occurredTurnKey", "sourceRecordKey", "sourceOrder", "originScope", "observedTimestamp", "kind", "completeness", "revision", "metadata", "payloadKeys"],
+      "properties": {
+        "eventKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "occurredTurnKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nullableHex64" },
+        "sourceRecordKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "sourceOrder": { "$ref": "session-facts-delta.v1.schema.json#/$defs/sourceOrder" },
+        "originScope": { "enum": ["main", "subagent", "unknown"] },
+        "observedTimestamp": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nullableString" },
+        "kind": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nonEmptyString" },
+        "completeness": { "$ref": "#/$defs/completeness" },
+        "revision": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "metadata": { "$ref": "#/$defs/historyEventMetadata" },
+        "payloadKeys": { "type": "array", "items": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" } }
+      }
+    },
+    "historyEventMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": { "enum": ["user", "assistant", "system", "developer", "analysis"] },
+        "capabilityKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "correlationDigest": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nullableHex64" },
+        "inputFingerprint": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nullableHex64" },
+        "providerState": { "type": "string" },
+        "exitCode": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "outputBytes": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "durationMs": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "lifecycleState": { "type": "string" },
+        "providerTurnDigest": { "$ref": "session-facts-delta.v1.schema.json#/$defs/nullableHex64" },
+        "statusKind": { "type": "string" },
+        "rolledBackTurnCount": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "strength": { "type": "string" },
+        "evidenceSource": { "type": "string" },
+        "pathFingerprint": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" }
+        ,"fileActivities": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action", "phase", "pathRole", "rawPath", "normalizedPath", "relativePath", "absolute", "projectRelative"],
+            "properties": {
+              "action": { "enum": ["read", "edit", "write", "delete", "move", "search", "list"] },
+              "phase": { "enum": ["attempted", "confirmed", "failed", "unknown"] },
+              "pathRole": { "enum": ["target", "source", "destination"] },
+              "rawPath": { "type": "string" },
+              "normalizedPath": { "type": "string" },
+              "relativePath": { "type": ["string", "null"] },
+              "absolute": { "type": "boolean" },
+              "projectRelative": { "type": "boolean" }
+            }
+          }
+        },
+        "errorSignatureVersion": { "const": "error-signature@1" },
+        "errorSignature": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "usageScope": { "const": "delta" },
+        "model": { "type": "string" },
+        "inputTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "cachedInputTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "cacheWriteInputTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "outputTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "reasoningTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "totalTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" }
+      }
+    },
+    "historyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payloadKey", "ownerSessionKey", "eventKey", "payloadKind", "encoding", "byteLength", "sha256", "completeness", "chunkCount"],
+      "properties": {
+        "payloadKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "eventKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "payloadKind": { "enum": ["message-content", "analysis-content", "tool-input", "tool-output", "error-content", "provider-payload", "compaction-content"] },
+        "encoding": { "enum": ["utf-8", "canonical-json"] },
+        "byteLength": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "sha256": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "completeness": { "$ref": "#/$defs/completeness" },
+        "chunkCount": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" }
+      }
+    },
+    "historyPayloadChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payloadKey", "ownerSessionKey", "ordinal", "content", "byteLength", "sha256"],
+      "properties": {
+        "payloadKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "ownerSessionKey": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "ordinal": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "content": { "type": "string", "maxLength": 65536 },
+        "byteLength": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },
+        "sha256": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" }
+      }
+    }
+  }
+}

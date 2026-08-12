@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-recipe.v1.schema.json",
+  "title": "Threadshare Insights Recipe v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "name", "window", "comparisonWindow", "evaluatedAt", "items", "totalItemCount", "truncated", "coverage", "provenance"],
+  "properties": {
+    "format": { "const": "threadshare-insights-recipe@v1" },
+    "snapshot": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/snapshot" },
+    "sourceFreshness": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/sourceFreshness" },
+    "name": { "enum": ["capability-contexts@1", "failure-chains@1", "file-workflow-signals@1", "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1"] },
+    "window": { "$ref": "#/$defs/window" },
+    "comparisonWindow": { "oneOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
+    "evaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "items": { "type": "array", "maxItems": 50 },
+    "totalItemCount": { "$ref": "#/$defs/decimal" },
+    "truncated": { "type": "boolean" },
+    "coverage": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/coverage" },
+    "provenance": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/provenance" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "name": { "const": "capability-contexts@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/capabilityContextItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "failure-chains@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/failureChainItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "file-workflow-signals@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/fileWorkflowItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "activity-shifts@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/activityShiftItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "token-hotspots@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/tokenHotspotItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "solution-recall@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/solutionRecallItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "session-timeline@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/sessionTimelineItem" } } } }
+    }
+  ],
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "signedDecimal": { "type": "string", "pattern": "^(0|-?[1-9][0-9]*)$" },
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableKey": { "oneOf": [{ "$ref": "#/$defs/key" }, { "type": "null" }] },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "nullableTimestamp": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "nullableString": { "oneOf": [{ "type": "string", "maxLength": 1048576 }, { "type": "null" }] },
+    "window": {
+      "type": "object", "additionalProperties": false, "required": ["after", "before"],
+      "properties": { "after": { "$ref": "#/$defs/timestamp" }, "before": { "$ref": "#/$defs/timestamp" } }
+    },
+    "evidence": { "$ref": "threadshare-insights-evidence-request.v2.schema.json#/$defs/target" },
+    "nullableEvidence": { "oneOf": [{ "$ref": "#/$defs/evidence" }, { "type": "null" }] },
+    "contentReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["byteLength", "sha256", "encoding", "inline", "reference", "complete"],
+      "properties": {
+        "byteLength": { "$ref": "#/$defs/decimal" },
+        "sha256": { "$ref": "#/$defs/key" },
+        "encoding": { "enum": ["utf-8", "canonical-json"] },
+        "inline": { "type": "null" },
+        "reference": { "$ref": "#/$defs/evidence" },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "nullableContentReference": { "oneOf": [{ "$ref": "#/$defs/contentReference" }, { "type": "null" }] },
+    "tokenTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cachedInput", "cacheWriteInput", "output", "reasoning", "total"],
+      "properties": {
+        "input": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "cachedInput": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "cacheWriteInput": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "output": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "reasoning": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "total": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+      }
+    },
+    "metricCoverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["presentEventCount", "totalEventCount"],
+      "properties": { "presentEventCount": { "$ref": "#/$defs/decimal" }, "totalEventCount": { "$ref": "#/$defs/decimal" } }
+    },
+    "tokenMetricCoverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cachedInput", "cacheWriteInput", "output", "reasoning", "total"],
+      "properties": {
+        "input": { "$ref": "#/$defs/metricCoverage" }, "cachedInput": { "$ref": "#/$defs/metricCoverage" },
+        "cacheWriteInput": { "$ref": "#/$defs/metricCoverage" }, "output": { "$ref": "#/$defs/metricCoverage" },
+        "reasoning": { "$ref": "#/$defs/metricCoverage" }, "total": { "$ref": "#/$defs/metricCoverage" }
+      }
+    },
+    "change": {
+      "type": "object", "additionalProperties": false, "required": ["baseline", "current", "absoluteChange"],
+      "properties": { "baseline": { "$ref": "#/$defs/decimal" }, "current": { "$ref": "#/$defs/decimal" }, "absoluteChange": { "$ref": "#/$defs/signedDecimal" } }
+    },
+    "nullableChange": {
+      "oneOf": [
+        { "$ref": "#/$defs/change" },
+        { "type": "object", "additionalProperties": false, "required": ["baseline", "current", "absoluteChange"], "properties": { "baseline": { "type": "null" }, "current": { "type": "null" }, "absoluteChange": { "type": "null" } } }
+      ]
+    },
+    "tokenChanges": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cachedInput", "cacheWriteInput", "output", "reasoning", "total"],
+      "properties": {
+        "input": { "$ref": "#/$defs/nullableChange" }, "cachedInput": { "$ref": "#/$defs/nullableChange" },
+        "cacheWriteInput": { "$ref": "#/$defs/nullableChange" }, "output": { "$ref": "#/$defs/nullableChange" },
+        "reasoning": { "$ref": "#/$defs/nullableChange" }, "total": { "$ref": "#/$defs/nullableChange" }
+      }
+    },
+    "dedupeSupport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctDedupeGroupCount", "strongDedupeGroupCount", "weakDedupeGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount"],
+      "properties": {
+        "distinctDedupeGroupCount": { "$ref": "#/$defs/decimal" }, "strongDedupeGroupCount": { "$ref": "#/$defs/decimal" },
+        "weakDedupeGroupCount": { "$ref": "#/$defs/decimal" }, "observedEofProvisionalGroupCount": { "$ref": "#/$defs/decimal" },
+        "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capabilityKey", "provider", "kind", "canonicalName"],
+      "properties": {
+        "capabilityKey": { "$ref": "#/$defs/key" }, "provider": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "enum": ["tool", "skill"] }, "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "capabilityContextItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capability", "recordedInvocationCount", "recordedFailingInvocationCount", "distinctTurnCount", "distinctSessionCount", "distinctDedupeGroupCount", "groupedInvocationCount", "ungroupedInvocationCount", "lastUsedAt", "strongGroupMemberInvocationCount", "weakGroupMemberInvocationCount", "invocationTerminalCounts", "topProjects", "coOccurringCapabilities", "representativeTurns", "evidence"],
+      "properties": {
+        "capability": { "$ref": "#/$defs/capability" },
+        "recordedInvocationCount": { "$ref": "#/$defs/decimal" }, "recordedFailingInvocationCount": { "$ref": "#/$defs/decimal" },
+        "distinctTurnCount": { "$ref": "#/$defs/decimal" }, "distinctSessionCount": { "$ref": "#/$defs/decimal" },
+        "distinctDedupeGroupCount": { "$ref": "#/$defs/decimal" }, "groupedInvocationCount": { "$ref": "#/$defs/decimal" },
+        "ungroupedInvocationCount": { "$ref": "#/$defs/decimal" }, "lastUsedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "strongGroupMemberInvocationCount": { "$ref": "#/$defs/decimal" }, "weakGroupMemberInvocationCount": { "$ref": "#/$defs/decimal" },
+        "invocationTerminalCounts": {
+          "type": "object", "additionalProperties": false, "required": ["pending", "completed", "failed", "cancelled", "unknown"],
+          "properties": { "pending": { "$ref": "#/$defs/decimal" }, "completed": { "$ref": "#/$defs/decimal" }, "failed": { "$ref": "#/$defs/decimal" }, "cancelled": { "$ref": "#/$defs/decimal" }, "unknown": { "$ref": "#/$defs/decimal" } }
+        },
+        "topProjects": {
+          "type": "array", "maxItems": 5,
+          "items": { "type": "object", "additionalProperties": false, "required": ["projectKey", "recordedInvocationCount"], "properties": { "projectKey": { "$ref": "#/$defs/nullableKey" }, "recordedInvocationCount": { "$ref": "#/$defs/decimal" } } }
+        },
+        "coOccurringCapabilities": {
+          "type": "array", "maxItems": 5,
+          "items": { "type": "object", "additionalProperties": false, "required": ["capabilityKey", "kind", "canonicalName", "distinctTurnCount"], "properties": { "capabilityKey": { "$ref": "#/$defs/key" }, "kind": { "enum": ["tool", "skill"] }, "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 }, "distinctTurnCount": { "$ref": "#/$defs/decimal" } } }
+        },
+        "representativeTurns": {
+          "type": "array", "maxItems": 5,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["turnKey", "usedAt", "recordedInvocationCount", "context", "evidence"],
+            "properties": {
+              "turnKey": { "$ref": "#/$defs/key" }, "usedAt": { "$ref": "#/$defs/nullableTimestamp" }, "recordedInvocationCount": { "$ref": "#/$defs/decimal" },
+              "context": { "type": "object", "additionalProperties": false, "required": ["problem", "finalAnswer"], "properties": { "problem": { "type": "string", "maxLength": 65536 }, "finalAnswer": { "$ref": "#/$defs/nullableString" } } },
+              "evidence": { "$ref": "#/$defs/evidence" }
+            }
+          }
+        },
+        "evidence": { "$ref": "#/$defs/nullableEvidence" }
+      }
+    },
+    "failureAttempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventKey", "revision", "eventKind", "observedAt", "capabilityKey", "capabilityName", "inputFingerprint", "providerState", "exitCode", "input", "output", "error", "evidence"],
+      "properties": {
+        "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "eventKind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "observedAt": { "$ref": "#/$defs/nullableTimestamp" }, "capabilityKey": { "$ref": "#/$defs/nullableKey" }, "capabilityName": { "$ref": "#/$defs/nullableString" },
+        "inputFingerprint": { "$ref": "#/$defs/nullableKey" }, "providerState": { "oneOf": [{ "enum": ["pending", "completed", "failed", "unknown"] }, { "type": "null" }] },
+        "exitCode": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }, "input": { "$ref": "#/$defs/nullableContentReference" },
+        "output": { "$ref": "#/$defs/nullableContentReference" }, "error": { "$ref": "#/$defs/nullableContentReference" }, "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "failureChainItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["chainKey", "revision", "status", "capabilityName", "eventCount", "failedResultCount", "completedResultCount", "firstObservedAt", "lastObservedAt", "attempts", "evidence"],
+      "properties": {
+        "chainKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "status": { "enum": ["resolved", "never-succeeded", "abandoned", "unknown"] },
+        "capabilityName": { "$ref": "#/$defs/nullableString" }, "eventCount": { "$ref": "#/$defs/decimal" }, "failedResultCount": { "$ref": "#/$defs/decimal" },
+        "completedResultCount": { "$ref": "#/$defs/decimal" }, "firstObservedAt": { "$ref": "#/$defs/nullableTimestamp" }, "lastObservedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "attempts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/failureAttempt" } }, "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "fileEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventKey", "revision", "observedAt", "eventKind", "activityOrdinal", "action", "phase", "pathRole", "rawPath", "normalizedPath", "relativePath", "absolute", "projectRelative", "input", "output", "error", "evidence"],
+      "properties": {
+        "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "observedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "eventKind": { "type": "string", "minLength": 1, "maxLength": 128 }, "activityOrdinal": { "$ref": "#/$defs/decimal" },
+        "action": { "enum": ["read", "edit", "write", "delete", "move", "search", "list"] }, "phase": { "enum": ["attempted", "confirmed", "failed", "unknown"] },
+        "pathRole": { "enum": ["target", "source", "destination"] }, "rawPath": { "type": "string", "minLength": 1, "maxLength": 12288 },
+        "normalizedPath": { "type": "string", "minLength": 1, "maxLength": 12288 }, "relativePath": { "$ref": "#/$defs/nullableString" },
+        "absolute": { "type": "boolean" }, "projectRelative": { "type": "boolean" }, "input": { "$ref": "#/$defs/nullableContentReference" },
+        "output": { "$ref": "#/$defs/nullableContentReference" }, "error": { "$ref": "#/$defs/nullableContentReference" }, "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "fileWorkflowItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sessionKey", "provider", "projectKey", "recordedCounts", "estimated", "evidence", "events"],
+      "properties": {
+        "sessionKey": { "$ref": "#/$defs/key" }, "provider": { "type": "string", "minLength": 1, "maxLength": 64 }, "projectKey": { "$ref": "#/$defs/nullableKey" },
+        "recordedCounts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["read", "edit", "write", "delete", "move", "search", "list", "attempted", "confirmed", "failed", "unknown", "distinctPath", "documentLike", "implementationLike"],
+          "properties": {
+            "read": { "$ref": "#/$defs/decimal" }, "edit": { "$ref": "#/$defs/decimal" }, "write": { "$ref": "#/$defs/decimal" }, "delete": { "$ref": "#/$defs/decimal" },
+            "move": { "$ref": "#/$defs/decimal" }, "search": { "$ref": "#/$defs/decimal" }, "list": { "$ref": "#/$defs/decimal" }, "attempted": { "$ref": "#/$defs/decimal" },
+            "confirmed": { "$ref": "#/$defs/decimal" }, "failed": { "$ref": "#/$defs/decimal" }, "unknown": { "$ref": "#/$defs/decimal" }, "distinctPath": { "$ref": "#/$defs/decimal" },
+            "documentLike": { "$ref": "#/$defs/decimal" }, "implementationLike": { "$ref": "#/$defs/decimal" }
+          }
+        },
+        "estimated": {
+          "type": "object", "additionalProperties": false, "required": ["researchHeavy", "implementationHeavy", "docVoid", "specPrecisionGap", "method"],
+          "properties": { "researchHeavy": { "type": "boolean" }, "implementationHeavy": { "type": "boolean" }, "docVoid": { "type": "boolean" }, "specPrecisionGap": { "type": "boolean" }, "method": { "const": "file-workflow-signals@1" } }
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }, "events": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/fileEvent" } }
+      }
+    },
+    "countChanges": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctSessionCount", "distinctTurnCount", "distinctProjectCount", "observedContextSwitchCount", "recordedToolInvocationCount", "recordedSkillInvocationCount", "recordedTokenEventCount", "recordedTokenTotals", "currentClosureCounts", "turnOutcomeCounts", "baselineBucketStart"],
+      "properties": {
+        "baselineBucketStart": { "$ref": "#/$defs/timestamp" }, "distinctSessionCount": { "$ref": "#/$defs/change" }, "distinctTurnCount": { "$ref": "#/$defs/change" },
+        "distinctProjectCount": { "$ref": "#/$defs/change" }, "observedContextSwitchCount": { "$ref": "#/$defs/change" },
+        "recordedToolInvocationCount": { "$ref": "#/$defs/change" }, "recordedSkillInvocationCount": { "$ref": "#/$defs/change" },
+        "recordedTokenEventCount": { "$ref": "#/$defs/change" }, "recordedTokenTotals": { "$ref": "#/$defs/tokenChanges" },
+        "currentClosureCounts": { "type": "object", "additionalProperties": false, "required": ["hardSealed", "quiescent", "open"], "properties": { "hardSealed": { "$ref": "#/$defs/change" }, "quiescent": { "$ref": "#/$defs/change" }, "open": { "$ref": "#/$defs/change" } } },
+        "turnOutcomeCounts": { "type": "object", "additionalProperties": false, "required": ["providerCompleted", "abandoned", "unknown"], "properties": { "providerCompleted": { "$ref": "#/$defs/change" }, "abandoned": { "$ref": "#/$defs/change" }, "unknown": { "$ref": "#/$defs/change" } } }
+      }
+    },
+    "activityShiftItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bucketStart", "bucketEnd", "timeZone", "closureEvaluatedAt", "quiescenceSeconds", "distinctSessionCount", "distinctTurnCount", "distinctProjectCount", "observedContextSwitchCount", "recordedToolInvocationCount", "recordedSkillInvocationCount", "recordedTokenEventCount", "recordedTokenTotals", "tokenMetricCoverage", "currentClosureCounts", "turnOutcomeCounts", "dedupeSupport", "comparison", "evidence"],
+      "properties": {
+        "bucketStart": { "$ref": "#/$defs/timestamp" }, "bucketEnd": { "$ref": "#/$defs/timestamp" }, "timeZone": { "const": "UTC" },
+        "closureEvaluatedAt": { "$ref": "#/$defs/timestamp" }, "quiescenceSeconds": { "const": 300 },
+        "distinctSessionCount": { "$ref": "#/$defs/decimal" }, "distinctTurnCount": { "$ref": "#/$defs/decimal" }, "distinctProjectCount": { "$ref": "#/$defs/decimal" },
+        "observedContextSwitchCount": { "$ref": "#/$defs/decimal" }, "recordedToolInvocationCount": { "$ref": "#/$defs/decimal" }, "recordedSkillInvocationCount": { "$ref": "#/$defs/decimal" },
+        "recordedTokenEventCount": { "$ref": "#/$defs/decimal" }, "recordedTokenTotals": { "$ref": "#/$defs/tokenTotals" }, "tokenMetricCoverage": { "$ref": "#/$defs/tokenMetricCoverage" },
+        "currentClosureCounts": { "type": "object", "additionalProperties": false, "required": ["hardSealed", "quiescent", "open"], "properties": { "hardSealed": { "$ref": "#/$defs/decimal" }, "quiescent": { "$ref": "#/$defs/decimal" }, "open": { "$ref": "#/$defs/decimal" } } },
+        "turnOutcomeCounts": { "type": "object", "additionalProperties": false, "required": ["providerCompleted", "abandoned", "unknown"], "properties": { "providerCompleted": { "$ref": "#/$defs/decimal" }, "abandoned": { "$ref": "#/$defs/decimal" }, "unknown": { "$ref": "#/$defs/decimal" } } },
+        "dedupeSupport": { "$ref": "#/$defs/dedupeSupport" }, "comparison": { "oneOf": [{ "$ref": "#/$defs/countChanges" }, { "type": "null" }] }, "evidence": { "$ref": "#/$defs/nullableEvidence" }
+      }
+    },
+    "tokenHotspotItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "model", "projectKey", "capability", "capabilityAttribution", "recordedTokenTotals", "metricCoverage", "evidence"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 64 }, "model": { "$ref": "#/$defs/nullableString" }, "projectKey": { "$ref": "#/$defs/nullableKey" },
+        "capability": { "type": "null" }, "capabilityAttribution": { "const": "unavailable" }, "recordedTokenTotals": { "$ref": "#/$defs/tokenTotals" },
+        "metricCoverage": { "$ref": "#/$defs/tokenMetricCoverage" }, "evidence": { "$ref": "#/$defs/nullableEvidence" }
+      }
+    },
+    "solutionRecallItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventKey", "eventRevision", "turnKey", "turnRevision", "provider", "projectKey", "eventKind", "observedAt", "finalAnswer", "subsequentSuccess", "evidence"],
+      "properties": {
+        "eventKey": { "$ref": "#/$defs/key" }, "eventRevision": { "$ref": "#/$defs/key" }, "turnKey": { "$ref": "#/$defs/nullableKey" }, "turnRevision": { "$ref": "#/$defs/nullableKey" },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 64 }, "projectKey": { "$ref": "#/$defs/nullableKey" }, "eventKind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "observedAt": { "$ref": "#/$defs/nullableTimestamp" }, "finalAnswer": { "$ref": "#/$defs/nullableString" },
+        "subsequentSuccess": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["chainKey", "eventKey", "observedAt", "evidence"], "properties": { "chainKey": { "$ref": "#/$defs/key" }, "eventKey": { "$ref": "#/$defs/key" }, "observedAt": { "$ref": "#/$defs/nullableTimestamp" }, "evidence": { "$ref": "#/$defs/evidence" } } },
+            { "type": "null" }
+          ]
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "sessionTimelineItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventKey", "revision", "observedAt", "eventKind", "originScope", "completeness", "metadata", "turnKey", "turnRevision", "evidence"],
+      "properties": {
+        "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "observedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "eventKind": { "type": "string", "minLength": 1, "maxLength": 128 }, "originScope": { "enum": ["main", "subagent", "unknown"] },
+        "completeness": { "enum": ["full", "summary", "unloaded", "truncated", "unavailable"] },
+        "metadata": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/jsonObject" }, "turnKey": { "$ref": "#/$defs/nullableKey" },
+        "turnRevision": { "$ref": "#/$defs/nullableKey" }, "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    }
+  }
+}

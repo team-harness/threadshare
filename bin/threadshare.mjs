@@ -42,7 +42,7 @@ import { parseShareReference } from "../src/share-url.mjs";
 const SESSION_PROVIDERS = new Set(["codex", "claude", "paseo"]);
 const NATIVE_SESSION_PROVIDERS = new Set(["codex", "claude"]);
 const INSIGHTS_QUERY_ACTIONS = new Set([
-  "overview", "search", "capabilities", "usage", "activity", "evidence",
+  "overview", "search", "capabilities", "usage", "activity", "evidence", "query", "recipe",
 ]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 
@@ -907,7 +907,33 @@ async function main() {
       query: options.query,
       request: options.request,
       revision: options.revision,
+      stdio: options.stdio,
     };
+    if (positionals[1] === "mcp") {
+      if (positionals.length !== 2) {
+        throw cliDiagnostic("TS_USAGE_UNEXPECTED_ARGUMENT", "insights mcp takes no positional argument.", {
+          command: "insights",
+          next: "Run `threadshare insights mcp --stdio`.",
+        });
+      }
+      for (const [optionName, optionValue] of Object.entries(options)) {
+        if (optionValue !== undefined && optionName !== "stdio") {
+          throw cliDiagnostic("TS_USAGE_OPTION_NOT_ALLOWED", `--${optionName} is not valid for insights mcp.`, {
+            command: "insights",
+            next: "Run `threadshare insights mcp --stdio`.",
+          });
+        }
+      }
+      if (options.stdio !== true) {
+        throw cliDiagnostic("TS_USAGE_OPTION_DEPENDENCY", "insights mcp requires --stdio.", {
+          command: "insights",
+          next: "Run `threadshare insights mcp --stdio`.",
+        });
+      }
+      const { runInsightsMcpServer } = await import("../src/insights-mcp.mjs");
+      await runInsightsMcpServer();
+      return;
+    }
     if (INSIGHTS_QUERY_ACTIONS.has(positionals[1])) {
       let invocation;
       const controller = new AbortController();
@@ -939,7 +965,7 @@ async function main() {
           `--${optionName} is only valid for an Insights query action.`,
           {
             command: "insights",
-            next: "Remove the query option, or choose overview, search, capabilities, usage, activity, or evidence.",
+            next: "Remove the query option, or choose overview, search, capabilities, usage, activity, evidence, query, recipe, or mcp.",
           },
         );
       }

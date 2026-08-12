@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-query.v2.schema.json",
+  "title": "Threadshare Insights Query v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "resource", "records", "groups", "nextCursor", "totalMatchCount", "totalGroupCount", "truncated", "coverage", "provenance", "limits"],
+  "properties": {
+    "format": { "const": "threadshare-insights-query@v2" },
+    "snapshot": { "$ref": "#/$defs/snapshot" },
+    "sourceFreshness": { "$ref": "#/$defs/sourceFreshness" },
+    "resource": { "enum": ["session", "turn", "event", "capability-use", "file-activity", "token-usage", "error-occurrence"] },
+    "records": { "oneOf": [{ "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/jsonObject" } }, { "type": "null" }] },
+    "groups": { "oneOf": [{ "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/jsonObject" } }, { "type": "null" }] },
+    "nextCursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] },
+    "totalMatchCount": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+    "totalGroupCount": { "oneOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+    "truncated": { "type": "boolean" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pageBytes", "payloadsMayRequireEvidencePaging"],
+      "properties": { "pageBytes": { "$ref": "#/$defs/decimal" }, "payloadsMayRequireEvidencePaging": { "type": "boolean" } }
+    }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "snapshot": {
+      "type": "object", "additionalProperties": false, "required": ["seq", "token"],
+      "properties": { "seq": { "$ref": "#/$defs/decimal" }, "token": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+    },
+    "sourceFreshness": {
+      "type": "object", "additionalProperties": false, "required": ["state", "lastCommittedAt"],
+      "properties": { "state": { "const": "not-evaluated" }, "lastCommittedAt": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] } }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["matching", "indexedHistory", "degraded", "diagnostics"],
+      "properties": {
+        "matching": {
+          "type": "object", "additionalProperties": false,
+          "required": ["fullRecordCount", "summaryRecordCount", "unloadedRecordCount", "truncatedRecordCount", "unavailableRecordCount", "missingTimestampCount", "missingRevisionCount", "missingTokenMetricCount", "missingPayloadCount"],
+          "properties": {
+            "fullRecordCount": { "$ref": "#/$defs/decimal" }, "summaryRecordCount": { "$ref": "#/$defs/decimal" },
+            "unloadedRecordCount": { "$ref": "#/$defs/decimal" }, "truncatedRecordCount": { "$ref": "#/$defs/decimal" },
+            "unavailableRecordCount": { "$ref": "#/$defs/decimal" }, "missingTimestampCount": { "$ref": "#/$defs/decimal" },
+            "missingRevisionCount": { "$ref": "#/$defs/decimal" }, "missingTokenMetricCount": { "$ref": "#/$defs/decimal" },
+            "missingPayloadCount": { "$ref": "#/$defs/decimal" }
+          }
+        },
+        "indexedHistory": {
+          "type": "object", "additionalProperties": false,
+          "required": ["visibleSessionCount", "excludedSessionCount", "subagentExcludedSessionCount", "unknownEligibilitySessionCount", "pendingPurgeSessionCount", "purgedSessionCount", "missingCoverageRollupSessionCount", "fts"],
+          "properties": {
+            "visibleSessionCount": { "$ref": "#/$defs/decimal" }, "excludedSessionCount": { "$ref": "#/$defs/decimal" },
+            "subagentExcludedSessionCount": { "$ref": "#/$defs/decimal" }, "unknownEligibilitySessionCount": { "$ref": "#/$defs/decimal" },
+            "pendingPurgeSessionCount": { "$ref": "#/$defs/decimal" }, "purgedSessionCount": { "$ref": "#/$defs/decimal" },
+            "missingCoverageRollupSessionCount": { "$ref": "#/$defs/decimal" },
+            "fts": {
+              "type": "object", "additionalProperties": false,
+              "required": ["searchableEventCount", "storedNotSearchableEventCount", "searchablePayloadBytes", "storedNotSearchablePayloadBytes"],
+              "properties": {
+                "searchableEventCount": { "$ref": "#/$defs/decimal" }, "storedNotSearchableEventCount": { "$ref": "#/$defs/decimal" },
+                "searchablePayloadBytes": { "$ref": "#/$defs/decimal" }, "storedNotSearchablePayloadBytes": { "$ref": "#/$defs/decimal" }
+              }
+            }
+          }
+        },
+        "degraded": { "type": "boolean" },
+        "diagnostics": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false, "required": ["default", "fields"],
+      "properties": {
+        "default": { "enum": ["recorded", "derived", "estimated"] },
+        "fields": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/provenanceField" } }
+      }
+    },
+    "provenanceField": {
+      "type": "object", "additionalProperties": false, "required": ["path", "kind", "method"],
+      "properties": { "path": { "type": "string", "minLength": 1, "maxLength": 256 }, "kind": { "enum": ["recorded", "derived", "estimated"] }, "method": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+    "jsonArray": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/jsonValue" } },
+    "jsonValue": { "oneOf": [{ "type": "null" }, { "type": "boolean" }, { "type": "number" }, { "type": "string" }, { "$ref": "#/$defs/jsonArray" }, { "$ref": "#/$defs/jsonObject" }] }
+  }
+}

@@ -1545,14 +1545,11 @@ fn activity_scope(
 ///
 /// Turn-shaped and invocation-shaped counts are read in separate passes: joining capability uses
 /// into the Turn aggregate would fan out and inflate every Turn-level count.
-pub fn read_activity(
+pub(crate) fn read_activity_buckets_in_snapshot(
     connection: &Connection,
     request: &ActivityRequest,
-) -> Result<ActivityResponse, QueryError> {
+) -> Result<Vec<ActivityBucketRow>, QueryError> {
     let bounds = request.bounds()?;
-    let closure_evaluated_at = canonical_timestamp(request.now_unix_ms)?;
-    let transaction = connection.unchecked_transaction().map_err(query_failed)?;
-    let snapshot = snapshot_seq(&transaction)?;
     let mut buckets: BTreeMap<i64, ActivityBucketAccumulator> = BTreeMap::new();
 
     {
@@ -1573,7 +1570,7 @@ pub fn read_activity(
              WHERE {scope}
              GROUP BY b"
         );
-        let mut statement = transaction.prepare(&sql).map_err(query_failed)?;
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
         let rows = statement
             .query_map(params_from_iter(parameters.values), |row| {
                 Ok((
@@ -1616,7 +1613,7 @@ pub fn read_activity(
              WHERE {scope} AND u.origin_scope='main'
              GROUP BY b"
         );
-        let mut statement = transaction.prepare(&sql).map_err(query_failed)?;
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
         let rows = statement
             .query_map(params_from_iter(parameters.values), |row| {
                 Ok((
@@ -1645,7 +1642,7 @@ pub fn read_activity(
              {FROM_TURNS}
              WHERE {scope}"
         );
-        let mut statement = transaction.prepare(&sql).map_err(query_failed)?;
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
         let rows = statement
             .query_map(params_from_iter(parameters.values), |row| {
                 Ok((
@@ -1681,13 +1678,11 @@ pub fn read_activity(
         .values()
         .flat_map(|entry| entry.groups.iter().cloned())
         .collect::<BTreeSet<_>>();
-    let confidences = read_group_confidences(&transaction, &all_groups)?;
-    let coverage = read_coverage(&transaction, None)?;
-    transaction.commit().map_err(query_failed)?;
+    let confidences = read_group_confidences(connection, &all_groups)?;
 
     // Emit every bucket in the window, including empty ones: a gap in the series would read as
     // "no data collected" rather than "no activity".
-    let rows = (0..bounds.bucket_count)
+    (0..bounds.bucket_count)
         .map(|index| {
             let empty = ActivityBucketAccumulator::default();
             let entry = buckets.get(&i64::from(index)).unwrap_or(&empty);
@@ -1725,8 +1720,20 @@ pub fn read_activity(
                 },
             })
         })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .collect::<Result<Vec<_>, QueryError>>()
+}
 
+pub fn read_activity(
+    connection: &Connection,
+    request: &ActivityRequest,
+) -> Result<ActivityResponse, QueryError> {
+    request.validate()?;
+    let closure_evaluated_at = canonical_timestamp(request.now_unix_ms)?;
+    let transaction = connection.unchecked_transaction().map_err(query_failed)?;
+    let snapshot = snapshot_seq(&transaction)?;
+    let rows = read_activity_buckets_in_snapshot(&transaction, request)?;
+    let coverage = read_coverage(&transaction, None)?;
+    transaction.commit().map_err(query_failed)?;
     Ok(ActivityResponse {
         snapshot_seq: snapshot,
         closure_evaluated_at,

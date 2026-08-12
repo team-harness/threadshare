@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-evidence.v2.schema.json",
+  "title": "Threadshare Insights Evidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "snapshot", "sourceFreshness", "target", "revision", "payloadSha256", "totalBytes", "range", "content", "nextCursor", "complete"],
+  "properties": {
+    "format": { "const": "threadshare-insights-evidence@v2" },
+    "snapshot": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/snapshot" },
+    "sourceFreshness": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/sourceFreshness" },
+    "target": { "$ref": "threadshare-insights-evidence-request.v2.schema.json#/$defs/target" },
+    "revision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "payloadSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "totalBytes": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/decimal" },
+    "range": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": { "start": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/decimal" }, "end": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/decimal" } }
+    },
+    "content": { "type": "string", "maxLength": 1048576 },
+    "nextCursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] },
+    "complete": { "type": "boolean" }
+  }
+}

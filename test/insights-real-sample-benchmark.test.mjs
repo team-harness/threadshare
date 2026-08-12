@@ -258,6 +258,7 @@ test("small real-provider sample runs through discovery, reconciliation, and det
     temporaryParent: scratch,
     seed: "real-sample-e2e",
     timeoutMs: 60_000,
+    deepQueryV2: true,
   });
   assert.equal(report.format, "threadshare-insights-real-sample-benchmark@v1");
   assert.equal(report.sampling.populationFiles, 20);
@@ -278,6 +279,20 @@ test("small real-provider sample runs through discovery, reconciliation, and det
   assert.equal(report.fts.projectedAt250000TurnsBytes > report.fts.detailFullBytes, true);
   assert.match(report.hashes.selectedSnapshotContentDigest, /^[0-9a-f]{64}$/u);
   assert.equal(report.storage.ftsIntegrityCheck, "ok");
+  assert.equal(report.deepQueryV2.committedDeltaCount, 6);
+  assert.equal(report.deepQueryV2.syncWallMs > 0, true);
+  assert.equal(report.deepQueryV2.commitAckMs.count, 6);
+  assert.equal(report.deepQueryV2.commitAckMs.p50 > 0, true);
+  assert.equal(report.deepQueryV2.rows.historyEvents > 0, true);
+  assert.equal(report.deepQueryV2.rows.historyPayloads > 0, true);
+  assert.equal(report.deepQueryV2.rows.historyPayloadChunks > 0, true);
+  assert.equal(report.deepQueryV2.storage.historyEventMetadataBytes > 0, true);
+  assert.equal(report.deepQueryV2.storage.historyPayloadBytes > 0, true);
+  assert.equal(report.deepQueryV2.storage.historyFtsBytes > 0, true);
+  assert.equal(report.deepQueryV2.historyFtsIntegrity, "ok");
+  assert.equal(report.deepQueryV2.gates.committedDeltaCoverage, true);
+  assert.equal(report.deepQueryV2.gates.nonemptyHistory, true);
+  assert.equal(report.deepQueryV2.gates.historyFtsIntegrityPassed, true);
   assert.equal(report.gates.ftsIntegrityCheckPassed, true);
   assert.equal(report.gates.dedupeCountsConsistent, true);
   assert.equal(Object.hasOwn(report.gates, "longTermProjectionGateSkipped"), false);

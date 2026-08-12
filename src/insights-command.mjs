@@ -215,8 +215,8 @@ export function parseInsightsInvocation(positionals, options = {}) {
   });
 }
 
-export function insightsRequiredContract(originSecretEpoch) {
-  return createInsightsRequiredContract(originSecretEpoch);
+export function insightsRequiredContract(originSecretEpoch, options) {
+  return createInsightsRequiredContract(originSecretEpoch, options);
 }
 
 async function discoverSources(options) {
@@ -337,8 +337,11 @@ export async function reconcileInsights(options = {}) {
     confirmation: options.confirmation,
     async buildCandidate({ databaseFile, originSecretEpoch, privacyContext, signal }) {
       const config = await loadInsightsConfig({ ...options.configOptions, paths });
-      const requiredContract = insightsRequiredContract(originSecretEpoch);
-      const engine = await createInsightsEngineClient({
+      const requiredContract = (options.requiredContractFactory ?? insightsRequiredContract)(
+        originSecretEpoch,
+      );
+      const createEngineClient = options.createEngineClient ?? createInsightsEngineClient;
+      const engine = await createEngineClient({
         databasePath: databaseFile,
         requiredContract,
         runtimeOptions: options.runtimeOptions,
@@ -424,7 +427,8 @@ export async function reconcileActiveInsights(options = {}) {
       "Insights origin secret is missing; explicit secret recovery is required",
     );
   }
-  return withInsightsWriterLock(paths, async () => {
+  const migrationRequired = Symbol("migration-required");
+  const result = await withInsightsWriterLock(paths, async () => {
     await recoverInsightsReindexSwap({ ...options.reindexOptions, paths });
     const lockedStatus = await inspectInsightsState({
       ...options.lifecycleOptions,
@@ -450,6 +454,16 @@ export async function reconcileActiveInsights(options = {}) {
       timeoutMs: options.timeoutMs,
     });
     try {
+      if (requiredContract.factSchemaVersion === 2) {
+        if (typeof engine.databaseIdentity !== "function") {
+          throw new TypeError("Engine client must expose databaseIdentity() for Fact V2");
+        }
+        const identity = engine.databaseIdentity();
+        if (identity?.factSchemaVersion !== null &&
+            identity?.factSchemaVersion !== requiredContract.factSchemaVersion) {
+          return migrationRequired;
+        }
+      }
       const index = await runInsightsIndexer({
         sources: discovery.sources,
         config,
@@ -477,6 +491,8 @@ export async function reconcileActiveInsights(options = {}) {
       await engine.close();
     }
   }, options.lockOptions);
+  if (result === migrationRequired) return reconcileInsights({ ...options, paths });
+  return result;
 }
 
 export function createInsightsBackgroundWorker(options = {}) {

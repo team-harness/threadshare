@@ -965,6 +965,7 @@ function projectExcluded(delta, exclusions) {
 }
 
 function assertDeltaMatchesItem(delta, item, privacyContext, requiredContract) {
+  const factSchemaVersion = requiredContract.factSchemaVersion ?? 1;
   const expectedSessionKey = hashKey(
     "session",
     item.source.provider,
@@ -973,7 +974,7 @@ function assertDeltaMatchesItem(delta, item, privacyContext, requiredContract) {
   const valid =
     delta &&
     typeof delta === "object" &&
-    delta.format === "session-facts-delta@v1" &&
+    delta.format === `session-facts-delta@v${factSchemaVersion}` &&
     delta.mode === item.action &&
     delta.session?.provider === item.source.provider &&
     delta.session?.sessionKey === expectedSessionKey &&
@@ -1105,6 +1106,7 @@ export async function runInsightsIndexer(options = {}) {
       options.signal?.throwIfAborted();
       const delta = await readDelta(item.source.provider, item.source.file, {
         ...adapterOptions,
+        factSchemaVersion: requiredContract.factSchemaVersion,
         privacyContext: options.privacyContext,
         sessionId: item.source.sessionId,
         mode: item.action,

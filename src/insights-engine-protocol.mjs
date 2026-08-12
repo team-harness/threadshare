@@ -12,17 +12,24 @@ export const ACTIVE_INSIGHTS_PROJECTION_VERSIONS = Object.freeze([
 export const ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES = Object.freeze([
   "mixed-cjk-code@1",
 ]);
-const ACTIVE_INSIGHTS_PROVIDER_ADAPTER_VERSIONS = Object.freeze(["claude@1", "codex@1"]);
+const INSIGHTS_PROVIDER_ADAPTER_VERSIONS = Object.freeze({
+  1: Object.freeze(["claude@1", "codex@1"]),
+  2: Object.freeze(["claude@2", "codex@2"]),
+});
 
-export function createInsightsRequiredContract(originSecretEpoch) {
+export function createInsightsRequiredContract(originSecretEpoch, options = {}) {
+  const factSchemaVersion = options.factSchemaVersion ?? 2;
+  if (factSchemaVersion !== 1 && factSchemaVersion !== 2) {
+    throw new RangeError("factSchemaVersion must be 1 or 2");
+  }
   return Object.freeze({
-    factSchemaVersion: 1,
-    providerAdapterVersions: ACTIVE_INSIGHTS_PROVIDER_ADAPTER_VERSIONS,
-    privacyPolicyVersion: 1,
+    factSchemaVersion,
+    providerAdapterVersions: INSIGHTS_PROVIDER_ADAPTER_VERSIONS[factSchemaVersion],
+    privacyPolicyVersion: factSchemaVersion,
     originSecretEpoch,
     duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
+    factStorageProfile: `normalized-row-v${factSchemaVersion}`,
+    storageSchemaVersion: factSchemaVersion,
     projectionVersions: ACTIVE_INSIGHTS_PROJECTION_VERSIONS,
     analyzerCapabilities: ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES,
     rankerVersion: 1,
@@ -44,6 +51,13 @@ export const UPSERT_COLLECTION_ORDER = Object.freeze([
   "capabilityUses",
   "capabilityUseEvidence",
 ]);
+export const V2_UPSERT_COLLECTION_ORDER = Object.freeze([
+  ...UPSERT_COLLECTION_ORDER,
+  "historyEvents",
+  "historyPayloads",
+  "historyPayloadChunks",
+]);
+const ALL_UPSERT_COLLECTIONS = Object.freeze([...new Set(V2_UPSERT_COLLECTION_ORDER)]);
 
 const MESSAGE_TYPES = new Set([
   "HELLO",
@@ -81,6 +95,12 @@ const MESSAGE_TYPES = new Set([
   "INSIGHTS_ACTIVITY",
   "READ_TURN_EVIDENCE",
   "TURN_EVIDENCE_PAGE",
+  "READ_INSIGHTS_QUERY_V2",
+  "INSIGHTS_QUERY_V2",
+  "READ_INSIGHTS_EVIDENCE_V2",
+  "INSIGHTS_EVIDENCE_V2",
+  "READ_INSIGHTS_RECIPE",
+  "INSIGHTS_RECIPE",
   "ABORT_SESSION",
   "SESSION_ABORTED",
   "ERROR",
@@ -123,6 +143,13 @@ const MAX_EVIDENCE_PAGE_ENTRIES = 128;
 const MAX_USAGE_ITEMS = 50;
 const MAX_ACTIVITY_BUCKETS = 366;
 const MAX_CURSOR_BYTES = 256;
+const MAX_DEEP_QUERY_REQUEST_BYTES = 64 * 1_024;
+const MAX_DEEP_CURSOR_BYTES = 4 * 1_024;
+const MAX_DEEP_EVIDENCE_BYTES = 1_048_576;
+const MAX_DEEP_QUERY_FIELDS = 64;
+const MAX_DEEP_ORDER_FIELDS = 4;
+const MAX_DEEP_PREDICATE_DEPTH = 8;
+const MAX_DEEP_PREDICATE_LEAVES = 64;
 const MAX_PPM = 1_000_000;
 const SEARCH_RESULT_EVIDENCE = new Set(["abandoned", "provider-completed", "unknown"]);
 const SEARCH_CLOSURE_STATES = new Set(["hard-sealed", "open", "quiescent"]);
@@ -141,6 +168,18 @@ const USAGE_ORDER = new Set([
 ]);
 const ACTIVITY_BUCKETS = new Set(["day", "week"]);
 const FTS_FIELDS = new Set(["capability", "code", "natural"]);
+const DEEP_RESOURCES = new Set([
+  "session", "turn", "event", "capability-use", "file-activity", "token-usage",
+  "error-occurrence",
+]);
+const DEEP_PREDICATE_OPERATORS = new Set([
+  "eq", "ne", "in", "not-in", "exists", "lt", "lte", "gt", "gte", "between",
+  "prefix", "contains", "match",
+]);
+const DEEP_PAYLOAD_MODES = new Set(["omit", "reference", "inline"]);
+const DEEP_COUNT_MODES = new Set(["none", "exact"]);
+const DEEP_DIRECTIONS = new Set(["asc", "desc"]);
+const DEEP_COMPLETENESS = new Set(["full", "summary", "unloaded", "truncated", "unavailable"]);
 
 export class InsightsProtocolError extends Error {
   constructor(code, message, options = {}) {
@@ -608,11 +647,16 @@ function assertMaxFrameBytes(value, label) {
   }
 }
 
-const COUNT_FIELDS = [...RETRACTION_COLLECTION_ORDER, ...UPSERT_COLLECTION_ORDER];
+function upsertCollectionsForDeltaFormat(deltaFormat) {
+  if (deltaFormat === "session-facts-delta@v1") return UPSERT_COLLECTION_ORDER;
+  if (deltaFormat === "session-facts-delta@v2") return V2_UPSERT_COLLECTION_ORDER;
+  throw invalidFrame("BEGIN_SESSION.deltaFormat is unsupported");
+}
 
-function assertCounts(counts) {
-  assertExactKeys(counts, "BEGIN_SESSION.counts", COUNT_FIELDS);
-  for (const field of COUNT_FIELDS) assertDecimal(counts[field], `BEGIN_SESSION.counts.${field}`);
+function assertCounts(counts, upsertCollections) {
+  const countFields = [...RETRACTION_COLLECTION_ORDER, ...upsertCollections];
+  assertExactKeys(counts, "BEGIN_SESSION.counts", countFields);
+  for (const field of countFields) assertDecimal(counts[field], `BEGIN_SESSION.counts.${field}`);
 }
 
 function assertHello(message) {
@@ -623,7 +667,8 @@ function assertHello(message) {
 }
 
 function assertReady(message) {
-  assertEnvelope(message, "READY", [
+  const v2 = message.acceptedContract?.factSchemaVersion === 2;
+  const fields = [
     "engineVersion",
     "target",
     "maxFrameBytes",
@@ -631,7 +676,9 @@ function assertReady(message) {
     "sqliteCompileOptionsDigest",
     "buildManifestDigest",
     "acceptedContract",
-  ]);
+  ];
+  if (v2) fields.push("databaseUuid", "databaseFactSchemaVersion");
+  assertEnvelope(message, "READY", fields);
   assertNonEmptyString(message.engineVersion, "READY.engineVersion");
   assertNonEmptyString(message.target, "READY.target");
   assertMaxFrameBytes(message.maxFrameBytes, "READY.maxFrameBytes");
@@ -639,6 +686,13 @@ function assertReady(message) {
   assertHex64(message.sqliteCompileOptionsDigest, "READY.sqliteCompileOptionsDigest");
   assertHex64(message.buildManifestDigest, "READY.buildManifestDigest");
   assertHandshakeContract(message.acceptedContract, "READY.acceptedContract");
+  if (v2) {
+    assertUuid(message.databaseUuid, "READY.databaseUuid");
+    if (message.databaseFactSchemaVersion !== null &&
+        message.databaseFactSchemaVersion !== 1 && message.databaseFactSchemaVersion !== 2) {
+      throw invalidFrame("READY.databaseFactSchemaVersion must be null, 1, or 2");
+    }
+  }
 }
 
 function assertBeginSession(message) {
@@ -652,9 +706,7 @@ function assertBeginSession(message) {
     "contract",
     "counts",
   ]);
-  if (message.deltaFormat !== "session-facts-delta@v1") {
-    throw invalidFrame("BEGIN_SESSION.deltaFormat is unsupported");
-  }
+  const upsertCollections = upsertCollectionsForDeltaFormat(message.deltaFormat);
   assertPlainObject(message.session, "BEGIN_SESSION.session");
   assertHex64(message.session.sessionKey, "BEGIN_SESSION.session.sessionKey");
   assertHex64(message.deltaId, "BEGIN_SESSION.deltaId");
@@ -664,7 +716,7 @@ function assertBeginSession(message) {
   assertDecimal(message.expectedGeneration, "BEGIN_SESSION.expectedGeneration");
   assertDecimal(message.targetGeneration, "BEGIN_SESSION.targetGeneration");
   assertSessionContract(message.contract, "BEGIN_SESSION.contract");
-  assertCounts(message.counts);
+  assertCounts(message.counts, upsertCollections);
 }
 
 function assertSessionAccepted(message) {
@@ -909,7 +961,9 @@ function assertEngineStatus(message) {
   } else {
     assertDecimal(message.snapshotAgeMs, "ENGINE_STATUS.snapshotAgeMs");
   }
-  if (!new Set(["normalized-row-v1", "packed-facts-v1"]).has(message.factStorageProfile)) {
+  if (!new Set(["normalized-row-v1", "normalized-row-v2", "packed-facts-v1"]).has(
+    message.factStorageProfile,
+  )) {
     throw invalidFrame("ENGINE_STATUS.factStorageProfile is invalid");
   }
 
@@ -1536,10 +1590,995 @@ function assertQueryDiagnostic(diagnostic, label) {
   }
 }
 
-function assertMessagePayloadBound(message, label) {
-  if (Buffer.byteLength(canonicalJson(message), "utf8") > MAX_PROTOCOL_PAYLOAD_BYTES) {
+function assertMessagePayloadBound(message, label, validatedPayloadByteLength = null) {
+  const payloadByteLength = validatedPayloadByteLength ??
+    Buffer.byteLength(canonicalJson(message), "utf8");
+  if (payloadByteLength > MAX_PROTOCOL_PAYLOAD_BYTES) {
     throw invalidFrame(`${label} exceeds the protocol payload limit`);
   }
+}
+
+function assertDeepCursor(value, label) {
+  if (value !== null) {
+    assertBoundedString(value, label, MAX_DEEP_CURSOR_BYTES, { allowEmpty: false, ascii: true });
+  }
+}
+
+function assertDeepTarget(target, label) {
+  assertPlainObject(target, label);
+  const fields = {
+    turn: ["kind", "turnKey", "revision"],
+    session: ["kind", "sessionKey", "revision"],
+    "attempt-chain": ["kind", "chainKey", "revision"],
+  };
+  if (target.kind === "event") {
+    const expected = Object.hasOwn(target, "payloadKey")
+      ? ["kind", "eventKey", "revision", "payloadKey"]
+      : ["kind", "eventKey", "revision"];
+    assertExactKeys(target, label, expected);
+    assertHex64(target.eventKey, `${label}.eventKey`);
+    assertHex64(target.revision, `${label}.revision`);
+    if (target.payloadKey !== undefined) {
+      assertHex64(target.payloadKey, `${label}.payloadKey`);
+    }
+    return;
+  }
+  if (typeof target.kind !== "string" || fields[target.kind] === undefined) {
+    throw invalidFrame(`${label}.kind is invalid`);
+  }
+  assertExactKeys(target, label, fields[target.kind]);
+  for (const field of fields[target.kind].filter((field) => field !== "kind")) {
+    assertHex64(target[field], `${label}.${field}`);
+  }
+}
+
+function assertDeepPredicate(predicate, label, depth = 1, state = { leaves: 0 }) {
+  if (depth > MAX_DEEP_PREDICATE_DEPTH) {
+    throw invalidFrame(`${label} exceeds maximum depth ${MAX_DEEP_PREDICATE_DEPTH}`);
+  }
+  assertPlainObject(predicate, label);
+  const keys = Object.keys(predicate);
+  if (keys.length === 1 && (keys[0] === "and" || keys[0] === "or")) {
+    const field = keys[0];
+    const items = predicate[field];
+    if (!Array.isArray(items) || items.length < 1 || items.length > 64) {
+      throw invalidFrame(`${label}.${field} must contain 1..=64 predicates`);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      assertDeepPredicate(items[index], `${label}.${field}[${index}]`, depth + 1, state);
+    }
+    return;
+  }
+  if (keys.length === 1 && keys[0] === "not") {
+    assertDeepPredicate(predicate.not, `${label}.not`, depth + 1, state);
+    return;
+  }
+  const expected = predicate.op === "exists" ? ["field", "op"] : ["field", "op", "value"];
+  assertExactKeys(predicate, label, expected);
+  assertBoundedString(predicate.field, `${label}.field`, 256, { allowEmpty: false });
+  assertEnum(predicate.op, `${label}.op`, DEEP_PREDICATE_OPERATORS);
+  state.leaves += 1;
+  if (state.leaves > MAX_DEEP_PREDICATE_LEAVES) {
+    throw invalidFrame(`${label} exceeds maximum ${MAX_DEEP_PREDICATE_LEAVES} leaves`);
+  }
+  if (predicate.op === "exists") return;
+  if (["in", "not-in", "between"].includes(predicate.op)) {
+    if (!Array.isArray(predicate.value) || predicate.value.length < 1 ||
+        predicate.value.length > 64 ||
+        (predicate.op === "between" && predicate.value.length !== 2)) {
+      throw invalidFrame(`${label}.value must be a bounded array`);
+    }
+    for (let index = 0; index < predicate.value.length; index += 1) {
+      assertBoundedString(predicate.value[index], `${label}.value[${index}]`, 8 * 1_024);
+    }
+    return;
+  }
+  assertBoundedString(predicate.value, `${label}.value`, 8 * 1_024);
+}
+
+function assertDeepQueryShape(shape, label) {
+  assertPlainObject(shape, label);
+  if (shape.kind === "records") {
+    assertExactKeys(shape, label, ["kind", "select", "payloadMode"]);
+    if (!Array.isArray(shape.select) || shape.select.length < 1 ||
+        shape.select.length > MAX_DEEP_QUERY_FIELDS) {
+      throw invalidFrame(`${label}.select must contain 1..=${MAX_DEEP_QUERY_FIELDS} fields`);
+    }
+    const seen = new Set();
+    for (let index = 0; index < shape.select.length; index += 1) {
+      assertBoundedString(shape.select[index], `${label}.select[${index}]`, 256, {
+        allowEmpty: false,
+      });
+      if (seen.has(shape.select[index])) throw invalidFrame(`${label}.select contains duplicates`);
+      seen.add(shape.select[index]);
+    }
+    assertEnum(shape.payloadMode, `${label}.payloadMode`, DEEP_PAYLOAD_MODES);
+    return;
+  }
+  if (shape.kind === "aggregate") {
+    assertExactKeys(shape, label, ["kind", "groupBy", "metrics"]);
+    if (!Array.isArray(shape.groupBy) || shape.groupBy.length > 3 ||
+        !Array.isArray(shape.metrics) || shape.metrics.length < 1 || shape.metrics.length > 8) {
+      throw invalidFrame(`${label} aggregate bounds are invalid`);
+    }
+    for (let index = 0; index < shape.groupBy.length; index += 1) {
+      assertBoundedString(shape.groupBy[index], `${label}.groupBy[${index}]`, 256, {
+        allowEmpty: false,
+      });
+    }
+    for (let index = 0; index < shape.metrics.length; index += 1) {
+      assertPlainObject(shape.metrics[index], `${label}.metrics[${index}]`);
+    }
+    return;
+  }
+  throw invalidFrame(`${label}.kind is invalid`);
+}
+
+function assertDeepQueryRequest(request, label) {
+  assertExactKeys(request, label, [
+    "format", "resource", "where", "shape", "orderBy", "limit", "cursor", "count",
+    "evaluatedAt",
+  ]);
+  if (request.format !== "threadshare-insights-query-request@v2") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertEnum(request.resource, `${label}.resource`, DEEP_RESOURCES);
+  if (request.where !== null) assertDeepPredicate(request.where, `${label}.where`);
+  assertDeepQueryShape(request.shape, `${label}.shape`);
+  if (!Array.isArray(request.orderBy) || request.orderBy.length < 1 ||
+      request.orderBy.length > MAX_DEEP_ORDER_FIELDS) {
+    throw invalidFrame(`${label}.orderBy must contain 1..=${MAX_DEEP_ORDER_FIELDS} fields`);
+  }
+  for (let index = 0; index < request.orderBy.length; index += 1) {
+    const item = request.orderBy[index];
+    assertExactKeys(item, `${label}.orderBy[${index}]`, ["field", "direction"]);
+    assertBoundedString(item.field, `${label}.orderBy[${index}].field`, 256, {
+      allowEmpty: false,
+    });
+    assertEnum(item.direction, `${label}.orderBy[${index}].direction`, DEEP_DIRECTIONS);
+  }
+  assertSafeInteger(request.limit, `${label}.limit`, { min: 1, max: 50 });
+  assertDeepCursor(request.cursor, `${label}.cursor`);
+  assertEnum(request.count, `${label}.count`, DEEP_COUNT_MODES);
+  assertCanonicalTimestamp(request.evaluatedAt, `${label}.evaluatedAt`);
+  if (Buffer.byteLength(canonicalJson(request), "utf8") > MAX_DEEP_QUERY_REQUEST_BYTES) {
+    throw invalidFrame(`${label} exceeds 64 KiB`);
+  }
+}
+
+function assertDeepEvidenceRequest(request, label) {
+  assertExactKeys(request, label, ["format", "target", "include", "cursor", "maxBytes"]);
+  if (request.format !== "threadshare-insights-evidence-request@v2") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertDeepTarget(request.target, `${label}.target`);
+  assertBoundedSortedArray(request.include, `${label}.include`, 2, (value, itemLabel) =>
+    assertEnum(value, itemLabel, new Set(["envelope", "payload"])));
+  if (request.include.length === 0) throw invalidFrame(`${label}.include must not be empty`);
+  assertDeepCursor(request.cursor, `${label}.cursor`);
+  assertSafeInteger(request.maxBytes, `${label}.maxBytes`, {
+    min: 4,
+    max: MAX_DEEP_EVIDENCE_BYTES,
+  });
+  if (Buffer.byteLength(canonicalJson(request), "utf8") > MAX_DEEP_QUERY_REQUEST_BYTES) {
+    throw invalidFrame(`${label} exceeds 64 KiB`);
+  }
+}
+
+function assertDeepJsonValue(value, label, depth = 0) {
+  if (depth > 16) throw invalidFrame(`${label} exceeds maximum nesting depth`);
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw invalidFrame(`${label} must be finite`);
+    return;
+  }
+  if (typeof value === "string") {
+    assertBoundedString(value, label, MAX_PROTOCOL_PAYLOAD_BYTES);
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 4096) throw invalidFrame(`${label} has too many items`);
+    for (let index = 0; index < value.length; index += 1) {
+      assertDeepJsonValue(value[index], `${label}[${index}]`, depth + 1);
+    }
+    return;
+  }
+  assertPlainObject(value, label);
+  const contentFields = [
+    "byteLength", "sha256", "encoding", "inline", "reference", "complete",
+  ];
+  if (contentFields.some((field) => Object.hasOwn(value, field))) {
+    assertExactKeys(value, label, contentFields);
+    assertDecimal(value.byteLength, `${label}.byteLength`);
+    assertHex64(value.sha256, `${label}.sha256`);
+    assertEnum(value.encoding, `${label}.encoding`, new Set(["utf-8", "canonical-json"]));
+    const inline = value.inline !== null;
+    const reference = value.reference !== null;
+    if (inline === reference) throw invalidFrame(`${label} must contain inline xor reference`);
+    if (inline) {
+      assertBoundedString(value.inline, `${label}.inline`, MAX_PROTOCOL_PAYLOAD_BYTES);
+      if (BigInt(Buffer.byteLength(value.inline, "utf8")) > BigInt(value.byteLength)) {
+        throw invalidFrame(`${label}.inline exceeds byteLength`);
+      }
+    } else {
+      assertDeepTarget(value.reference, `${label}.reference`);
+    }
+    assertBoolean(value.complete, `${label}.complete`);
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    assertBoundedString(key, `${label} key`, 256, { allowEmpty: false });
+    assertDeepJsonValue(item, `${label}.${key}`, depth + 1);
+  }
+}
+
+function assertDeepCoverage(value, label) {
+  assertExactKeys(value, label, ["matching", "indexedHistory", "degraded", "diagnostics"]);
+  const matchingFields = [
+    "fullRecordCount", "summaryRecordCount", "unloadedRecordCount",
+    "truncatedRecordCount", "unavailableRecordCount", "missingTimestampCount",
+    "missingRevisionCount", "missingTokenMetricCount", "missingPayloadCount",
+  ];
+  assertExactKeys(value.matching, `${label}.matching`, matchingFields);
+  for (const field of matchingFields) {
+    assertDecimal(value.matching[field], `${label}.matching.${field}`);
+  }
+  const visible = matchingFields.slice(0, 5)
+    .reduce((sum, field) => sum + BigInt(value.matching[field]), 0n);
+  for (const field of ["missingTimestampCount", "missingRevisionCount", "missingPayloadCount"]) {
+    if (BigInt(value.matching[field]) > visible) {
+      throw invalidFrame(`${label}.matching.${field} is inconsistent`);
+    }
+  }
+  if (BigInt(value.matching.missingTokenMetricCount) > visible * 6n) {
+    throw invalidFrame(`${label}.matching.missingTokenMetricCount is inconsistent`);
+  }
+  const historyCountFields = [
+    "visibleSessionCount", "excludedSessionCount", "subagentExcludedSessionCount",
+    "unknownEligibilitySessionCount", "pendingPurgeSessionCount", "purgedSessionCount",
+    "missingCoverageRollupSessionCount",
+  ];
+  assertExactKeys(value.indexedHistory, `${label}.indexedHistory`, [...historyCountFields, "fts"]);
+  for (const field of historyCountFields) {
+    assertDecimal(value.indexedHistory[field], `${label}.indexedHistory.${field}`);
+  }
+  const ftsFields = [
+    "searchableEventCount", "storedNotSearchableEventCount",
+    "searchablePayloadBytes", "storedNotSearchablePayloadBytes",
+  ];
+  assertExactKeys(value.indexedHistory.fts, `${label}.indexedHistory.fts`, ftsFields);
+  for (const field of ftsFields) {
+    assertDecimal(value.indexedHistory.fts[field], `${label}.indexedHistory.fts.${field}`);
+  }
+  if (BigInt(value.indexedHistory.missingCoverageRollupSessionCount) >
+      BigInt(value.indexedHistory.visibleSessionCount)) {
+    throw invalidFrame(`${label}.indexedHistory coverage rollup count is inconsistent`);
+  }
+  assertBoolean(value.degraded, `${label}.degraded`);
+  const expectedDegraded = matchingFields.slice(1, 5)
+    .some((field) => BigInt(value.matching[field]) > 0n) ||
+    historyCountFields.slice(1).some((field) => BigInt(value.indexedHistory[field]) > 0n);
+  if (value.degraded !== expectedDegraded) throw invalidFrame(`${label}.degraded is inconsistent`);
+  assertBoundedSortedArray(value.diagnostics, `${label}.diagnostics`, 32,
+    (item, itemLabel) => assertBoundedString(item, itemLabel, 128, {
+      allowEmpty: false,
+      ascii: true,
+    }));
+  if (value.degraded !== (value.diagnostics.length > 0)) {
+    throw invalidFrame(`${label}.diagnostics is inconsistent with degraded`);
+  }
+  return visible;
+}
+
+function assertDeepQueryResponse(response, label) {
+  assertExactKeys(response, label, [
+    "format", "databaseUuid", "snapshotSeq", "resource", "records", "groups",
+    "nextCursor", "totalMatchCount", "totalGroupCount", "truncated", "coverage",
+    "provenance", "limits",
+  ]);
+  if (response.format !== "threadshare-insights-query@v2") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertUuid(response.databaseUuid, `${label}.databaseUuid`);
+  assertDecimal(response.snapshotSeq, `${label}.snapshotSeq`);
+  assertEnum(response.resource, `${label}.resource`, DEEP_RESOURCES);
+  const records = response.records !== null;
+  const groups = response.groups !== null;
+  if (records === groups) throw invalidFrame(`${label} must contain records xor groups`);
+  const page = records ? response.records : response.groups;
+  if (!Array.isArray(page) || page.length > 50) throw invalidFrame(`${label} page is invalid`);
+  for (let index = 0; index < page.length; index += 1) {
+    assertDeepJsonValue(page[index], `${label}.${records ? "records" : "groups"}[${index}]`);
+  }
+  assertDeepCursor(response.nextCursor, `${label}.nextCursor`);
+  if (response.totalMatchCount !== null) {
+    assertDecimal(response.totalMatchCount, `${label}.totalMatchCount`);
+    if (BigInt(response.totalMatchCount) < BigInt(page.length)) {
+      throw invalidFrame(`${label}.totalMatchCount is inconsistent`);
+    }
+  }
+  if (records) {
+    if (response.totalGroupCount !== null) {
+      throw invalidFrame(`${label}.totalGroupCount must be null for records`);
+    }
+  } else {
+    assertDecimal(response.totalGroupCount, `${label}.totalGroupCount`);
+    if (BigInt(response.totalGroupCount) < BigInt(page.length)) {
+      throw invalidFrame(`${label}.totalGroupCount is inconsistent`);
+    }
+  }
+  assertBoolean(response.truncated, `${label}.truncated`);
+  if (response.truncated !== (response.nextCursor !== null)) {
+    throw invalidFrame(`${label}.truncated is inconsistent`);
+  }
+  const coverageTotal = assertDeepCoverage(response.coverage, `${label}.coverage`);
+  if (response.totalMatchCount !== null && BigInt(response.totalMatchCount) !== coverageTotal) {
+    throw invalidFrame(`${label}.totalMatchCount does not match coverage`);
+  }
+  assertExactKeys(response.provenance, `${label}.provenance`, ["default", "fields"]);
+  assertEnum(response.provenance.default, `${label}.provenance.default`,
+    new Set(["recorded", "derived", "estimated"]));
+  if (!Array.isArray(response.provenance.fields) || response.provenance.fields.length > 128) {
+    throw invalidFrame(`${label}.provenance.fields is invalid`);
+  }
+  for (let index = 0; index < response.provenance.fields.length; index += 1) {
+    const field = response.provenance.fields[index];
+    const fieldLabel = `${label}.provenance.fields[${index}]`;
+    assertExactKeys(field, fieldLabel, ["path", "kind", "method"]);
+    assertBoundedString(field.path, `${fieldLabel}.path`, 256, { allowEmpty: false });
+    assertEnum(field.kind, `${fieldLabel}.kind`, new Set(["recorded", "derived", "estimated"]));
+    assertBoundedString(field.method, `${fieldLabel}.method`, 128, { allowEmpty: false });
+  }
+  assertExactKeys(response.limits, `${label}.limits`, [
+    "pageBytes", "payloadsMayRequireEvidencePaging",
+  ]);
+  assertDecimal(response.limits.pageBytes, `${label}.limits.pageBytes`);
+  assertBoolean(
+    response.limits.payloadsMayRequireEvidencePaging,
+    `${label}.limits.payloadsMayRequireEvidencePaging`,
+  );
+}
+
+function assertDeepEvidenceResponse(response, label) {
+  assertExactKeys(response, label, [
+    "format", "databaseUuid", "snapshotSeq", "target", "revision", "payloadSha256",
+    "totalBytes", "range", "content", "nextCursor", "complete",
+  ]);
+  if (response.format !== "threadshare-insights-evidence@v2") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertUuid(response.databaseUuid, `${label}.databaseUuid`);
+  assertDecimal(response.snapshotSeq, `${label}.snapshotSeq`);
+  assertDeepTarget(response.target, `${label}.target`);
+  assertHex64(response.revision, `${label}.revision`);
+  if (response.target.revision !== response.revision) {
+    throw invalidFrame(`${label}.revision does not match target`);
+  }
+  assertHex64(response.payloadSha256, `${label}.payloadSha256`);
+  assertDecimal(response.totalBytes, `${label}.totalBytes`);
+  assertExactKeys(response.range, `${label}.range`, ["start", "end"]);
+  assertDecimal(response.range.start, `${label}.range.start`);
+  assertDecimal(response.range.end, `${label}.range.end`);
+  const start = BigInt(response.range.start);
+  const end = BigInt(response.range.end);
+  const total = BigInt(response.totalBytes);
+  if (start > end || end > total || end - start !== BigInt(Buffer.byteLength(response.content))) {
+    throw invalidFrame(`${label}.range is inconsistent`);
+  }
+  assertBoundedString(response.content, `${label}.content`, MAX_DEEP_EVIDENCE_BYTES);
+  assertDeepCursor(response.nextCursor, `${label}.nextCursor`);
+  assertBoolean(response.complete, `${label}.complete`);
+  if (response.complete !== (end === total && response.nextCursor === null)) {
+    throw invalidFrame(`${label}.complete is inconsistent`);
+  }
+}
+
+function assertReadInsightsQueryV2(message) {
+  assertEnvelope(message, "READ_INSIGHTS_QUERY_V2", ["request"]);
+  assertDeepQueryRequest(message.request, "READ_INSIGHTS_QUERY_V2.request");
+}
+
+function assertInsightsQueryV2(message) {
+  assertEnvelope(message, "INSIGHTS_QUERY_V2", ["response"]);
+  assertDeepQueryResponse(message.response, "INSIGHTS_QUERY_V2.response");
+  assertMessagePayloadBound(message, "INSIGHTS_QUERY_V2");
+}
+
+function assertReadInsightsEvidenceV2(message) {
+  assertEnvelope(message, "READ_INSIGHTS_EVIDENCE_V2", ["request"]);
+  assertDeepEvidenceRequest(message.request, "READ_INSIGHTS_EVIDENCE_V2.request");
+}
+
+function assertInsightsEvidenceV2(message, validatedPayloadByteLength = null) {
+  assertEnvelope(message, "INSIGHTS_EVIDENCE_V2", ["response"]);
+  assertDeepEvidenceResponse(message.response, "INSIGHTS_EVIDENCE_V2.response");
+  assertMessagePayloadBound(
+    message,
+    "INSIGHTS_EVIDENCE_V2",
+    validatedPayloadByteLength,
+  );
+}
+
+const RECIPE_NAMES = new Set([
+  "capability-contexts@1", "failure-chains@1", "file-workflow-signals@1",
+  "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1",
+]);
+
+function assertRecipeWindow(value, label) {
+  assertExactKeys(value, label, ["after", "before"]);
+  assertCanonicalTimestamp(value.after, `${label}.after`);
+  assertCanonicalTimestamp(value.before, `${label}.before`);
+  if (Date.parse(value.after) >= Date.parse(value.before)) {
+    throw invalidFrame(`${label} must be non-empty`);
+  }
+}
+
+function assertRecipeFilters(value, label) {
+  assertExactKeys(value, label, [
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+  ]);
+  for (const field of ["providers", "eventKinds"]) {
+    assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
+      (item, itemLabel) => assertBoundedString(item, itemLabel, 256, { allowEmpty: false }));
+  }
+  for (const field of ["projectKeys", "capabilityKeys", "sessionKeys"]) {
+    assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
+      (item, itemLabel) => assertHex64(item, itemLabel));
+  }
+  if (value.text !== null) {
+    assertBoundedString(value.text, `${label}.text`, 8 * 1_024, { allowEmpty: false });
+  }
+  if (value.bucket !== null) assertEnum(value.bucket, `${label}.bucket`, new Set(["day", "week"]));
+}
+
+function assertRecipeRequest(request, label) {
+  assertExactKeys(request, label, [
+    "format", "name", "window", "comparisonWindow", "filters", "limit", "allowDegraded",
+    "evaluatedAt",
+  ]);
+  if (request.format !== "threadshare-insights-recipe-request@v1") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertEnum(request.name, `${label}.name`, RECIPE_NAMES);
+  assertRecipeWindow(request.window, `${label}.window`);
+  if (request.comparisonWindow !== null) {
+    assertRecipeWindow(request.comparisonWindow, `${label}.comparisonWindow`);
+  }
+  assertRecipeFilters(request.filters, `${label}.filters`);
+  assertSafeInteger(request.limit, `${label}.limit`, { min: 1, max: 50 });
+  assertBoolean(request.allowDegraded, `${label}.allowDegraded`);
+  assertCanonicalTimestamp(request.evaluatedAt, `${label}.evaluatedAt`);
+  if (Buffer.byteLength(canonicalJson(request), "utf8") > MAX_DEEP_QUERY_REQUEST_BYTES) {
+    throw invalidFrame(`${label} exceeds 64 KiB`);
+  }
+}
+
+const RECIPE_TOKEN_METRICS = Object.freeze([
+  "input", "cachedInput", "cacheWriteInput", "output", "reasoning", "total",
+]);
+
+function assertNullableRecipeString(value, label, maxBytes = MAX_PROTOCOL_PAYLOAD_BYTES) {
+  if (value !== null) assertBoundedString(value, label, maxBytes);
+}
+
+function assertRecipeEvidence(value, label, { nullable = false, kind = null } = {}) {
+  if (value === null && nullable) return;
+  assertDeepTarget(value, label);
+  if (kind !== null && value.kind !== kind) throw invalidFrame(`${label}.kind is invalid`);
+}
+
+function assertRecipeContent(value, label) {
+  if (value === null) return;
+  assertDeepJsonValue(value, label);
+  if (value.inline !== null || value.reference === null) {
+    throw invalidFrame(`${label} must use an evidence reference`);
+  }
+}
+
+function assertRecipeDecimalFields(value, label, fields) {
+  assertExactKeys(value, label, fields);
+  for (const field of fields) assertDecimal(value[field], `${label}.${field}`);
+}
+
+function assertRecipeTokenFields(totals, coverage, label) {
+  assertExactKeys(totals, `${label}.totals`, RECIPE_TOKEN_METRICS);
+  assertExactKeys(coverage, `${label}.coverage`, RECIPE_TOKEN_METRICS);
+  for (const field of RECIPE_TOKEN_METRICS) {
+    const metricLabel = `${label}.${field}`;
+    assertRecipeDecimalFields(coverage[field], `${metricLabel}.coverage`, [
+      "presentEventCount", "totalEventCount",
+    ]);
+    const present = BigInt(coverage[field].presentEventCount);
+    const total = BigInt(coverage[field].totalEventCount);
+    if (present > total) throw invalidFrame(`${metricLabel} coverage is inconsistent`);
+    const complete = present === total;
+    if (totals[field] === null) {
+      if (complete) throw invalidFrame(`${metricLabel} unexpectedly omits a complete total`);
+    } else {
+      assertDecimal(totals[field], `${metricLabel}.total`);
+      if (!complete) throw invalidFrame(`${metricLabel} presents a partial sum as a total`);
+    }
+  }
+}
+
+function assertRecipeChange(value, label, { nullable = false } = {}) {
+  assertExactKeys(value, label, ["baseline", "current", "absoluteChange"]);
+  const nulls = [value.baseline, value.current, value.absoluteChange]
+    .filter((item) => item === null).length;
+  if (nulls > 0) {
+    if (!nullable || nulls !== 3) throw invalidFrame(`${label} nullability is inconsistent`);
+    return;
+  }
+  assertDecimal(value.baseline, `${label}.baseline`);
+  assertDecimal(value.current, `${label}.current`);
+  assertSignedDecimal(value.absoluteChange, `${label}.absoluteChange`);
+  if (BigInt(value.current) - BigInt(value.baseline) !== BigInt(value.absoluteChange)) {
+    throw invalidFrame(`${label}.absoluteChange is inconsistent`);
+  }
+}
+
+function assertRecipeDedupeSupport(value, label) {
+  assertRecipeDecimalFields(value, label, [
+    "distinctDedupeGroupCount", "strongDedupeGroupCount", "weakDedupeGroupCount",
+    "observedEofProvisionalGroupCount", "unknownDedupeSessionCount",
+  ]);
+  if (BigInt(value.strongDedupeGroupCount) + BigInt(value.weakDedupeGroupCount) !==
+      BigInt(value.distinctDedupeGroupCount)) {
+    throw invalidFrame(`${label} confidence counts are inconsistent`);
+  }
+}
+
+function assertCapabilityContextItem(item, label) {
+  assertExactKeys(item, label, [
+    "capability", "recordedInvocationCount", "recordedFailingInvocationCount",
+    "distinctTurnCount", "distinctSessionCount", "distinctDedupeGroupCount",
+    "groupedInvocationCount", "ungroupedInvocationCount", "lastUsedAt",
+    "strongGroupMemberInvocationCount", "weakGroupMemberInvocationCount",
+    "invocationTerminalCounts", "topProjects", "coOccurringCapabilities",
+    "representativeTurns", "evidence",
+  ]);
+  assertExactKeys(item.capability, `${label}.capability`, [
+    "capabilityKey", "provider", "kind", "canonicalName",
+  ]);
+  assertHex64(item.capability.capabilityKey, `${label}.capability.capabilityKey`);
+  assertBoundedString(item.capability.provider, `${label}.capability.provider`, 64, {
+    allowEmpty: false,
+  });
+  assertEnum(item.capability.kind, `${label}.capability.kind`, new Set(["tool", "skill"]));
+  assertBoundedString(item.capability.canonicalName, `${label}.capability.canonicalName`, 512, {
+    allowEmpty: false,
+  });
+  const counts = [
+    "recordedInvocationCount", "recordedFailingInvocationCount", "distinctTurnCount",
+    "distinctSessionCount", "distinctDedupeGroupCount", "groupedInvocationCount",
+    "ungroupedInvocationCount", "strongGroupMemberInvocationCount",
+    "weakGroupMemberInvocationCount",
+  ];
+  for (const field of counts) assertDecimal(item[field], `${label}.${field}`);
+  if (BigInt(item.groupedInvocationCount) + BigInt(item.ungroupedInvocationCount) !==
+      BigInt(item.recordedInvocationCount)) {
+    throw invalidFrame(`${label} grouped invocation counts are inconsistent`);
+  }
+  if (item.lastUsedAt !== null) requiredTimestamp(item.lastUsedAt, `${label}.lastUsedAt`);
+  assertRecipeDecimalFields(item.invocationTerminalCounts, `${label}.invocationTerminalCounts`, [
+    "pending", "completed", "failed", "cancelled", "unknown",
+  ]);
+  const terminalTotal = Object.values(item.invocationTerminalCounts)
+    .reduce((sum, value) => sum + BigInt(value), 0n);
+  if (terminalTotal !== BigInt(item.recordedInvocationCount) ||
+      item.invocationTerminalCounts.failed !== item.recordedFailingInvocationCount) {
+    throw invalidFrame(`${label} terminal counts are inconsistent`);
+  }
+  if (!Array.isArray(item.topProjects) || item.topProjects.length > 5) {
+    throw invalidFrame(`${label}.topProjects exceeds 5 items`);
+  }
+  for (let index = 0; index < item.topProjects.length; index += 1) {
+    const project = item.topProjects[index];
+    const projectLabel = `${label}.topProjects[${index}]`;
+    assertExactKeys(project, projectLabel, ["projectKey", "recordedInvocationCount"]);
+    assertNullableHex64(project.projectKey, `${projectLabel}.projectKey`);
+    assertDecimal(project.recordedInvocationCount, `${projectLabel}.recordedInvocationCount`);
+  }
+  if (!Array.isArray(item.coOccurringCapabilities) || item.coOccurringCapabilities.length > 5) {
+    throw invalidFrame(`${label}.coOccurringCapabilities exceeds 5 items`);
+  }
+  for (let index = 0; index < item.coOccurringCapabilities.length; index += 1) {
+    const other = item.coOccurringCapabilities[index];
+    const otherLabel = `${label}.coOccurringCapabilities[${index}]`;
+    assertExactKeys(other, otherLabel, [
+      "capabilityKey", "kind", "canonicalName", "distinctTurnCount",
+    ]);
+    assertHex64(other.capabilityKey, `${otherLabel}.capabilityKey`);
+    assertEnum(other.kind, `${otherLabel}.kind`, new Set(["tool", "skill"]));
+    assertBoundedString(other.canonicalName, `${otherLabel}.canonicalName`, 512, {
+      allowEmpty: false,
+    });
+    assertDecimal(other.distinctTurnCount, `${otherLabel}.distinctTurnCount`);
+  }
+  if (!Array.isArray(item.representativeTurns) || item.representativeTurns.length > 5) {
+    throw invalidFrame(`${label}.representativeTurns exceeds 5 items`);
+  }
+  for (let index = 0; index < item.representativeTurns.length; index += 1) {
+    const turn = item.representativeTurns[index];
+    const turnLabel = `${label}.representativeTurns[${index}]`;
+    assertExactKeys(turn, turnLabel, [
+      "turnKey", "usedAt", "recordedInvocationCount", "context", "evidence",
+    ]);
+    assertHex64(turn.turnKey, `${turnLabel}.turnKey`);
+    if (turn.usedAt !== null) requiredTimestamp(turn.usedAt, `${turnLabel}.usedAt`);
+    assertDecimal(turn.recordedInvocationCount, `${turnLabel}.recordedInvocationCount`);
+    assertExactKeys(turn.context, `${turnLabel}.context`, ["problem", "finalAnswer"]);
+    assertBoundedString(turn.context.problem, `${turnLabel}.context.problem`, MAX_TURN_PROBLEM_BYTES);
+    assertNullableBoundedString(
+      turn.context.finalAnswer,
+      `${turnLabel}.context.finalAnswer`,
+      MAX_TURN_ANSWER_BYTES,
+    );
+    assertRecipeEvidence(turn.evidence, `${turnLabel}.evidence`, { kind: "turn" });
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { nullable: true, kind: "turn" });
+}
+
+function assertFailureChainItem(item, label) {
+  assertExactKeys(item, label, [
+    "chainKey", "revision", "status", "capabilityName", "eventCount",
+    "failedResultCount", "completedResultCount", "firstObservedAt", "lastObservedAt",
+    "attempts", "evidence",
+  ]);
+  assertHex64(item.chainKey, `${label}.chainKey`);
+  assertHex64(item.revision, `${label}.revision`);
+  assertEnum(item.status, `${label}.status`, new Set([
+    "resolved", "never-succeeded", "abandoned", "unknown",
+  ]));
+  assertNullableRecipeString(item.capabilityName, `${label}.capabilityName`, 512);
+  for (const field of ["eventCount", "failedResultCount", "completedResultCount"]) {
+    assertDecimal(item[field], `${label}.${field}`);
+  }
+  if (item.firstObservedAt !== null) requiredTimestamp(item.firstObservedAt, `${label}.firstObservedAt`);
+  if (item.lastObservedAt !== null) requiredTimestamp(item.lastObservedAt, `${label}.lastObservedAt`);
+  if (!Array.isArray(item.attempts) || item.attempts.length > 10_000 ||
+      BigInt(item.eventCount) !== BigInt(item.attempts.length)) {
+    throw invalidFrame(`${label}.attempts is inconsistent`);
+  }
+  let failed = 0n;
+  let completed = 0n;
+  for (let index = 0; index < item.attempts.length; index += 1) {
+    const attempt = item.attempts[index];
+    const attemptLabel = `${label}.attempts[${index}]`;
+    assertExactKeys(attempt, attemptLabel, [
+      "eventKey", "revision", "eventKind", "observedAt", "capabilityKey",
+      "capabilityName", "inputFingerprint", "providerState", "exitCode", "input",
+      "output", "error", "evidence",
+    ]);
+    assertHex64(attempt.eventKey, `${attemptLabel}.eventKey`);
+    assertHex64(attempt.revision, `${attemptLabel}.revision`);
+    assertBoundedString(attempt.eventKind, `${attemptLabel}.eventKind`, 128, {
+      allowEmpty: false,
+    });
+    if (attempt.observedAt !== null) requiredTimestamp(attempt.observedAt, `${attemptLabel}.observedAt`);
+    assertNullableHex64(attempt.capabilityKey, `${attemptLabel}.capabilityKey`);
+    assertNullableRecipeString(attempt.capabilityName, `${attemptLabel}.capabilityName`, 512);
+    assertNullableHex64(attempt.inputFingerprint, `${attemptLabel}.inputFingerprint`);
+    if (attempt.providerState !== null) {
+      assertEnum(attempt.providerState, `${attemptLabel}.providerState`, new Set([
+        "pending", "completed", "failed", "unknown",
+      ]));
+    }
+    if (attempt.exitCode !== null) assertDecimal(attempt.exitCode, `${attemptLabel}.exitCode`);
+    for (const field of ["input", "output", "error"]) {
+      assertRecipeContent(attempt[field], `${attemptLabel}.${field}`);
+    }
+    assertRecipeEvidence(attempt.evidence, `${attemptLabel}.evidence`, { kind: "event" });
+    if (attempt.providerState === "failed") failed += 1n;
+    if (attempt.providerState === "completed") completed += 1n;
+  }
+  if (failed !== BigInt(item.failedResultCount) || completed !== BigInt(item.completedResultCount)) {
+    throw invalidFrame(`${label} result counts are inconsistent`);
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "attempt-chain" });
+}
+
+function assertFileWorkflowItem(item, label) {
+  assertExactKeys(item, label, [
+    "sessionKey", "provider", "projectKey", "recordedCounts", "estimated", "evidence", "events",
+  ]);
+  assertHex64(item.sessionKey, `${label}.sessionKey`);
+  assertBoundedString(item.provider, `${label}.provider`, 64, { allowEmpty: false });
+  assertNullableHex64(item.projectKey, `${label}.projectKey`);
+  const recordedFields = [
+    "read", "edit", "write", "delete", "move", "search", "list", "attempted",
+    "confirmed", "failed", "unknown", "distinctPath", "documentLike", "implementationLike",
+  ];
+  assertRecipeDecimalFields(item.recordedCounts, `${label}.recordedCounts`, recordedFields);
+  assertExactKeys(item.estimated, `${label}.estimated`, [
+    "researchHeavy", "implementationHeavy", "docVoid", "specPrecisionGap", "method",
+  ]);
+  for (const field of ["researchHeavy", "implementationHeavy", "docVoid", "specPrecisionGap"]) {
+    assertBoolean(item.estimated[field], `${label}.estimated.${field}`);
+  }
+  if (item.estimated.method !== "file-workflow-signals@1") {
+    throw invalidFrame(`${label}.estimated.method is invalid`);
+  }
+  if (!Array.isArray(item.events) || item.events.length > 10_000) {
+    throw invalidFrame(`${label}.events is invalid`);
+  }
+  for (let index = 0; index < item.events.length; index += 1) {
+    const event = item.events[index];
+    const eventLabel = `${label}.events[${index}]`;
+    assertExactKeys(event, eventLabel, [
+      "eventKey", "revision", "observedAt", "eventKind", "activityOrdinal", "action",
+      "phase", "pathRole", "rawPath", "normalizedPath", "relativePath", "absolute",
+      "projectRelative", "input", "output", "error", "evidence",
+    ]);
+    assertHex64(event.eventKey, `${eventLabel}.eventKey`);
+    assertHex64(event.revision, `${eventLabel}.revision`);
+    if (event.observedAt !== null) requiredTimestamp(event.observedAt, `${eventLabel}.observedAt`);
+    assertBoundedString(event.eventKind, `${eventLabel}.eventKind`, 128, { allowEmpty: false });
+    assertDecimal(event.activityOrdinal, `${eventLabel}.activityOrdinal`);
+    assertEnum(event.action, `${eventLabel}.action`, new Set([
+      "read", "edit", "write", "delete", "move", "search", "list",
+    ]));
+    assertEnum(event.phase, `${eventLabel}.phase`, new Set([
+      "attempted", "confirmed", "failed", "unknown",
+    ]));
+    assertEnum(event.pathRole, `${eventLabel}.pathRole`, new Set(["target", "source", "destination"]));
+    assertBoundedString(event.rawPath, `${eventLabel}.rawPath`, MAX_SOURCE_LOCATOR_BYTES, {
+      allowEmpty: false,
+    });
+    assertBoundedString(event.normalizedPath, `${eventLabel}.normalizedPath`, MAX_SOURCE_LOCATOR_BYTES, {
+      allowEmpty: false,
+    });
+    assertNullableRecipeString(event.relativePath, `${eventLabel}.relativePath`, MAX_SOURCE_LOCATOR_BYTES);
+    assertBoolean(event.absolute, `${eventLabel}.absolute`);
+    assertBoolean(event.projectRelative, `${eventLabel}.projectRelative`);
+    for (const field of ["input", "output", "error"]) {
+      assertRecipeContent(event[field], `${eventLabel}.${field}`);
+    }
+    assertRecipeEvidence(event.evidence, `${eventLabel}.evidence`, { kind: "event" });
+  }
+  const actionTotal = ["read", "edit", "write", "delete", "move", "search", "list"]
+    .reduce((sum, field) => sum + BigInt(item.recordedCounts[field]), 0n);
+  const phaseTotal = ["attempted", "confirmed", "failed", "unknown"]
+    .reduce((sum, field) => sum + BigInt(item.recordedCounts[field]), 0n);
+  if (actionTotal !== BigInt(item.events.length) || phaseTotal !== BigInt(item.events.length) ||
+      BigInt(item.recordedCounts.distinctPath) > BigInt(item.events.length)) {
+    throw invalidFrame(`${label}.recordedCounts is inconsistent`);
+  }
+  const mutations = ["edit", "write", "delete", "move"]
+    .reduce((sum, field) => sum + BigInt(item.recordedCounts[field]), 0n);
+  const reads = BigInt(item.recordedCounts.read);
+  const researchHeavy = reads >= 3n * (mutations > 0n ? mutations : 1n);
+  const implementationHeavy = mutations >= 5n && reads * 10n <= mutations * 8n;
+  const noDocuments = item.recordedCounts.documentLike === "0";
+  if (item.estimated.researchHeavy !== researchHeavy ||
+      item.estimated.implementationHeavy !== implementationHeavy ||
+      item.estimated.docVoid !== (researchHeavy && noDocuments) ||
+      item.estimated.specPrecisionGap !== (implementationHeavy && noDocuments)) {
+    throw invalidFrame(`${label}.estimated is inconsistent`);
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "session" });
+}
+
+function assertActivityShiftItem(item, label) {
+  assertExactKeys(item, label, [
+    "bucketStart", "bucketEnd", "timeZone", "closureEvaluatedAt", "quiescenceSeconds",
+    "distinctSessionCount", "distinctTurnCount", "distinctProjectCount",
+    "observedContextSwitchCount", "recordedToolInvocationCount",
+    "recordedSkillInvocationCount", "recordedTokenEventCount", "recordedTokenTotals",
+    "tokenMetricCoverage", "currentClosureCounts", "turnOutcomeCounts", "dedupeSupport",
+    "comparison", "evidence",
+  ]);
+  const start = requiredTimestamp(item.bucketStart, `${label}.bucketStart`);
+  const end = requiredTimestamp(item.bucketEnd, `${label}.bucketEnd`);
+  if (start >= end || item.timeZone !== "UTC") throw invalidFrame(`${label} bucket is invalid`);
+  requiredTimestamp(item.closureEvaluatedAt, `${label}.closureEvaluatedAt`);
+  if (item.quiescenceSeconds !== 300) throw invalidFrame(`${label}.quiescenceSeconds is invalid`);
+  const countFields = [
+    "distinctSessionCount", "distinctTurnCount", "distinctProjectCount",
+    "observedContextSwitchCount", "recordedToolInvocationCount",
+    "recordedSkillInvocationCount", "recordedTokenEventCount",
+  ];
+  for (const field of countFields) assertDecimal(item[field], `${label}.${field}`);
+  assertRecipeTokenFields(
+    item.recordedTokenTotals,
+    item.tokenMetricCoverage,
+    `${label}.tokenMetrics`,
+  );
+  for (const metric of RECIPE_TOKEN_METRICS) {
+    if (item.tokenMetricCoverage[metric].totalEventCount !== item.recordedTokenEventCount) {
+      throw invalidFrame(`${label}.${metric} token coverage denominator is inconsistent`);
+    }
+  }
+  assertRecipeDecimalFields(item.currentClosureCounts, `${label}.currentClosureCounts`, [
+    "hardSealed", "quiescent", "open",
+  ]);
+  assertRecipeDecimalFields(item.turnOutcomeCounts, `${label}.turnOutcomeCounts`, [
+    "providerCompleted", "abandoned", "unknown",
+  ]);
+  for (const group of [item.currentClosureCounts, item.turnOutcomeCounts]) {
+    const total = Object.values(group).reduce((sum, value) => sum + BigInt(value), 0n);
+    if (total !== BigInt(item.distinctTurnCount)) {
+      throw invalidFrame(`${label} Turn counts are inconsistent`);
+    }
+  }
+  assertRecipeDedupeSupport(item.dedupeSupport, `${label}.dedupeSupport`);
+  if (item.comparison !== null) {
+    assertExactKeys(item.comparison, `${label}.comparison`, [
+      "baselineBucketStart", "distinctSessionCount", "distinctTurnCount",
+      "distinctProjectCount", "observedContextSwitchCount", "recordedToolInvocationCount",
+      "recordedSkillInvocationCount", "recordedTokenEventCount", "recordedTokenTotals",
+      "currentClosureCounts", "turnOutcomeCounts",
+    ]);
+    requiredTimestamp(item.comparison.baselineBucketStart, `${label}.comparison.baselineBucketStart`);
+    for (const field of countFields) {
+      assertRecipeChange(item.comparison[field], `${label}.comparison.${field}`);
+    }
+    assertExactKeys(
+      item.comparison.recordedTokenTotals,
+      `${label}.comparison.recordedTokenTotals`,
+      RECIPE_TOKEN_METRICS,
+    );
+    for (const metric of RECIPE_TOKEN_METRICS) {
+      assertRecipeChange(
+        item.comparison.recordedTokenTotals[metric],
+        `${label}.comparison.recordedTokenTotals.${metric}`,
+        { nullable: true },
+      );
+    }
+    for (const [field, keys] of [
+      ["currentClosureCounts", ["hardSealed", "quiescent", "open"]],
+      ["turnOutcomeCounts", ["providerCompleted", "abandoned", "unknown"]],
+    ]) {
+      assertExactKeys(item.comparison[field], `${label}.comparison.${field}`, keys);
+      for (const key of keys) {
+        assertRecipeChange(
+          item.comparison[field][key],
+          `${label}.comparison.${field}.${key}`,
+        );
+      }
+    }
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { nullable: true, kind: "session" });
+}
+
+function assertTokenHotspotItem(item, label) {
+  assertExactKeys(item, label, [
+    "provider", "model", "projectKey", "capability", "capabilityAttribution",
+    "recordedTokenTotals", "metricCoverage", "evidence",
+  ]);
+  assertBoundedString(item.provider, `${label}.provider`, 64, { allowEmpty: false });
+  assertNullableRecipeString(item.model, `${label}.model`, 256);
+  assertNullableHex64(item.projectKey, `${label}.projectKey`);
+  if (item.capability !== null || item.capabilityAttribution !== "unavailable") {
+    throw invalidFrame(`${label} must not infer capability-scoped token usage`);
+  }
+  assertRecipeTokenFields(
+    item.recordedTokenTotals,
+    item.metricCoverage,
+    `${label}.tokenMetrics`,
+  );
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { nullable: true, kind: "event" });
+}
+
+function assertSolutionRecallItem(item, label) {
+  assertExactKeys(item, label, [
+    "eventKey", "eventRevision", "turnKey", "turnRevision", "provider", "projectKey",
+    "eventKind", "observedAt", "finalAnswer", "subsequentSuccess", "evidence",
+  ]);
+  assertHex64(item.eventKey, `${label}.eventKey`);
+  assertHex64(item.eventRevision, `${label}.eventRevision`);
+  assertNullableHex64(item.turnKey, `${label}.turnKey`);
+  assertNullableHex64(item.turnRevision, `${label}.turnRevision`);
+  if ((item.turnKey === null) !== (item.turnRevision === null)) {
+    throw invalidFrame(`${label} Turn identity is inconsistent`);
+  }
+  assertBoundedString(item.provider, `${label}.provider`, 64, { allowEmpty: false });
+  assertNullableHex64(item.projectKey, `${label}.projectKey`);
+  assertBoundedString(item.eventKind, `${label}.eventKind`, 128, { allowEmpty: false });
+  if (item.observedAt !== null) requiredTimestamp(item.observedAt, `${label}.observedAt`);
+  assertNullableBoundedString(item.finalAnswer, `${label}.finalAnswer`, MAX_TURN_ANSWER_BYTES);
+  if (item.subsequentSuccess !== null) {
+    assertExactKeys(item.subsequentSuccess, `${label}.subsequentSuccess`, [
+      "chainKey", "eventKey", "observedAt", "evidence",
+    ]);
+    assertHex64(item.subsequentSuccess.chainKey, `${label}.subsequentSuccess.chainKey`);
+    assertHex64(item.subsequentSuccess.eventKey, `${label}.subsequentSuccess.eventKey`);
+    if (item.subsequentSuccess.observedAt !== null) {
+      requiredTimestamp(
+        item.subsequentSuccess.observedAt,
+        `${label}.subsequentSuccess.observedAt`,
+      );
+    }
+    assertRecipeEvidence(
+      item.subsequentSuccess.evidence,
+      `${label}.subsequentSuccess.evidence`,
+      { kind: "event" },
+    );
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
+}
+
+function assertSessionTimelineItem(item, label) {
+  assertExactKeys(item, label, [
+    "eventKey", "revision", "observedAt", "eventKind", "originScope", "completeness",
+    "metadata", "turnKey", "turnRevision", "evidence",
+  ]);
+  assertHex64(item.eventKey, `${label}.eventKey`);
+  assertHex64(item.revision, `${label}.revision`);
+  if (item.observedAt !== null) requiredTimestamp(item.observedAt, `${label}.observedAt`);
+  assertBoundedString(item.eventKind, `${label}.eventKind`, 128, { allowEmpty: false });
+  assertEnum(item.originScope, `${label}.originScope`, new Set(["main", "subagent", "unknown"]));
+  assertEnum(item.completeness, `${label}.completeness`, new Set([
+    "full", "summary", "unloaded", "truncated", "unavailable",
+  ]));
+  assertPlainObject(item.metadata, `${label}.metadata`);
+  assertDeepJsonValue(item.metadata, `${label}.metadata`);
+  assertNullableHex64(item.turnKey, `${label}.turnKey`);
+  assertNullableHex64(item.turnRevision, `${label}.turnRevision`);
+  if ((item.turnKey === null) !== (item.turnRevision === null)) {
+    throw invalidFrame(`${label} Turn identity is inconsistent`);
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
+}
+
+function assertRecipeItem(name, item, label) {
+  if (name === "capability-contexts@1") return assertCapabilityContextItem(item, label);
+  if (name === "failure-chains@1") return assertFailureChainItem(item, label);
+  if (name === "file-workflow-signals@1") return assertFileWorkflowItem(item, label);
+  if (name === "activity-shifts@1") return assertActivityShiftItem(item, label);
+  if (name === "token-hotspots@1") return assertTokenHotspotItem(item, label);
+  if (name === "solution-recall@1") return assertSolutionRecallItem(item, label);
+  return assertSessionTimelineItem(item, label);
+}
+
+function assertRecipeResponse(response, label) {
+  assertExactKeys(response, label, [
+    "format", "databaseUuid", "snapshotSeq", "name", "window", "comparisonWindow",
+    "evaluatedAt", "items", "totalItemCount", "truncated", "coverage", "provenance",
+  ]);
+  if (response.format !== "threadshare-insights-recipe@v1") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertUuid(response.databaseUuid, `${label}.databaseUuid`);
+  assertDecimal(response.snapshotSeq, `${label}.snapshotSeq`);
+  assertEnum(response.name, `${label}.name`, RECIPE_NAMES);
+  assertRecipeWindow(response.window, `${label}.window`);
+  if (response.comparisonWindow !== null) {
+    assertRecipeWindow(response.comparisonWindow, `${label}.comparisonWindow`);
+  }
+  assertCanonicalTimestamp(response.evaluatedAt, `${label}.evaluatedAt`);
+  if (!Array.isArray(response.items) || response.items.length > 50) {
+    throw invalidFrame(`${label}.items exceeds 50 items`);
+  }
+  for (let index = 0; index < response.items.length; index += 1) {
+    assertRecipeItem(response.name, response.items[index], `${label}.items[${index}]`);
+  }
+  assertDecimal(response.totalItemCount, `${label}.totalItemCount`);
+  if (BigInt(response.totalItemCount) < BigInt(response.items.length)) {
+    throw invalidFrame(`${label}.totalItemCount is inconsistent`);
+  }
+  assertBoolean(response.truncated, `${label}.truncated`);
+  if (response.truncated !== (BigInt(response.totalItemCount) > BigInt(response.items.length))) {
+    throw invalidFrame(`${label}.truncated is inconsistent`);
+  }
+  assertDeepCoverage(response.coverage, `${label}.coverage`);
+  assertExactKeys(response.provenance, `${label}.provenance`, ["default", "fields"]);
+  assertEnum(response.provenance.default, `${label}.provenance.default`,
+    new Set(["recorded", "derived", "estimated"]));
+  if (!Array.isArray(response.provenance.fields) || response.provenance.fields.length > 64) {
+    throw invalidFrame(`${label}.provenance.fields is invalid`);
+  }
+  assertMessagePayloadBound({ response }, label);
+}
+
+function assertReadInsightsRecipe(message) {
+  assertEnvelope(message, "READ_INSIGHTS_RECIPE", ["request"]);
+  assertRecipeRequest(message.request, "READ_INSIGHTS_RECIPE.request");
+}
+
+function assertInsightsRecipe(message) {
+  assertEnvelope(message, "INSIGHTS_RECIPE", ["response"]);
+  assertRecipeResponse(message.response, "INSIGHTS_RECIPE.response");
 }
 
 function assertSearchTrace(trace, label) {
@@ -2185,7 +3224,7 @@ function assertErrorMessage(message) {
 }
 
 /** Strictly validates a protocol-v1 envelope and all protocol-owned nested fields. */
-export function assertProtocolMessage(message) {
+function validateProtocolMessage(message, validatedPayloadByteLength = null) {
   assertPlainObject(message, "protocol message");
   if (message.format !== INSIGHTS_PROTOCOL_FORMAT) {
     throw protocolError(
@@ -2206,7 +3245,7 @@ export function assertProtocolMessage(message) {
   else if (message.type === "RETRACT_FACTS") {
     assertBatch(message, "RETRACT_FACTS", RETRACTION_COLLECTION_ORDER);
   } else if (message.type === "UPSERT_FACTS") {
-    assertBatch(message, "UPSERT_FACTS", UPSERT_COLLECTION_ORDER);
+    assertBatch(message, "UPSERT_FACTS", ALL_UPSERT_COLLECTIONS);
   } else if (message.type === "BATCH_ACCEPTED") assertBatchAccepted(message);
   else if (message.type === "COMMIT_SESSION") assertCommitSession(message);
   else if (message.type === "SESSION_COMMITTED") assertSessionCommitted(message);
@@ -2237,10 +3276,23 @@ export function assertProtocolMessage(message) {
   else if (message.type === "INSIGHTS_ACTIVITY") assertInsightsActivity(message);
   else if (message.type === "READ_TURN_EVIDENCE") assertReadTurnEvidence(message);
   else if (message.type === "TURN_EVIDENCE_PAGE") assertTurnEvidencePage(message);
+  else if (message.type === "READ_INSIGHTS_QUERY_V2") assertReadInsightsQueryV2(message);
+  else if (message.type === "INSIGHTS_QUERY_V2") assertInsightsQueryV2(message);
+  else if (message.type === "READ_INSIGHTS_EVIDENCE_V2") assertReadInsightsEvidenceV2(message);
+  else if (message.type === "INSIGHTS_EVIDENCE_V2") {
+    assertInsightsEvidenceV2(message, validatedPayloadByteLength);
+  }
+  else if (message.type === "READ_INSIGHTS_RECIPE") assertReadInsightsRecipe(message);
+  else if (message.type === "INSIGHTS_RECIPE") assertInsightsRecipe(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
   else if (message.type === "ERROR") assertErrorMessage(message);
   return message;
+}
+
+/** Strictly validates a protocol-v1 envelope and all protocol-owned nested fields. */
+export function assertProtocolMessage(message) {
+  return validateProtocolMessage(message);
 }
 
 function envelope(type, requestId, fields) {
@@ -2265,17 +3317,24 @@ export function createReadyMessage({
   sqliteCompileOptionsDigest,
   buildManifestDigest,
   acceptedContract,
+  databaseUuid,
+  databaseFactSchemaVersion,
 }) {
+  const fields = {
+    engineVersion,
+    target,
+    maxFrameBytes: MAX_PROTOCOL_PAYLOAD_BYTES,
+    sqliteVersion,
+    sqliteCompileOptionsDigest,
+    buildManifestDigest,
+    acceptedContract: canonicalHandshakeContract(acceptedContract),
+  };
+  if (acceptedContract.factSchemaVersion === 2) {
+    fields.databaseUuid = databaseUuid;
+    fields.databaseFactSchemaVersion = databaseFactSchemaVersion;
+  }
   return assertProtocolMessage(
-    envelope("READY", requestId, {
-      engineVersion,
-      target,
-      maxFrameBytes: MAX_PROTOCOL_PAYLOAD_BYTES,
-      sqliteVersion,
-      sqliteCompileOptionsDigest,
-      buildManifestDigest,
-      acceptedContract: canonicalHandshakeContract(acceptedContract),
-    }),
+    envelope("READY", requestId, fields),
   );
 }
 
@@ -2328,7 +3387,7 @@ function countsFromDelta(delta) {
       assertArray(delta.retractions[collection], `delta.retractions.${collection}`).length,
     );
   }
-  for (const collection of UPSERT_COLLECTION_ORDER) {
+  for (const collection of upsertCollectionsForDeltaFormat(delta.format)) {
     counts[collection] = String(assertArray(delta[collection], `delta.${collection}`).length);
   }
   return counts;
@@ -2361,7 +3420,7 @@ function sessionContractFromDelta(
 }
 
 export function createBeginSessionMessage(delta, options) {
-  assertPlainObject(delta, "SessionFactsDeltaV1");
+  assertPlainObject(delta, "SessionFactsDelta");
   assertPlainObject(delta.session, "delta.session");
   return assertProtocolMessage(
     envelope("BEGIN_SESSION", options.requestId, {
@@ -2866,6 +3925,30 @@ export function createTurnEvidencePageMessage({
   }));
 }
 
+export function createReadInsightsQueryV2Message({ requestId, request }) {
+  return assertProtocolMessage(envelope("READ_INSIGHTS_QUERY_V2", requestId, { request }));
+}
+
+export function createInsightsQueryV2Message({ requestId, response }) {
+  return assertProtocolMessage(envelope("INSIGHTS_QUERY_V2", requestId, { response }));
+}
+
+export function createReadInsightsEvidenceV2Message({ requestId, request }) {
+  return assertProtocolMessage(envelope("READ_INSIGHTS_EVIDENCE_V2", requestId, { request }));
+}
+
+export function createInsightsEvidenceV2Message({ requestId, response }) {
+  return assertProtocolMessage(envelope("INSIGHTS_EVIDENCE_V2", requestId, { response }));
+}
+
+export function createReadInsightsRecipeMessage({ requestId, request }) {
+  return assertProtocolMessage(envelope("READ_INSIGHTS_RECIPE", requestId, { request }));
+}
+
+export function createInsightsRecipeMessage({ requestId, response }) {
+  return assertProtocolMessage(envelope("INSIGHTS_RECIPE", requestId, { response }));
+}
+
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {
   return assertProtocolMessage(envelope("ABORT_SESSION", requestId, { nextSequence, reason }));
 }
@@ -2953,7 +4036,7 @@ function decodePayload(payload) {
   if (expected.byteLength !== payload.byteLength || !expected.equals(payload)) {
     throw invalidFrame("frame payload is not canonical UTF-8 JSON");
   }
-  return assertProtocolMessage(message);
+  return validateProtocolMessage(message, payload.byteLength);
 }
 
 /** Incremental decoder for fragmented prefixes/payloads and coalesced frames. */
@@ -3048,7 +4131,7 @@ function collectionDescriptors(delta) {
       collection,
       items: delta.retractions[collection],
     })),
-    ...UPSERT_COLLECTION_ORDER.map((collection) => ({
+    ...upsertCollectionsForDeltaFormat(delta.format).map((collection) => ({
       type: "UPSERT_FACTS",
       collection,
       items: delta[collection],
@@ -3191,12 +4274,12 @@ export async function* createSessionDeltaMessages(
   yield commit;
 }
 
-function collectionRank(message) {
+function collectionRank(message, upsertCollections) {
   if (message.type === "RETRACT_FACTS") {
     return RETRACTION_COLLECTION_ORDER.indexOf(message.collection);
   }
   if (message.type === "UPSERT_FACTS") {
-    return RETRACTION_COLLECTION_ORDER.length + UPSERT_COLLECTION_ORDER.indexOf(message.collection);
+    return RETRACTION_COLLECTION_ORDER.length + upsertCollections.indexOf(message.collection);
   }
   return -1;
 }
@@ -3205,13 +4288,13 @@ function countKey(message) {
   return `${message.type}:${message.collection}`;
 }
 
-function expectedCountEntries(begin) {
+function expectedCountEntries(begin, upsertCollections) {
   return [
     ...RETRACTION_COLLECTION_ORDER.map((collection) => [
       `RETRACT_FACTS:${collection}`,
       BigInt(begin.counts[collection]),
     ]),
-    ...UPSERT_COLLECTION_ORDER.map((collection) => [
+    ...upsertCollections.map((collection) => [
       `UPSERT_FACTS:${collection}`,
       BigInt(begin.counts[collection]),
     ]),
@@ -3226,6 +4309,7 @@ export class SessionBatchSequenceValidator {
   #nextSequence = 0n;
   #lastCollectionRank = -1;
   #done = false;
+  #upsertCollections;
 
   constructor(begin) {
     assertProtocolMessage(begin);
@@ -3236,7 +4320,8 @@ export class SessionBatchSequenceValidator {
       );
     }
     this.#begin = begin;
-    this.#expected = new Map(expectedCountEntries(begin));
+    this.#upsertCollections = upsertCollectionsForDeltaFormat(begin.deltaFormat);
+    this.#expected = new Map(expectedCountEntries(begin, this.#upsertCollections));
     for (const key of this.#expected.keys()) this.#seen.set(key, 0n);
   }
 
@@ -3278,7 +4363,13 @@ export class SessionBatchSequenceValidator {
     }
 
     if (message.type === "RETRACT_FACTS" || message.type === "UPSERT_FACTS") {
-      const rank = collectionRank(message);
+      const rank = collectionRank(message, this.#upsertCollections);
+      if (rank < 0) {
+        throw protocolError(
+          "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
+          `${message.collection} is not valid for ${this.#begin.deltaFormat}`,
+        );
+      }
       if (rank < this.#lastCollectionRank) {
         throw protocolError(
           "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",

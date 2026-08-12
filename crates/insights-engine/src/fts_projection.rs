@@ -1,5 +1,6 @@
 use crate::analyzer::{
-    AnalyzerDiagnostics, AnalyzerField, QueryTerm, analyzer_identity, is_encoded_term,
+    AnalyzedDocument, AnalyzerDiagnostics, AnalyzerField, QueryTerm, analyzer_identity,
+    is_encoded_term,
 };
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value,
@@ -111,6 +112,59 @@ impl FtsMatchExpression {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistoryFtsMatchExpression(String);
+
+impl HistoryFtsMatchExpression {
+    pub(crate) fn from_query_terms(terms: &[QueryTerm]) -> rusqlite::Result<Self> {
+        if terms.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "history FTS MATCH requires at least one analyzed field-term".to_owned(),
+            ));
+        }
+        let mut expression = Vec::with_capacity(terms.len());
+        for term in terms {
+            expression.push(history_field_term(term.field, &term.encoded)?);
+        }
+        Ok(Self(expression.join(" OR ")))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub(crate) fn history_fts_document_text(document: &AnalyzedDocument) -> rusqlite::Result<String> {
+    let mut tokens = Vec::new();
+    for (field, text) in [
+        (AnalyzerField::Natural, document.natural.fts_text.as_str()),
+        (AnalyzerField::Code, document.code.fts_text.as_str()),
+        (
+            AnalyzerField::Capability,
+            document.capability.fts_text.as_str(),
+        ),
+    ] {
+        for encoded in text.split_ascii_whitespace() {
+            tokens.push(history_field_term(field, encoded)?);
+        }
+    }
+    Ok(tokens.join(" "))
+}
+
+fn history_field_term(field: AnalyzerField, encoded: &str) -> rusqlite::Result<String> {
+    if !is_encoded_term(encoded) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "history FTS accepts only analyzer-encoded terms".to_owned(),
+        ));
+    }
+    let prefix = match field {
+        AnalyzerField::Natural => 'n',
+        AnalyzerField::Code => 'c',
+        AnalyzerField::Capability => 'p',
+    };
+    Ok(format!("{prefix}{encoded}"))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -579,11 +633,12 @@ fn df_lookup_parameters(terms: &[String], tier: usize, field: FtsField) -> Vec<V
 mod tests {
     use super::{
         Bm25Weights, DF_PARAMETER_TIERS, FtsDocument, FtsField, FtsMatchExpression,
-        REQUIRED_DF_SEEK_INDEX, delete_fts_document, explain_df_lookup_plan,
-        fts5_virtual_table_index, initialize_fts_projection_schema,
-        lookup_field_document_frequencies, search_fts, upsert_fts_document,
+        HistoryFtsMatchExpression, REQUIRED_DF_SEEK_INDEX, delete_fts_document,
+        explain_df_lookup_plan, fts5_virtual_table_index, history_fts_document_text,
+        initialize_fts_projection_schema, lookup_field_document_frequencies, search_fts,
+        upsert_fts_document,
     };
-    use crate::analyzer::encode_term;
+    use crate::analyzer::{AnalyzerField, QueryTerm, analyze_document, encode_term};
     use rusqlite::{Connection, params};
 
     fn connection() -> Connection {
@@ -642,6 +697,36 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn compact_history_codec_keeps_analyzer_fields_distinct() {
+        let natural = analyze_document("alpha", &[]);
+        let code = analyze_document("`alpha`", &[]);
+        let natural_text = history_fts_document_text(&natural).unwrap();
+        let code_text = history_fts_document_text(&code).unwrap();
+        let encoded = encode_term("alpha");
+        let terms = [AnalyzerField::Natural, AnalyzerField::Code].map(|field| QueryTerm {
+            field,
+            logical: "alpha".to_owned(),
+            encoded: encoded.clone(),
+            source_offset: 0,
+        });
+        let expression = HistoryFtsMatchExpression::from_query_terms(&terms).unwrap();
+
+        assert!(
+            natural_text
+                .split_ascii_whitespace()
+                .any(|token| token.starts_with('n'))
+        );
+        assert!(
+            code_text
+                .split_ascii_whitespace()
+                .any(|token| token.starts_with('c'))
+        );
+        assert_ne!(natural_text, code_text);
+        assert!(expression.as_str().contains(&format!("n{encoded}")));
+        assert!(expression.as_str().contains(&format!("c{encoded}")));
     }
 
     #[test]

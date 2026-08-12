@@ -114,7 +114,7 @@ test("status starts the sidecar and publishes its content-free health snapshot",
     });
 
     assert.equal(startedWith.databasePath, fixture.paths.databaseFile);
-    assert.equal(startedWith.requiredContract.factStorageProfile, "normalized-row-v1");
+    assert.equal(startedWith.requiredContract.factStorageProfile, "normalized-row-v2");
     assert.equal(reads, 1);
     assert.equal(closes, 1);
     assert.equal(status.state, "ready");

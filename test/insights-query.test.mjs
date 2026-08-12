@@ -11,6 +11,9 @@ import {
   executeInsightsQuery,
   insightsQueryDiagnostic,
   normalizeInsightsActivityRequest,
+  normalizeInsightsDeepEvidenceRequest,
+  normalizeInsightsDeepQueryRequest,
+  normalizeInsightsRecipeRequest,
   normalizeInsightsSearchRequest,
   normalizeInsightsUsageRequest,
   parseInsightsQueryInvocation,
@@ -28,6 +31,7 @@ const TURN_KEY = "2".repeat(64);
 const SESSION_KEY = "3".repeat(64);
 const REVISION = "4".repeat(64);
 const DATABASE_UUID = "11111111-2222-4333-8444-555555555555";
+const RECIPE_ITEMS_URL = new URL("./fixtures/insights-recipe-items.v1.json", import.meta.url);
 
 function privacyContext() {
   return createPrivacyContext({
@@ -145,6 +149,30 @@ test("query action parser enforces JSON-only bounded command shapes", () => {
   );
   assert.deepEqual(
     parseInsightsQueryInvocation(
+      ["insights", "query"],
+      { format: "json", request: "-" },
+    ),
+    { action: "query", format: "json", requestSource: "-" },
+  );
+  assert.deepEqual(
+    parseInsightsQueryInvocation(
+      ["insights", "recipe", "failure-chains@1"],
+      { format: "json", request: "request.json" },
+    ),
+    {
+      action: "recipe", name: "failure-chains@1", format: "json",
+      requestSource: "request.json",
+    },
+  );
+  assert.deepEqual(
+    parseInsightsQueryInvocation(
+      ["insights", "evidence"],
+      { format: "json", request: "-" },
+    ),
+    { action: "evidence-v2", format: "json", requestSource: "-" },
+  );
+  assert.deepEqual(
+    parseInsightsQueryInvocation(
       ["insights", "evidence", TURN_KEY],
       { format: "json", revision: REVISION },
     ),
@@ -162,6 +190,11 @@ test("query action parser enforces JSON-only bounded command shapes", () => {
     [["insights", "capabilities"], { format: "json" }, "TS_USAGE_MISSING_ARGUMENT"],
     [["insights", "usage", "tool"], { format: "json" }, "TS_USAGE_OPTION_DEPENDENCY"],
     [["insights", "activity"], { format: "json", request: "-", limit: "2" }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "query"], { format: "json" }, "TS_USAGE_OPTION_DEPENDENCY"],
+    [["insights", "query", "extra"], { format: "json", request: "-" }, "TS_USAGE_UNEXPECTED_ARGUMENT"],
+    [["insights", "recipe"], { format: "json", request: "-" }, "TS_USAGE_MISSING_ARGUMENT"],
+    [["insights", "recipe", "unknown@1"], { format: "json", request: "-" }, "TS_USAGE_INVALID_VALUE"],
+    [["insights", "evidence", TURN_KEY], { format: "json", request: "-" }, "TS_USAGE_OPTION_CONFLICT"],
     [["insights", "evidence", TURN_KEY], { format: "json" }, "TS_USAGE_OPTION_DEPENDENCY"],
     [["insights", "evidence"], { format: "json", revision: REVISION }, "TS_USAGE_MISSING_ARGUMENT"],
   ]) {
@@ -170,6 +203,148 @@ test("query action parser enforces JSON-only bounded command shapes", () => {
       (error) => error?.code === code,
     );
   }
+});
+
+test("deep Query, Recipe, and Evidence public requests normalize into Engine contracts", () => {
+  const evaluatedAt = "2026-08-12T00:00:00.000Z";
+  assert.deepEqual(normalizeInsightsDeepQueryRequest({
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    where: null,
+    shape: { kind: "records", select: ["eventKey"], payloadMode: "reference" },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 10,
+    count: "exact",
+  }, { evaluatedAt }), {
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    where: null,
+    shape: { kind: "records", select: ["eventKey"], payloadMode: "reference" },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 10,
+    cursor: null,
+    count: "exact",
+    evaluatedAt,
+  });
+  assert.equal(normalizeInsightsRecipeRequest({
+    format: "threadshare-insights-recipe-request@v1",
+    window: { after: "2026-08-01T00:00:00.000Z", before: evaluatedAt },
+    filters: {},
+    limit: 20,
+  }, { name: "failure-chains@1", evaluatedAt }).name, "failure-chains@1");
+  assert.equal(normalizeInsightsDeepEvidenceRequest({
+    format: "threadshare-insights-evidence-request@v2",
+    target: { kind: "turn", turnKey: TURN_KEY, revision: REVISION },
+    include: ["envelope", "payload"],
+    maxBytes: 1024,
+  }).cursor, null);
+});
+
+test("deep Query, Recipe, and Evidence execution publish MAC snapshots without database UUIDs", async () => {
+  const context = privacyContext();
+  const state = {
+    paths: { databaseFile: "/not-read-by-fixture" },
+    originSecretEpoch: context.originSecretEpoch,
+    privacyContext: context,
+  };
+  const coverage = {
+    matching: {
+      fullRecordCount: "1", summaryRecordCount: "0", unloadedRecordCount: "0",
+      truncatedRecordCount: "0", unavailableRecordCount: "0", missingTimestampCount: "0",
+      missingRevisionCount: "0", missingTokenMetricCount: "0", missingPayloadCount: "0",
+    },
+    indexedHistory: {
+      visibleSessionCount: "1", excludedSessionCount: "0",
+      subagentExcludedSessionCount: "0", unknownEligibilitySessionCount: "0",
+      pendingPurgeSessionCount: "0", purgedSessionCount: "0",
+      missingCoverageRollupSessionCount: "0",
+      fts: {
+        searchableEventCount: "1", storedNotSearchableEventCount: "0",
+        searchablePayloadBytes: "7", storedNotSearchablePayloadBytes: "0",
+      },
+    },
+    degraded: false, diagnostics: [],
+  };
+  const run = (invocation, request, method, response) => executeInsightsQuery(invocation, {
+    async openState() { return state; },
+    createReader() {
+      return { async [method]() { return response; }, async close() {} };
+    },
+    input: Readable.from([JSON.stringify(request)]),
+    now: () => 1_786_464_000_000,
+  });
+  const queryRequest = {
+    format: "threadshare-insights-query-request@v2",
+    resource: "event",
+    shape: { kind: "records", select: ["eventKey"] },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "eventKey", direction: "asc" },
+    ],
+    limit: 10,
+  };
+  const query = await run(
+    { action: "query", requestSource: "-" }, queryRequest, "queryV2",
+    {
+      format: "threadshare-insights-query@v2", databaseUuid: DATABASE_UUID,
+      snapshotSeq: "7", resource: "event", records: [{ eventKey: TURN_KEY }], groups: null,
+      nextCursor: null, totalMatchCount: null, totalGroupCount: null, truncated: false,
+      coverage, provenance: { default: "recorded", fields: [] },
+      limits: { pageBytes: "3932160", payloadsMayRequireEvidencePaging: true },
+    },
+  );
+  assert.equal(query.snapshot.seq, "7");
+  assert.equal(JSON.stringify(query).includes(DATABASE_UUID), false);
+  assert.equal(query.records[0].eventKey, TURN_KEY);
+
+  const recipeRequest = {
+    format: "threadshare-insights-recipe-request@v1",
+    window: {
+      after: "2026-08-01T00:00:00.000Z",
+      before: "2026-08-12T00:00:00.000Z",
+    },
+    limit: 20,
+  };
+  const recipeItems = JSON.parse(await readFile(RECIPE_ITEMS_URL, "utf8"));
+  const failureItem = recipeItems.find(({ name }) => name === "failure-chains@1").item;
+  const recipe = await run(
+    { action: "recipe", name: "failure-chains@1", requestSource: "-" },
+    recipeRequest,
+    "recipe",
+    {
+      format: "threadshare-insights-recipe@v1", databaseUuid: DATABASE_UUID,
+      snapshotSeq: "7", name: "failure-chains@1", window: recipeRequest.window,
+      comparisonWindow: null, evaluatedAt: "2026-08-11T16:00:00.000Z",
+      items: [failureItem], totalItemCount: "1", truncated: false,
+      coverage, provenance: { default: "recorded", fields: [] },
+    },
+  );
+  assert.equal(recipe.items[0].status, "resolved");
+  assert.equal(JSON.stringify(recipe).includes(DATABASE_UUID), false);
+
+  const evidenceRequest = {
+    format: "threadshare-insights-evidence-request@v2",
+    target: { kind: "turn", turnKey: TURN_KEY, revision: REVISION },
+    include: ["payload"],
+    maxBytes: 1024,
+  };
+  const evidence = await run(
+    { action: "evidence-v2", requestSource: "-" }, evidenceRequest, "evidenceV2",
+    {
+      format: "threadshare-insights-evidence@v2", databaseUuid: DATABASE_UUID,
+      snapshotSeq: "7", target: evidenceRequest.target, revision: REVISION,
+      payloadSha256: KEY, totalBytes: "7", range: { start: "0", end: "7" },
+      content: "private", nextCursor: null, complete: true,
+    },
+  );
+  assert.equal(evidence.content, "private");
+  assert.equal(JSON.stringify(evidence).includes(DATABASE_UUID), false);
 });
 
 test("search request normalization is exact, bounded, and preserves explicit UTC windows", () => {
@@ -314,6 +489,22 @@ test("Engine evidence drift maps to public cursor and revision diagnostics", () 
   assert.equal(
     insightsQueryDiagnostic({ code: "EVIDENCE_INVALID_CURSOR" }, "evidence").code,
     "TS_INSIGHTS_CURSOR_STALE",
+  );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_EVIDENCE_CHANGED" }, "evidence").code,
+    "TS_INSIGHTS_PAYLOAD_CHANGED",
+  );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_EVIDENCE_NOT_FOUND" }, "evidence").code,
+    "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+  );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_QUERY_V2_NOT_READY" }, "query").code,
+    "TS_INSIGHTS_QUERY_V2_NOT_READY",
+  );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_COVERAGE_INCOMPLETE" }, "recipe").code,
+    "TS_INSIGHTS_COVERAGE_INCOMPLETE",
   );
   assert.equal(
     insightsQueryDiagnostic({ code: "TS_INSIGHTS_ENGINE_UNAVAILABLE" }, "search").code,

@@ -5,6 +5,11 @@ import { TextDecoder } from "node:util";
 
 import { canonicalJson } from "./canonical-json.mjs";
 import { cliDiagnostic } from "./cli-contract.mjs";
+import {
+  createReadInsightsEvidenceV2Message,
+  createReadInsightsQueryV2Message,
+  createReadInsightsRecipeMessage,
+} from "./insights-engine-protocol.mjs";
 import { createInsightsQueryReader } from "./insights-query-reader.mjs";
 import { openExistingInsightsState } from "./insights-state.mjs";
 
@@ -15,6 +20,8 @@ export const INSIGHTS_QUERY_ACTIONS = new Set([
   "usage",
   "activity",
   "evidence",
+  "query",
+  "recipe",
 ]);
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -45,6 +52,15 @@ const SKILL_LOAD_EVIDENCE_SOURCES = new Set([
   "structured-skill-injection",
   "session-catalog-complete-read",
   "claude-skill-tool-success",
+]);
+const RECIPE_NAMES = new Set([
+  "capability-contexts@1",
+  "failure-chains@1",
+  "file-workflow-signals@1",
+  "activity-shifts@1",
+  "token-hotspots@1",
+  "solution-recall@1",
+  "session-timeline@1",
 ]);
 
 function queryError(code, message, cause) {
@@ -207,6 +223,32 @@ export function parseInsightsQueryInvocation(positionals, options = {}) {
     }
     return Object.freeze({ action, format: "json", requestSource: options.request });
   }
+  if (action === "query") {
+    assertAllowedOptions(options, ["format", "request"]);
+    if (first !== undefined) throw queryError("TS_USAGE_UNEXPECTED_ARGUMENT", "query takes no positional argument");
+    if (options.request === undefined) {
+      throw queryError("TS_USAGE_OPTION_DEPENDENCY", "query requires --request");
+    }
+    return Object.freeze({ action, format: "json", requestSource: options.request });
+  }
+  if (action === "recipe") {
+    assertAllowedOptions(options, ["format", "request"]);
+    if (first === undefined) throw queryError("TS_USAGE_MISSING_ARGUMENT", "recipe requires a name");
+    if (!RECIPE_NAMES.has(first)) {
+      throw queryError("TS_USAGE_INVALID_VALUE", "recipe name is not supported");
+    }
+    if (options.request === undefined) {
+      throw queryError("TS_USAGE_OPTION_DEPENDENCY", "recipe requires --request");
+    }
+    return Object.freeze({ action, name: first, format: "json", requestSource: options.request });
+  }
+  if (options.request !== undefined) {
+    assertAllowedOptions(options, ["format", "request"]);
+    if (first !== undefined) {
+      throw queryError("TS_USAGE_OPTION_CONFLICT", "evidence --request cannot be combined with a Turn key");
+    }
+    return Object.freeze({ action: "evidence-v2", format: "json", requestSource: options.request });
+  }
   assertAllowedOptions(options, ["format", "revision", "cursor", "limit"]);
   if (first === undefined) {
     throw queryError("TS_USAGE_MISSING_ARGUMENT", "evidence requires a Turn key");
@@ -219,6 +261,123 @@ export function parseInsightsQueryInvocation(positionals, options = {}) {
     revision: requireHex64(options.revision, "revision", "TS_USAGE_INVALID_VALUE"),
     format: "json", limit: parseLimit(options.limit), cursor: optionalCursor(options.cursor),
   });
+}
+
+function validateEngineRequest(factory, request, label) {
+  try {
+    factory({ requestId: "1", request });
+  } catch (cause) {
+    throw requestError(`${label} is invalid`, cause);
+  }
+  return deepFreeze(request);
+}
+
+function cloneJson(value, label) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (cause) {
+    throw requestError(`${label} is not valid JSON`, cause);
+  }
+}
+
+export function normalizeInsightsDeepQueryRequest(input, options = {}) {
+  exactKeys(input, [
+    "format", "resource", "where", "shape", "orderBy", "limit", "cursor", "count",
+  ], "Query request");
+  if (input.format !== "threadshare-insights-query-request@v2") {
+    throw requestError("Query request format is invalid");
+  }
+  const evaluatedAt = canonicalTimestamp(options.evaluatedAt, "evaluatedAt").timestamp;
+  const shape = cloneJson(input.shape, "Query shape");
+  if (plainObject(shape) && shape.kind === "records" && shape.payloadMode === undefined) {
+    shape.payloadMode = "reference";
+  }
+  const request = {
+    format: input.format,
+    resource: input.resource,
+    where: input.where === undefined ? null : cloneJson(input.where, "Query predicate"),
+    shape,
+    orderBy: cloneJson(input.orderBy, "Query orderBy"),
+    limit: input.limit,
+    cursor: options.engineCursor ?? null,
+    count: input.count ?? "none",
+    evaluatedAt,
+  };
+  return validateEngineRequest(createReadInsightsQueryV2Message, request, "Query request");
+}
+
+function normalizeRecipeWindow(value, label) {
+  exactKeys(value, ["after", "before"], label);
+  const after = canonicalTimestamp(value.after, `${label}.after`).timestamp;
+  const before = canonicalTimestamp(value.before, `${label}.before`).timestamp;
+  if (Date.parse(after) >= Date.parse(before)) throw requestError(`${label} must be non-empty`);
+  return { after, before };
+}
+
+function normalizeRecipeFilters(value = {}) {
+  exactKeys(value, [
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+  ], "Recipe filters");
+  const text = value.text ?? null;
+  if (text !== null && (typeof text !== "string" || text.length === 0 ||
+      Buffer.byteLength(text, "utf8") > MAX_QUERY_BYTES)) {
+    throw requestError("Recipe filters.text must be a bounded non-empty string");
+  }
+  const bucket = value.bucket ?? null;
+  if (bucket !== null && bucket !== "day" && bucket !== "week") {
+    throw requestError("Recipe filters.bucket must be day or week");
+  }
+  return {
+    providers: stringArray(value.providers, "Recipe filters.providers", {
+      maximum: 64, maxBytes: 256,
+    }),
+    projectKeys: stringArray(value.projectKeys, "Recipe filters.projectKeys", { maximum: 64, hex: true }),
+    capabilityKeys: stringArray(value.capabilityKeys, "Recipe filters.capabilityKeys", { maximum: 64, hex: true }),
+    sessionKeys: stringArray(value.sessionKeys, "Recipe filters.sessionKeys", { maximum: 64, hex: true }),
+    eventKinds: stringArray(value.eventKinds, "Recipe filters.eventKinds", {
+      maximum: 64, maxBytes: 256,
+    }),
+    text,
+    bucket,
+  };
+}
+
+export function normalizeInsightsRecipeRequest(input, options = {}) {
+  exactKeys(input, [
+    "format", "window", "comparisonWindow", "filters", "limit", "allowDegraded",
+  ], "Recipe request");
+  if (input.format !== "threadshare-insights-recipe-request@v1") {
+    throw requestError("Recipe request format is invalid");
+  }
+  if (!RECIPE_NAMES.has(options.name)) throw requestError("Recipe name is not supported");
+  const request = {
+    format: input.format,
+    name: options.name,
+    window: normalizeRecipeWindow(input.window, "Recipe window"),
+    comparisonWindow: input.comparisonWindow == null
+      ? null
+      : normalizeRecipeWindow(input.comparisonWindow, "Recipe comparisonWindow"),
+    filters: normalizeRecipeFilters(input.filters),
+    limit: input.limit ?? 20,
+    allowDegraded: input.allowDegraded ?? false,
+    evaluatedAt: canonicalTimestamp(options.evaluatedAt, "evaluatedAt").timestamp,
+  };
+  return validateEngineRequest(createReadInsightsRecipeMessage, request, "Recipe request");
+}
+
+export function normalizeInsightsDeepEvidenceRequest(input, options = {}) {
+  exactKeys(input, ["format", "target", "include", "cursor", "maxBytes"], "Evidence request");
+  if (input.format !== "threadshare-insights-evidence-request@v2") {
+    throw requestError("Evidence request format is invalid");
+  }
+  const request = {
+    format: input.format,
+    target: cloneJson(input.target, "Evidence target"),
+    include: cloneJson(input.include, "Evidence include"),
+    cursor: options.engineCursor ?? null,
+    maxBytes: input.maxBytes ?? 1_048_576,
+  };
+  return validateEngineRequest(createReadInsightsEvidenceV2Message, request, "Evidence request");
 }
 
 function canonicalTimestamp(value, label) {
@@ -622,6 +781,176 @@ function publicSnapshot(response, privacyContext) {
   const seq = response.snapshot?.snapshotSeq ?? response.snapshotSeq;
   if (seq === "0") throw queryError("TS_INSIGHTS_NOT_INDEXED", "Insights index is empty");
   return createInsightsCursorCodec(privacyContext).snapshot(response.databaseUuid, seq);
+}
+
+function publicSourceFreshness() {
+  return { state: "not-evaluated", lastCommittedAt: null };
+}
+
+function publicDeepCoverage(value) {
+  if (!plainObject(value)) throw responseError("Engine response is missing deep query coverage");
+  return {
+    matching: {
+      fullRecordCount: decimal(value.matching.fullRecordCount),
+      summaryRecordCount: decimal(value.matching.summaryRecordCount),
+      unloadedRecordCount: decimal(value.matching.unloadedRecordCount),
+      truncatedRecordCount: decimal(value.matching.truncatedRecordCount),
+      unavailableRecordCount: decimal(value.matching.unavailableRecordCount),
+      missingTimestampCount: decimal(value.matching.missingTimestampCount),
+      missingRevisionCount: decimal(value.matching.missingRevisionCount),
+      missingTokenMetricCount: decimal(value.matching.missingTokenMetricCount),
+      missingPayloadCount: decimal(value.matching.missingPayloadCount),
+    },
+    indexedHistory: {
+      visibleSessionCount: decimal(value.indexedHistory.visibleSessionCount),
+      excludedSessionCount: decimal(value.indexedHistory.excludedSessionCount),
+      subagentExcludedSessionCount: decimal(value.indexedHistory.subagentExcludedSessionCount),
+      unknownEligibilitySessionCount: decimal(value.indexedHistory.unknownEligibilitySessionCount),
+      pendingPurgeSessionCount: decimal(value.indexedHistory.pendingPurgeSessionCount),
+      purgedSessionCount: decimal(value.indexedHistory.purgedSessionCount),
+      missingCoverageRollupSessionCount:
+        decimal(value.indexedHistory.missingCoverageRollupSessionCount),
+      fts: {
+        searchableEventCount: decimal(value.indexedHistory.fts.searchableEventCount),
+        storedNotSearchableEventCount:
+          decimal(value.indexedHistory.fts.storedNotSearchableEventCount),
+        searchablePayloadBytes: decimal(value.indexedHistory.fts.searchablePayloadBytes),
+        storedNotSearchablePayloadBytes:
+          decimal(value.indexedHistory.fts.storedNotSearchablePayloadBytes),
+      },
+    },
+    degraded: value.degraded,
+    diagnostics: [...value.diagnostics],
+  };
+}
+
+function publicDeepProvenance(value) {
+  if (!plainObject(value) || !Array.isArray(value.fields)) {
+    throw responseError("Engine response is missing deep query provenance");
+  }
+  return {
+    default: value.default,
+    fields: value.fields.map((field) => ({
+      path: field.path,
+      kind: field.kind,
+      method: field.method,
+    })),
+  };
+}
+
+function deepQueryCursorRequest(request) {
+  return {
+    format: request.format,
+    resource: request.resource,
+    where: request.where,
+    shape: request.shape,
+    orderBy: request.orderBy,
+    limit: request.limit,
+    count: request.count,
+  };
+}
+
+export function projectInsightsDeepQuery(response, context) {
+  if (response.resource !== context.request.resource ||
+      (response.records === null) === (response.groups === null)) {
+    throw responseError("Engine response changed the deep Query shape");
+  }
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const snapshot = publicSnapshot(response, context.privacyContext);
+  if (context.cursor !== null) codec.assertSnapshot(context.cursor, snapshot);
+  const nextCursor = response.nextCursor === null ? null : codec.seal({
+    kind: "query-v2",
+    snapshot,
+    requestDigest: codec.requestDigest(deepQueryCursorRequest(context.request)),
+    engineCursor: response.nextCursor,
+    closureEvaluatedAt: context.evaluatedAt,
+    quiescenceSeconds: null,
+    turnKey: null,
+    revision: null,
+  });
+  return deepFreeze({
+    format: "threadshare-insights-query@v2",
+    snapshot,
+    sourceFreshness: publicSourceFreshness(),
+    resource: response.resource,
+    records: response.records === null ? null : cloneJson(response.records, "Query records"),
+    groups: response.groups === null ? null : cloneJson(response.groups, "Query groups"),
+    nextCursor,
+    totalMatchCount: response.totalMatchCount === null ? null : decimal(response.totalMatchCount),
+    totalGroupCount: response.totalGroupCount === null ? null : decimal(response.totalGroupCount),
+    truncated: response.truncated,
+    coverage: publicDeepCoverage(response.coverage),
+    provenance: publicDeepProvenance(response.provenance),
+    limits: {
+      pageBytes: decimal(response.limits.pageBytes),
+      payloadsMayRequireEvidencePaging: response.limits.payloadsMayRequireEvidencePaging,
+    },
+  });
+}
+
+export function projectInsightsRecipe(response, context) {
+  if (response.name !== context.request.name || response.evaluatedAt !== context.evaluatedAt ||
+      canonicalJson(response.window) !== canonicalJson(context.request.window) ||
+      canonicalJson(response.comparisonWindow) !== canonicalJson(context.request.comparisonWindow)) {
+    throw responseError("Engine response changed the Recipe request");
+  }
+  return deepFreeze({
+    format: "threadshare-insights-recipe@v1",
+    snapshot: publicSnapshot(response, context.privacyContext),
+    sourceFreshness: publicSourceFreshness(),
+    name: response.name,
+    window: cloneJson(response.window, "Recipe window"),
+    comparisonWindow: response.comparisonWindow === null
+      ? null
+      : cloneJson(response.comparisonWindow, "Recipe comparisonWindow"),
+    evaluatedAt: response.evaluatedAt,
+    items: cloneJson(response.items, "Recipe items"),
+    totalItemCount: decimal(response.totalItemCount),
+    truncated: response.truncated,
+    coverage: publicDeepCoverage(response.coverage),
+    provenance: publicDeepProvenance(response.provenance),
+  });
+}
+
+function deepEvidenceCursorRequest(request) {
+  return {
+    format: request.format,
+    target: request.target,
+    include: request.include,
+    maxBytes: request.maxBytes,
+  };
+}
+
+export function projectInsightsDeepEvidence(response, context) {
+  if (canonicalJson(response.target) !== canonicalJson(context.request.target)) {
+    throw turnChanged();
+  }
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const snapshot = publicSnapshot(response, context.privacyContext);
+  if (context.cursor !== null) codec.assertSnapshot(context.cursor, snapshot);
+  const nextCursor = response.nextCursor === null ? null : codec.seal({
+    kind: "evidence-v2",
+    snapshot,
+    requestDigest: codec.requestDigest(deepEvidenceCursorRequest(context.request)),
+    engineCursor: response.nextCursor,
+    closureEvaluatedAt: null,
+    quiescenceSeconds: null,
+    turnKey: null,
+    revision: response.revision,
+  });
+  return deepFreeze({
+    format: "threadshare-insights-evidence@v2",
+    snapshot,
+    sourceFreshness: publicSourceFreshness(),
+    target: cloneJson(response.target, "Evidence target"),
+    revision: response.revision,
+    payloadSha256: response.payloadSha256,
+    totalBytes: decimal(response.totalBytes),
+    range: { start: decimal(response.range.start), end: decimal(response.range.end) },
+    content: response.content,
+    nextCursor,
+    complete: response.complete,
+  });
 }
 
 function publicSearchResult(item, orderBy) {
@@ -1321,6 +1650,58 @@ export async function executeInsightsQuery(invocation, options = {}) {
         request,
       });
     }
+    if (invocation.action === "query") {
+      const input = await readInsightsQueryRequest(invocation.requestSource, options);
+      const initialRequest = normalizeInsightsDeepQueryRequest(input, {
+        evaluatedAt: evaluation.closureEvaluatedAt,
+      });
+      const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
+        kind: "query-v2",
+        request: deepQueryCursorRequest(initialRequest),
+      });
+      const evaluatedAt = publicCursor?.closureEvaluatedAt ?? evaluation.closureEvaluatedAt;
+      if (evaluatedAt === null) throw staleCursor();
+      const request = publicCursor === null ? initialRequest : normalizeInsightsDeepQueryRequest(
+        input,
+        { evaluatedAt, engineCursor: publicCursor.engineCursor },
+      );
+      const response = await reader.queryV2(request, { signal: options.signal });
+      return projectInsightsDeepQuery(response, {
+        privacyContext: state.privacyContext,
+        request,
+        cursor: publicCursor,
+        evaluatedAt,
+      });
+    }
+    if (invocation.action === "recipe") {
+      const request = normalizeInsightsRecipeRequest(
+        await readInsightsQueryRequest(invocation.requestSource, options),
+        { name: invocation.name, evaluatedAt: evaluation.closureEvaluatedAt },
+      );
+      const response = await reader.recipe(request, { signal: options.signal });
+      return projectInsightsRecipe(response, {
+        privacyContext: state.privacyContext,
+        request,
+        evaluatedAt: evaluation.closureEvaluatedAt,
+      });
+    }
+    if (invocation.action === "evidence-v2") {
+      const input = await readInsightsQueryRequest(invocation.requestSource, options);
+      const baseRequest = normalizeInsightsDeepEvidenceRequest(input);
+      const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
+        kind: "evidence-v2",
+        request: deepEvidenceCursorRequest(baseRequest),
+      });
+      const request = normalizeInsightsDeepEvidenceRequest(input, {
+        engineCursor: publicCursor?.engineCursor ?? null,
+      });
+      const response = await reader.evidenceV2(request, { signal: options.signal });
+      return projectInsightsDeepEvidence(response, {
+        privacyContext: state.privacyContext,
+        request,
+        cursor: publicCursor,
+      });
+    }
     if (invocation.action === "evidence") {
       const digestRequest = {
         turnKey: invocation.turnKey,
@@ -1372,8 +1753,12 @@ export function insightsQueryDiagnostic(error, action) {
     "TS_QUERY_TOO_BROAD",
     "TS_INSIGHTS_REQUEST_INVALID",
     "TS_INSIGHTS_NOT_INDEXED",
+    "TS_INSIGHTS_QUERY_V2_NOT_READY",
     "TS_INSIGHTS_CURSOR_STALE",
     "TS_INSIGHTS_TURN_CHANGED",
+    "TS_INSIGHTS_PAYLOAD_CHANGED",
+    "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+    "TS_INSIGHTS_COVERAGE_INCOMPLETE",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
     "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
@@ -1382,6 +1767,7 @@ export function insightsQueryDiagnostic(error, action) {
   if (error?.code === "QUERY_TOO_LONG") code = "TS_QUERY_TOO_LONG";
   if (error?.code === "QUERY_TOO_BROAD") code = "TS_QUERY_TOO_BROAD";
   if (error?.code === "TURN_REVISION_MISMATCH") code = "TS_INSIGHTS_TURN_CHANGED";
+  if (error?.code === "TS_INSIGHTS_EVIDENCE_CHANGED") code = "TS_INSIGHTS_PAYLOAD_CHANGED";
   if (error?.code === "EVIDENCE_INVALID_CURSOR" || error?.code === "USAGE_INVALID_CURSOR") {
     code = "TS_INSIGHTS_CURSOR_STALE";
   }
@@ -1402,8 +1788,12 @@ export function insightsQueryDiagnostic(error, action) {
     TS_QUERY_TOO_BROAD: "The Insights search query is too broad.",
     TS_INSIGHTS_REQUEST_INVALID: "The Insights request is invalid.",
     TS_INSIGHTS_NOT_INDEXED: "No committed Insights index is available.",
+    TS_INSIGHTS_QUERY_V2_NOT_READY: "The committed Insights index has not completed its Fact V2 rebuild.",
     TS_INSIGHTS_CURSOR_STALE: "The Insights cursor no longer matches the committed index.",
     TS_INSIGHTS_TURN_CHANGED: "The requested Turn changed after the search result was read.",
+    TS_INSIGHTS_PAYLOAD_CHANGED: "The requested Insights evidence changed after the result was read.",
+    TS_INSIGHTS_EVIDENCE_NOT_FOUND: "The requested Insights evidence is no longer available.",
+    TS_INSIGHTS_COVERAGE_INCOMPLETE: "The Insights recipe cannot provide complete coverage for this request.",
     TS_INSIGHTS_ORIGIN_SECRET_MISSING: "The Insights origin secret is missing.",
     TS_INSIGHTS_ORIGIN_SECRET_INVALID: "The Insights origin secret is invalid.",
     TS_INSIGHTS_ENGINE_UNAVAILABLE: "The local Insights Engine is unavailable.",
@@ -1411,10 +1801,15 @@ export function insightsQueryDiagnostic(error, action) {
   };
   return cliDiagnostic(code, problems[code], {
     command: "insights",
-    next: code === "TS_INSIGHTS_NOT_INDEXED"
-      ? "Run `threadshare insights reindex`, then retry the query."
-      : code === "TS_INSIGHTS_CURSOR_STALE" || code === "TS_INSIGHTS_TURN_CHANGED"
+    next: code === "TS_INSIGHTS_NOT_INDEXED" || code === "TS_INSIGHTS_QUERY_V2_NOT_READY"
+      ? "Run `threadshare insights sync`, then retry the query."
+      : code === "TS_INSIGHTS_CURSOR_STALE"
+          || code === "TS_INSIGHTS_TURN_CHANGED"
+          || code === "TS_INSIGHTS_PAYLOAD_CHANGED"
+          || code === "TS_INSIGHTS_EVIDENCE_NOT_FOUND"
         ? "Repeat the preceding Insights query and use its new snapshot, revision, or cursor."
+        : code === "TS_INSIGHTS_COVERAGE_INCOMPLETE"
+          ? "Run `threadshare insights sync`; use allowDegraded only when partial results are acceptable."
         : `Check \`threadshare insights --help\` and retry insights ${action ?? "query"}.`,
   });
 }

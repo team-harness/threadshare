@@ -299,13 +299,13 @@ test("retries exclusion visibility and reconciliation after the config is alread
 test("the required Engine contract binds the current Fact identity versions", () => {
   const epoch = "11111111-1111-4111-8111-111111111111";
   assert.deepEqual(insightsRequiredContract(epoch), {
-    factSchemaVersion: 1,
-    providerAdapterVersions: ["claude@1", "codex@1"],
-    privacyPolicyVersion: 1,
+    factSchemaVersion: 2,
+    providerAdapterVersions: ["claude@2", "codex@2"],
+    privacyPolicyVersion: 2,
     originSecretEpoch: epoch,
     duplicatePolicyVersion: 1,
-    factStorageProfile: "normalized-row-v1",
-    storageSchemaVersion: 1,
+    factStorageProfile: "normalized-row-v2",
+    storageSchemaVersion: 2,
     projectionVersions: ["turn-search@2", "turn-summary@1"],
     analyzerCapabilities: ["mixed-cjk-code@1"],
     rankerVersion: 1,
@@ -487,6 +487,66 @@ test("real sidecar sync initializes once and then reconciles only changed source
     bytesProcessed: progress.at(-1).bytesTotal,
     bytesTotal: progress.at(-1).bytesTotal,
   });
+});
+
+test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", {
+  timeout: 60_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "92929292-9292-4292-8292-929292929292",
+  );
+  await reconcileInsights({
+    ...fixture.reconcileOptions,
+    requiredContractFactory(originSecretEpoch) {
+      return insightsRequiredContract(originSecretEpoch, { factSchemaVersion: 1 });
+    },
+  });
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const before = new DatabaseSync(fixture.paths.databaseFile, { readOnly: true });
+  const beforeUuid = before.prepare(
+    "SELECT value FROM engine_metadata WHERE key='database_uuid'",
+  ).get().value;
+  assert.equal(
+    before.prepare("SELECT value FROM engine_metadata WHERE key='fact_schema_version'").get().value,
+    "1",
+  );
+  before.close();
+
+  const migrated = await reconcileActiveInsights(fixture.reconcileOptions);
+  assert.equal(migrated.format, "threadshare-insights-reindex@v1");
+  assert.equal(migrated.report.failed, 0);
+
+  const after = new DatabaseSync(fixture.paths.databaseFile, { readOnly: true });
+  try {
+    const afterUuid = after.prepare(
+      "SELECT value FROM engine_metadata WHERE key='database_uuid'",
+    ).get().value;
+    assert.notEqual(afterUuid, beforeUuid);
+    assert.equal(
+      after.prepare("SELECT value FROM engine_metadata WHERE key='fact_schema_version'").get().value,
+      "2",
+    );
+    const state = JSON.parse(after.prepare(
+      "SELECT state_json FROM source_ingestion_states LIMIT 1",
+    ).get().state_json);
+    assert.equal(state.contract.factSchemaVersion, 2);
+    assert.equal(state.contract.providerAdapterVersion, "codex@2");
+    assert.equal(
+      after.prepare("SELECT COUNT(*) AS count FROM history_payloads").get().count > 0,
+      true,
+    );
+    assert.equal(
+      after.prepare(
+        "SELECT COUNT(*) AS count FROM history_events WHERE event_kind='provider-unknown'",
+      ).get().count > 0,
+      true,
+    );
+  } finally {
+    after.close();
+  }
 });
 
 test("real sidecar reindex reports unique committed sources across source-change retries", {

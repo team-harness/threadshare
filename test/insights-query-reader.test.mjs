@@ -19,9 +19,11 @@ function fakeClient(number, overrides = {}) {
     async readInsightsOverview(input) { return { number, input }; },
     async listCapabilities(input) { return { number, input }; },
     async searchTurns(input) { return { number, input }; },
+    async readInsightsQueryV2(input) { return { number, input }; },
     async readCapabilityUsage(input) { return { number, input }; },
     async readInsightsActivity(input) { return { number, input }; },
     async readTurnEvidence(input) { return { number, input }; },
+    async readInsightsEvidenceV2(input) { return { number, input }; },
     async close() { this.closed = true; },
     ...overrides,
   };
@@ -54,6 +56,8 @@ test("query reader opens existing state and reopens after database replacement",
 
   assert.equal((await reader.overview({ nowUnixMs: "1" })).number, 1);
   assert.equal((await reader.search({ query: "needle" })).number, 1);
+  assert.equal((await reader.queryV2({ format: "request-v2" })).number, 1);
+  assert.equal((await reader.evidenceV2({ format: "evidence-v2" })).number, 1);
   assert.equal(createOptions[0].openExisting, true);
   assert.equal(createOptions[0].databasePath, path.join(await realpath(root), "insights.sqlite3"));
 

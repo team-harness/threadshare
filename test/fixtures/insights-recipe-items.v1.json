@@ -1,0 +1,290 @@
+[
+  {
+    "name": "capability-contexts@1",
+    "item": {
+      "capability": {
+        "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "provider": "codex",
+        "kind": "tool",
+        "canonicalName": "Bash"
+      },
+      "recordedInvocationCount": "1",
+      "recordedFailingInvocationCount": "0",
+      "distinctTurnCount": "1",
+      "distinctSessionCount": "1",
+      "distinctDedupeGroupCount": "0",
+      "groupedInvocationCount": "0",
+      "ungroupedInvocationCount": "1",
+      "lastUsedAt": "2026-08-10T00:00:00.000Z",
+      "strongGroupMemberInvocationCount": "0",
+      "weakGroupMemberInvocationCount": "0",
+      "invocationTerminalCounts": {
+        "pending": "0",
+        "completed": "1",
+        "failed": "0",
+        "cancelled": "0",
+        "unknown": "0"
+      },
+      "topProjects": [],
+      "coOccurringCapabilities": [],
+      "representativeTurns": [
+        {
+          "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "usedAt": "2026-08-10T00:00:00.000Z",
+          "recordedInvocationCount": "1",
+          "context": { "problem": "run Bash", "finalAnswer": null },
+          "evidence": {
+            "kind": "turn",
+            "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      ],
+      "evidence": {
+        "kind": "turn",
+        "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  {
+    "name": "failure-chains@1",
+    "item": {
+      "chainKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "status": "resolved",
+      "capabilityName": "Bash",
+      "eventCount": "2",
+      "failedResultCount": "1",
+      "completedResultCount": "1",
+      "firstObservedAt": "2026-08-10T00:00:00.000Z",
+      "lastObservedAt": "2026-08-10T00:00:01.000Z",
+      "attempts": [
+        {
+          "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+          "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "eventKind": "capability-result",
+          "observedAt": "2026-08-10T00:00:00.000Z",
+          "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "capabilityName": "Bash",
+          "inputFingerprint": null,
+          "providerState": "failed",
+          "exitCode": "7",
+          "input": null,
+          "output": null,
+          "error": {
+            "byteLength": "7",
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+            "encoding": "utf-8",
+            "inline": null,
+            "reference": {
+              "kind": "event",
+              "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+              "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "payloadKey": "4444444444444444444444444444444444444444444444444444444444444444"
+            },
+            "complete": true
+          },
+          "evidence": {
+            "kind": "event",
+            "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+            "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "payloadKey": "4444444444444444444444444444444444444444444444444444444444444444"
+          }
+        },
+        {
+          "eventKey": "5555555555555555555555555555555555555555555555555555555555555555",
+          "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "eventKind": "capability-result",
+          "observedAt": "2026-08-10T00:00:01.000Z",
+          "capabilityKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "capabilityName": "Bash",
+          "inputFingerprint": null,
+          "providerState": "completed",
+          "exitCode": "0",
+          "input": null,
+          "output": null,
+          "error": null,
+          "evidence": {
+            "kind": "event",
+            "eventKey": "5555555555555555555555555555555555555555555555555555555555555555",
+            "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      ],
+      "evidence": {
+        "kind": "attempt-chain",
+        "chainKey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  {
+    "name": "file-workflow-signals@1",
+    "item": {
+      "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider": "codex",
+      "projectKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "recordedCounts": {
+        "read": "1", "edit": "0", "write": "0", "delete": "0", "move": "0",
+        "search": "0", "list": "0", "attempted": "1", "confirmed": "0",
+        "failed": "0", "unknown": "0", "distinctPath": "1", "documentLike": "0",
+        "implementationLike": "1"
+      },
+      "estimated": {
+        "researchHeavy": false,
+        "implementationHeavy": false,
+        "docVoid": false,
+        "specPrecisionGap": false,
+        "method": "file-workflow-signals@1"
+      },
+      "evidence": {
+        "kind": "session",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "events": [
+        {
+          "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+          "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "observedAt": "2026-08-10T00:00:00.000Z",
+          "eventKind": "capability-invocation",
+          "activityOrdinal": "0",
+          "action": "read",
+          "phase": "attempted",
+          "pathRole": "target",
+          "rawPath": "/work/project/src/lib.rs",
+          "normalizedPath": "/work/project/src/lib.rs",
+          "relativePath": "src/lib.rs",
+          "absolute": true,
+          "projectRelative": true,
+          "input": null,
+          "output": null,
+          "error": null,
+          "evidence": {
+            "kind": "event",
+            "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+            "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "activity-shifts@1",
+    "item": {
+      "bucketStart": "2026-08-10T00:00:00.000Z",
+      "bucketEnd": "2026-08-11T00:00:00.000Z",
+      "timeZone": "UTC",
+      "closureEvaluatedAt": "2026-08-12T00:00:00.000Z",
+      "quiescenceSeconds": 300,
+      "distinctSessionCount": "1",
+      "distinctTurnCount": "1",
+      "distinctProjectCount": "1",
+      "observedContextSwitchCount": "0",
+      "recordedToolInvocationCount": "1",
+      "recordedSkillInvocationCount": "0",
+      "recordedTokenEventCount": "1",
+      "recordedTokenTotals": {
+        "input": "10", "cachedInput": "0", "cacheWriteInput": "0", "output": "5",
+        "reasoning": null, "total": "15"
+      },
+      "tokenMetricCoverage": {
+        "input": { "presentEventCount": "1", "totalEventCount": "1" },
+        "cachedInput": { "presentEventCount": "1", "totalEventCount": "1" },
+        "cacheWriteInput": { "presentEventCount": "1", "totalEventCount": "1" },
+        "output": { "presentEventCount": "1", "totalEventCount": "1" },
+        "reasoning": { "presentEventCount": "0", "totalEventCount": "1" },
+        "total": { "presentEventCount": "1", "totalEventCount": "1" }
+      },
+      "currentClosureCounts": { "hardSealed": "1", "quiescent": "0", "open": "0" },
+      "turnOutcomeCounts": { "providerCompleted": "1", "abandoned": "0", "unknown": "0" },
+      "dedupeSupport": {
+        "distinctDedupeGroupCount": "0", "strongDedupeGroupCount": "0",
+        "weakDedupeGroupCount": "0", "observedEofProvisionalGroupCount": "0",
+        "unknownDedupeSessionCount": "1"
+      },
+      "comparison": null,
+      "evidence": {
+        "kind": "session",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  {
+    "name": "token-hotspots@1",
+    "item": {
+      "provider": "codex",
+      "model": "gpt-5",
+      "projectKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capability": null,
+      "capabilityAttribution": "unavailable",
+      "recordedTokenTotals": {
+        "input": "10", "cachedInput": "0", "cacheWriteInput": "0", "output": "5",
+        "reasoning": null, "total": "15"
+      },
+      "metricCoverage": {
+        "input": { "presentEventCount": "1", "totalEventCount": "1" },
+        "cachedInput": { "presentEventCount": "1", "totalEventCount": "1" },
+        "cacheWriteInput": { "presentEventCount": "1", "totalEventCount": "1" },
+        "output": { "presentEventCount": "1", "totalEventCount": "1" },
+        "reasoning": { "presentEventCount": "0", "totalEventCount": "1" },
+        "total": { "presentEventCount": "1", "totalEventCount": "1" }
+      },
+      "evidence": {
+        "kind": "event",
+        "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  {
+    "name": "solution-recall@1",
+    "item": {
+      "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+      "eventRevision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "turnRevision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "provider": "codex",
+      "projectKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "eventKind": "capability-result",
+      "observedAt": "2026-08-10T00:00:00.000Z",
+      "finalAnswer": "fixed by retry",
+      "subsequentSuccess": {
+        "chainKey": "1111111111111111111111111111111111111111111111111111111111111111",
+        "eventKey": "5555555555555555555555555555555555555555555555555555555555555555",
+        "observedAt": "2026-08-10T00:00:01.000Z",
+        "evidence": {
+          "kind": "event",
+          "eventKey": "5555555555555555555555555555555555555555555555555555555555555555",
+          "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      },
+      "evidence": {
+        "kind": "event",
+        "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  {
+    "name": "session-timeline@1",
+    "item": {
+      "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+      "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "observedAt": "2026-08-10T00:00:00.000Z",
+      "eventKind": "visible-message",
+      "originScope": "main",
+      "completeness": "full",
+      "metadata": { "role": "user" },
+      "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "turnRevision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "evidence": {
+        "kind": "event",
+        "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  }
+]

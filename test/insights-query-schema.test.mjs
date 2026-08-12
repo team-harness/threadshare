@@ -15,16 +15,44 @@ const FORMATS = Object.freeze([
   "threadshare-insights-activity-request@v1",
   "threadshare-insights-activity@v1",
   "threadshare-insights-evidence@v1",
+  "threadshare-insights-query-request@v2",
+  "threadshare-insights-query@v2",
+  "threadshare-insights-recipe-request@v1",
+  "threadshare-insights-recipe@v1",
+  "threadshare-insights-evidence-request@v2",
+  "threadshare-insights-evidence@v2",
 ]);
+const RECIPE_ITEMS_URL = new URL("./fixtures/insights-recipe-items.v1.json", import.meta.url);
+
+function completeCoverage() {
+  return {
+    matching: {
+      fullRecordCount: "1", summaryRecordCount: "0", unloadedRecordCount: "0",
+      truncatedRecordCount: "0", unavailableRecordCount: "0", missingTimestampCount: "0",
+      missingRevisionCount: "0", missingTokenMetricCount: "0", missingPayloadCount: "0",
+    },
+    indexedHistory: {
+      visibleSessionCount: "1", excludedSessionCount: "0", subagentExcludedSessionCount: "0",
+      unknownEligibilitySessionCount: "0", pendingPurgeSessionCount: "0",
+      purgedSessionCount: "0", missingCoverageRollupSessionCount: "0",
+      fts: {
+        searchableEventCount: "1", storedNotSearchableEventCount: "0",
+        searchablePayloadBytes: "7", storedNotSearchablePayloadBytes: "0",
+      },
+    },
+    degraded: false,
+    diagnostics: [],
+  };
+}
 
 function schemaFilename(format) {
-  return `${format.replace("@v1", ".v1")}.schema.json`;
+  return `${format.replace(/@v([12])$/u, ".v$1")}.schema.json`;
 }
 
 async function compiledSchemas() {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
-  const result = new Map();
+  const documents = new Map();
   for (const format of FORMATS) {
     const filename = schemaFilename(format);
     const document = JSON.parse(await readFile(new URL(`../schema/${filename}`, import.meta.url)));
@@ -34,13 +62,16 @@ async function compiledSchemas() {
     assert.equal(document.additionalProperties, false);
     assert.deepEqual(document.properties.format, { const: format });
     assert.equal(document.required.includes("format"), true);
-    result.set(format, ajv.compile(document));
+    documents.set(format, document);
+    ajv.addSchema(document);
   }
+  const result = new Map();
+  for (const [format, document] of documents) result.set(format, ajv.getSchema(document.$id));
   return result;
 }
 
-test("ships nine strict Agent Insights JSON schemas", async () => {
-  assert.equal((await compiledSchemas()).size, 9);
+test("ships fifteen strict Agent Insights JSON schemas", async () => {
+  assert.equal((await compiledSchemas()).size, 15);
 });
 
 test("usage and activity schemas lock the non-causal aggregate axes", async () => {
@@ -146,4 +177,35 @@ test("usage and activity schemas lock the non-causal aggregate axes", async () =
     ...activity,
     buckets: [{ ...activity.buckets[0], successfulToolInvocationCount: "3" }],
   }), false);
+});
+
+test("all seven Recipe schemas accept reviewed items and reject unknown fields", async () => {
+  const schemas = await compiledSchemas();
+  const validate = schemas.get("threadshare-insights-recipe@v1");
+  const recipes = JSON.parse(await readFile(RECIPE_ITEMS_URL, "utf8"));
+  assert.equal(recipes.length, 7);
+  for (const { name, item } of recipes) {
+    const response = {
+      format: "threadshare-insights-recipe@v1",
+      snapshot: { seq: "7", token: "a".repeat(64) },
+      sourceFreshness: { state: "not-evaluated", lastCommittedAt: null },
+      name,
+      window: {
+        after: "2026-08-01T00:00:00.000Z",
+        before: "2026-09-01T00:00:00.000Z",
+      },
+      comparisonWindow: null,
+      evaluatedAt: "2026-08-12T00:00:00.000Z",
+      items: [item],
+      totalItemCount: "1",
+      truncated: false,
+      coverage: completeCoverage(),
+      provenance: { default: "recorded", fields: [] },
+    };
+    assert.equal(validate(response), true, `${name}: ${JSON.stringify(validate.errors)}`);
+    assert.equal(validate({
+      ...response,
+      items: [{ ...item, unreviewed: "private surprise" }],
+    }), false, name);
+  }
 });

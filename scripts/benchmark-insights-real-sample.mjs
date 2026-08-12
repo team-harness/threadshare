@@ -30,9 +30,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { reconcileInsights } from "../src/insights-command.mjs";
 import { loadInsightsConfig, saveInsightsConfig } from "../src/insights-config.mjs";
+import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
 import { resolveInsightsPaths } from "../src/insights-paths.mjs";
 import { discoverProviderEvidenceSources } from "../src/provider-evidence.mjs";
-import { hashKey } from "../src/session-facts.mjs";
+import { canonicalJson, hashKey } from "../src/session-facts.mjs";
 import { INSIGHTS_ENGINE_TARGETS } from "../src/insights-engine-targets.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -64,6 +65,8 @@ const MAXIMUM_ACCEPTANCE_BYTE_FRACTION = 0.35;
 const LONG_TERM_TURN_COUNT = 250_000;
 const BUNDLED_SQLITE_VERSION = "3.53.2";
 const VERSION_FORMAT = "threadshare-insights-engine-version@v1";
+const DEEP_STORAGE_AMPLIFICATION_LIMIT = 1.8;
+const DEEP_FTS_AMPLIFICATION_LIMIT = 0.7;
 const SIZE_STRATA = Object.freeze([
   Object.freeze({ name: "under-64-kib", minimum: 0, maximum: 64 * 1024 }),
   Object.freeze({ name: "64-kib-to-1-mib", minimum: 64 * 1024, maximum: 1024 * 1024 }),
@@ -127,6 +130,34 @@ function safeNumber(value, label) {
 
 function sum(values) {
   return values.reduce((total, value) => total + value, 0);
+}
+
+function percentile(values, quantile) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.max(0, Math.ceil(sorted.length * quantile) - 1)];
+}
+
+function latencySummary(values) {
+  return Object.freeze({
+    unit: "ms",
+    count: values.length,
+    total: values.reduce((total, value) => total + value, 0),
+    p50: percentile(values, 0.50),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    max: values.length === 0 ? null : Math.max(...values),
+  });
+}
+
+function sqliteObjectOwner(name) {
+  return /^sqlite_autoindex_(.+)_[0-9]+$/u.exec(name)?.[1] ?? name;
+}
+
+function storageBytes(pageRows, predicate) {
+  return sum(pageRows
+    .filter((row) => predicate(String(row.name), sqliteObjectOwner(String(row.name))))
+    .map((row) => Number(row.bytes)));
 }
 
 function sourceToken(seed, source) {
@@ -567,6 +598,20 @@ async function auditDatabase(databasePath) {
     const detailFullBytes = sum(pageRows
       .filter((row) => isDetailFullFtsObject(String(row.name)))
       .map((row) => Number(row.bytes)));
+    const historyEventMetadataBytes = storageBytes(pageRows, (name, owner) =>
+      owner === "history_events" || owner === "attempt_chain_events" ||
+      owner === "file_activity" || owner === "token_usage" ||
+      owner === "error_occurrences" || name.startsWith("history_events_") ||
+      name.startsWith("attempt_chain_events_") || name.startsWith("file_activity_") ||
+      name.startsWith("token_usage_") || name.startsWith("error_occurrences_"));
+    const historyPayloadBytes = storageBytes(pageRows, (name, owner) =>
+      owner === "history_payloads" || owner === "history_payload_chunks" ||
+      name === "history_payloads_event");
+    const historyFtsBytes = storageBytes(pageRows, (name, owner) =>
+      owner === "history_event_fts_documents" || owner === "history_event_fts" ||
+      name.startsWith("history_event_fts_"));
+    const historyProjectionBytes = storageBytes(pageRows, (_name, owner) =>
+      owner === "history_coverage_rollups");
     const ftsByField = database.prepare(
       `SELECT col AS field, COUNT(*) AS fieldTerms, COALESCE(SUM(doc),0) AS postings,
             COALESCE(SUM(cnt),0) AS occurrences
@@ -628,6 +673,19 @@ async function auditDatabase(databasePath) {
       .map((row) => String(row.integrity_check));
     database.exec("INSERT INTO turns_fts(turns_fts) VALUES('integrity-check')");
     const ftsIntegrity = "ok";
+    database.exec(
+      "INSERT INTO history_event_fts(history_event_fts) VALUES('integrity-check')",
+    );
+    const historyFtsIntegrity = "ok";
+    const historyCoverage = database.prepare(
+      `SELECT COALESCE(SUM(fts_searchable_payload_bytes),0) AS searchablePayloadBytes,
+              COALESCE(SUM(fts_stored_not_searchable_payload_bytes),0)
+                AS storedNotSearchablePayloadBytes,
+              COALESCE(SUM(fts_searchable_event_count),0) AS searchableEventCount,
+              COALESCE(SUM(fts_stored_not_searchable_event_count),0)
+                AS storedNotSearchableEventCount
+         FROM history_coverage_rollups`,
+    ).get();
     const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all().length;
     const sqliteVersion = String(database.prepare("SELECT sqlite_version() AS value").get().value);
     result = {
@@ -637,6 +695,35 @@ async function auditDatabase(databasePath) {
       databasePageBytes: pageCount * pageSize,
       dbstatBytes,
       detailFullFtsBytes: detailFullBytes,
+      deepQueryV2: {
+        rows: {
+          historyEvents: scalar("SELECT COUNT(*) AS value FROM history_events"),
+          historyPayloads: scalar("SELECT COUNT(*) AS value FROM history_payloads"),
+          historyPayloadChunks: scalar("SELECT COUNT(*) AS value FROM history_payload_chunks"),
+          attemptChainEvents: scalar("SELECT COUNT(*) AS value FROM attempt_chain_events"),
+          fileActivity: scalar("SELECT COUNT(*) AS value FROM file_activity"),
+          tokenUsage: scalar("SELECT COUNT(*) AS value FROM token_usage"),
+          errorOccurrences: scalar("SELECT COUNT(*) AS value FROM error_occurrences"),
+          historyFtsDocuments: scalar(
+            "SELECT COUNT(*) AS value FROM history_event_fts_documents",
+          ),
+        },
+        storage: {
+          historyEventMetadataBytes,
+          historyPayloadBytes,
+          historyFtsBytes,
+          historyProjectionBytes,
+          searchablePayloadBytes: Number(historyCoverage.searchablePayloadBytes),
+          storedNotSearchablePayloadBytes:
+            Number(historyCoverage.storedNotSearchablePayloadBytes),
+        },
+        coverage: {
+          searchableEventCount: Number(historyCoverage.searchableEventCount),
+          storedNotSearchableEventCount:
+            Number(historyCoverage.storedNotSearchableEventCount),
+        },
+        historyFtsIntegrity,
+      },
       facts: {
         sessions: scalar("SELECT COUNT(*) AS value FROM sessions"),
         sessionGroups,
@@ -740,6 +827,7 @@ export async function runInsightsRealSampleBenchmark(options = {}) {
   const sourceEnvironment = options.sourceEnvironment ?? process.env;
   const seed = options.seed ?? DEFAULT_SEED;
   const fraction = options.fraction ?? SAMPLE_FRACTION;
+  const deepQueryV2 = options.deepQueryV2 === true;
   const binaryPath = path.resolve(options.enginePath ?? process.env.THREADSHARE_INSIGHTS_ENGINE_PATH ?? DEFAULT_ENGINE_PATH);
   if (fraction !== SAMPLE_FRACTION && options.allowNonAcceptanceFraction !== true) {
     fail("acceptance evidence requires the frozen 30% sample fraction");
@@ -760,6 +848,29 @@ export async function runInsightsRealSampleBenchmark(options = {}) {
       paths,
       configDirectoryManaged: true,
     });
+    const committedDeltas = new Map();
+    const commitAckLatencies = [];
+    const createMeasuredEngineClient = deepQueryV2
+      ? async (clientOptions) => {
+        const engine = await createInsightsEngineClient(clientOptions);
+        return new Proxy(engine, {
+          get(target, property) {
+            if (property === "commitSourceDelta") {
+              return async (input, commitOptions) => {
+                const canonical = canonicalJson(input.delta);
+                const started = performance.now();
+                const response = await target.commitSourceDelta(input, commitOptions);
+                commitAckLatencies.push(performance.now() - started);
+                committedDeltas.set(input.delta.deltaId, Buffer.byteLength(canonical, "utf8"));
+                return response;
+              };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      }
+      : undefined;
     const started = performance.now();
     const reconciliation = await reconcileInsights({
       paths,
@@ -770,6 +881,9 @@ export async function runInsightsRealSampleBenchmark(options = {}) {
       configOptions: { configDirectoryManaged: true },
       concurrency: options.concurrency ?? 4,
       timeoutMs: options.timeoutMs ?? 24 * 60 * 60 * 1000,
+      ...(createMeasuredEngineClient === undefined
+        ? {}
+        : { createEngineClient: createMeasuredEngineClient }),
     });
     const indexingWallMs = performance.now() - started;
     const audit = await auditDatabase(paths.databaseFile);
@@ -807,6 +921,35 @@ export async function runInsightsRealSampleBenchmark(options = {}) {
     const byteFractionGate = evaluateRealSampleByteFraction(byteFraction);
     const storageConsistent = audit.integrity.length === 1 && audit.integrity[0] === "ok" &&
       audit.ftsIntegrity === "ok" && audit.foreignKeyViolations === 0;
+    const canonicalIndexedSourceBytes = [...committedDeltas.values()]
+      .reduce((total, bytes) => total + bytes, 0);
+    const persistentStorageAmplification = deepQueryV2 && canonicalIndexedSourceBytes > 0
+      ? audit.postMaintenanceBytes / canonicalIndexedSourceBytes
+      : null;
+    const historyFtsAmplification = deepQueryV2 &&
+      audit.deepQueryV2.storage.searchablePayloadBytes > 0
+      ? audit.deepQueryV2.storage.historyFtsBytes /
+        audit.deepQueryV2.storage.searchablePayloadBytes
+      : null;
+    const deepQueryV2Gates = deepQueryV2 ? {
+      committedDeltaCoverage:
+        committedDeltas.size === reconciliation.report.committed && committedDeltas.size > 0,
+      nonemptyHistory:
+        audit.deepQueryV2.rows.historyEvents > 0 &&
+        audit.deepQueryV2.rows.historyPayloads > 0 &&
+        audit.deepQueryV2.rows.historyPayloadChunks > 0,
+      historyFtsIntegrityPassed: audit.deepQueryV2.historyFtsIntegrity === "ok",
+      persistentStorageAmplificationWithinLimit:
+        persistentStorageAmplification !== null &&
+        persistentStorageAmplification <= DEEP_STORAGE_AMPLIFICATION_LIMIT,
+      historyFtsAmplificationWithinLimit:
+        historyFtsAmplification !== null &&
+        historyFtsAmplification <= DEEP_FTS_AMPLIFICATION_LIMIT,
+    } : null;
+    if (deepQueryV2Gates) {
+      deepQueryV2Gates.allMeasuredDeepQueryV2GatesPassed =
+        Object.values(deepQueryV2Gates).every((value) => value === true);
+    }
     const dedupeCountsConsistent = [
       audit.dedupe.overall,
       ...Object.values(audit.dedupe.byProvider),
@@ -892,6 +1035,33 @@ export async function runInsightsRealSampleBenchmark(options = {}) {
         ftsIntegrityCheck: audit.ftsIntegrity,
         foreignKeyViolations: audit.foreignKeyViolations,
       },
+      ...(deepQueryV2 ? {
+        deepQueryV2: {
+          measuredScope: "fact-v2-real-session-capacity-and-commit-ack",
+          canonicalIndexedSourceBytes,
+          committedDeltaCount: committedDeltas.size,
+          syncWallMs: indexingWallMs,
+          commitAckMs: latencySummary(commitAckLatencies),
+          rows: audit.deepQueryV2.rows,
+          storage: {
+            ...audit.deepQueryV2.storage,
+            persistentBytes: audit.postMaintenanceBytes,
+            persistentStorageAmplification,
+            historyFtsAmplification,
+            limits: {
+              persistentStorageAmplification: DEEP_STORAGE_AMPLIFICATION_LIMIT,
+              historyFtsAmplification: DEEP_FTS_AMPLIFICATION_LIMIT,
+            },
+          },
+          coverage: audit.deepQueryV2.coverage,
+          historyFtsIntegrity: audit.deepQueryV2.historyFtsIntegrity,
+          gates: deepQueryV2Gates,
+          notMeasured: [
+            "fixed-work-budget records, aggregate, Recipe, and Evidence latency; synthetic 25k/250k evidence owns those gates",
+            "sidecar RSS; synthetic 25k/250k evidence owns the 128 MiB hard gate",
+          ],
+        },
+      } : {}),
       gates: {
         frozenThirtyPercentFraction: fraction === SAMPLE_FRACTION,
         overallByteFractionWithinRange: byteFractionGate.withinAcceptanceRange,
@@ -932,12 +1102,17 @@ function parseArguments(argv) {
     enginePath: process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
     output: null,
     seed: DEFAULT_SEED,
+    deepQueryV2: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") return { help: true };
     if (argument === "--execute") {
       values.execute = true;
+      continue;
+    }
+    if (argument === "--deep-query-v2") {
+      values.deepQueryV2 = true;
       continue;
     }
     if (!["--engine", "--output", "--seed"].includes(argument)) fail(`unknown argument ${argument}`);
@@ -952,7 +1127,7 @@ function parseArguments(argv) {
 }
 
 function usage() {
-  return "Usage: benchmark-insights-real-sample.mjs --execute [--engine FILE] [--output FILE] [--seed VALUE]";
+  return "Usage: benchmark-insights-real-sample.mjs --execute [--deep-query-v2] [--engine FILE] [--output FILE] [--seed VALUE]";
 }
 
 async function main(argv) {
@@ -972,6 +1147,9 @@ async function main(argv) {
     await writeFile(output, serialized, { mode: 0o600 });
   }
   if (!report.gates.allMeasuredGatesPassed) fail("real-session sample benchmark gates failed");
+  if (options.deepQueryV2 && !report.deepQueryV2.gates.allMeasuredDeepQueryV2GatesPassed) {
+    fail("real-session Fact V2 benchmark gates failed");
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

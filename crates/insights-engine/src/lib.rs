@@ -6,6 +6,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub mod agent_query;
 pub mod analyzer;
+pub mod deep_query;
 pub mod engine;
 pub mod engine_status;
 pub mod evidence_path;
@@ -19,6 +20,7 @@ pub mod normalized_repository;
 pub mod projection;
 pub mod protocol;
 pub mod query;
+pub mod recipe;
 pub mod retry_projection;
 pub mod search_projection;
 pub mod source_state;

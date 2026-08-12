@@ -14,8 +14,14 @@ export { canonicalJson };
 const deltaSchema = JSON.parse(
   readFileSync(new URL("../schema/session-facts-delta.v1.schema.json", import.meta.url), "utf8"),
 );
+const deltaSchemaV2 = JSON.parse(
+  readFileSync(new URL("../schema/session-facts-delta.v2.schema.json", import.meta.url), "utf8"),
+);
 const ajvOptions = { allErrors: true, strict: false };
 const validateDelta = new Ajv2020(ajvOptions).compile(deltaSchema);
+const ajvV2 = new Ajv2020(ajvOptions);
+ajvV2.addSchema(deltaSchema);
+const validateDeltaV2 = ajvV2.compile(deltaSchemaV2);
 const eventValidatorNames = Object.freeze({
   "visible-message": "visibleMessage",
   "capability-invocation": "capabilityInvocation",
@@ -257,8 +263,20 @@ export function validateSessionFactsDelta(delta) {
   return { valid: errors.length === 0, errors };
 }
 
+/** Validates the unredacted, chunked SessionFactsDeltaV2 contract. */
+export function validateSessionFactsDeltaV2(delta) {
+  const valid = Boolean(validateDeltaV2(delta));
+  return { valid, errors: valid ? [] : [...(validateDeltaV2.errors ?? [])] };
+}
+
 export function assertSessionFactsDelta(delta) {
   const result = validateSessionFactsDelta(delta);
   if (!result.valid) throw new TypeError(`Invalid SessionFactsDeltaV1: ${result.errors[0]?.message ?? "schema validation failed"}`);
+  return delta;
+}
+
+export function assertSessionFactsDeltaV2(delta) {
+  const result = validateSessionFactsDeltaV2(delta);
+  if (!result.valid) throw new TypeError(`Invalid SessionFactsDeltaV2: ${result.errors[0]?.message ?? "schema validation failed"}`);
   return delta;
 }

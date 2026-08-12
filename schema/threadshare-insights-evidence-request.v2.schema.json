@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-evidence-request.v2.schema.json",
+  "title": "Threadshare Insights Evidence Request v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "target", "include"],
+  "properties": {
+    "format": { "const": "threadshare-insights-evidence-request@v2" },
+    "target": { "$ref": "#/$defs/target" },
+    "include": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["envelope", "payload"] } },
+    "cursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] },
+    "maxBytes": { "type": "integer", "minimum": 4, "maximum": 1048576 }
+  },
+  "$defs": {
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "target": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "eventKey", "revision"], "properties": { "kind": { "const": "event" }, "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "payloadKey": { "$ref": "#/$defs/key" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "turnKey", "revision"], "properties": { "kind": { "const": "turn" }, "turnKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "sessionKey", "revision"], "properties": { "kind": { "const": "session" }, "sessionKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "chainKey", "revision"], "properties": { "kind": { "const": "attempt-chain" }, "chainKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } }
+      ]
+    }
+  }
+}

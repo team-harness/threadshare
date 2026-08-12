@@ -10,10 +10,14 @@ use crate::fact_repository::{
 use crate::storage::{CommitOutcome, StorageError};
 use crate::{hash_key, try_canonical_json};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+
+fn corrupt(message: impl Into<String>) -> StorageError {
+    StorageError::new("TS_INSIGHTS_STORAGE_CORRUPT", message)
+}
 
 const NORMALIZED_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -137,6 +141,148 @@ CREATE INDEX IF NOT EXISTS evidence_events_session_order ON evidence_events(sess
 CREATE INDEX IF NOT EXISTS evidence_events_source_record ON evidence_events(source_record_id);
 CREATE INDEX IF NOT EXISTS evidence_events_occurred_turn
   ON evidence_events(occurred_turn_id) WHERE occurred_turn_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS history_events (
+  event_key BLOB PRIMARY KEY CHECK(length(event_key)=32),
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  occurred_turn_id INTEGER REFERENCES turns(turn_id) ON DELETE CASCADE,
+  source_record_id INTEGER NOT NULL REFERENCES source_records(source_record_id) ON DELETE CASCADE,
+  record_start_offset BLOB NOT NULL CHECK(length(record_start_offset)=8),
+  content_index INTEGER NOT NULL CHECK(content_index>=-1),
+  event_ordinal INTEGER NOT NULL CHECK(event_ordinal BETWEEN 0 AND 65535),
+  origin_scope TEXT NOT NULL,
+  observed_timestamp TEXT,
+  event_kind TEXT NOT NULL,
+  completeness TEXT NOT NULL,
+  revision BLOB NOT NULL CHECK(length(revision)=32),
+  metadata_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_events_session_revision
+  ON history_events(session_id, revision, event_key);
+CREATE INDEX IF NOT EXISTS history_events_session_order
+  ON history_events(session_id, record_start_offset, content_index, event_ordinal, event_key);
+CREATE INDEX IF NOT EXISTS history_events_source_record ON history_events(source_record_id);
+CREATE INDEX IF NOT EXISTS history_events_occurred_turn
+  ON history_events(occurred_turn_id) WHERE occurred_turn_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS history_events_observed
+  ON history_events(observed_timestamp,event_key);
+CREATE INDEX IF NOT EXISTS history_events_kind_observed
+  ON history_events(event_kind,observed_timestamp,event_key);
+
+CREATE TABLE IF NOT EXISTS attempt_chain_events (
+  event_key BLOB PRIMARY KEY REFERENCES history_events(event_key) ON DELETE CASCADE
+    CHECK(length(event_key)=32),
+  chain_key BLOB NOT NULL CHECK(length(chain_key)=32),
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  correlation_digest BLOB NOT NULL CHECK(length(correlation_digest)=32)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS attempt_chain_events_chain
+  ON attempt_chain_events(chain_key,event_key);
+CREATE INDEX IF NOT EXISTS attempt_chain_events_correlation
+  ON attempt_chain_events(session_id,correlation_digest,event_key);
+
+CREATE TABLE IF NOT EXISTS history_payloads (
+  payload_key BLOB PRIMARY KEY CHECK(length(payload_key)=32),
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  event_key BLOB NOT NULL REFERENCES history_events(event_key) ON DELETE CASCADE,
+  payload_kind TEXT NOT NULL,
+  encoding TEXT NOT NULL,
+  byte_length BLOB NOT NULL CHECK(length(byte_length)=8),
+  sha256 BLOB NOT NULL CHECK(length(sha256)=32),
+  completeness TEXT NOT NULL,
+  chunk_count BLOB NOT NULL CHECK(length(chunk_count)=8)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_payloads_event
+  ON history_payloads(event_key, payload_key);
+
+CREATE TABLE IF NOT EXISTS history_payload_chunks (
+  payload_key BLOB NOT NULL REFERENCES history_payloads(payload_key) ON DELETE CASCADE,
+  ordinal BLOB NOT NULL CHECK(length(ordinal)=8),
+  content TEXT NOT NULL,
+  byte_length BLOB NOT NULL CHECK(length(byte_length)=8),
+  sha256 BLOB NOT NULL CHECK(length(sha256)=32),
+  PRIMARY KEY(payload_key, ordinal)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS history_event_fts_documents (
+  document_id INTEGER PRIMARY KEY,
+  payload_key BLOB NOT NULL REFERENCES history_payloads(payload_key) ON DELETE CASCADE,
+  chunk_ordinal BLOB NOT NULL CHECK(length(chunk_ordinal)=8),
+  UNIQUE(payload_key,chunk_ordinal)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS history_event_fts USING fts5(
+  tokens,
+  content='',
+  contentless_delete=1,
+  columnsize=1,
+  detail=none
+);
+CREATE TRIGGER IF NOT EXISTS history_event_fts_documents_delete
+AFTER DELETE ON history_event_fts_documents BEGIN
+  DELETE FROM history_event_fts WHERE rowid=old.document_id;
+END;
+
+CREATE TABLE IF NOT EXISTS history_coverage_rollups (
+  session_id INTEGER PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+  missing_payload_event_count INTEGER NOT NULL CHECK(missing_payload_event_count>=0),
+  missing_token_metric_event_count INTEGER NOT NULL CHECK(missing_token_metric_event_count>=0),
+  fts_searchable_event_count INTEGER NOT NULL CHECK(fts_searchable_event_count>=0),
+  fts_stored_not_searchable_event_count INTEGER NOT NULL
+    CHECK(fts_stored_not_searchable_event_count>=0),
+  fts_searchable_payload_bytes INTEGER NOT NULL CHECK(fts_searchable_payload_bytes>=0),
+  fts_stored_not_searchable_payload_bytes INTEGER NOT NULL
+    CHECK(fts_stored_not_searchable_payload_bytes>=0)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS file_activity (
+  event_key BLOB NOT NULL REFERENCES history_events(event_key) ON DELETE CASCADE,
+  activity_ordinal INTEGER NOT NULL CHECK(activity_ordinal>=0),
+  observed_timestamp TEXT,
+  action TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  path_role TEXT NOT NULL,
+  raw_path TEXT NOT NULL,
+  normalized_path TEXT NOT NULL,
+  relative_path TEXT,
+  is_absolute INTEGER NOT NULL CHECK(is_absolute IN (0,1)),
+  is_project_relative INTEGER NOT NULL CHECK(is_project_relative IN (0,1)),
+  PRIMARY KEY(event_key,activity_ordinal)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS file_activity_path_observed
+  ON file_activity(normalized_path,observed_timestamp,event_key);
+CREATE INDEX IF NOT EXISTS file_activity_observed
+  ON file_activity(observed_timestamp,event_key);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+  event_key BLOB PRIMARY KEY REFERENCES history_events(event_key) ON DELETE CASCADE,
+  observed_timestamp TEXT,
+  usage_scope TEXT NOT NULL,
+  model TEXT,
+  input_tokens BLOB CHECK(input_tokens IS NULL OR length(input_tokens)=8),
+  cached_input_tokens BLOB CHECK(cached_input_tokens IS NULL OR length(cached_input_tokens)=8),
+  cache_write_input_tokens BLOB CHECK(cache_write_input_tokens IS NULL OR length(cache_write_input_tokens)=8),
+  output_tokens BLOB CHECK(output_tokens IS NULL OR length(output_tokens)=8),
+  reasoning_tokens BLOB CHECK(reasoning_tokens IS NULL OR length(reasoning_tokens)=8),
+  total_tokens BLOB CHECK(total_tokens IS NULL OR length(total_tokens)=8)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS token_usage_model_observed
+  ON token_usage(model,observed_timestamp,event_key);
+CREATE INDEX IF NOT EXISTS token_usage_observed
+  ON token_usage(observed_timestamp,event_key);
+
+CREATE TABLE IF NOT EXISTS error_occurrences (
+  event_key BLOB PRIMARY KEY REFERENCES history_events(event_key) ON DELETE CASCADE,
+  observed_timestamp TEXT,
+  signature_version TEXT NOT NULL,
+  error_signature BLOB NOT NULL CHECK(length(error_signature)=32),
+  capability_key BLOB CHECK(capability_key IS NULL OR length(capability_key)=32),
+  provider_state TEXT,
+  exit_code BLOB CHECK(exit_code IS NULL OR length(exit_code)=8)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS error_occurrences_signature_observed
+  ON error_occurrences(error_signature,observed_timestamp,event_key);
+CREATE INDEX IF NOT EXISTS error_occurrences_observed
+  ON error_occurrences(observed_timestamp,event_key);
 
 CREATE TABLE IF NOT EXISTS visible_message_events (
   event_id INTEGER PRIMARY KEY REFERENCES evidence_events(event_id) ON DELETE CASCADE,
@@ -300,6 +446,89 @@ CREATE TABLE IF NOT EXISTS fact_coverage (
 ) WITHOUT ROWID;
 "#;
 
+const FACT_SCHEMA_METADATA_KEY: &str = "fact_schema_version";
+
+fn validate_history_fts_layout(connection: &Connection) -> Result<(), StorageError> {
+    let schema = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='history_event_fts'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let compact = schema
+        .split_ascii_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let mapping_has_event_key = connection
+        .prepare(
+            "SELECT name FROM pragma_table_info('history_event_fts_documents')
+             WHERE name='event_key'",
+        )?
+        .exists([])?;
+    if mapping_has_event_key
+        || !compact.contains("fts5(tokens,")
+        || !compact.contains("columnsize=1")
+        || !compact.contains("detail=none")
+    {
+        return Err(StorageError::new(
+            "TS_INSIGHTS_FACT_SCHEMA_MIGRATION_REQUIRED",
+            "the active Insights database requires a shadow rebuild for the history FTS layout",
+        ));
+    }
+    Ok(())
+}
+
+fn database_fact_schema_version(connection: &Connection) -> Result<Option<u8>, StorageError> {
+    let stored = connection
+        .query_row(
+            "SELECT value FROM engine_metadata WHERE key=?1",
+            [FACT_SCHEMA_METADATA_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(value) = stored {
+        return match value.as_str() {
+            "1" => Ok(Some(1)),
+            "2" => Ok(Some(2)),
+            _ => Err(StorageError::new(
+                "TS_INSIGHTS_STORAGE_CORRUPT",
+                "the Insights database Fact schema identity is invalid",
+            )),
+        };
+    }
+    let populated: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_commits)
+             OR CAST((SELECT value FROM engine_metadata WHERE key='snapshot_seq') AS INTEGER)>0",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok((populated != 0).then_some(1))
+}
+
+fn bind_database_fact_schema_version(
+    transaction: &Transaction<'_>,
+    fact_schema_version: u8,
+) -> Result<(), StorageError> {
+    if let Some(current) = database_fact_schema_version(transaction)?
+        && current != fact_schema_version
+    {
+        return Err(StorageError::new(
+            "TS_INSIGHTS_FACT_SCHEMA_MIGRATION_REQUIRED",
+            "the active Insights database requires a shadow rebuild for this Fact schema",
+        ));
+    }
+    transaction.execute(
+        "INSERT OR IGNORE INTO engine_metadata(key,value) VALUES (?1,?2)",
+        params![FACT_SCHEMA_METADATA_KEY, fact_schema_version.to_string()],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn read_database_fact_schema_version(
+    connection: &Connection,
+) -> Result<Option<u8>, StorageError> {
+    database_fact_schema_version(connection)
+}
+
 pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), StorageError> {
     let legacy_receipt = connection
         .prepare(
@@ -308,6 +537,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
         .exists([])?;
     if !legacy_receipt {
         connection.execute_batch(NORMALIZED_SCHEMA)?;
+        validate_history_fts_layout(connection)?;
         crate::projection::initialize_projection_schema(connection)?;
         crate::search_projection::initialize_search_projection_schema(connection)?;
         crate::retry_projection::initialize_retry_projection_schema(connection)?;
@@ -365,6 +595,7 @@ pub(crate) fn initialize_schema(connection: &mut Connection) -> Result<(), Stora
     }
     transaction.execute_batch("DROP TABLE legacy_session_commits_v0;")?;
     transaction.commit()?;
+    validate_history_fts_layout(connection)?;
     crate::projection::initialize_projection_schema(connection)?;
     crate::search_projection::initialize_search_projection_schema(connection)?;
     crate::retry_projection::initialize_retry_projection_schema(connection)?;
@@ -381,12 +612,14 @@ pub(crate) fn apply_session_facts(
         .validate()
         .map_err(|error| StorageError::new(error.code, error.message))?;
     let canonical = try_canonical_json(
-        &serde_json::to_value(delta)
-            .map_err(|error| StorageError::new("TS_INSIGHTS_INVALID_DELTA", error.to_string()))?,
+        &delta
+            .to_contract_value()
+            .map_err(|error| StorageError::new(error.code, error.message))?,
     )
     .map_err(|_| StorageError::new("TS_INSIGHTS_INVALID_DELTA", "non-canonical delta"))?;
     let canonical_digest: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    bind_database_fact_schema_version(&transaction, delta.fact_schema_version)?;
     let current = current_commit(&transaction, delta.session.session_key)?;
     if let Some(current) = &current
         && current.delta_id == delta.delta_id
@@ -441,6 +674,13 @@ pub(crate) fn apply_session_facts(
     upsert_turns(&transaction, session_id, &delta.turns)?;
     upsert_source_records(&transaction, session_id, &delta.source_records)?;
     upsert_events(&transaction, session_id, &delta.evidence_events)?;
+    upsert_history_events(&transaction, session_id, &delta.history_events)?;
+    upsert_history_payloads(
+        &transaction,
+        session_id,
+        &delta.history_payloads,
+        &delta.history_payload_chunks,
+    )?;
     upsert_uses(&transaction, session_id, &delta.capability_uses)?;
     upsert_turn_links(&transaction, session_id, &delta.turn_evidence)?;
     upsert_use_links(&transaction, session_id, &delta.capability_use_evidence)?;
@@ -450,6 +690,7 @@ pub(crate) fn apply_session_facts(
     replace_diagnostics(&transaction, session_id, &delta.diagnostics)?;
     replace_coverage(&transaction, session_id, &delta.coverage)?;
     collect_garbage(&transaction, session_id)?;
+    rebuild_history_coverage_rollup(&transaction, session_id)?;
 
     let snapshot_seq: i64 = transaction.query_row(
         "UPDATE engine_metadata SET value=CAST(value AS INTEGER)+1
@@ -512,6 +753,7 @@ pub(crate) fn apply_staged_session_facts(
         .map_err(|error| StorageError::new(error.code, error.message))?;
     let canonical_digest = staged.canonical_digest;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    bind_database_fact_schema_version(&transaction, delta.fact_schema_version)?;
     let current = current_commit(&transaction, delta.session.session_key)?;
     if let Some(current) = &current
         && current.delta_id == delta.delta_id
@@ -582,6 +824,21 @@ pub(crate) fn apply_staged_session_facts(
         "evidenceEvents",
         |facts| upsert_events(&transaction, session_id, facts),
     )?;
+    crate::fact_staging::for_each_chunk::<HistoryEventFact>(
+        &transaction,
+        "historyEvents",
+        |facts| upsert_history_events(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<HistoryPayloadFact>(
+        &transaction,
+        "historyPayloads",
+        |facts| upsert_history_payload_metadata(&transaction, session_id, facts),
+    )?;
+    crate::fact_staging::for_each_chunk::<HistoryPayloadChunkFact>(
+        &transaction,
+        "historyPayloadChunks",
+        |facts| upsert_history_payload_chunks(&transaction, facts),
+    )?;
     crate::fact_staging::for_each_chunk::<CapabilityUseFact>(
         &transaction,
         "capabilityUses",
@@ -603,6 +860,7 @@ pub(crate) fn apply_staged_session_facts(
     replace_diagnostics(&transaction, session_id, &delta.diagnostics)?;
     replace_coverage(&transaction, session_id, &delta.coverage)?;
     collect_garbage(&transaction, session_id)?;
+    rebuild_history_coverage_rollup(&transaction, session_id)?;
 
     let snapshot_seq: i64 = transaction.query_row(
         "UPDATE engine_metadata SET value=CAST(value AS INTEGER)+1
@@ -834,6 +1092,11 @@ fn retract_orphan_events(
     event_keys: &[StableKey],
 ) -> Result<(), StorageError> {
     for event_key in event_keys {
+        transaction.execute(
+            "DELETE FROM history_events
+             WHERE session_id=?1 AND event_key=?2 AND occurred_turn_id IS NULL",
+            params![session_id, blob(*event_key)],
+        )?;
         transaction.execute(
             "DELETE FROM evidence_events
              WHERE session_id=?1 AND event_key=?2 AND occurred_turn_id IS NULL",
@@ -1134,6 +1397,502 @@ fn upsert_events(
             }
         }
     }
+    Ok(())
+}
+
+fn upsert_history_events(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    events: &[HistoryEventFact],
+) -> Result<(), StorageError> {
+    for event in events {
+        let source_record_id = source_record_id(transaction, event.source_record_key)?;
+        let occurred_turn_id = event
+            .occurred_turn_key
+            .map(|turn_key| turn_id(transaction, turn_key))
+            .transpose()?;
+        let metadata_json = try_canonical_json(&event.metadata).map_err(|_| {
+            StorageError::new(
+                "TS_INSIGHTS_INVALID_DELTA",
+                "history event metadata is outside the canonical JSON domain",
+            )
+        })?;
+        transaction.execute(
+            "DELETE FROM history_payloads WHERE event_key=?1",
+            [blob(event.event_key)],
+        )?;
+        transaction.execute(
+            "INSERT INTO history_events(
+               event_key,session_id,occurred_turn_id,source_record_id,
+               record_start_offset,content_index,event_ordinal,origin_scope,
+               observed_timestamp,event_kind,completeness,revision,metadata_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(event_key) DO UPDATE SET
+               session_id=excluded.session_id,
+               occurred_turn_id=excluded.occurred_turn_id,
+               source_record_id=excluded.source_record_id,
+               record_start_offset=excluded.record_start_offset,
+               content_index=excluded.content_index,
+               event_ordinal=excluded.event_ordinal,
+               origin_scope=excluded.origin_scope,
+               observed_timestamp=excluded.observed_timestamp,
+               event_kind=excluded.event_kind,
+               completeness=excluded.completeness,
+               revision=excluded.revision,
+               metadata_json=excluded.metadata_json",
+            params![
+                blob(event.event_key),
+                session_id,
+                occurred_turn_id,
+                source_record_id,
+                u64_blob(event.source_order.record_start_offset),
+                event.source_order.content_index,
+                event.source_order.event_ordinal,
+                enum_text(event.origin_scope),
+                event.observed_timestamp,
+                &event.kind,
+                enum_text(event.completeness),
+                blob(event.revision),
+                metadata_json,
+            ],
+        )?;
+        replace_deep_event_projections(transaction, event)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileActivityProjection {
+    action: String,
+    phase: String,
+    path_role: String,
+    raw_path: String,
+    normalized_path: String,
+    relative_path: Option<String>,
+    absolute: bool,
+    project_relative: bool,
+}
+
+fn metadata_object(
+    event: &HistoryEventFact,
+) -> Result<&serde_json::Map<String, serde_json::Value>, StorageError> {
+    event.metadata.as_object().ok_or_else(|| {
+        StorageError::new(
+            "TS_INSIGHTS_INVALID_DELTA",
+            "history event metadata must be an object",
+        )
+    })
+}
+
+fn metadata_string<'a>(
+    metadata: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<&'a str>, StorageError> {
+    metadata
+        .get(field)
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                StorageError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "typed history event metadata contains an invalid string",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn metadata_wire(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<WireU64>, StorageError> {
+    metadata_string(metadata, field)?
+        .map(|value| {
+            value.parse::<WireU64>().map_err(|_| {
+                StorageError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "typed history event metadata contains an invalid decimal",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn metadata_key(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<StableKey>, StorageError> {
+    metadata_string(metadata, field)?
+        .map(|value| {
+            value.parse::<StableKey>().map_err(|_| {
+                StorageError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "typed history event metadata contains an invalid stable key",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn replace_deep_event_projections(
+    transaction: &Transaction<'_>,
+    event: &HistoryEventFact,
+) -> Result<(), StorageError> {
+    let event_key = blob(event.event_key);
+    transaction.execute("DELETE FROM file_activity WHERE event_key=?1", [&event_key])?;
+    transaction.execute("DELETE FROM token_usage WHERE event_key=?1", [&event_key])?;
+    transaction.execute(
+        "DELETE FROM error_occurrences WHERE event_key=?1",
+        [&event_key],
+    )?;
+    transaction.execute(
+        "DELETE FROM attempt_chain_events WHERE event_key=?1",
+        [&event_key],
+    )?;
+    let metadata = metadata_object(event)?;
+
+    if matches!(
+        event.kind.as_str(),
+        "capability-invocation" | "capability-result"
+    ) && let Some(correlation_digest) = metadata_key(metadata, "correlationDigest")?
+    {
+        let chain_key = hex::decode(crate::hash_key(
+            "attempt-chain",
+            &[
+                event.owner_session_key.as_bytes().to_vec(),
+                correlation_digest.as_bytes().to_vec(),
+            ],
+        ))
+        .map_err(|_| {
+            StorageError::new(
+                "TS_INSIGHTS_INVALID_DELTA",
+                "attempt chain identity could not be derived",
+            )
+        })?;
+        transaction.execute(
+            "INSERT INTO attempt_chain_events(event_key,chain_key,session_id,correlation_digest)
+             SELECT ?1,?2,session_id,?3 FROM history_events WHERE event_key=?1",
+            params![&event_key, chain_key, blob(correlation_digest)],
+        )?;
+    }
+
+    if let Some(value) = metadata.get("fileActivities") {
+        let activities = serde_json::from_value::<Vec<FileActivityProjection>>(value.clone())
+            .map_err(|_| {
+                StorageError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "history file activity metadata is invalid",
+                )
+            })?;
+        if activities.len() > 64 {
+            return Err(StorageError::new(
+                "TS_INSIGHTS_INVALID_DELTA",
+                "history file activity metadata exceeds its bound",
+            ));
+        }
+        for (ordinal, activity) in activities.into_iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO file_activity(
+                   event_key,activity_ordinal,observed_timestamp,action,phase,path_role,
+                   raw_path,normalized_path,relative_path,is_absolute,is_project_relative
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    &event_key,
+                    i64::try_from(ordinal).map_err(|_| StorageError::new(
+                        "TS_INSIGHTS_INVALID_DELTA",
+                        "history file activity ordinal is invalid",
+                    ))?,
+                    event.observed_timestamp.as_deref(),
+                    activity.action,
+                    activity.phase,
+                    activity.path_role,
+                    activity.raw_path,
+                    activity.normalized_path,
+                    activity.relative_path,
+                    activity.absolute,
+                    activity.project_relative,
+                ],
+            )?;
+        }
+    }
+
+    if let Some(usage_scope) = metadata_string(metadata, "usageScope")? {
+        transaction.execute(
+            "INSERT INTO token_usage(
+               event_key,observed_timestamp,usage_scope,model,input_tokens,cached_input_tokens,
+               cache_write_input_tokens,output_tokens,reasoning_tokens,total_tokens
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                &event_key,
+                event.observed_timestamp.as_deref(),
+                usage_scope,
+                metadata_string(metadata, "model")?,
+                metadata_wire(metadata, "inputTokens")?.map(u64_blob),
+                metadata_wire(metadata, "cachedInputTokens")?.map(u64_blob),
+                metadata_wire(metadata, "cacheWriteInputTokens")?.map(u64_blob),
+                metadata_wire(metadata, "outputTokens")?.map(u64_blob),
+                metadata_wire(metadata, "reasoningTokens")?.map(u64_blob),
+                metadata_wire(metadata, "totalTokens")?.map(u64_blob),
+            ],
+        )?;
+    }
+
+    if let Some(signature_version) = metadata_string(metadata, "errorSignatureVersion")? {
+        let signature = metadata_key(metadata, "errorSignature")?.ok_or_else(|| {
+            StorageError::new(
+                "TS_INSIGHTS_INVALID_DELTA",
+                "history error metadata is missing its signature",
+            )
+        })?;
+        transaction.execute(
+            "INSERT INTO error_occurrences(
+               event_key,observed_timestamp,signature_version,error_signature,
+               capability_key,provider_state,exit_code
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                &event_key,
+                event.observed_timestamp.as_deref(),
+                signature_version,
+                blob(signature),
+                metadata_key(metadata, "capabilityKey")?.map(blob),
+                metadata_string(metadata, "providerState")?,
+                metadata_wire(metadata, "exitCode")?.map(u64_blob),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_history_payloads(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    payloads: &[HistoryPayloadFact],
+    chunks: &[HistoryPayloadChunkFact],
+) -> Result<(), StorageError> {
+    upsert_history_payload_metadata(transaction, session_id, payloads)?;
+    upsert_history_payload_chunks(transaction, chunks)
+}
+
+fn upsert_history_payload_metadata(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+    payloads: &[HistoryPayloadFact],
+) -> Result<(), StorageError> {
+    for payload in payloads {
+        transaction.execute(
+            "INSERT INTO history_payloads(
+               payload_key,session_id,event_key,payload_kind,encoding,
+               byte_length,sha256,completeness,chunk_count
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(payload_key) DO UPDATE SET
+               session_id=excluded.session_id,event_key=excluded.event_key,
+               payload_kind=excluded.payload_kind,encoding=excluded.encoding,
+               byte_length=excluded.byte_length,sha256=excluded.sha256,
+               completeness=excluded.completeness,chunk_count=excluded.chunk_count",
+            params![
+                blob(payload.payload_key),
+                session_id,
+                blob(payload.event_key),
+                enum_text(payload.payload_kind),
+                enum_text(payload.encoding),
+                u64_blob(payload.byte_length),
+                blob(payload.sha256),
+                enum_text(payload.completeness),
+                u64_blob(payload.chunk_count),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_history_payload_chunks(
+    transaction: &Transaction<'_>,
+    chunks: &[HistoryPayloadChunkFact],
+) -> Result<(), StorageError> {
+    for chunk in chunks {
+        transaction.execute(
+            "INSERT INTO history_payload_chunks(
+               payload_key,ordinal,content,byte_length,sha256
+             ) VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(payload_key,ordinal) DO UPDATE SET
+               content=excluded.content,byte_length=excluded.byte_length,
+               sha256=excluded.sha256",
+            params![
+                blob(chunk.payload_key),
+                u64_blob(chunk.ordinal),
+                &chunk.content,
+                u64_blob(chunk.byte_length),
+                blob(chunk.sha256),
+            ],
+        )?;
+        upsert_history_event_fts_chunk(transaction, chunk)?;
+    }
+    Ok(())
+}
+
+fn upsert_history_event_fts_chunk(
+    transaction: &Transaction<'_>,
+    chunk: &HistoryPayloadChunkFact,
+) -> Result<(), StorageError> {
+    let payload_key = blob(chunk.payload_key);
+    let ordinal = u64_blob(chunk.ordinal);
+    let payload_kind: String = transaction.query_row(
+        "SELECT payload_kind FROM history_payloads WHERE payload_key=?1",
+        [&payload_key],
+        |row| row.get(0),
+    )?;
+    let existing = transaction
+        .query_row(
+            "SELECT document_id FROM history_event_fts_documents
+             WHERE payload_key=?1 AND chunk_ordinal=?2",
+            params![&payload_key, &ordinal],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if payload_kind == "provider-payload" {
+        if let Some(document_id) = existing {
+            transaction.execute(
+                "DELETE FROM history_event_fts_documents WHERE document_id=?1",
+                [document_id],
+            )?;
+        }
+        return Ok(());
+    }
+    let document_id = if let Some(document_id) = existing {
+        transaction.execute(
+            "DELETE FROM history_event_fts WHERE rowid=?1",
+            [document_id],
+        )?;
+        document_id
+    } else {
+        transaction.execute(
+            "INSERT INTO history_event_fts_documents(payload_key,chunk_ordinal)
+             VALUES (?1,?2)",
+            params![&payload_key, &ordinal],
+        )?;
+        transaction.last_insert_rowid()
+    };
+    let analyzed = crate::analyzer::analyze_document(&chunk.content, &[]);
+    let tokens = crate::fts_projection::history_fts_document_text(&analyzed)?;
+    transaction.execute(
+        "INSERT INTO history_event_fts(rowid,tokens) VALUES (?1,?2)",
+        params![document_id, tokens],
+    )?;
+    Ok(())
+}
+
+fn rebuild_history_coverage_rollup(
+    transaction: &Transaction<'_>,
+    session_id: i64,
+) -> Result<(), StorageError> {
+    let (missing_payload_event_count, missing_token_metric_event_count): (i64, i64) = transaction
+        .query_row(
+        "SELECT
+               COALESCE(SUM(CASE
+                 WHEN he.event_kind='visible-message' AND NOT EXISTS (
+                   SELECT 1 FROM history_payloads hp
+                   WHERE hp.event_key=he.event_key AND hp.payload_kind='message-content'
+                 ) THEN 1
+                 WHEN he.event_kind='capability-invocation' AND NOT EXISTS (
+                   SELECT 1 FROM history_payloads hp
+                   WHERE hp.event_key=he.event_key AND hp.payload_kind='tool-input'
+                 ) THEN 1
+             WHEN he.event_kind='capability-result'
+                  AND (json_extract(he.metadata_json,'$.providerState')='failed'
+                       OR json_type(he.metadata_json,'$.outputBytes') IS NOT NULL
+                       OR json_type(he.metadata_json,'$.errorSignature') IS NOT NULL)
+                      AND NOT EXISTS (
+                   SELECT 1 FROM history_payloads hp
+                   WHERE hp.event_key=he.event_key
+                     AND hp.payload_kind IN ('tool-output','error-content')
+                 ) THEN 1
+                 WHEN he.event_kind='provider-unknown' AND NOT EXISTS (
+                   SELECT 1 FROM history_payloads hp
+                   WHERE hp.event_key=he.event_key AND hp.payload_kind='provider-payload'
+                 ) THEN 1
+                 ELSE 0 END),0),
+               COALESCE(SUM(CASE WHEN tu.event_key IS NOT NULL THEN
+                 (tu.input_tokens IS NULL) + (tu.cached_input_tokens IS NULL) +
+                 (tu.cache_write_input_tokens IS NULL) + (tu.output_tokens IS NULL) +
+                 (tu.reasoning_tokens IS NULL) + (tu.total_tokens IS NULL)
+               ELSE 0 END),0)
+             FROM history_events he
+             LEFT JOIN token_usage tu ON tu.event_key=he.event_key
+             WHERE he.session_id=?1",
+        [session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let mut statement = transaction.prepare(
+        "SELECT hp.event_key,hp.byte_length,hp.chunk_count,
+                COUNT(hfd.document_id)
+         FROM history_payloads hp
+         LEFT JOIN history_event_fts_documents hfd ON hfd.payload_key=hp.payload_key
+         WHERE hp.session_id=?1
+         GROUP BY hp.payload_key
+         ORDER BY hp.payload_key",
+    )?;
+    let mut rows = statement.query([session_id])?;
+    let mut searchable_events = BTreeSet::<Vec<u8>>::new();
+    let mut not_searchable_events = BTreeSet::<Vec<u8>>::new();
+    let mut searchable_bytes = 0_u64;
+    let mut not_searchable_bytes = 0_u64;
+    while let Some(row) = rows.next()? {
+        let event_key: Vec<u8> = row.get(0)?;
+        let byte_length = WireU64::from_be_blob(&row.get::<_, Vec<u8>>(1)?)
+            .map_err(|_| corrupt("stored history payload byte length is invalid"))?
+            .get();
+        let chunk_count = WireU64::from_be_blob(&row.get::<_, Vec<u8>>(2)?)
+            .map_err(|_| corrupt("stored history payload chunk count is invalid"))?
+            .get();
+        let document_count = u64::try_from(row.get::<_, i64>(3)?)
+            .map_err(|_| corrupt("stored history FTS document count is invalid"))?;
+        let searchable = chunk_count > 0 && document_count == chunk_count;
+        if searchable {
+            searchable_events.insert(event_key);
+            searchable_bytes = searchable_bytes.checked_add(byte_length).ok_or_else(|| {
+                corrupt("stored history searchable payload byte count overflowed")
+            })?;
+        } else {
+            not_searchable_events.insert(event_key);
+            not_searchable_bytes =
+                not_searchable_bytes
+                    .checked_add(byte_length)
+                    .ok_or_else(|| {
+                        corrupt("stored history non-searchable payload byte count overflowed")
+                    })?;
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    transaction.execute(
+        "INSERT INTO history_coverage_rollups(
+           session_id,missing_payload_event_count,missing_token_metric_event_count,
+           fts_searchable_event_count,fts_stored_not_searchable_event_count,
+           fts_searchable_payload_bytes,fts_stored_not_searchable_payload_bytes
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(session_id) DO UPDATE SET
+           missing_payload_event_count=excluded.missing_payload_event_count,
+           missing_token_metric_event_count=excluded.missing_token_metric_event_count,
+           fts_searchable_event_count=excluded.fts_searchable_event_count,
+           fts_stored_not_searchable_event_count=excluded.fts_stored_not_searchable_event_count,
+           fts_searchable_payload_bytes=excluded.fts_searchable_payload_bytes,
+           fts_stored_not_searchable_payload_bytes=excluded.fts_stored_not_searchable_payload_bytes",
+        params![
+            session_id,
+            missing_payload_event_count,
+            missing_token_metric_event_count,
+            i64::try_from(searchable_events.len())
+                .map_err(|_| corrupt("history searchable event count overflowed"))?,
+            i64::try_from(not_searchable_events.len())
+                .map_err(|_| corrupt("history non-searchable event count overflowed"))?,
+            i64::try_from(searchable_bytes)
+                .map_err(|_| corrupt("history searchable payload bytes exceeded SQLite"))?,
+            i64::try_from(not_searchable_bytes)
+                .map_err(|_| corrupt("history non-searchable payload bytes exceeded SQLite"))?,
+        ],
+    )?;
     Ok(())
 }
 
@@ -1499,6 +2258,9 @@ fn collect_garbage(transaction: &Transaction<'_>, session_id: i64) -> Result<(),
          WHERE session_id=?1 AND NOT EXISTS(
            SELECT 1 FROM evidence_events
            WHERE evidence_events.source_record_id=source_records.source_record_id
+         ) AND NOT EXISTS(
+           SELECT 1 FROM history_events
+           WHERE history_events.source_record_id=source_records.source_record_id
          )",
         [session_id],
     )?;
@@ -2930,6 +3692,58 @@ mod tests {
                 .any(|(name, _)| name == "canonical_delta")
         );
         assert!(receipt_columns.contains(&("canonical_digest".to_owned(), "BLOB".to_owned())));
+    }
+
+    #[test]
+    fn history_fts_uses_the_bounded_detail_none_layout() {
+        let connection = connection();
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='history_event_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(schema.contains("columnsize=1"), "{schema}");
+        assert!(schema.contains("detail=none"), "{schema}");
+        assert!(!schema.contains("detail=full"), "{schema}");
+        let mapping_columns = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('history_event_fts_documents') ORDER BY cid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            mapping_columns,
+            ["document_id", "payload_key", "chunk_ordinal"]
+        );
+    }
+
+    #[test]
+    fn legacy_history_fts_layout_requires_a_shadow_rebuild() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES('snapshot_seq','0');
+                 CREATE VIRTUAL TABLE history_event_fts USING fts5(
+                   natural,code,capability,content='',contentless_delete=1,
+                   columnsize=1,detail=full
+                 );",
+            )
+            .unwrap();
+        let error = initialize_schema(&mut connection).unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_FACT_SCHEMA_MIGRATION_REQUIRED");
+        assert_eq!(
+            error.message,
+            "the active Insights database requires a shadow rebuild for the history FTS layout"
+        );
     }
 
     #[test]

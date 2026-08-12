@@ -13,7 +13,10 @@ import {
   createReadEngineStatusMessage,
   createReadCapabilityUsageMessage,
   createReadInsightsActivityMessage,
+  createReadInsightsEvidenceV2Message,
   createReadInsightsOverviewMessage,
+  createReadInsightsQueryV2Message,
+  createReadInsightsRecipeMessage,
   createReadPurgeStatusMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
@@ -459,6 +462,14 @@ class InsightsEngineClient {
     return operation;
   }
 
+  databaseIdentity() {
+    if (!this.#ready || this.#requiredContract.factSchemaVersion !== 2) return null;
+    return Object.freeze({
+      databaseUuid: this.#ready.databaseUuid,
+      factSchemaVersion: this.#ready.databaseFactSchemaVersion,
+    });
+  }
+
   readSourceStates(options = {}) {
     if (this.#closed) {
       return Promise.reject(clientError(
@@ -669,6 +680,57 @@ class InsightsEngineClient {
     }
     const operation = this.#tail.then(() =>
       this.#runRead(() => this.#readInsightsActivity(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readInsightsQueryV2(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsQueryV2(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readInsightsEvidenceV2(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsEvidenceV2(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readInsightsRecipe(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsRecipe(input, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -1096,6 +1158,66 @@ class InsightsEngineClient {
     );
     throwIfAborted(signal, this.#transport.stderr);
     return freezeProtocolValue(response);
+  }
+
+  async #readInsightsQueryV2(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsQueryV2 input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsQueryV2Message({ requestId, request: input });
+    await this.#transport.write(request, "sending READ_INSIGHTS_QUERY_V2", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_QUERY_V2",
+      requestId,
+      {},
+      "waiting for INSIGHTS_QUERY_V2",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response.response);
+  }
+
+  async #readInsightsEvidenceV2(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsEvidenceV2 input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsEvidenceV2Message({ requestId, request: input });
+    await this.#transport.write(request, "sending READ_INSIGHTS_EVIDENCE_V2", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_EVIDENCE_V2",
+      requestId,
+      {},
+      "waiting for INSIGHTS_EVIDENCE_V2",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response.response);
+  }
+
+  async #readInsightsRecipe(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsRecipe input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsRecipeMessage({ requestId, request: input });
+    await this.#transport.write(request, "sending READ_INSIGHTS_RECIPE", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_RECIPE",
+      requestId,
+      {},
+      "waiting for INSIGHTS_RECIPE",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response.response);
   }
 
   async #runPurgeMaintenance(limit, signal) {

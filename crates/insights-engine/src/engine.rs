@@ -1,4 +1,7 @@
-use crate::protocol::{MessageKind, ProtocolError, validate_protocol_message};
+use crate::protocol::{
+    MessageKind, ProtocolError, V1_UPSERT_COLLECTIONS, upsert_collections_for_delta_format,
+    validate_protocol_message,
+};
 use crate::storage::{CommitOutcome, EngineStorage, StorageError};
 use crate::{hash_key, try_canonical_json};
 use serde_json::{Map, Value, json};
@@ -6,17 +9,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub const RETRACTION_COLLECTIONS: [&str; 3] =
-    ["turnKeys", "orphanEventKeys", "authoritativeTurnKeys"];
-pub const UPSERT_COLLECTIONS: [&str; 7] = [
-    "turns",
-    "sourceRecords",
-    "evidenceEvents",
-    "turnEvidence",
-    "capabilities",
-    "capabilityUses",
-    "capabilityUseEvidence",
-];
+pub use crate::protocol::{RETRACTION_COLLECTIONS, V2_UPSERT_COLLECTIONS};
+pub const UPSERT_COLLECTIONS: [&str; 7] = V1_UPSERT_COLLECTIONS;
 pub const MAX_SESSION_FACTS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +126,7 @@ fn field<'a>(object: &'a Map<String, Value>, name: &str) -> Result<&'a Value, En
 pub struct SessionAccumulator {
     begin: Value,
     provider: String,
+    upsert_collections: &'static [&'static str],
     expected_counts: BTreeMap<String, usize>,
     received_counts: BTreeMap<String, usize>,
     canonical_fact_bytes: usize,
@@ -157,12 +152,21 @@ impl SessionAccumulator {
                 "expected BEGIN_SESSION",
             ));
         }
+        let delta_format = string(field(root, "deltaFormat")?, "deltaFormat")?;
+        let upsert_collections =
+            upsert_collections_for_delta_format(delta_format).ok_or_else(|| {
+                EngineError::new(
+                    "TS_INSIGHTS_INVALID_DELTA",
+                    "validation",
+                    "unsupported session Fact delta format",
+                )
+            })?;
         let counts = object(field(root, "counts")?, "counts")?;
         let mut expected_counts = BTreeMap::new();
         let mut total_fact_count = 0_u64;
         for collection in RETRACTION_COLLECTIONS
             .iter()
-            .chain(UPSERT_COLLECTIONS.iter())
+            .chain(upsert_collections.iter())
         {
             let count = decimal(field(counts, collection)?, collection)?
                 .parse::<u64>()
@@ -221,6 +225,7 @@ impl SessionAccumulator {
         Ok(Self {
             begin: message,
             provider,
+            upsert_collections,
             expected_counts,
             received_counts: BTreeMap::new(),
             canonical_fact_bytes: session_fact_bytes,
@@ -250,7 +255,7 @@ impl SessionAccumulator {
         let collection = string(field(root, "collection")?, "collection")?;
         let allowed = match message_type {
             "RETRACT_FACTS" => &RETRACTION_COLLECTIONS[..],
-            "UPSERT_FACTS" => &UPSERT_COLLECTIONS[..],
+            "UPSERT_FACTS" => self.upsert_collections,
             _ => {
                 return Err(EngineError::new(
                     "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
@@ -268,7 +273,7 @@ impl SessionAccumulator {
         }
         let rank = RETRACTION_COLLECTIONS
             .iter()
-            .chain(UPSERT_COLLECTIONS.iter())
+            .chain(self.upsert_collections.iter())
             .position(|candidate| candidate == &collection)
             .expect("validated collection has a rank");
         if self.last_collection_rank.is_some_and(|prior| rank < prior) {
@@ -483,8 +488,8 @@ impl SessionAccumulator {
                 "authoritativeTurnKeys": [],
             }),
         );
-        for collection in UPSERT_COLLECTIONS {
-            delta.insert(collection.to_owned(), Value::Array(Vec::new()));
+        for collection in self.upsert_collections {
+            delta.insert((*collection).to_owned(), Value::Array(Vec::new()));
         }
         delta.insert("checkpoint".to_owned(), checkpoint.clone());
         delta.insert(
@@ -688,5 +693,26 @@ mod tests {
             TURN_COUNT
         );
         assert_eq!(accumulator.next_sequence, TURN_COUNT as u64);
+    }
+
+    #[test]
+    fn v1_session_rejects_v2_fact_collections() {
+        let begin = begin_with_zero_counts();
+        let mut accumulator = SessionAccumulator::begin(begin).unwrap();
+        let mut storage = EngineStorage::open_in_memory().unwrap();
+        let error = accumulator
+            .apply_batch(
+                &json!({
+                    "format": "threadshare-insights-protocol@v1",
+                    "type": "UPSERT_FACTS",
+                    "requestId": "2",
+                    "sequence": "0",
+                    "collection": "historyEvents",
+                    "items": [{}],
+                }),
+                &mut storage,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME");
     }
 }

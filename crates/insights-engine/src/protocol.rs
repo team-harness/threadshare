@@ -51,7 +51,7 @@ const SESSION_CONTRACT_FIELDS: [&str; 10] = [
     "analyzerCapabilities",
     "rankerVersion",
 ];
-const COUNT_FIELDS: [&str; 10] = [
+const V1_COUNT_FIELDS: [&str; 10] = [
     "turnKeys",
     "orphanEventKeys",
     "authoritativeTurnKeys",
@@ -63,8 +63,24 @@ const COUNT_FIELDS: [&str; 10] = [
     "capabilityUses",
     "capabilityUseEvidence",
 ];
-const RETRACTION_COLLECTIONS: [&str; 3] = ["turnKeys", "orphanEventKeys", "authoritativeTurnKeys"];
-const UPSERT_COLLECTIONS: [&str; 7] = [
+const V2_COUNT_FIELDS: [&str; 13] = [
+    "turnKeys",
+    "orphanEventKeys",
+    "authoritativeTurnKeys",
+    "turns",
+    "sourceRecords",
+    "evidenceEvents",
+    "turnEvidence",
+    "capabilities",
+    "capabilityUses",
+    "capabilityUseEvidence",
+    "historyEvents",
+    "historyPayloads",
+    "historyPayloadChunks",
+];
+pub const RETRACTION_COLLECTIONS: [&str; 3] =
+    ["turnKeys", "orphanEventKeys", "authoritativeTurnKeys"];
+pub const V1_UPSERT_COLLECTIONS: [&str; 7] = [
     "turns",
     "sourceRecords",
     "evidenceEvents",
@@ -73,6 +89,30 @@ const UPSERT_COLLECTIONS: [&str; 7] = [
     "capabilityUses",
     "capabilityUseEvidence",
 ];
+pub const V2_UPSERT_COLLECTIONS: [&str; 10] = [
+    "turns",
+    "sourceRecords",
+    "evidenceEvents",
+    "turnEvidence",
+    "capabilities",
+    "capabilityUses",
+    "capabilityUseEvidence",
+    "historyEvents",
+    "historyPayloads",
+    "historyPayloadChunks",
+];
+
+pub fn upsert_collections_for_delta_format(delta_format: &str) -> Option<&'static [&'static str]> {
+    match delta_format {
+        "session-facts-delta@v1" => Some(&V1_UPSERT_COLLECTIONS),
+        "session-facts-delta@v2" => Some(&V2_UPSERT_COLLECTIONS),
+        _ => None,
+    }
+}
+
+pub fn is_upsert_collection(collection: &str) -> bool {
+    V2_UPSERT_COLLECTIONS.contains(&collection)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -111,6 +151,12 @@ pub enum MessageKind {
     InsightsActivity,
     ReadTurnEvidence,
     TurnEvidencePage,
+    ReadInsightsQueryV2,
+    InsightsQueryV2,
+    ReadInsightsEvidenceV2,
+    InsightsEvidenceV2,
+    ReadInsightsRecipe,
+    InsightsRecipe,
     AbortSession,
     SessionAborted,
     Error,
@@ -154,6 +200,12 @@ impl MessageKind {
             Self::InsightsActivity => "INSIGHTS_ACTIVITY",
             Self::ReadTurnEvidence => "READ_TURN_EVIDENCE",
             Self::TurnEvidencePage => "TURN_EVIDENCE_PAGE",
+            Self::ReadInsightsQueryV2 => "READ_INSIGHTS_QUERY_V2",
+            Self::InsightsQueryV2 => "INSIGHTS_QUERY_V2",
+            Self::ReadInsightsEvidenceV2 => "READ_INSIGHTS_EVIDENCE_V2",
+            Self::InsightsEvidenceV2 => "INSIGHTS_EVIDENCE_V2",
+            Self::ReadInsightsRecipe => "READ_INSIGHTS_RECIPE",
+            Self::InsightsRecipe => "INSIGHTS_RECIPE",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
             Self::Error => "ERROR",
@@ -531,7 +583,7 @@ fn validate_engine_status(message: &Value, kind: MessageKind) -> Result<(), Prot
     }
     if !matches!(
         field(message, "factStorageProfile", kind.as_str())?.as_str(),
-        Some("normalized-row-v1" | "packed-facts-v1")
+        Some("normalized-row-v1" | "normalized-row-v2" | "packed-facts-v1")
     ) {
         return Err(invalid_frame("ENGINE_STATUS.factStorageProfile is invalid"));
     }
@@ -3526,6 +3578,12 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "INSIGHTS_ACTIVITY" => MessageKind::InsightsActivity,
         "READ_TURN_EVIDENCE" => MessageKind::ReadTurnEvidence,
         "TURN_EVIDENCE_PAGE" => MessageKind::TurnEvidencePage,
+        "READ_INSIGHTS_QUERY_V2" => MessageKind::ReadInsightsQueryV2,
+        "INSIGHTS_QUERY_V2" => MessageKind::InsightsQueryV2,
+        "READ_INSIGHTS_EVIDENCE_V2" => MessageKind::ReadInsightsEvidenceV2,
+        "INSIGHTS_EVIDENCE_V2" => MessageKind::InsightsEvidenceV2,
+        "READ_INSIGHTS_RECIPE" => MessageKind::ReadInsightsRecipe,
+        "INSIGHTS_RECIPE" => MessageKind::InsightsRecipe,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
         "ERROR" => MessageKind::Error,
@@ -3560,19 +3618,20 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             )?;
         }
         MessageKind::Ready => {
-            validate_envelope(
-                message,
-                kind,
-                &[
-                    "engineVersion",
-                    "target",
-                    "maxFrameBytes",
-                    "sqliteVersion",
-                    "sqliteCompileOptionsDigest",
-                    "buildManifestDigest",
-                    "acceptedContract",
-                ],
-            )?;
+            let v2 = message["acceptedContract"]["factSchemaVersion"].as_u64() == Some(2);
+            let mut fields = vec![
+                "engineVersion",
+                "target",
+                "maxFrameBytes",
+                "sqliteVersion",
+                "sqliteCompileOptionsDigest",
+                "buildManifestDigest",
+                "acceptedContract",
+            ];
+            if v2 {
+                fields.extend(["databaseUuid", "databaseFactSchemaVersion"]);
+            }
+            validate_envelope(message, kind, &fields)?;
             non_empty_string(
                 field(message, "engineVersion", "READY")?,
                 "READY.engineVersion",
@@ -3599,6 +3658,18 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 field(message, "acceptedContract", "READY")?,
                 "READY.acceptedContract",
             )?;
+            if v2 {
+                uuid(
+                    field(message, "databaseUuid", "READY")?,
+                    "READY.databaseUuid",
+                )?;
+                let schema = field(message, "databaseFactSchemaVersion", "READY")?;
+                if !schema.is_null() && !matches!(schema.as_u64(), Some(1 | 2)) {
+                    return Err(invalid_frame(
+                        "READY.databaseFactSchemaVersion must be null, 1, or 2",
+                    ));
+                }
+            }
         }
         MessageKind::BeginSession => {
             validate_envelope(
@@ -3615,11 +3686,16 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                     "counts",
                 ],
             )?;
-            if field(message, "deltaFormat", "BEGIN_SESSION")?.as_str()
-                != Some("session-facts-delta@v1")
-            {
-                return Err(invalid_frame("BEGIN_SESSION.deltaFormat is unsupported"));
-            }
+            let delta_format = field(message, "deltaFormat", "BEGIN_SESSION")?
+                .as_str()
+                .ok_or_else(|| invalid_frame("BEGIN_SESSION.deltaFormat is unsupported"))?;
+            let count_fields: &[&str] = match delta_format {
+                "session-facts-delta@v1" => &V1_COUNT_FIELDS,
+                "session-facts-delta@v2" => &V2_COUNT_FIELDS,
+                _ => {
+                    return Err(invalid_frame("BEGIN_SESSION.deltaFormat is unsupported"));
+                }
+            };
             let session = field(message, "session", "BEGIN_SESSION")?;
             object(session, "BEGIN_SESSION.session")?;
             hex64(
@@ -3649,8 +3725,8 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 "BEGIN_SESSION.contract",
             )?;
             let counts = field(message, "counts", "BEGIN_SESSION")?;
-            exact_object_keys(counts, "BEGIN_SESSION.counts", &COUNT_FIELDS)?;
-            for count in COUNT_FIELDS {
+            exact_object_keys(counts, "BEGIN_SESSION.counts", count_fields)?;
+            for count in count_fields {
                 decimal_u64(
                     field(counts, count, "BEGIN_SESSION.counts")?,
                     &format!("BEGIN_SESSION.counts.{count}"),
@@ -3681,10 +3757,10 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             let collection = field(message, "collection", kind.as_str())?
                 .as_str()
                 .ok_or_else(|| invalid_frame(format!("{}.collection is invalid", kind.as_str())))?;
-            let allowed = if kind == MessageKind::RetractFacts {
+            let allowed: &[&str] = if kind == MessageKind::RetractFacts {
                 &RETRACTION_COLLECTIONS[..]
             } else {
-                &UPSERT_COLLECTIONS[..]
+                &V2_UPSERT_COLLECTIONS[..]
             };
             if !allowed.contains(&collection) {
                 return Err(invalid_frame(format!(
@@ -3982,6 +4058,100 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         MessageKind::InsightsActivity => validate_insights_activity(message, kind)?,
         MessageKind::ReadTurnEvidence => validate_read_turn_evidence(message, kind)?,
         MessageKind::TurnEvidencePage => validate_turn_evidence_page(message, kind)?,
+        MessageKind::ReadInsightsQueryV2 => {
+            validate_envelope(message, kind, &["request"])?;
+            let request = field(message, "request", kind.as_str())?;
+            if try_canonical_json(request)
+                .map_err(|_| invalid_frame("READ_INSIGHTS_QUERY_V2.request is invalid"))?
+                .len()
+                > 64 * 1024
+            {
+                return Err(invalid_frame(
+                    "READ_INSIGHTS_QUERY_V2.request exceeds 64 KiB",
+                ));
+            }
+            let request: crate::deep_query::DeepQueryRequest =
+                serde_json::from_value(request.clone()).map_err(|_| {
+                    invalid_frame("READ_INSIGHTS_QUERY_V2.request has an invalid shape")
+                })?;
+            request
+                .validate()
+                .map_err(|_| invalid_frame("READ_INSIGHTS_QUERY_V2.request is invalid"))?;
+        }
+        MessageKind::InsightsQueryV2 => {
+            validate_envelope(message, kind, &["response"])?;
+            let response: crate::deep_query::DeepQueryResponse =
+                serde_json::from_value(field(message, "response", kind.as_str())?.clone())
+                    .map_err(|_| {
+                        invalid_frame("INSIGHTS_QUERY_V2.response has an invalid shape")
+                    })?;
+            if response.format != crate::deep_query::QUERY_RESPONSE_FORMAT {
+                return Err(invalid_frame(
+                    "INSIGHTS_QUERY_V2.response format is invalid",
+                ));
+            }
+        }
+        MessageKind::ReadInsightsEvidenceV2 => {
+            validate_envelope(message, kind, &["request"])?;
+            let request = field(message, "request", kind.as_str())?;
+            if try_canonical_json(request)
+                .map_err(|_| invalid_frame("READ_INSIGHTS_EVIDENCE_V2.request is invalid"))?
+                .len()
+                > 64 * 1024
+            {
+                return Err(invalid_frame(
+                    "READ_INSIGHTS_EVIDENCE_V2.request exceeds 64 KiB",
+                ));
+            }
+            let request: crate::deep_query::DeepEvidenceRequest =
+                serde_json::from_value(request.clone()).map_err(|_| {
+                    invalid_frame("READ_INSIGHTS_EVIDENCE_V2.request has an invalid shape")
+                })?;
+            request
+                .validate()
+                .map_err(|_| invalid_frame("READ_INSIGHTS_EVIDENCE_V2.request is invalid"))?;
+        }
+        MessageKind::InsightsEvidenceV2 => {
+            validate_envelope(message, kind, &["response"])?;
+            let response: crate::deep_query::DeepEvidenceResponse =
+                serde_json::from_value(field(message, "response", kind.as_str())?.clone())
+                    .map_err(|_| {
+                        invalid_frame("INSIGHTS_EVIDENCE_V2.response has an invalid shape")
+                    })?;
+            if response.format != crate::deep_query::EVIDENCE_RESPONSE_FORMAT {
+                return Err(invalid_frame(
+                    "INSIGHTS_EVIDENCE_V2.response format is invalid",
+                ));
+            }
+        }
+        MessageKind::ReadInsightsRecipe => {
+            validate_envelope(message, kind, &["request"])?;
+            let request = field(message, "request", kind.as_str())?;
+            if try_canonical_json(request)
+                .map_err(|_| invalid_frame("READ_INSIGHTS_RECIPE.request is invalid"))?
+                .len()
+                > 64 * 1024
+            {
+                return Err(invalid_frame("READ_INSIGHTS_RECIPE.request exceeds 64 KiB"));
+            }
+            let request: crate::recipe::RecipeRequest = serde_json::from_value(request.clone())
+                .map_err(|_| invalid_frame("READ_INSIGHTS_RECIPE.request has an invalid shape"))?;
+            request
+                .validate()
+                .map_err(|_| invalid_frame("READ_INSIGHTS_RECIPE.request is invalid"))?;
+        }
+        MessageKind::InsightsRecipe => {
+            validate_envelope(message, kind, &["response"])?;
+            let response: crate::recipe::RecipeResponse =
+                serde_json::from_value(field(message, "response", kind.as_str())?.clone())
+                    .map_err(|_| invalid_frame("INSIGHTS_RECIPE.response has an invalid shape"))?;
+            if response.format != crate::recipe::RECIPE_RESPONSE_FORMAT {
+                return Err(invalid_frame("INSIGHTS_RECIPE.response format is invalid"));
+            }
+            response
+                .validate()
+                .map_err(|_| invalid_frame("INSIGHTS_RECIPE.response is invalid"))?;
+        }
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
             decimal_u64(
@@ -4093,7 +4263,7 @@ pub fn accepted_contract_from_hello(message: &Value) -> Result<Value, ProtocolEr
     let contract = message
         .get("requiredContract")
         .expect("validated HELLO has requiredContract");
-    let supported = contract.get("factSchemaVersion").and_then(Value::as_u64) == Some(1)
+    let v1 = contract.get("factSchemaVersion").and_then(Value::as_u64) == Some(1)
         && contract.get("providerAdapterVersions") == Some(&json!(["claude@1", "codex@1"]))
         && contract.get("privacyPolicyVersion").and_then(Value::as_u64) == Some(1)
         && contract
@@ -4105,7 +4275,19 @@ pub fn accepted_contract_from_hello(message: &Value) -> Result<Value, ProtocolEr
         && contract.get("projectionVersions") == Some(&json!(["turn-search@2", "turn-summary@1"]))
         && contract.get("analyzerCapabilities") == Some(&json!(["mixed-cjk-code@1"]))
         && contract.get("rankerVersion").and_then(Value::as_u64) == Some(1);
-    if !supported {
+    let v2 = contract.get("factSchemaVersion").and_then(Value::as_u64) == Some(2)
+        && contract.get("providerAdapterVersions") == Some(&json!(["claude@2", "codex@2"]))
+        && contract.get("privacyPolicyVersion").and_then(Value::as_u64) == Some(2)
+        && contract
+            .get("duplicatePolicyVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+        && contract.get("factStorageProfile").and_then(Value::as_str) == Some("normalized-row-v2")
+        && contract.get("storageSchemaVersion").and_then(Value::as_u64) == Some(2)
+        && contract.get("projectionVersions") == Some(&json!(["turn-search@2", "turn-summary@1"]))
+        && contract.get("analyzerCapabilities") == Some(&json!(["mixed-cjk-code@1"]))
+        && contract.get("rankerVersion").and_then(Value::as_u64) == Some(1);
+    if !v1 && !v2 {
         return Err(unsupported_contract(
             "the requested Insights contract is unsupported",
         ));
@@ -4357,6 +4539,32 @@ mod tests {
                 vector.name
             );
         }
+    }
+
+    #[test]
+    fn validates_v2_session_counts_without_widening_v1() {
+        let mut begin = fixture()
+            .frames
+            .into_iter()
+            .find(|frame| frame.name == "begin-session")
+            .unwrap()
+            .message;
+        begin["counts"]["historyEvents"] = Value::String("0".to_owned());
+        assert_eq!(
+            validate_protocol_message(&begin).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+
+        begin["deltaFormat"] = Value::String("session-facts-delta@v2".to_owned());
+        begin["contract"]["factSchemaVersion"] = Value::from(2);
+        begin["contract"]["providerAdapterVersion"] = Value::String("codex@2".to_owned());
+        begin["contract"]["privacyPolicyVersion"] = Value::from(2);
+        begin["counts"]["historyPayloads"] = Value::String("0".to_owned());
+        begin["counts"]["historyPayloadChunks"] = Value::String("0".to_owned());
+        assert_eq!(
+            validate_protocol_message(&begin).unwrap(),
+            MessageKind::BeginSession
+        );
     }
 
     #[test]
@@ -4854,6 +5062,78 @@ mod tests {
         extended_year["window"]["observedBefore"] = json!("+010000-08-17T00:00:00.000Z");
         assert_eq!(
             validate_protocol_message(&extended_year).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+    }
+
+    #[test]
+    fn validates_deep_query_and_evidence_v2_envelopes_without_widening_them() {
+        let query = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_INSIGHTS_QUERY_V2",
+            "requestId": "70",
+            "request": {
+                "format": "threadshare-insights-query-request@v2",
+                "resource": "event",
+                "where": {"field":"event.kind","op":"eq","value":"visible-message"},
+                "shape": {
+                    "kind":"records",
+                    "select":["eventKey","message.content"],
+                    "payloadMode":"reference"
+                },
+                "orderBy":[
+                    {"field":"observedAt","direction":"desc"},
+                    {"field":"eventKey","direction":"asc"}
+                ],
+                "limit": 20,
+                "cursor": null,
+                "count": "none",
+                "evaluatedAt": "2026-08-12T00:00:00.000Z"
+            }
+        });
+        assert_eq!(
+            validate_protocol_message(&query).unwrap(),
+            MessageKind::ReadInsightsQueryV2
+        );
+
+        let mut widened = query.clone();
+        widened["request"]["sql"] = json!("SELECT * FROM history_events");
+        assert_eq!(
+            validate_protocol_message(&widened).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+        let mut invalid_field = query;
+        invalid_field["request"]["shape"]["select"] = json!(["metadataJson"]);
+        assert_eq!(
+            validate_protocol_message(&invalid_field).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+
+        let evidence = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "READ_INSIGHTS_EVIDENCE_V2",
+            "requestId": "71",
+            "request": {
+                "format": "threadshare-insights-evidence-request@v2",
+                "target": {
+                    "kind":"event",
+                    "eventKey":"1".repeat(64),
+                    "revision":"2".repeat(64),
+                    "payloadKey":"3".repeat(64)
+                },
+                "include":["envelope","payload"],
+                "cursor":null,
+                "maxBytes":1048576
+            }
+        });
+        assert_eq!(
+            validate_protocol_message(&evidence).unwrap(),
+            MessageKind::ReadInsightsEvidenceV2
+        );
+        let mut oversized = evidence;
+        oversized["request"]["maxBytes"] = json!(1_048_577);
+        assert_eq!(
+            validate_protocol_message(&oversized).unwrap_err().code,
             "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
         );
     }

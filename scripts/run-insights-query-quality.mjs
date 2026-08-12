@@ -18,7 +18,7 @@ import {
 } from "./insights-query-evaluation.mjs";
 import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
 import { createInsightsRequiredContract } from "../src/insights-engine-protocol.mjs";
-import { assertSessionFactsDelta, canonicalJson, hashKey } from "../src/session-facts.mjs";
+import { assertSessionFactsDeltaV2, canonicalJson, hashKey } from "../src/session-facts.mjs";
 import { createBenchmarkCorpus } from "./benchmark-insights-engine.mjs";
 
 export const QUERY_QUALITY_RUN_FORMAT = "threadshare-insights-query-quality-run@v1";
@@ -147,7 +147,7 @@ function finalizeDelta(delta) {
     mutationDigest,
     delta.checkpoint.completeOffset,
   );
-  return assertSessionFactsDelta(delta);
+  return assertSessionFactsDeltaV2(delta);
 }
 
 export function createQueryQualityDelta(fixture, { dataset = "real-acceptance" } = {}) {
@@ -178,10 +178,10 @@ export function createQueryQualityDelta(fixture, { dataset = "real-acceptance" }
   }));
   const completeOffset = String(selected.documents.length * 1_024);
   const delta = finalizeDelta({
-    format: "session-facts-delta@v1",
-    factSchemaVersion: 1,
-    providerAdapterVersion: "codex@1",
-    privacyPolicyVersion: 1,
+    format: "session-facts-delta@v2",
+    factSchemaVersion: 2,
+    providerAdapterVersion: "codex@2",
+    privacyPolicyVersion: 2,
     originSecretEpoch: ORIGIN_SECRET_EPOCH,
     duplicatePolicyVersion: 1,
     expectedGeneration: "0",
@@ -215,6 +215,9 @@ export function createQueryQualityDelta(fixture, { dataset = "real-acceptance" }
     capabilities: [],
     capabilityUses: [],
     capabilityUseEvidence: [],
+    historyEvents: [],
+    historyPayloads: [],
+    historyPayloadChunks: [],
     checkpoint: checkpoint(
       sessionKey,
       turns[0]?.turnKey ?? null,

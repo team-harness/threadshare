@@ -127,6 +127,12 @@ fn verify_integrity(connection: &Connection) -> Result<EngineIntegrityStatus, St
             [],
         )
         .map_err(|_| corrupt("the Insights FTS index failed integrity-check"))?;
+    connection
+        .execute(
+            "INSERT INTO history_event_fts(history_event_fts) VALUES('integrity-check')",
+            [],
+        )
+        .map_err(|_| corrupt("the Insights history FTS index failed integrity-check"))?;
     Ok(EngineIntegrityStatus {
         quick_check: "ok".to_owned(),
         fts: "ok".to_owned(),
@@ -278,11 +284,16 @@ pub(crate) fn read_engine_status(
         WAL_PASSIVE_CHECKPOINT_BYTES,
         WAL_BACKPRESSURE_BYTES,
     );
+    let fact_storage_profile =
+        match crate::normalized_repository::read_database_fact_schema_version(connection)? {
+            Some(2) => "normalized-row-v2",
+            _ => FACT_STORAGE_PROFILE,
+        };
     Ok(EngineStatus {
         snapshot_seq,
         snapshot_age_ms,
         snapshot_pending,
-        fact_storage_profile: FACT_STORAGE_PROFILE.to_owned(),
+        fact_storage_profile: fact_storage_profile.to_owned(),
         projections,
         change_log: EngineChangeLogStatus {
             rows: usage.row_count.to_string(),
