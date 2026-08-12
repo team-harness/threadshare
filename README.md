@@ -135,16 +135,21 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### Query Local Insights with an Agent
 
-Build the local Insights index once, then use the JSON-only query actions to inspect committed,
-privacy-trimmed history without uploading it or rereading provider session files:
+Initialize or incrementally update the local Insights index with `sync`, then use the JSON-only query
+actions to inspect committed, privacy-trimmed history without uploading it or rereading provider
+session files during queries:
 
 ```bash
 threadshare insights status
-threadshare insights reindex
+threadshare insights sync
 threadshare insights search --query 'database timeout' --format json
 threadshare insights usage skill --request usage.json --format json
 threadshare insights activity --request activity.json --format json
 ```
+
+`sync` creates the index when it is missing and otherwise commits only new, changed, deleted, or newly
+excluded Sessions. In an interactive terminal it reports byte progress on stderr. Use `reindex` only
+when you explicitly need a complete atomic rebuild or origin-secret recovery.
 
 Use `threadshare insights --help` and each action's help for the canonical request shape. The query
 surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filtered Turn search,

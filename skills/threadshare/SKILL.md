@@ -40,8 +40,10 @@ Use `analyze` when the user wants Turn closure, Tool/Skill usage, retry evidence
 ## Query Local Insights
 
 Use `insights` when the user wants cross-session evidence from the committed local index. Query actions
-are local, JSON-only, and do not upload or rescan raw provider sessions. If status reports no index, ask
-before running the maintenance action `threadshare insights reindex`; queries never reindex implicitly.
+are local, JSON-only, and do not upload or rescan raw provider sessions. If status reports no index or
+the user wants fresh results, ask before running the maintenance action `threadshare insights sync`;
+queries never index implicitly. `sync` initializes a missing index and otherwise applies only changed
+Sessions. Reserve `threadshare insights reindex` for an explicit complete rebuild or origin-secret recovery.
 
 1. Use `overview` to establish the committed snapshot and coverage. Use `capabilities` to resolve a Tool
    or Skill key before filtering Search or requesting Usage. Query `coverage` counts have

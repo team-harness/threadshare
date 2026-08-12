@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  createInsightsProgressReporter,
   createInsightsBackgroundWorker,
   executeInsightsCommand,
   formatInsightsCommandResult,
@@ -67,18 +68,23 @@ test("parses the bounded insights subcommand grammar", () => {
     parseInsightsInvocation(["insights", "reindex"], { "regenerate-secret": true }),
     { action: "reindex", format: "text", regenerateSecret: true },
   );
+  assert.deepEqual(
+    parseInsightsInvocation(["insights", "sync"]),
+    { action: "sync", format: "text", regenerateSecret: false },
+  );
   for (const [positionals, options, code] of [
     [["insights", "unknown"], {}, "TS_USAGE_INVALID_VALUE"],
     [["insights", "status", "extra"], {}, "TS_USAGE_UNEXPECTED_ARGUMENT"],
     [["insights", "exclude", "add", "unknown", "value"], {}, "TS_USAGE_INVALID_VALUE"],
     [["insights", "exclude", "remove", "session"], {}, "TS_USAGE_MISSING_ARGUMENT"],
+    [["insights", "sync"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
     [["insights", "reset"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
   ]) {
     assert.throws(() => parseInsightsInvocation(positionals, options), { code });
   }
 });
 
-test("executes status, exclusions, reset, and reindex through injectable services", async () => {
+test("executes status, exclusions, reset, sync, and reindex through injectable services", async () => {
   const config = emptyConfig();
   const calls = [];
   const services = {
@@ -127,6 +133,14 @@ test("executes status, exclusions, reset, and reindex through injectable service
         purge: { state: "purged", batches: 0 },
       };
     },
+    async sync() {
+      calls.push("sync");
+      return {
+        format: "threadshare-insights-reconciliation@v1",
+        report: { committed: 1, unchanged: 2, excluded: 0, missing: 0, failed: 0 },
+        purge: { state: "purged", batches: 0 },
+      };
+    },
   };
 
   const status = await executeInsightsCommand(
@@ -157,6 +171,18 @@ test("executes status, exclusions, reset, and reindex through injectable service
   );
   assert.equal(formatInsightsCommandResult(reset), "Insights state reset.\n");
 
+  const synced = await executeInsightsCommand(
+    parseInsightsInvocation(["insights", "sync"]),
+    { services },
+  );
+  assert.deepEqual(synced, {
+    format: "threadshare-insights-sync@v1",
+    mode: "incremental",
+    report: { committed: 1, unchanged: 2, excluded: 0, missing: 0, failed: 0 },
+    purge: { state: "purged", batches: 0 },
+  });
+  assert.match(formatInsightsCommandResult(synced), /^Insights sync complete\.\nMode: incremental/mu);
+
   const reindexed = await executeInsightsCommand(
     parseInsightsInvocation(["insights", "reindex"]),
     { services },
@@ -169,8 +195,54 @@ test("executes status, exclusions, reset, and reindex through injectable service
     "reindex:false",
     "list",
     "reset",
+    "sync",
     "reindex:false",
   ]);
+});
+
+test("sync reports initialization when no active index existed", async () => {
+  const result = await executeInsightsCommand(
+    parseInsightsInvocation(["insights", "sync"]),
+    {
+      services: {
+        async sync() {
+          return {
+            format: "threadshare-insights-reindex@v1",
+            report: { committed: 3, unchanged: 0, excluded: 1, missing: 0, failed: 0 },
+            purge: { state: "purged", batches: 1 },
+          };
+        },
+      },
+    },
+  );
+  assert.equal(result.mode, "initialized");
+  assert.equal(result.report.committed, 3);
+});
+
+test("progress renders bounded byte progress only for a text TTY", () => {
+  const writes = [];
+  const stream = { isTTY: true, write(value) { writes.push(value); } };
+  const progress = createInsightsProgressReporter({ format: "text", stream });
+  progress.update({ bytesProcessed: "524288", bytesTotal: "1048576" });
+  progress.update({ bytesProcessed: "1048576", bytesTotal: "1048576" });
+  progress.finish();
+  progress.finish();
+  assert.deepEqual(writes, [
+    "\rInsights indexing: 50% (512 KiB / 1 MiB)",
+    "\rInsights indexing: 100% (1 MiB / 1 MiB)",
+    "\n",
+  ]);
+
+  for (const format of ["json", "text"]) {
+    const quietWrites = [];
+    const quiet = createInsightsProgressReporter({
+      format,
+      stream: { isTTY: format === "json", write(value) { quietWrites.push(value); } },
+    });
+    quiet.update({ bytesProcessed: "1", bytesTotal: "2" });
+    quiet.finish();
+    assert.deepEqual(quietWrites, []);
+  }
 });
 
 test("retries exclusion visibility and reconciliation after the config is already saved", async () => {
@@ -371,6 +443,50 @@ test("real sidecar reindex atomically replaces an empty snapshot and preserves i
   );
   assert.deepEqual(await readFile(value.databaseFile), activeDatabase);
   assert.deepEqual(await readFile(value.originSecretFile), secret);
+});
+
+test("real sidecar sync initializes once and then reconciles only changed sources", {
+  timeout: 60_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "91919191-9191-4191-8191-919191919191",
+  );
+  const invocation = parseInsightsInvocation(["insights", "sync"], { format: "json" });
+  const progress = [];
+  const options = {
+    ...fixture.reconcileOptions,
+    onProgress(value) {
+      progress.push(value);
+    },
+  };
+
+  const initialized = await executeInsightsCommand(invocation, options);
+  assert.equal(initialized.mode, "initialized");
+  assert.equal(initialized.report.committed, 1);
+  assert.equal(initialized.report.failed, 0);
+
+  const unchanged = await executeInsightsCommand(invocation, options);
+  assert.equal(unchanged.mode, "incremental");
+  assert.equal(unchanged.report.committed, 0);
+  assert.equal(unchanged.report.unchanged, 1);
+
+  await appendFile(fixture.sessionFile, `${JSON.stringify({
+    type: "event_msg",
+    timestamp: "2026-08-10T09:00:11.000Z",
+    payload: { type: "token_count", info: {} },
+  })}\n`);
+  const changed = await executeInsightsCommand(invocation, options);
+  assert.equal(changed.mode, "incremental");
+  assert.equal(changed.report.committed, 1);
+  assert.equal(changed.report.unchanged, 0);
+  assert.equal(changed.report.failed, 0);
+  assert.equal(progress.length > 0, true);
+  assert.deepEqual(progress.at(-1), {
+    bytesProcessed: progress.at(-1).bytesTotal,
+    bytesTotal: progress.at(-1).bytesTotal,
+  });
 });
 
 test("real sidecar reindex reports unique committed sources across source-change retries", {

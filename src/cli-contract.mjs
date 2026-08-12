@@ -206,7 +206,7 @@ export const COMMAND_SPECS = Object.freeze({
       "no action: opens the authenticated local Dashboard and waits until stopped.",
       "status: content-free index state and storage footprint.",
       "overview/search/capabilities/usage/activity/evidence: one-line versioned JSON for agents.",
-      "reindex/reset/exclude: bounded text or one-line JSON result.",
+      "sync/reindex/reset/exclude: bounded text or one-line JSON result.",
     ],
     constraints: [
       "Queries require --format json and never scan raw provider session files or trigger reindex.",
@@ -214,6 +214,7 @@ export const COMMAND_SPECS = Object.freeze({
       "evidence requires the Turn revision returned by Search.",
       "exclude uses: exclude list, or exclude <add|remove> <provider|project|session> <value>.",
       "reset removes derived state and the origin secret but preserves the external config file.",
+      "sync initializes a missing index or incrementally applies only changed local Sessions.",
       "--regenerate-secret fails closed without a TTY and the exact typed confirmation.",
     ],
     examples: [
@@ -223,6 +224,7 @@ export const COMMAND_SPECS = Object.freeze({
       "threadshare insights capabilities tool --limit 20 --format json",
       "threadshare insights evidence <turn-key> --revision <revision> --format json",
       "threadshare insights status --format json",
+      "threadshare insights sync",
       "threadshare insights reindex",
       "threadshare insights exclude add project /work/private",
       "threadshare insights exclude list",

@@ -215,6 +215,7 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("share"), /invalid dry run.*exits 1.*stdout.*JSON.*stderr.*empty/is);
   assert.match(renderCommandHelp("sessions"), /does not list Paseo agents.*paseo ls --json/is);
   assert.match(renderCommandHelp("insights"), /normal reindex preserves the origin secret/is);
+  assert.match(renderCommandHelp("insights"), /sync initializes a missing index or incrementally applies/is);
   assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
   assert.match(renderCommandHelp("insights"), /overview.*search.*capabilities.*usage.*activity.*evidence/is);
   assert.match(renderCommandHelp("insights"), /Queries require --format json/is);

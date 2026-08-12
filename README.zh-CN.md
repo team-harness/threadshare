@@ -135,16 +135,20 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### 让 Agent 查询本地 Insights
 
-先构建一次本地 Insights 索引，再通过 JSON-only 查询动作分析已提交、经过隐私裁剪的历史；
-查询不会上传数据，也不会重新扫描 provider session 文件：
+先用 `sync` 初始化或增量更新本地 Insights 索引，再通过 JSON-only 查询动作分析已提交、经过隐私裁剪的历史；
+查询本身不会上传数据，也不会重新扫描 provider session 文件：
 
 ```bash
 threadshare insights status
-threadshare insights reindex
+threadshare insights sync
 threadshare insights search --query 'database timeout' --format json
 threadshare insights usage skill --request usage.json --format json
 threadshare insights activity --request activity.json --format json
 ```
+
+`sync` 会在索引不存在时创建它；索引已存在时只提交新增、变更、删除或刚被排除的 Session。
+在交互式终端中，它会把字节进度写到 stderr。只有明确需要完整原子重建或恢复 origin secret 时才使用
+`reindex`。
 
 规范请求形状以 `threadshare insights --help` 和各 action 的 help 为准。查询面包括 Overview、
 Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录，以及带 revision

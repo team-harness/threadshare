@@ -20,7 +20,7 @@ import { canonicalSessionId, sessionRoot } from "./session-files.mjs";
 
 export const REGENERATE_SECRET_CONFIRMATION = INSIGHTS_REGENERATE_CONFIRMATION;
 
-const ACTIONS = new Set(["status", "reindex", "reset", "exclude"]);
+const ACTIONS = new Set(["status", "sync", "reindex", "reset", "exclude"]);
 const EXCLUSION_OPERATIONS = new Set(["add", "remove", "list"]);
 const EXCLUSION_KINDS = new Set(["provider", "project", "session"]);
 const MAX_REINDEX_SOURCE_CHANGED_RETRIES = 3;
@@ -162,7 +162,7 @@ export function parseInsightsInvocation(positionals, options = {}) {
   if (!ACTIONS.has(action)) {
     throw commandError(
       "TS_USAGE_INVALID_VALUE",
-      "Insights action must be status, reindex, reset, or exclude",
+      "Insights action must be status, sync, reindex, reset, or exclude",
     );
   }
   if (extra.length > 0) {
@@ -523,6 +523,7 @@ function defaultServices(options) {
       paths,
       includeEngineStatus: false,
     })).databasePresent,
+    sync: () => reconcileActiveInsights({ ...options, paths }),
     reindex: (input) => reconcileInsights({
       ...options,
       ...input,
@@ -545,6 +546,21 @@ export async function executeInsightsCommand(invocation, options = {}) {
   }
   if (invocation.action === "reset") {
     return services.reset();
+  }
+  if (invocation.action === "sync") {
+    const result = await services.sync();
+    const mode = result.format === "threadshare-insights-reindex@v1"
+      ? "initialized"
+      : result.format === "threadshare-insights-reconciliation@v1"
+        ? "incremental"
+        : null;
+    if (mode === null) throw new TypeError("Unknown Insights sync result format");
+    return Object.freeze({
+      format: "threadshare-insights-sync@v1",
+      mode,
+      report: result.report,
+      purge: result.purge,
+    });
   }
   if (invocation.action === "reindex") {
     return services.reindex({ regenerateSecret: invocation.regenerateSecret });
@@ -606,6 +622,50 @@ function formatExclusions(exclusions) {
   ].join("\n");
 }
 
+function formatByteCount(value) {
+  const units = [
+    [1_073_741_824n, "GiB"],
+    [1_048_576n, "MiB"],
+    [1_024n, "KiB"],
+  ];
+  for (const [unit, label] of units) {
+    if (value < unit) continue;
+    const whole = value / unit;
+    const tenth = (value % unit) * 10n / unit;
+    return `${whole}${tenth === 0n ? "" : `.${tenth}`} ${label}`;
+  }
+  return `${value} B`;
+}
+
+export function createInsightsProgressReporter({ format = "text", stream = process.stderr } = {}) {
+  const enabled = format === "text" && stream?.isTTY === true && typeof stream.write === "function";
+  let active = false;
+  let finished = false;
+  return Object.freeze({
+    update(progress) {
+      if (!enabled || finished) return;
+      const processedText = progress?.bytesProcessed;
+      const totalText = progress?.bytesTotal;
+      if (!/^(?:0|[1-9][0-9]*)$/u.test(processedText) ||
+          !/^(?:0|[1-9][0-9]*)$/u.test(totalText)) return;
+      const processed = BigInt(processedText);
+      const total = BigInt(totalText);
+      const percent = total === 0n
+        ? 100n
+        : (processed * 100n / total > 100n ? 100n : processed * 100n / total);
+      stream.write(
+        `\rInsights indexing: ${percent}% (${formatByteCount(processed)} / ${formatByteCount(total)})`,
+      );
+      active = true;
+    },
+    finish() {
+      if (!enabled || finished) return;
+      finished = true;
+      if (active) stream.write("\n");
+    },
+  });
+}
+
 export function formatInsightsCommandResult(result, format = "text") {
   assertFormat(format);
   if (format === "json") return `${JSON.stringify(result)}\n`;
@@ -627,6 +687,16 @@ export function formatInsightsCommandResult(result, format = "text") {
     return `${[state, formatExclusions(result.exclusions), indexState]
       .filter(Boolean)
       .join("\n")}\n`;
+  }
+  if (result.format === "threadshare-insights-sync@v1") {
+    const { report, purge } = result;
+    return [
+      "Insights sync complete.",
+      `Mode: ${result.mode}`,
+      `Committed: ${report.committed}; unchanged: ${report.unchanged}; excluded: ${report.excluded}; missing: ${report.missing}; failed: ${report.failed}`,
+      `Purge: ${purge.state}; maintenance batches: ${purge.batches}`,
+      "",
+    ].join("\n");
   }
   if (result.format === "threadshare-insights-reindex@v1") {
     const { report, purge } = result;

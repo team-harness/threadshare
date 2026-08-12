@@ -948,6 +948,7 @@ async function main() {
     try {
       const {
         REGENERATE_SECRET_CONFIRMATION,
+        createInsightsProgressReporter,
         executeInsightsCommand,
         formatInsightsCommandResult,
         parseInsightsInvocation,
@@ -964,12 +965,19 @@ async function main() {
       if (invocation.regenerateSecret) {
         await confirmInsightsSecretRegeneration(REGENERATE_SECRET_CONFIRMATION);
       }
-      const result = await executeInsightsCommand(invocation, {
-        regenerationConfirmation: invocation.regenerateSecret
-          ? REGENERATE_SECRET_CONFIRMATION
-          : undefined,
-      });
-      process.stdout.write(formatInsightsCommandResult(result, invocation.format));
+      const progress = createInsightsProgressReporter({ format: invocation.format });
+      try {
+        const result = await executeInsightsCommand(invocation, {
+          regenerationConfirmation: invocation.regenerateSecret
+            ? REGENERATE_SECRET_CONFIRMATION
+            : undefined,
+          onProgress: progress.update,
+        });
+        progress.finish();
+        process.stdout.write(formatInsightsCommandResult(result, invocation.format));
+      } finally {
+        progress.finish();
+      }
       return;
     } catch (error) {
       if (error?.name === "CliDiagnostic") throw error;
