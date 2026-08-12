@@ -24,11 +24,11 @@ status: active
 - [x] Stage 2：typed Query records、stable cursor、Evidence v2
 - [x] Stage 3：aggregate、coverage/provenance、7 个 Recipe
 - [x] Stage 4：stdio MCP、v1 compatibility adapters
-- [ ] Stage 5：正式 V2 evidence pipeline 已完成；当前迭代 25k/30% 正式运行与归档待 clean checkpoint，250k 延期
+- [ ] Stage 5：正式 V2 evidence pipeline 已完成；当前迭代待归档 25k，真实 30% sample 与 250k 显式延期
 
 ## 当前步骤
 
-功能与发布候选验证已完成。Fact V2、七类 typed resource、records/aggregate、七个 Recipe、Evidence v2、CLI 与 stdio MCP 已落地；V1 查询命令与云端 share 边界保持兼容。Stage 5 已具备非空 V2 合成语料、固定 work budget、正式 runner、原始聚合报告打包器和历史 Git object verifier；当前只剩从 clean checkpoint 运行并归档正式 evidence。
+功能与发布候选验证已完成。Fact V2、七类 typed resource、records/aggregate、七个 Recipe、Evidence v2、CLI 与 stdio MCP 已落地；V1 查询命令与云端 share 边界保持兼容。Stage 5 已具备非空 V2 合成语料、固定 work budget、正式 runner、原始聚合报告打包器和历史 Git object verifier；当前迭代只归档 25k 合成 evidence，真实 30% sample 本轮运行超过一小时未形成报告，已停止并显式延期。
 
 25k 性能探针促成 `deep-query-coverage@3`：event kind、逐日 completeness、Activity、token、coverage、capability context 与共现都在 Session 事实事务内生成精确 rollup。records/aggregate 读取 coverage projection；Capability/Token/Activity Recipe 仅在完整 UTC day 与可证明排序等价时走 rollup，否则回退 exact typed SQL。Activity 的 recipe coverage 同样按完整 UTC day 汇总，不再为每次请求扫描窗口内全部事件。Activity rollup 的 nullable provider terminal 使用显式 `COALESCE(SUM(...),0)`；Rust 回归和 Node real-sidecar 样本均覆盖 open Turn，不再把合法 NULL 聚合成 SQLite NOT NULL 失败。
 
@@ -40,7 +40,7 @@ capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 
 第三次 clean 25k 正式运行完整产出报告，但 `activity-shifts@1` 的 P95/P99 为 3,880.61/4,076.42 ms，未通过 500/1,000 ms Recipe gate，因此报告未归档。其余六个 Recipe、records、aggregate、Evidence、RSS 与存储门槛均通过（sidecar peak 50.48 MiB、persistent amplification 1.1491x、History FTS amplification 0.5717x、Evidence 51.04 MiB/s）。采样确认 Activity 本体已使用日级 rollup，剩余成本来自 `read_recipe` 每次仍扫描窗口内 250,001 条 `history_event_coverage`。`deep-query-coverage@3` 新增逐 UTC day completeness rollup，Activity 完整日窗口按 Session 可见性与 purge 状态精确汇总；非完整日路径继续扫描 typed event，旧 projection identity fail-closed 要求 shadow rebuild。投影/精确 coverage 差分、degraded fail-closed、旧 `@2` identity 拒绝与 bounded query plan 均有回归测试。
 
-第四次 clean 25k 正式运行验证 Activity rollup 修复：`activity-shifts@1` P95 从 3,880.61 ms 降至 5.74 ms，但主机起始 load average 11.33 下 Evidence paging 为 48.43 MiB/s，低于固定 50 MiB/s 门槛，因此报告未归档。第五次同一 clean candidate 重跑全绿：Activity P95 6.70 ms、Evidence 51.03 MiB/s、sidecar peak 52.34 MiB、persistent amplification 1.1492x、History FTS amplification 0.5717x。随后启动的 250k 运行在约 44 分钟时按 owner 决策终止并延期，未生成或归档报告。
+第四次 clean 25k 正式运行验证 Activity rollup 修复：`activity-shifts@1` P95 从 3,880.61 ms 降至 5.74 ms，但主机起始 load average 11.33 下 Evidence paging 为 48.43 MiB/s，低于固定 50 MiB/s 门槛，因此报告未归档。第五次同一 clean candidate 重跑全绿：Activity P95 6.70 ms、Evidence 51.03 MiB/s、sidecar peak 52.34 MiB、persistent amplification 1.1492x、History FTS amplification 0.5717x。随后启动的 250k 运行在约 44 分钟时按 owner 决策终止并延期，未生成或归档报告。之后按 owner 的“25k 足够”决定启动 30% 真实 sample；该运行超过一小时仍停留在 Fact V2 staged projection，未生成报告，已停止且未归档半成品。
 
 ## 验收守卫
 
@@ -52,11 +52,11 @@ capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 ## 已完成验证
 
 - Rust：全 crate 单元、集成与 doctest 通过，含 lib 99/99、Fact V2 transaction/crash/migration、deep query 与 recipe 集成测试。
-- Node：Insights 263/263；Deep Query 定向 82/82；`npm run test:cli` 185/185；`npm run test:release` 66/66；Deep Query evidence 负例 14/14。
+- Node：Insights 263/263；Deep Query 定向 82/82；`npm run test:cli` 185/185；`npm run test:release` 66/66；Deep Query evidence 负例 15/15。
 - 质量：`cargo fmt --check`、Clippy `-D warnings`、`git diff --check` 与 `npm run validate:skill` 通过。
 - 发布候选：`npm pack --dry-run --ignore-scripts --json` 为精确 62 文件；`verify:release -- source --tag 0.7.4` 通过。
 - clean install：从 tarball 安装后 CLI help 与 stdio MCP 三工具可用；18 份 schema 全部经 Ajv 编译，其中 Agent Insights schema 15 份。
 
 ## Next Action
 
-提交“25k 当前验收、250k 显式延期”的 evidence 契约 checkpoint；用该提交的 release Engine 重新生成 25k 与至少 30% 本机真实 Session byte sample 报告，原样打包进日期化 evidence 目录，接入根 verifier 后完成 Stage 5。
+提交“25k 当前验收、真实 sample/250k 显式延期”的 evidence 契约 checkpoint；用该 checkpoint 的 release Engine 归档 25k 报告，接入根 verifier 后完成当前迭代 Stage 5。真实 sample 与 250k 留待后续迭代。

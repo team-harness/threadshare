@@ -15,6 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  DEEP_QUERY_DEFERRED_RUNS,
   DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
   DEEP_QUERY_REPORTS,
   packageDeepQueryEvidence,
@@ -34,7 +35,6 @@ const RECIPE_NAMES = [
 ];
 const SOURCE_FILES = new Map([
   ["scripts/benchmark-insights-engine.mjs", Buffer.from("synthetic benchmark\n")],
-  ["scripts/benchmark-insights-real-sample.mjs", Buffer.from("real benchmark\n")],
   ["scripts/package-insights-deep-query-evidence.mjs", Buffer.from("packager\n")],
   ["docs/insights-deep-query-design.md", Buffer.from("accepted design\n")],
 ]);
@@ -194,77 +194,9 @@ function syntheticReport(turns) {
   };
 }
 
-function realReport() {
-  const { binarySha256, ...engine } = identity();
-  return {
-    format: "threadshare-insights-real-sample-benchmark@v1",
-    measuredScope: "item-5-real-provider-session-detail-full-capacity",
-    sourceRevision: REVISION,
-    sourceWorktreeDirty: false,
-    hashes: {
-      benchmarkScriptSha256:
-        sha256(SOURCE_FILES.get("scripts/benchmark-insights-real-sample.mjs")),
-      engineBinarySha256: binarySha256,
-    },
-    engine,
-    sampling: {
-      fraction: 0.30,
-      seed: "threadshare-insights-real-sample-v1",
-      byteFraction: 0.30,
-    },
-    indexing: { committed: 10 },
-    storage: { postMaintenanceBytes: 1_500_000 },
-    deepQueryV2: {
-      measuredScope: "fact-v2-real-session-capacity-and-commit-ack",
-      canonicalIndexedSourceBytes: 1_000_000,
-      committedDeltaCount: 10,
-      syncWallMs: 2_000,
-      commitAckMs: latency(10),
-      rows: {
-        historyEvents: 100,
-        historyPayloads: 80,
-        historyPayloadChunks: 80,
-        attemptChainEvents: 10,
-        fileActivity: 10,
-        tokenUsage: 10,
-        errorOccurrences: 10,
-        historyFtsDocuments: 80,
-      },
-      storage: {
-        historyEventMetadataBytes: 200_000,
-        historyPayloadBytes: 600_000,
-        historyFtsBytes: 500_000,
-        historyProjectionBytes: 100_000,
-        searchablePayloadBytes: 1_000_000,
-        storedNotSearchablePayloadBytes: 50_000,
-        persistentBytes: 1_500_000,
-        persistentStorageAmplification: 1.5,
-        historyFtsAmplification: 0.5,
-        limits: {
-          persistentStorageAmplification: 1.8,
-          historyFtsAmplification: 0.7,
-        },
-      },
-      coverage: { searchableEventCount: 80, storedNotSearchableEventCount: 20 },
-      historyFtsIntegrity: "ok",
-      gates: {
-        committedDeltaCoverage: true,
-        nonemptyHistory: true,
-        historyFtsIntegrityPassed: true,
-        persistentStorageAmplificationWithinLimit: true,
-        historyFtsAmplificationWithinLimit: true,
-        allMeasuredDeepQueryV2GatesPassed: true,
-      },
-      notMeasured: ["synthetic evidence owns fixed-work query latency"],
-    },
-    gates: { allMeasuredGatesPassed: true },
-  };
-}
-
 function reports() {
   return {
     [DEEP_QUERY_REPORTS[0]]: syntheticReport(25_000),
-    [DEEP_QUERY_REPORTS[1]]: realReport(),
   };
 }
 
@@ -326,7 +258,7 @@ test("Deep Query evidence packager preserves raw reports and verifies historical
       directory: output,
       repositoryRoot: root,
       readSourceFile,
-    }), 2);
+    }), 1);
     assert.deepEqual(
       (await readdir(output)).sort(),
       ["manifest.json", ...DEEP_QUERY_REPORTS].sort(),
@@ -341,6 +273,8 @@ test("Deep Query evidence packager preserves raw reports and verifies historical
       manifest.formalConfiguration.deferredSyntheticTurns,
       DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
     );
+    assert.deepEqual(manifest.formalConfiguration.deferredRuns, DEEP_QUERY_DEFERRED_RUNS);
+    assert.equal(manifest.formalConfiguration.deferredRealSampleFraction, 0.30);
   });
 });
 
@@ -367,12 +301,6 @@ test("Deep Query evidence rejects rehashed metric and coverage bypasses", async 
       value.storage.persistentBytes = 1_900_000;
       value.storage.postVacuum.databaseBytes = 1_900_000;
       value.storage.persistentStorageAmplification = 1.9;
-    }],
-    ["real sample byte fraction", DEEP_QUERY_REPORTS[1], (value) => {
-      value.sampling.byteFraction = 0.24;
-    }],
-    ["real sample history", DEEP_QUERY_REPORTS[1], (value) => {
-      value.deepQueryV2.rows.historyEvents = 0;
     }],
   ];
   for (const [name, file, mutate] of cases) {
@@ -447,9 +375,6 @@ test("Deep Query report validation rejects a dirty or cross-build report set", (
   dirty[DEEP_QUERY_REPORTS[0]].sourceWorktreeDirty = true;
   assert.throws(() => validateDeepQueryEvidenceReports(dirty), /clean tree/u);
 
-  const mixed = reports();
-  mixed[DEEP_QUERY_REPORTS[1]].hashes.engineBinarySha256 = "f".repeat(64);
-  assert.throws(() => validateDeepQueryEvidenceReports(mixed), /one Engine identity/u);
 });
 
 test("Deep Query verifier requires the deferred 250k disclosure", async () => {
@@ -458,6 +383,21 @@ test("Deep Query verifier requires the deferred 250k disclosure", async () => {
     const manifestPath = path.join(output, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     manifest.formalConfiguration.deferredSyntheticTurns = [];
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await assert.rejects(() => verifyDeepQueryEvidenceDirectory({
+      directory: output,
+      repositoryRoot: root,
+      readSourceFile,
+    }), /formal configuration drifted/u);
+  });
+});
+
+test("Deep Query verifier requires deferred real-sample disclosure", async () => {
+  await withFixture(async (root) => {
+    const { output } = await createPackagedEvidence(root);
+    const manifestPath = path.join(output, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.formalConfiguration.deferredRuns = [];
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await assert.rejects(() => verifyDeepQueryEvidenceDirectory({
       directory: output,

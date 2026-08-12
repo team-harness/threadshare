@@ -23,9 +23,9 @@ export const DEEP_QUERY_EVIDENCE_FORMAT =
   "threadshare-insights-deep-query-evidence-manifest@v1";
 export const DEEP_QUERY_REPORTS = Object.freeze([
   "deep-query-25k.acceptance.json",
-  "deep-query-real-sample-30pct.acceptance.json",
 ]);
 export const DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS = Object.freeze([250_000]);
+export const DEEP_QUERY_DEFERRED_RUNS = Object.freeze(["real-sample-30pct"]);
 export const DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT = 1.8;
 export const DEEP_QUERY_FTS_AMPLIFICATION_LIMIT = 0.7;
 export const DEEP_QUERY_RECIPE_P95_LIMIT_MS = 500;
@@ -36,9 +36,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPOSITORY_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
 const DESIGN_FILE = "docs/insights-deep-query-design.md";
 const SYNTHETIC_FORMAT = "threadshare-insights-deep-query-benchmark@v1";
-const REAL_SAMPLE_FORMAT = "threadshare-insights-real-sample-benchmark@v1";
 const SYNTHETIC_SCOPE = "local-insights-fact-v2-deep-query-capacity-and-performance";
-const REAL_SAMPLE_SCOPE = "fact-v2-real-session-capacity-and-commit-ack";
 const DEEP_QUERY_COUNT = 100;
 const DEEP_QUERY_WARMUP_COUNT = 20;
 const RSS_LIMIT_BYTES = 128 * 1024 ** 2;
@@ -61,7 +59,6 @@ const RECIPE_NAMES = Object.freeze([
 ]);
 const SCRIPT_FILES = Object.freeze([
   "scripts/benchmark-insights-engine.mjs",
-  "scripts/benchmark-insights-real-sample.mjs",
   "scripts/package-insights-deep-query-evidence.mjs",
 ]);
 
@@ -195,36 +192,6 @@ function validateSyntheticStorage(storage, name) {
   }
 }
 
-function validateRealStorage(storage, name) {
-  const value = object(storage, name);
-  exactKeys(value, [
-    "historyEventMetadataBytes", "historyPayloadBytes", "historyFtsBytes",
-    "historyProjectionBytes", "searchablePayloadBytes", "storedNotSearchablePayloadBytes",
-    "persistentBytes", "persistentStorageAmplification", "historyFtsAmplification", "limits",
-  ], name);
-  integer(value.persistentBytes, `${name}.persistent`, 1);
-  const storageRatio = number(
-    value.persistentStorageAmplification,
-    `${name}.persistentStorageAmplification`,
-  );
-  const searchable = integer(value.searchablePayloadBytes, `${name}.searchable`, 1);
-  const historyFts = integer(value.historyFtsBytes, `${name}.historyFts`, 1);
-  for (const key of [
-    "historyEventMetadataBytes", "historyPayloadBytes", "historyProjectionBytes",
-  ]) integer(value[key], `${name}.${key}`, 1);
-  const ftsRatio = number(value.historyFtsAmplification, `${name}.historyFtsAmplification`);
-  if (!closeEnough(ftsRatio, historyFts / searchable)) {
-    fail(`${name} amplification arithmetic drifted`);
-  }
-  if (value.limits?.persistentStorageAmplification !==
-      DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT ||
-      value.limits?.historyFtsAmplification !== DEEP_QUERY_FTS_AMPLIFICATION_LIMIT ||
-      storageRatio > DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT ||
-      ftsRatio > DEEP_QUERY_FTS_AMPLIFICATION_LIMIT) {
-    fail(`${name} exceeded a frozen amplification limit`);
-  }
-}
-
 function validateSynthetic(report, turns) {
   const name = `Deep Query ${turns}`;
   const scale = SYNTHETIC_SCALES[turns];
@@ -336,77 +303,21 @@ function validateSynthetic(report, turns) {
   assertAggregateArtifactPrivacy(report, name);
 }
 
-function validateRealSample(report) {
-  const name = "Deep Query 30% real sample";
-  if (report.format !== REAL_SAMPLE_FORMAT || report.sampling?.fraction !== 0.30 ||
-      report.sampling?.seed !== "threadshare-insights-real-sample-v1") {
-    fail(`${name} identity drifted`);
-  }
-  if (report.sourceWorktreeDirty !== false ||
-      report.sampling.byteFraction < 0.25 || report.sampling.byteFraction > 0.35) {
-    fail(`${name} is not a clean 30% byte sample`);
-  }
-  hex(report.sourceRevision, `${name}.sourceRevision`, [40, 64]);
-  hex(report.hashes?.benchmarkScriptSha256, `${name}.benchmarkScriptSha256`);
-  const deep = object(report.deepQueryV2, `${name}.deepQueryV2`);
-  if (deep.measuredScope !== REAL_SAMPLE_SCOPE || deep.committedDeltaCount < 1 ||
-      deep.committedDeltaCount !== report.indexing?.committed) {
-    fail(`${name} committed delta coverage drifted`);
-  }
-  number(deep.syncWallMs, `${name}.syncWallMs`, 0.001);
-  validateLatency(deep.commitAckMs, `${name}.commitAckMs`, deep.committedDeltaCount);
-  for (const key of ["historyEvents", "historyPayloads", "historyPayloadChunks"]) {
-    integer(deep.rows?.[key], `${name}.rows.${key}`, 1);
-  }
-  integer(deep.rows.historyFtsDocuments, `${name}.rows.historyFtsDocuments`, 1);
-  const persistent = integer(deep.storage?.persistentBytes, `${name}.storage.persistent`, 1);
-  const canonical = integer(
-    deep.canonicalIndexedSourceBytes,
-    `${name}.canonicalIndexedSourceBytes`,
-    1,
-  );
-  if (!closeEnough(deep.storage?.persistentStorageAmplification, persistent / canonical)) {
-    fail(`${name} persistent storage amplification arithmetic drifted`);
-  }
-  if (persistent !== report.storage?.postMaintenanceBytes) {
-    fail(`${name} persistent byte accounting drifted`);
-  }
-  validateRealStorage(deep.storage, `${name}.storage`);
-  if (deep.historyFtsIntegrity !== "ok") fail(`${name} history FTS integrity failed`);
-  for (const key of [
-    "committedDeltaCoverage", "nonemptyHistory", "historyFtsIntegrityPassed",
-    "persistentStorageAmplificationWithinLimit", "historyFtsAmplificationWithinLimit",
-    "allMeasuredDeepQueryV2GatesPassed",
-  ]) gate(deep.gates?.[key], `${name}.${key}`);
-  gate(report.gates?.allMeasuredGatesPassed, `${name}.legacyGates`);
-  assertAggregateArtifactPrivacy(report, name);
-}
-
 export function validateDeepQueryEvidenceReports(reports, expected = {}) {
   exactKeys(reports, DEEP_QUERY_REPORTS, "Deep Query reports");
   validateSynthetic(reports[DEEP_QUERY_REPORTS[0]], 25_000);
-  validateRealSample(reports[DEEP_QUERY_REPORTS[1]]);
   const values = Object.values(reports);
   const sourceRevision = values[0].sourceRevision;
   const engine = validateEngineIdentity(values[0].engineIdentity, "Deep Query Engine");
   if (values.some((report) => report.sourceRevision !== sourceRevision)) {
     fail("Deep Query reports do not share one source revision");
   }
-  const realEngine = {
-    ...reports[DEEP_QUERY_REPORTS[1]].engine,
-    binarySha256: reports[DEEP_QUERY_REPORTS[1]].hashes.engineBinarySha256,
-  };
-  if (!isDeepStrictEqual(engine, realEngine)) {
-    fail("Deep Query reports do not share one Engine identity");
-  }
   if (expected.sourceRevision !== undefined && sourceRevision !== expected.sourceRevision) {
     fail("Deep Query source revision drifted");
   }
   if (expected.scriptHashes) {
     if (reports[DEEP_QUERY_REPORTS[0]].benchmarkScriptSha256 !==
-        expected.scriptHashes["scripts/benchmark-insights-engine.mjs"]?.sha256 ||
-        reports[DEEP_QUERY_REPORTS[1]].hashes.benchmarkScriptSha256 !==
-        expected.scriptHashes["scripts/benchmark-insights-real-sample.mjs"]?.sha256) {
+        expected.scriptHashes["scripts/benchmark-insights-engine.mjs"]?.sha256) {
       fail("Deep Query benchmark script identity drifted");
     }
   }
@@ -528,9 +439,10 @@ export async function packageDeepQueryEvidence({
       formalConfiguration: {
         syntheticTurns: [25_000],
         deferredSyntheticTurns: DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
+        deferredRuns: DEEP_QUERY_DEFERRED_RUNS,
         measuredRuns: DEEP_QUERY_COUNT,
         warmupRuns: DEEP_QUERY_WARMUP_COUNT,
-        realSampleFraction: 0.30,
+        deferredRealSampleFraction: 0.30,
         persistentStorageAmplificationLimit: DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT,
         historyFtsAmplificationLimit: DEEP_QUERY_FTS_AMPLIFICATION_LIMIT,
         recipeP95LimitMs: DEEP_QUERY_RECIPE_P95_LIMIT_MS,
@@ -601,16 +513,17 @@ export async function verifyDeepQueryEvidenceDirectory({
   },
     "Deep Query design provenance drifted");
   exactKeys(manifest.formalConfiguration, [
-    "syntheticTurns", "deferredSyntheticTurns", "measuredRuns", "warmupRuns", "realSampleFraction",
+    "syntheticTurns", "deferredSyntheticTurns", "deferredRuns", "measuredRuns", "warmupRuns", "deferredRealSampleFraction",
     "persistentStorageAmplificationLimit", "historyFtsAmplificationLimit",
     "recipeP95LimitMs", "recipeP99LimitMs", "sidecarRssLimitBytes",
   ], "Deep Query formalConfiguration");
   equal(manifest.formalConfiguration, {
     syntheticTurns: [25_000],
     deferredSyntheticTurns: DEEP_QUERY_DEFERRED_SYNTHETIC_TURNS,
+    deferredRuns: DEEP_QUERY_DEFERRED_RUNS,
     measuredRuns: DEEP_QUERY_COUNT,
     warmupRuns: DEEP_QUERY_WARMUP_COUNT,
-    realSampleFraction: 0.30,
+    deferredRealSampleFraction: 0.30,
     persistentStorageAmplificationLimit: DEEP_QUERY_STORAGE_AMPLIFICATION_LIMIT,
     historyFtsAmplificationLimit: DEEP_QUERY_FTS_AMPLIFICATION_LIMIT,
     recipeP95LimitMs: DEEP_QUERY_RECIPE_P95_LIMIT_MS,

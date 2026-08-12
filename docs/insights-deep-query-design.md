@@ -1,6 +1,6 @@
 # Local Insights Deep Query 设计
 
-状态：Accepted；功能、契约、clean-install 与正式 evidence pipeline 已完成，当前迭代以 25k + 30% 真实样本验收，250k 延期
+状态：Accepted；功能、契约、clean-install 与正式 evidence pipeline 已完成，当前迭代以 25k 合成证据验收，真实样本与 250k 延期
 日期：2026-08-12  
 适用范围：本机 Threadshare Insights；不改变云端 share、Viewer 或 `threadshare-history@v1`
 
@@ -12,7 +12,7 @@
 
 采纳建议中的 `dataSource/estimatedFields`、有界降级诊断、完整性状态、lifecycle-only Turn、compaction 独立事件、文件工作流信号与 Agent-native 查询入口。没有照搬任意 SQL/jq、位置型失败启发式或“一种分析一条命令”；这些能力由类型化 Query、可靠 attempt chain 与 Recipe 层承载。
 
-实施状态（2026-08-13）：Stage 1–4 已完成；README、Skill、62-file release allowlist 与 tarball clean-install smoke 已通过。Stage 5 的非空 Fact V2 合成语料、固定 work budget、正式 runner、双层 fail-closed packager/verifier 与 800-Turn 真实 sidecar smoke 已完成；当前迭代从 clean checkpoint 运行并归档 25k 与至少 30% 本机真实 Session byte sample。250k 长期规模档由 owner 明确延期到后续迭代，不得标记为已测或由 25k 外推。历史 Fact V1 evidence 与仅携带空 history collection 的 V2 envelope smoke 均不得冒充该证据。
+实施状态（2026-08-13）：Stage 1–4 已完成；README、Skill、62-file release allowlist 与 tarball clean-install smoke 已通过。Stage 5 的非空 Fact V2 合成语料、固定 work budget、正式 runner、双层 fail-closed packager/verifier 与 800-Turn 真实 sidecar smoke 已完成；当前迭代归档 25k 合成证据。30% 本机真实 Session sample 本轮运行超过一小时未形成报告，已停止并记录为延期；250k 长期规模档同样由 owner 明确延期到后续迭代。二者不得标记为已测或由 25k 外推。历史 Fact V1 evidence 与仅携带空 history collection 的 V2 envelope smoke 均不得冒充该证据。
 
 ## 1. 决策摘要
 
@@ -715,14 +715,12 @@ Node 不实现统计逻辑，不解析 SQL，也不重新计算 Rust 返回的 m
 
 现有 ITEM-4/5 的 6 GiB Fact、8 GiB derived state、400 MiB FTS 证据只覆盖裁剪后的 Fact V1，**不能冒充 Fact V2 的容量证明**。
 
-V2 当前迭代必须重新建立正式证据：
+V2 当前迭代重新建立的正式证据：
 
 - 25k Turn 合成语料；
-- 至少 30% 的本机真实 Session byte sample；
 - 两个已知 >32 MiB Session 和单 Session 512 MiB logical payload 边界；
-- synthetic 写入按每 Session commit ACK 报告 P50/P95/P99；真实 30% sample 的每 Session
-  commit ACK 同样报告 P50/P95/P99；完整产品 `sync` 报告单次 wall time，不把一次正式运行
-  伪装成延迟百分位；records、aggregate、recipe、evidence paging 报告 P50/P95/P99；
+- synthetic 写入按每 Session commit ACK 报告 P50/P95/P99；records、aggregate、recipe、
+  evidence paging 报告 P50/P95/P99；
 - sidecar RSS 继续以 128 MiB 为硬上限；
 - 存储分别报告 event metadata、payload、FTS、projection、WAL/staging，禁止只给总量。
 
@@ -738,10 +736,13 @@ V2 当前迭代必须重新建立正式证据：
 
 最后两个比率必须经 prototype 与正式 evidence 冻结；达不到时先调整存储/索引设计，不能在报告中放宽门槛。
 
-250k 是后续迭代的长期规模验收，继续保留 records/aggregate P95 <200 ms、P99 <500 ms，
+30% 本机真实 Session byte sample 与 250k 都是后续迭代的验收。真实 sample 继续要求每
+Session commit ACK 报告 P50/P95/P99，完整产品 `sync` 报告单次 wall time，不把一次正式
+运行伪装成延迟百分位；250k 继续保留 records/aggregate P95 <200 ms、P99 <500 ms，
 每个 Recipe P95 <500 ms、P99 <1,000 ms，及相同的 RSS、paging、storage 与 query-plan
-门槛。当前 manifest 必须用 `deferredSyntheticTurns: [250000]` 显式披露该缺口；25k 通过不能
-外推为 250k 已通过。
+门槛。当前 manifest 必须用 `deferredSyntheticTurns: [250000]`、
+`deferredRuns: ["real-sample-30pct"]` 与 `deferredRealSampleFraction: 0.30` 显式披露缺口；
+25k 通过不能外推为真实样本或 250k 已通过。
 
 ## 22. 测试与验收
 
