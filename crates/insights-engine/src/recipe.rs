@@ -2761,6 +2761,10 @@ fn read_recipe_coverage(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<DeepCoverage, QueryError> {
+    if request.name == RecipeName::ActivityShifts && complete_day_window(&request.window)?.is_some()
+    {
+        return read_projected_activity_coverage(connection, request);
+    }
     let extra = match request.name {
         RecipeName::CapabilityContexts | RecipeName::FailureChains => {
             Some("he.event_kind IN ('capability-invocation','capability-result')")
@@ -2830,6 +2834,60 @@ fn read_recipe_coverage(
         missing_payload_count: nonnegative_count(counts.8)?,
     };
     assemble_coverage(connection, matching, "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE")
+}
+
+fn read_projected_activity_coverage(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<DeepCoverage, QueryError> {
+    let (sql, values) = projected_activity_coverage_statement(request)?;
+    let counts = connection
+        .query_row(&sql, params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(query_failed)?;
+    let matching = DeepMatchingCoverage {
+        full_record_count: nonnegative_count(counts.0)?,
+        summary_record_count: nonnegative_count(counts.1)?,
+        unloaded_record_count: nonnegative_count(counts.2)?,
+        truncated_record_count: nonnegative_count(counts.3)?,
+        unavailable_record_count: nonnegative_count(counts.4)?,
+        missing_timestamp_count: nonnegative_count(counts.5)?,
+        missing_revision_count: nonnegative_count(counts.6)?,
+        missing_token_metric_count: nonnegative_count(counts.7)?,
+        missing_payload_count: nonnegative_count(counts.8)?,
+    };
+    assemble_coverage(connection, matching, "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE")
+}
+
+fn projected_activity_coverage_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = projected_rollup_scope(request, None)?;
+    let sql = format!(
+        "SELECT COALESCE(SUM(rollup.full_count),0),
+                COALESCE(SUM(rollup.summary_count),0),
+                COALESCE(SUM(rollup.unloaded_count),0),
+                COALESCE(SUM(rollup.truncated_count),0),
+                COALESCE(SUM(rollup.unavailable_count),0),0,
+                COALESCE(SUM(rollup.missing_revision_count),0),
+                COALESCE(SUM(rollup.missing_token_metric_count),0),
+                COALESCE(SUM(rollup.missing_payload_count),0)
+         FROM history_event_day_coverage_rollups rollup
+         JOIN sessions s ON s.session_id=rollup.session_id
+         WHERE {scope}"
+    );
+    Ok((sql, values))
 }
 
 fn recipe_provenance(name: RecipeName) -> DeepProvenance {
@@ -3164,7 +3222,7 @@ fn require_fact_v2(connection: &Connection) -> Result<(), QueryError> {
     if version != Some(2) || !coverage_ready {
         return Err(QueryError::new(
             "TS_INSIGHTS_QUERY_V2_NOT_READY",
-            "recipe requires a completed Fact V2 shadow rebuild with deep-query-coverage@2",
+            "recipe requires a completed Fact V2 shadow rebuild with deep-query-coverage@3",
         ));
     }
     Ok(())
@@ -3246,8 +3304,9 @@ mod tests {
 
     use super::{
         RecipeFilters, RecipeName, RecipeRequest, RecipeWindow,
-        projected_capability_cooccurrences_statement,
-        projected_capability_representatives_statement, solution_recall_statement,
+        projected_activity_coverage_statement, projected_capability_cooccurrences_statement,
+        projected_capability_representatives_statement, read_recipe_coverage,
+        solution_recall_statement,
     };
 
     fn solution_recall_request() -> RecipeRequest {
@@ -3287,6 +3346,119 @@ mod tests {
             allow_degraded: false,
             evaluated_at: "2026-01-02T01:00:00.000Z".to_owned(),
         }
+    }
+
+    fn activity_request(name: RecipeName) -> RecipeRequest {
+        RecipeRequest {
+            format: super::RECIPE_REQUEST_FORMAT.to_owned(),
+            name,
+            window: RecipeWindow {
+                after: "2026-01-01T00:00:00.000Z".to_owned(),
+                before: "2026-01-03T00:00:00.000Z".to_owned(),
+            },
+            comparison_window: None,
+            filters: RecipeFilters {
+                bucket: (name == RecipeName::ActivityShifts).then_some(super::RecipeBucket::Day),
+                ..RecipeFilters::default()
+            },
+            limit: 10,
+            allow_degraded: false,
+            evaluated_at: "2026-01-03T01:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn coverage_connection() -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES
+                   ('snapshot_seq','0'),
+                   ('database_uuid','00000000-0000-4000-8000-000000000000');",
+            )
+            .unwrap();
+        crate::normalized_repository::initialize_schema(&mut connection).unwrap();
+        crate::source_state::initialize_schema(&connection).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                   session_key,provider,session_scope,eligibility,duplicate_policy_version
+                 ) VALUES (?1,'codex','main','eligible',1)",
+                [vec![0x11; 32]],
+            )
+            .unwrap();
+        for (ordinal, observed, completeness, missing_revision, missing_token, missing_payload) in [
+            (1_u8, "2026-01-01T01:00:00.000Z", "full", 0, 0, 0),
+            (2_u8, "2026-01-01T02:00:00.000Z", "truncated", 1, 2, 1),
+            (3_u8, "2026-01-02T01:00:00.000Z", "summary", 0, 0, 0),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO history_event_coverage(
+                       event_key,session_id,event_kind,observed_timestamp,completeness,
+                       missing_revision,missing_token_metric,missing_payload,
+                       has_file_activity,has_token_usage
+                     ) VALUES (?1,1,'provider-event',?2,?3,?4,?5,?6,0,0)",
+                    rusqlite::params![
+                        vec![ordinal; 32],
+                        observed,
+                        completeness,
+                        missing_revision,
+                        missing_token,
+                        missing_payload
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO history_event_day_coverage_rollups(
+                   session_id,bucket_day,full_count,summary_count,unloaded_count,
+                   truncated_count,unavailable_count,missing_revision_count,
+                   missing_token_metric_count,missing_payload_count
+                 ) VALUES
+                   (1,'2026-01-01',1,0,0,1,0,1,2,1),
+                   (1,'2026-01-02',0,1,0,0,0,0,0,0);",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn projected_activity_coverage_matches_exact_events_and_uses_day_index() {
+        let connection = coverage_connection();
+        let projected_request = activity_request(RecipeName::ActivityShifts);
+        let exact_request = activity_request(RecipeName::SessionTimeline);
+        let projected = read_recipe_coverage(&connection, &projected_request).unwrap();
+        let exact = read_recipe_coverage(&connection, &exact_request).unwrap();
+        assert_eq!(projected, exact);
+
+        let (sql, values) = projected_activity_coverage_statement(&projected_request).unwrap();
+        let details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("history_event_day_coverage_rollups_day")
+                    || detail.contains("SEARCH rollup USING PRIMARY KEY")
+            }),
+            "projected Activity coverage must use a bounded rollup index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("history_event_coverage"))
+        );
     }
 
     #[test]

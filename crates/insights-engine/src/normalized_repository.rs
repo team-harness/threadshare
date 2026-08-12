@@ -280,6 +280,22 @@ CREATE TABLE IF NOT EXISTS history_event_kind_rollups (
 CREATE INDEX IF NOT EXISTS history_event_kind_rollups_kind
   ON history_event_kind_rollups(event_kind,session_id);
 
+CREATE TABLE IF NOT EXISTS history_event_day_coverage_rollups (
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
+  full_count INTEGER NOT NULL CHECK(full_count>=0),
+  summary_count INTEGER NOT NULL CHECK(summary_count>=0),
+  unloaded_count INTEGER NOT NULL CHECK(unloaded_count>=0),
+  truncated_count INTEGER NOT NULL CHECK(truncated_count>=0),
+  unavailable_count INTEGER NOT NULL CHECK(unavailable_count>=0),
+  missing_revision_count INTEGER NOT NULL CHECK(missing_revision_count>=0),
+  missing_token_metric_count INTEGER NOT NULL CHECK(missing_token_metric_count>=0),
+  missing_payload_count INTEGER NOT NULL CHECK(missing_payload_count>=0),
+  PRIMARY KEY(session_id,bucket_day)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS history_event_day_coverage_rollups_day
+  ON history_event_day_coverage_rollups(bucket_day,session_id);
+
 CREATE TABLE IF NOT EXISTS history_activity_rollups (
   session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
   bucket_day TEXT NOT NULL CHECK(length(bucket_day)=10),
@@ -594,7 +610,7 @@ CREATE TABLE IF NOT EXISTS fact_coverage (
 
 const FACT_SCHEMA_METADATA_KEY: &str = "fact_schema_version";
 const DEEP_QUERY_COVERAGE_METADATA_KEY: &str = "deep_query_coverage_projection";
-const DEEP_QUERY_COVERAGE_VERSION: &str = "2";
+const DEEP_QUERY_COVERAGE_VERSION: &str = "3";
 
 fn validate_history_fts_layout(connection: &Connection) -> Result<(), StorageError> {
     let schema = connection.query_row(
@@ -2124,6 +2140,27 @@ fn rebuild_deep_query_rollups(
                 SUM(missing_revision),SUM(missing_token_metric),SUM(missing_payload)
          FROM history_event_coverage WHERE session_id=?1
          GROUP BY session_id,event_kind",
+        [session_id],
+    )?;
+
+    transaction.execute(
+        "DELETE FROM history_event_day_coverage_rollups WHERE session_id=?1",
+        [session_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO history_event_day_coverage_rollups(
+           session_id,bucket_day,full_count,summary_count,unloaded_count,
+           truncated_count,unavailable_count,missing_revision_count,
+           missing_token_metric_count,missing_payload_count
+         )
+         SELECT session_id,substr(observed_timestamp,1,10),
+                SUM(completeness='full'),SUM(completeness='summary'),
+                SUM(completeness='unloaded'),SUM(completeness='truncated'),
+                SUM(completeness='unavailable'),SUM(missing_revision),
+                SUM(missing_token_metric),SUM(missing_payload)
+         FROM history_event_coverage
+         WHERE session_id=?1 AND observed_timestamp IS NOT NULL
+         GROUP BY session_id,substr(observed_timestamp,1,10)",
         [session_id],
     )?;
 
@@ -4096,7 +4133,7 @@ fn usize_i64(value: usize) -> Result<i64, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_session_facts, initialize_schema};
+    use super::{apply_session_facts, deep_query_coverage_ready, initialize_schema};
     use crate::fact_model::{MutationMode, SessionFactsDeltaV1, StableKey};
     use crate::fact_repository::{FactEntity, FactEntityKind, FactRepository};
     use rusqlite::Connection;
@@ -4126,6 +4163,21 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn prior_deep_query_projection_identity_requires_a_shadow_rebuild() {
+        let mut connection = connection();
+        assert!(deep_query_coverage_ready(&connection).unwrap());
+        connection
+            .execute(
+                "UPDATE engine_metadata SET value='2'
+                 WHERE key='deep_query_coverage_projection'",
+                [],
+            )
+            .unwrap();
+        initialize_schema(&mut connection).unwrap();
+        assert!(!deep_query_coverage_ready(&connection).unwrap());
     }
 
     fn mutation_trace() -> Vec<SessionFactsDeltaV1> {

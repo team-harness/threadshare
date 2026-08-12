@@ -200,7 +200,8 @@ const PROJECTION_TABLES = new Set([
   "turn_search_build_cursor", "overview_rollup_state", "overview_session_rollups",
   "overview_session_capabilities", "overview_session_fact_signals",
   "history_coverage_rollups", "history_event_coverage",
-  "history_event_kind_rollups", "history_activity_rollups", "history_token_rollups",
+  "history_event_kind_rollups", "history_event_day_coverage_rollups",
+  "history_activity_rollups", "history_token_rollups",
   "history_query_session_coverage", "history_capability_rollups",
   "history_capability_representatives", "history_capability_cooccurrences",
 ]);
@@ -1276,6 +1277,7 @@ function storageOwner(name) {
     "history_event_coverage_kind",
     "history_event_coverage_observed",
     "history_event_kind_rollups_kind",
+    "history_event_day_coverage_rollups_day",
     "history_activity_rollups_day",
     "history_token_rollups_session",
     "history_token_rollups_day",

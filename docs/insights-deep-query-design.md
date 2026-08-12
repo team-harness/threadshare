@@ -523,7 +523,7 @@ unredacted semantic payload
 
 物理实现可以合并低基数字段，但模块接口和 migration 必须按这些责任分层。热查询先选 event key，再按当前页 hydration payload；禁止在候选选择阶段读取大 payload。
 
-`deep-query-coverage@2` 是首个包含上述 rollup 的内部 projection identity。每个 Session 的正式事实写入与 rollup 重建处于同一 SQLite transaction；任何一侧失败都不得提交。只在可证明与精确事件路径等价时读取 rollup：时间窗必须覆盖完整 UTC day，Activity 的 Session 时间范围不得交叠到可能改变全局排序；否则回退到有界的 typed event SQL。版本缺失或不匹配时，Query/Recipe 必须返回 `TS_INSIGHTS_QUERY_V2_NOT_READY`，由 candidate shadow rebuild 生成新库，禁止在旧 active DB 原地混写。
+`deep-query-coverage@3` 是包含上述 rollup 以及逐 UTC day completeness coverage 的内部 projection identity。每个 Session 的正式事实写入与 rollup 重建处于同一 SQLite transaction；任何一侧失败都不得提交。只在可证明与精确事件路径等价时读取 rollup：时间窗必须覆盖完整 UTC day，Activity 的 Session 时间范围不得交叠到可能改变全局排序；否则回退到有界的 typed event SQL。版本缺失或不匹配时，Query/Recipe 必须返回 `TS_INSIGHTS_QUERY_V2_NOT_READY`，由 candidate shadow rebuild 生成新库，禁止在旧 active DB 原地混写。
 
 ### 12.3 Payload chunking
 

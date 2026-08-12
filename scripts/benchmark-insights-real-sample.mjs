@@ -612,13 +612,16 @@ async function auditDatabase(databasePath) {
       name.startsWith("history_event_fts_"));
     const historyProjectionBytes = storageBytes(pageRows, (name, owner) =>
       owner === "history_coverage_rollups" || owner === "history_event_coverage" ||
-      owner === "history_event_kind_rollups" || owner === "history_activity_rollups" ||
+      owner === "history_event_kind_rollups" ||
+      owner === "history_event_day_coverage_rollups" ||
+      owner === "history_activity_rollups" ||
       owner === "history_token_rollups" || owner === "history_query_session_coverage" ||
       owner === "history_capability_rollups" ||
       owner === "history_capability_representatives" ||
       owner === "history_capability_cooccurrences" ||
       name.startsWith("history_event_coverage_") ||
       name.startsWith("history_event_kind_rollups_") ||
+      name.startsWith("history_event_day_coverage_rollups_") ||
       name.startsWith("history_activity_rollups_") ||
       name.startsWith("history_token_rollups_") ||
       name.startsWith("history_capability_rollups_") ||

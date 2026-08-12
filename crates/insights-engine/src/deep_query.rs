@@ -3085,7 +3085,7 @@ fn require_fact_v2(connection: &Connection) -> Result<(), QueryError> {
     if version != Some(2) || !coverage_ready {
         return Err(QueryError::new(
             "TS_INSIGHTS_QUERY_V2_NOT_READY",
-            "deep query requires a completed Fact V2 shadow rebuild with deep-query-coverage@2",
+            "deep query requires a completed Fact V2 shadow rebuild with deep-query-coverage@3",
         ));
     }
     Ok(())

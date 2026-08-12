@@ -360,6 +360,17 @@ fn projected_capability_and_token_recipes_match_the_exact_event_path() {
             "{name:?} coverage drifted"
         );
     }
+
+    let projected_activity = storage
+        .read_recipe(&recipe_request(RecipeName::ActivityShifts, session_key))
+        .unwrap();
+    let exact_activity = storage
+        .read_recipe(&recipe_request(RecipeName::SessionTimeline, session_key))
+        .unwrap();
+    assert_eq!(
+        projected_activity.coverage, exact_activity.coverage,
+        "Activity projected coverage drifted from the exact event path"
+    );
 }
 
 #[test]
@@ -576,6 +587,12 @@ fn recipes_reject_incomplete_coverage_unless_degradation_is_explicit() {
     assert_eq!(
         response.coverage.diagnostics,
         ["TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE"]
+    );
+
+    let activity = recipe_request(RecipeName::ActivityShifts, delta.session.session_key);
+    assert_eq!(
+        storage.read_recipe(&activity).unwrap_err().code,
+        "TS_INSIGHTS_COVERAGE_INCOMPLETE"
     );
 }
 
