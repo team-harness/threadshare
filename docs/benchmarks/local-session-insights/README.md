@@ -12,6 +12,7 @@ JSON、manifest、生成参数与哈希；原始 session、prompt/answer、真�
 | [`2026-08-10/`](2026-08-10/) | ITEM-4 回填、增量、事务、容量与隐私清除 | 10,000 session / 250,000 Turn | raw 回填 12.736 MiB/s；250k 派生状态约 2.53 GiB；全部正式 gate 通过 |
 | [`2026-08-10-item-5/`](2026-08-10-item-5/) | ITEM-5 查询质量、延迟、mutation 等价与真实样本外推 | 250,000 Turn / 本机约 30% 字节样本 | Recall@300 0.925；Top-20 Recall 0.925；NDCG@10 0.790453；250k P99 低于 144 ms |
 | [`2026-08-11-item-6/`](2026-08-11-item-6/) | ITEM-6 Dashboard Overview、首次可用与产品路径 freshness | 250,000 Turn / 1,000 次测量 | 25k P95/P99 2.697/3.577 ms；250k P95/P99 15.665/20.270 ms；append-to-searchable 163.454 ms；全部 gate 通过 |
+| [`2026-08-13-deep-query/`](2026-08-13-deep-query/) | Deep Query v2 records、aggregate、7 个 Recipe 与 Evidence 分页 | 25,000 Turn / 100 次测量 | 7 个 Recipe 全部通过；Evidence 56.50 MiB/s；sidecar 46.73 MiB；250k 与真实样本延期 |
 
 ITEM-4 目录另外保留一份受主机竞争影响的失败运行，证明吞吐和 freshness 门槛会真实
 失败，而不是只保存通过样本。ITEM-5 的 `evidence/manifest.json` 绑定 source commit、
@@ -54,3 +55,8 @@ npm run test:insights-engine
 语义必须保持可复现。新证据应从 clean committed worktree 生成；上述 ITEM-4 历史例外
 必须同时保留 dirty 标记、候选说明与可对照的提交脚本哈希。失败运行不能覆盖已通过的
 evidence 目录。
+
+Deep Query v2 的当前正式证据见 `2026-08-13-deep-query/`。本迭代只归档 25k 合成运行；
+250k 长期规模和 30% 真实 Session sample 明确延期，不能由 25k 结果外推。该证据由根
+verifier 与 Deep Query 专用 packager 双重复核，Recipe、Evidence 分页、存储放大、FTS
+完整性、RSS 和 query plan 均从 aggregate report 独立重算。

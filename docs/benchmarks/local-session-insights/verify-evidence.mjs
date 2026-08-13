@@ -8,6 +8,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertAggregateArtifactPrivacy } from "../../../scripts/package-insights-benchmark-evidence.mjs";
+import { verifyDeepQueryEvidenceDirectory } from "../../../scripts/package-insights-deep-query-evidence.mjs";
 import {
   ITEM6_APPROVED_EPIC_SHA256,
   ITEM6_CAPACITY_CATEGORY_KEYS,
@@ -49,6 +50,14 @@ const ITEM6_REPORTS = Object.freeze(Object.fromEntries(
   ]),
 ));
 const ITEM6_FILES = Object.freeze(["manifest.json", ...Object.keys(ITEM6_REPORTS)].sort());
+const DEEP_QUERY_DIRECTORY = path.join(
+  REPOSITORY_ROOT,
+  "docs",
+  "benchmarks",
+  "local-session-insights",
+  "2026-08-13-deep-query",
+  "evidence",
+);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -714,16 +723,21 @@ export async function verifyItem6Evidence({
 }
 
 export async function verifyInsightsEvidence() {
-  const [item4Artifacts, item5Artifacts, item6Artifacts] = await Promise.all([
+  const [item4Artifacts, item5Artifacts, item6Artifacts, deepQueryArtifacts] = await Promise.all([
     verifyItem4(),
     verifyItem5(),
     verifyItem6Evidence(),
+    verifyDeepQueryEvidenceDirectory({
+      directory: DEEP_QUERY_DIRECTORY,
+      repositoryRoot: REPOSITORY_ROOT,
+    }),
   ]);
   return {
     format: "threadshare-insights-evidence-verification@v1",
     item4Artifacts,
     item5Artifacts,
     item6Artifacts,
+    deepQueryArtifacts,
   };
 }
 

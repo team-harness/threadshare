@@ -1,0 +1,322 @@
+{
+  "format": "threadshare-insights-deep-query-benchmark@v1",
+  "measuredScope": "local-insights-fact-v2-deep-query-capacity-and-performance",
+  "sourceRevision": "427af7608b07e648ecbb1d7745ff53ab17ee32da",
+  "sourceWorktreeDirty": false,
+  "benchmarkScriptSha256": "f17a42d409a679af1906da3078bc518ea22e3cf5ad132a4009676dff9761f2b3",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 5.98876953125,
+        "fiveMinutes": 7.046875,
+        "fifteenMinutes": 7.36962890625,
+        "oneMinutePerLogicalCpu": 0.598876953125
+      },
+      "atReport": {
+        "oneMinute": 11.052734375,
+        "fiveMinutes": 8.44873046875,
+        "fifteenMinutes": 8.390625,
+        "oneMinutePerLogicalCpu": 1.1052734375
+      }
+    }
+  },
+  "corpus": {
+    "corpusVersion": 7,
+    "seed": "threadshare-insights-deep-query-25k-v1",
+    "identityDigest": "0b1cbc302a6742677462d618a5146d3692c18896cf6a9e210b1dbf736bb641a5",
+    "contentDigest": "2fad7f7d93832fefeeedffeb1464aa093e6d7143f1d1a70c2f0329f2c11b3174",
+    "turns": 25000,
+    "sessions": 250,
+    "turnsPerSession": 100,
+    "density": {
+      "sourceRecordsPerTurn": 10,
+      "evidenceEventsPerTurn": 9,
+      "turnEvidencePerTurn": 3,
+      "capabilityUsesPerTurn": 3,
+      "capabilityUseEvidencePerTurn": 6,
+      "historyEventsPerTurn": 10,
+      "historyPayloadsPerTurn": 8,
+      "historyPayloadChunksPerTurn": 8,
+      "evidencePagingProbeBytes": 2097152,
+      "evidencePagingProbeEvents": 1,
+      "evidencePagingProbePayloads": 1,
+      "evidencePagingProbeChunks": 32,
+      "capabilitiesPerProvider": 12,
+      "naturalTermsPerTurn": 135,
+      "uniqueNaturalTermsPerTurn": 6,
+      "problemTextCharacters": 1600,
+      "finalAnswerCharacters": 1100
+    },
+    "canonicalBytes": 925932974,
+    "maxSessionCanonicalBytes": 5801715,
+    "boundedMemoryModel": "one generated SessionFactsDeltaV2 plus one protocol batch"
+  },
+  "engineIdentity": {
+    "buildManifestDigest": "a59adc1d2c99a7680d365a22cdd8768f1886f1883956afd96255d2d25f309d8e",
+    "engineVersion": "0.0.0",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "development",
+    "binarySha256": "02f697c0fde9cf2092adb6009b1fad89b260f3478ee22c09bec8292c7105d82f"
+  },
+  "backfill": {
+    "wallMs": 1485263.709708,
+    "commitAckMs": {
+      "unit": "ms",
+      "count": 250,
+      "total": 1457139.5685430004,
+      "p50": 5643.226834000088,
+      "p95": 7524.127874999947,
+      "p99": 10442.133333000005,
+      "max": 11835.085292000032
+    },
+    "corpusGenerationMs": 28122.06628900031,
+    "protocolPreparationMs": 23246.62619900131,
+    "engineBackfillMs": 1433895.0172199986,
+    "endToEndTurnsPerSecond": 16.83202776489769,
+    "engineTurnsPerSecond": 17.4350281574096,
+    "endToEndCanonicalMiBPerSecond": 0.5945331392975728,
+    "engineCanonicalMiBPerSecond": 0.6158320416856389
+  },
+  "protocol": {
+    "requestFrames": 4681,
+    "responseFrames": 4681,
+    "requestBytes": 927313462,
+    "responseBytes": 385904501,
+    "protocolPreparationMs": 23246.62619900131,
+    "totalWireBytes": 1313217963,
+    "wireAmplification": 1.4182646043232932
+  },
+  "rss": {
+    "samplingMode": "darwin-500ms",
+    "peakSampled": true,
+    "sidecarPeakBytes": 49004544,
+    "nodeHarnessPeakBytes": 247201792,
+    "combinedPeakBytes": 279691264
+  },
+  "deepQuery": {
+    "measuredRequestCount": 100,
+    "warmupRequestCount": 20,
+    "records": {
+      "emptyResultCount": 0,
+      "roundTripMs": {
+        "unit": "ms",
+        "count": 100,
+        "total": 234.9027889992576,
+        "p50": 1.9885419998317957,
+        "p95": 4.0632909999694675,
+        "p99": 4.231999999843538,
+        "max": 4.302457999903709
+      }
+    },
+    "aggregate": {
+      "emptyResultCount": 0,
+      "roundTripMs": {
+        "unit": "ms",
+        "count": 100,
+        "total": 79.54420700087212,
+        "p50": 0.6175829998683184,
+        "p95": 1.4206670001149178,
+        "p99": 1.9267080000136048,
+        "max": 5.338541999924928
+      }
+    },
+    "recipes": {
+      "capability-contexts@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 13846.866624000715,
+          "p50": 135.10099999979138,
+          "p95": 154.50883399997838,
+          "p99": 161.04374999995343,
+          "max": 163.7657500000205
+        }
+      },
+      "failure-chains@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 2231.6965020012576,
+          "p50": 21.744457999942824,
+          "p95": 25.534332999959588,
+          "p99": 29.668583000078797,
+          "max": 29.88525000005029
+        }
+      },
+      "file-workflow-signals@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 6742.936627000803,
+          "p50": 65.86720799980685,
+          "p95": 75.4429999999702,
+          "p99": 78.60279199993238,
+          "max": 92.07475000014529
+        }
+      },
+      "activity-shifts@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 302.1800030025188,
+          "p50": 2.884000000078231,
+          "p95": 3.6265000000130385,
+          "p99": 5.444542000070214,
+          "max": 5.467042000032961
+        }
+      },
+      "token-hotspots@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 1961.771330000367,
+          "p50": 18.836458000121638,
+          "p95": 24.543167000170797,
+          "p99": 30.246082999976352,
+          "max": 31.969333000015467
+        }
+      },
+      "solution-recall@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 101.8272500007879,
+          "p50": 0.8855420001782477,
+          "p95": 1.6623750000726432,
+          "p99": 1.9407500000670552,
+          "max": 1.958583999890834
+        }
+      },
+      "session-timeline@1": {
+        "emptyResultCount": 0,
+        "roundTripMs": {
+          "unit": "ms",
+          "count": 100,
+          "total": 2127.9202899993397,
+          "p50": 20.749416999984533,
+          "p95": 25.29537499998696,
+          "p99": 26.851583000039682,
+          "max": 27.259165999945253
+        }
+      }
+    },
+    "evidence": {
+      "targetPayloadBytes": 2097152,
+      "completedReadCount": 100,
+      "multiPageReadCount": 100,
+      "returnedBytes": 209715200,
+      "firstPageRoundTripMs": {
+        "unit": "ms",
+        "count": 100,
+        "total": 1765.1944559991825,
+        "p50": 17.204833999974653,
+        "p95": 19.71500000008382,
+        "p99": 22.36704199993983,
+        "max": 26.469957999885082
+      },
+      "pageRoundTripMs": {
+        "unit": "ms",
+        "count": 200,
+        "total": 3539.948906999314,
+        "p50": 17.231167000019923,
+        "p95": 20.328875000122935,
+        "p99": 23.54949999996461,
+        "max": 26.469957999885082
+      },
+      "readWallMs": 3539.948906999314,
+      "payloadMiBPerSecond": 56.4979905796247
+    },
+    "resultDigest": "b5d195289fcca1e90f49cbba77d55ba010106c9db4771713dcd89063a168079f",
+    "gates": {
+      "budget": "current-25k",
+      "recordsWithinLimit": true,
+      "aggregateWithinLimit": true,
+      "evidenceFirstPageWithinLimit": true,
+      "evidencePagingAtLeast50MiBPerSecond": true,
+      "allRecordsReturnedResults": true,
+      "allAggregatesReturnedGroups": true,
+      "allRecipesExercised": true,
+      "allRecipesWithinLimit": true,
+      "allEvidenceReadsCompleted": true,
+      "allDeepQueryPathsExercised": true,
+      "allMeasuredDeepQueryGatesPassed": true
+    }
+  },
+  "storage": {
+    "canonicalIndexedSourceBytes": 925932974,
+    "preVacuum": {
+      "databaseBytes": 1157251072,
+      "walBytes": 0,
+      "shmBytes": 0
+    },
+    "postVacuum": {
+      "databaseBytes": 1064038400,
+      "walBytes": 0,
+      "shmBytes": 0
+    },
+    "persistentBytes": 1064038400,
+    "stagingUpperBoundBytes": 5801715,
+    "historyEventMetadataBytes": 343965696,
+    "historyPayloadBytes": 302559232,
+    "historyFtsBytes": 44175360,
+    "projectionBytes": 92573696,
+    "searchablePayloadBytes": 77271446,
+    "storedNotSearchablePayloadBytes": 2097152,
+    "persistentStorageAmplification": 1.1491527247413915,
+    "historyFtsAmplification": 0.5716906087146344,
+    "limits": {
+      "persistentStorageAmplification": 1.8,
+      "historyFtsAmplification": 0.7
+    }
+  },
+  "rowCounts": {
+    "history_events": 250001,
+    "history_payloads": 200001,
+    "history_payload_chunks": 200032,
+    "attempt_chain_events": 150000,
+    "file_activity": 150000,
+    "token_usage": 25000,
+    "error_occurrences": 10714,
+    "history_event_fts_documents": 200000
+  },
+  "explain": {
+    "recordsByEventKind": [
+      "SEARCH he USING INDEX history_events_kind_order (event_kind=?)",
+      "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)"
+    ]
+  },
+  "gates": {
+    "v2CorpusComplete": true,
+    "deepQueryPathsComplete": true,
+    "deepQueryPerformanceWithinLimit": true,
+    "historyFtsIntegrityPassed": true,
+    "engineRssWithin128MiB": true,
+    "storageAmplificationWithinLimit": true,
+    "historyFtsAmplificationWithinLimit": true,
+    "storageClassificationComplete": true,
+    "queryPlanUsesEventKindIndex": true,
+    "allMeasuredDeepQueryEvidenceGatesPassed": true
+  },
+  "notMeasured": [
+    "raw provider parsing; the synthetic corpus starts at SessionFactsDeltaV2",
+    "30% real Session byte sample; it is recorded as an independent evidence artifact",
+    "single-Session 512 MiB logical payload boundary; the dedicated Rust boundary test owns it"
+  ]
+}

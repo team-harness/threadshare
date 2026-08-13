@@ -1,0 +1,71 @@
+{
+  "format": "threadshare-insights-deep-query-evidence-manifest@v1",
+  "sourceRevision": "427af7608b07e648ecbb1d7745ff53ab17ee32da",
+  "design": {
+    "source": "git-object-at-source-revision",
+    "file": "docs/insights-deep-query-design.md",
+    "bytes": 41026,
+    "sha256": "4199ea02bdea510d235c1edd662917c00b583c6c6827a96cfebebe7d6369fa54"
+  },
+  "scripts": {
+    "scripts/benchmark-insights-engine.mjs": {
+      "source": "git-object-at-source-revision",
+      "bytes": 169241,
+      "sha256": "f17a42d409a679af1906da3078bc518ea22e3cf5ad132a4009676dff9761f2b3"
+    },
+    "scripts/package-insights-deep-query-evidence.mjs": {
+      "source": "git-object-at-source-revision",
+      "bytes": 23555,
+      "sha256": "186fe66140a792ea441c14455a349e0f8222c2c2b084042bb90e82e78d1d6b48"
+    }
+  },
+  "engineIdentity": {
+    "buildManifestDigest": "a59adc1d2c99a7680d365a22cdd8768f1886f1883956afd96255d2d25f309d8e",
+    "engineVersion": "0.0.0",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "development",
+    "binarySha256": "02f697c0fde9cf2092adb6009b1fad89b260f3478ee22c09bec8292c7105d82f"
+  },
+  "sourceReports": {
+    "deep-query-25k.acceptance.json": {
+      "bytes": 10107,
+      "sha256": "7bede1dd63100c57dda5b93ec1ca41f7fd99549e935fe59950b1b818169edd99"
+    }
+  },
+  "artifacts": {
+    "deep-query-25k.acceptance.json": {
+      "bytes": 10107,
+      "sha256": "7bede1dd63100c57dda5b93ec1ca41f7fd99549e935fe59950b1b818169edd99"
+    }
+  },
+  "formalConfiguration": {
+    "syntheticTurns": [
+      25000
+    ],
+    "deferredSyntheticTurns": [
+      250000
+    ],
+    "deferredRuns": [
+      "real-sample-30pct"
+    ],
+    "measuredRuns": 100,
+    "warmupRuns": 20,
+    "deferredRealSampleFraction": 0.3,
+    "persistentStorageAmplificationLimit": 1.8,
+    "historyFtsAmplificationLimit": 0.7,
+    "recipeP95LimitMs": 500,
+    "recipeP99LimitMs": 1000,
+    "sidecarRssLimitBytes": 134217728
+  },
+  "privacy": {
+    "aggregateOnly": true,
+    "sourceReportsIncluded": true,
+    "rawSessionsIncluded": false,
+    "temporaryDatabasesIncluded": false,
+    "sourcePathsIncluded": false,
+    "sessionIdentifiersIncluded": false
+  }
+}

@@ -24,7 +24,7 @@ status: active
 - [x] Stage 2：typed Query records、stable cursor、Evidence v2
 - [x] Stage 3：aggregate、coverage/provenance、7 个 Recipe
 - [x] Stage 4：stdio MCP、v1 compatibility adapters
-- [ ] Stage 5：正式 V2 evidence pipeline 已完成；当前迭代待归档 25k，真实 30% sample 与 250k 显式延期
+- [x] Stage 5：正式 V2 evidence pipeline 已完成；当前迭代已归档 25k，真实 30% sample 与 250k 显式延期
 
 ## 当前步骤
 
@@ -59,4 +59,4 @@ capacity corpus v7 每 Turn 生成 10 个 history event、8 个 payload 与 8 �
 
 ## Next Action
 
-提交“25k 当前验收、真实 sample/250k 显式延期”的 evidence 契约 checkpoint；用该 checkpoint 的 release Engine 归档 25k 报告，接入根 verifier 后完成当前迭代 Stage 5。真实 sample 与 250k 留待后续迭代。
+归档 25k evidence checkpoint 已完成，根 verifier 已接入并覆盖 Deep Query 目录；真实 sample 与 250k 留待后续迭代。后续若继续扩展规模，必须重新运行同一 packager/verifier，不得用本次 25k 结果外推。
