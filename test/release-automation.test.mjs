@@ -1130,6 +1130,7 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
   assert.match(verifyCommands, /npm ci/);
   assert.match(verifyCommands, /npm test/);
   assert.match(verifyCommands, /npm run test:insights-engine/);
+  assert.doesNotMatch(verifyCommands, /test:insights-engine-benchmark/);
   assert.match(verifyCommands, /rustup toolchain install 1\.94\.1 --profile minimal --component clippy/);
   assert.match(verifyCommands, /npm run build:cloudflare/);
   assert.match(verifyCommands, /npm run validate:skill/);
