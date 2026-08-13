@@ -74,6 +74,14 @@ Query may return raw Tool arguments/output, system/developer/analysis content, p
 local paths. Treat them as local context: quote only what the answer needs, and never pass them to
 `share`, `publish`, a remote MCP server, or another network service unless the user explicitly asks.
 
+For the new Agent surface, use action-specific help before constructing JSON:
+`threadshare insights query --help`, `recipe --help`, `evidence --help`, and `mcp --help`.
+Query requests use `threadshare-insights-query-request@v2`; Recipe requests use
+`threadshare-insights-recipe-request@v1`; Evidence requests use
+`threadshare-insights-evidence-request@v2`. Prefer `payloadMode: "reference"`, carry `nextCursor`
+unchanged, and use the exact returned revision for evidence. These commands never run `sync`
+implicitly.
+
 ## Choose A Start Turn
 
 When the user asks for the full conversation, use the regular `share` command without `--from` or `--before`. Omitting both options is the deliberate full-conversation mode. An empty range value is invalid; if selection fails, stop instead of retrying without the range options. When the user wants to start from a particular message but has not supplied an exact message ID, use this non-interactive workflow:

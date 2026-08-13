@@ -1,6 +1,6 @@
 {
   "name": "@team-harness/threadshare",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "description": "Self-hostable API, viewer, and CLI for sharing AI agent conversation threads",
   "keywords": [
     "ai-agent",

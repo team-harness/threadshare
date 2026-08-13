@@ -571,6 +571,106 @@ export function renderCommandHelp(name) {
   return lines.join("\n");
 }
 
+const INSIGHTS_ACTION_HELP = Object.freeze({
+  sync: [
+    "Incrementally index local provider Sessions into the committed Insights snapshot.",
+    "",
+    "Usage:",
+    "  threadshare insights sync [--format text|json]",
+    "",
+    "Behavior:",
+    "  Creates the index when it is missing; otherwise processes only new, changed, deleted, or excluded Sessions.",
+    "  Progress is written to stderr in an interactive terminal. stdout remains the result channel.",
+    "",
+    "Agent notes:",
+    "  Run sync before the first query or when status reports stale or missing data.",
+    "  Queries never trigger sync implicitly. Use reindex only for a complete atomic rebuild or secret recovery.",
+  ],
+  query: [
+    "Run a bounded typed records or aggregate query over the local Insights event store.",
+    "",
+    "Usage:",
+    "  threadshare insights query --request <file|-> --format json",
+    "",
+    "Request:",
+    "  JSON format: threadshare-insights-query-request@v2",
+    "  resources: session, turn, event, capability-use, file-activity, token-usage, error-occurrence",
+    "  shape.kind: records (select fields, optional payloadMode omit|reference|inline) or aggregate (groupBy + metrics)",
+    "  where: typed and/or/not predicates; orderBy: stable field/direction list; limit: 1..50",
+    "  Use schema/threadshare-insights-query-request.v2.schema.json for the complete field registry and operators.",
+    "",
+    "Minimal request:",
+    "  {\"format\":\"threadshare-insights-query-request@v2\",\"resource\":\"event\",\"where\":null,\"shape\":{\"kind\":\"records\",\"select\":[\"eventKey\",\"observedAt\"],\"payloadMode\":\"reference\"},\"orderBy\":[{\"field\":\"observedAt\",\"direction\":\"desc\"},{\"field\":\"eventKey\",\"direction\":\"asc\"}],\"limit\":20}",
+    "",
+    "Agent notes:",
+    "  Run `threadshare insights sync` first. Query reads one committed snapshot and never scans raw provider files.",
+    "  Save nextCursor and reuse it unchanged for the next page; payload content may require evidence paging.",
+  ],
+  recipe: [
+    "Run a versioned, evidence-bearing analysis over a bounded local time window.",
+    "",
+    "Usage:",
+    "  threadshare insights recipe <name> --request <file|-> --format json",
+    "",
+    "Recipe names:",
+    "  capability-contexts@1  failure-chains@1  file-workflow-signals@1",
+    "  activity-shifts@1      token-hotspots@1   solution-recall@1",
+    "  session-timeline@1",
+    "",
+    "Request:",
+    "  JSON format: threadshare-insights-recipe-request@v1",
+    "  required window: {after,before} as canonical UTC timestamps with milliseconds",
+    "  optional comparisonWindow, filters, limit (1..50), allowDegraded (default false)",
+    "  Use schema/threadshare-insights-recipe-request.v1.schema.json for filter bounds.",
+    "",
+    "Minimal request:",
+    "  {\"format\":\"threadshare-insights-recipe-request@v1\",\"window\":{\"after\":\"2026-01-01T00:00:00.000Z\",\"before\":\"2026-02-01T00:00:00.000Z\"},\"limit\":20,\"allowDegraded\":false}",
+    "",
+    "Agent notes:",
+    "  Results are structured facts and evidence targets, not an LLM-generated verdict.",
+    "  Do not describe co-occurrence as causation; report coverage and estimated fields explicitly.",
+  ],
+  evidence: [
+    "Read revision-bound local event, Turn, Session, or attempt-chain evidence.",
+    "",
+    "Usage:",
+    "  threadshare insights evidence --request <file|-> --format json",
+    "  threadshare insights evidence <turn-key> --revision <revision> --format json",
+    "",
+    "Request:",
+    "  JSON format: threadshare-insights-evidence-request@v2",
+    "  target.kind: event, turn, session, or attempt-chain; target must include its key and revision",
+    "  include: envelope, payload, or both; maxBytes: 4..1048576; cursor continues byte paging",
+    "  Use schema/threadshare-insights-evidence-request.v2.schema.json for target fields.",
+    "",
+    "Agent notes:",
+    "  Use the exact revision returned by Search, Query, or Recipe evidence targets.",
+    "  A changed revision or payload is a hard error; repeat the originating query instead of guessing.",
+  ],
+  mcp: [
+    "Expose the same local Query, Recipe, and Evidence contracts through newline JSON-RPC over stdio.",
+    "",
+    "Usage:",
+    "  threadshare insights mcp --stdio",
+    "",
+    "Tools:",
+    "  threadshare_insights_query, threadshare_insights_recipe, threadshare_insights_evidence",
+    "",
+    "Behavior:",
+    "  stdout is JSON-RPC only; diagnostics go to stderr. No TCP listener, network access, sync, or reindex.",
+    "  The MCP client must call initialize, tools/list, then tools/call with the published JSON Schemas.",
+    "",
+    "Agent notes:",
+    "  Run `threadshare insights sync` before starting the server when the index is missing or stale.",
+    "  Treat returned raw payloads, paths, prompts, and provider content as sensitive local data.",
+  ],
+});
+
+export function renderInsightsActionHelp(action) {
+  const lines = INSIGHTS_ACTION_HELP[action];
+  return lines === undefined ? undefined : lines.join("\n");
+}
+
 export class CliDiagnostic extends Error {
   constructor(code, problem, { command, next, result, secretLines = [] } = {}) {
     super(problem);
@@ -658,6 +758,9 @@ export function preflightHelp(args) {
         { command: "help", next: "Run `threadshare help --help`." },
       );
     }
+    if (second === "insights" && rest.length === 1 && INSIGHTS_ACTION_HELP[rest[0]] !== undefined) {
+      return renderInsightsActionHelp(rest[0]);
+    }
     if (!Object.hasOwn(COMMAND_SPECS, second)) throw unknownCommand(second);
     if (rest.length > 0) {
       throw cliDiagnostic("TS_USAGE_UNEXPECTED_ARGUMENT", `Unexpected argument for help: ${rest[0]}.`, {
@@ -666,6 +769,9 @@ export function preflightHelp(args) {
       });
     }
     return renderCommandHelp(second);
+  }
+  if (first === "insights" && INSIGHTS_ACTION_HELP[second] !== undefined && args.includes("--help")) {
+    return renderInsightsActionHelp(second);
   }
   if (Object.hasOwn(COMMAND_SPECS, first) && first !== "help" && args.includes("--help")) {
     return renderCommandHelp(first);

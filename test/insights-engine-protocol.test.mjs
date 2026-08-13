@@ -303,7 +303,7 @@ test("Fact V2 READY requires the active database identity without widening V1", 
   const contract = createInsightsRequiredContract(EPOCH);
   const input = {
     requestId: "1",
-    engineVersion: "threadshare-insights-engine@0.7.4",
+    engineVersion: "threadshare-insights-engine@0.8.0",
     target: "darwin-arm64",
     sqliteVersion: "3.53.2",
     sqliteCompileOptionsDigest: COMPILE_OPTIONS_DIGEST,

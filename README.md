@@ -152,6 +152,31 @@ threadshare insights evidence --request evidence.json --format json
 threadshare insights mcp --stdio
 ```
 
+For Agent-built requests, start with the action-specific help instead of guessing option
+combinations:
+
+```bash
+threadshare insights query --help
+threadshare insights recipe --help
+threadshare insights evidence --help
+threadshare insights mcp --help
+```
+
+The request files are strict JSON contracts shipped in the package. A minimal typed event query is:
+
+```json
+{"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
+```
+
+Save it as `query.json`, then run:
+
+```bash
+threadshare insights query --request query.json --format json
+```
+
+Use `nextCursor` unchanged for the next page. Use the exact revision from a returned evidence target
+when requesting full content. Query and Recipe do not implicitly run `sync`; run it explicitly first.
+
 `sync` creates the index when it is missing and otherwise commits only new, changed, deleted, or newly
 excluded Sessions. In an interactive terminal it reports byte progress on stderr. Use `reindex` only
 when you explicitly need a complete atomic rebuild or origin-secret recovery.
@@ -181,7 +206,7 @@ derived signals, estimates, and co-occurrence.
 
 Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
 core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
-available in the 0.7.x release line while the owner-only Windows ACL adapter remains unimplemented.
+available in the 0.8.x release line while the owner-only Windows ACL adapter remains unimplemented.
 
 Usage counts are recorded invocations, not inferred independent uses. Agents must report grouped and
 ungrouped invocations with the returned dedupe support, and must describe Capability terminal states

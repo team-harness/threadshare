@@ -16,6 +16,7 @@ import {
   DIAGNOSTIC_CODES,
   OPTION_DEFINITIONS,
   renderCommandHelp,
+  renderInsightsActionHelp,
   renderDiagnostic,
   renderRootHelp,
   sanitizeDiagnosticProblem,
@@ -232,12 +233,29 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
   assert.match(renderCommandHelp("insights"), /overview.*search.*capabilities.*usage.*activity.*evidence/is);
   assert.match(renderCommandHelp("insights"), /Queries require --format json/is);
+  assert.match(renderInsightsActionHelp("query"), /threadshare insights query --request <file\|-> --format json/);
+  assert.match(renderInsightsActionHelp("query"), /threadshare-insights-query-request@v2/);
+  assert.match(renderInsightsActionHelp("recipe"), /capability-contexts@1.*failure-chains@1/is);
+  assert.match(renderInsightsActionHelp("evidence"), /target\.kind: event, turn, session, or attempt-chain/);
+  assert.match(renderInsightsActionHelp("mcp"), /stdout is JSON-RPC only/);
   assert.match(renderCommandHelp("publish"), /run `threadshare validate/);
   assert.match(renderCommandHelp("publish"), /revokeToken.*human mode.*stderr/is);
   assert.match(renderCommandHelp("share"), /revokeToken.*human mode.*stderr/is);
   assert.match(renderCommandHelp("read"), /rejects fragments such as #token=/);
   assert.match(renderCommandHelp("read"), /does not accept --url or read THREADSHARE_URL/);
   assert.match(renderCommandHelp("revoke"), /does not accept --url or read THREADSHARE_URL/);
+});
+
+test("renders action-specific Insights help without touching the index", () => {
+  for (const action of ["sync", "query", "recipe", "evidence", "mcp"]) {
+    const result = spawnSync(process.execPath, [cli, "insights", action, "--help"], {
+      encoding: "utf8",
+      env: { ...process.env, THREADSHARE_INSIGHTS_HOME: "/definitely/not/read" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout, `${renderInsightsActionHelp(action)}\n`);
+  }
 });
 
 test("prints root help without arguments and equivalent command help offline", () => {

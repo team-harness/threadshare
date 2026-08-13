@@ -151,6 +151,30 @@ threadshare insights evidence --request evidence.json --format json
 threadshare insights mcp --stdio
 ```
 
+Agent 构造请求时，先查看 action 专属帮助，不要猜测参数组合：
+
+```bash
+threadshare insights query --help
+threadshare insights recipe --help
+threadshare insights evidence --help
+threadshare insights mcp --help
+```
+
+请求文件是随 npm 包发布的严格 JSON 契约。最小的事件查询示例：
+
+```json
+{"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
+```
+
+保存为 `query.json` 后执行：
+
+```bash
+threadshare insights query --request query.json --format json
+```
+
+下一页必须原样复用返回的 `nextCursor`；请求完整内容时，必须使用结果中的准确 revision。
+Query 和 Recipe 不会隐式执行 `sync`，首次查询或需要最新数据时先显式运行 `sync`。
+
 `sync` 会在索引不存在时创建它；索引已存在时只提交新增、变更、删除或刚被排除的 Session。
 在交互式终端中，它会把字节进度写到 stderr。只有明确需要完整原子重建或恢复 origin secret 时才使用
 `reindex`。
@@ -178,7 +202,7 @@ Agent 负责形成回答，并区分 recorded fact、derived signal、estimate �
 
 本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
 `share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，
-0.7.x 不提供本地 Insights。
+0.8.x 不提供本地 Insights。
 
 Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 必须同时报告 grouped、
 ungrouped invocation 与返回的 dedupe support；Capability 调用终态和所在 Turn 的结果必须分开陈述，
