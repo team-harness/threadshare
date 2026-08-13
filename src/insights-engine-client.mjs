@@ -31,7 +31,6 @@ import { resolveInsightsEngine } from "./insights-engine-runtime.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMIT_TIMEOUT_MS = 30 * 60 * 1_000;
-const MAX_ADAPTIVE_COMMIT_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_STDERR_LIMIT_BYTES = 16 * 1_024;
 const MAX_STDERR_LIMIT_BYTES = 1_048_576;
@@ -47,10 +46,6 @@ export class InsightsEngineClientError extends Error {
       value: options.stderr ?? "",
       enumerable: false,
     });
-    Object.defineProperty(this, "action", {
-      value: options.action ?? null,
-      enumerable: false,
-    });
   }
 }
 
@@ -62,14 +57,6 @@ function assertPositiveInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) 
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new TypeError(`${label} must be a positive integer no greater than ${maximum}`);
   }
-}
-
-function adaptiveCommitTimeoutMs(delta) {
-  const sourceSize = delta?.checkpoint?.sourceSize;
-  if (typeof sourceSize !== "string" || !/^(?:0|[1-9][0-9]*)$/u.test(sourceSize)) {
-    return DEFAULT_COMMIT_TIMEOUT_MS;
-  }
-  return MAX_ADAPTIVE_COMMIT_TIMEOUT_MS;
 }
 
 function lifecycleSessionKey(input, operation) {
@@ -126,7 +113,7 @@ function timeoutError(action, stderr) {
   return clientError(
     "TS_INSIGHTS_ENGINE_TIMEOUT",
     `Insights Engine timed out while ${action}`,
-    { action, retryable: true, stderr },
+    { retryable: true, stderr },
   );
 }
 
@@ -402,20 +389,20 @@ class InsightsEngineClient {
   #resolved;
   #timeoutMs;
   #commitTimeoutMs;
-  #adaptiveCommitTimeout;
+  #sessionTimeoutMs;
   #requestId = 2n;
   #tail = Promise.resolve();
   #closed = false;
   #broken = false;
   #closePromise = null;
 
-  constructor(transport, resolved, requiredContract, timeoutMs, commitTimeoutMs, adaptiveCommitTimeout) {
+  constructor(transport, resolved, requiredContract, timeoutMs, commitTimeoutMs, sessionTimeoutMs) {
     this.#transport = transport;
     this.#resolved = resolved;
     this.#requiredContract = requiredContract;
     this.#timeoutMs = timeoutMs;
     this.#commitTimeoutMs = commitTimeoutMs;
-    this.#adaptiveCommitTimeout = adaptiveCommitTimeout;
+    this.#sessionTimeoutMs = sessionTimeoutMs;
   }
 
   async handshake(clientVersion) {
@@ -788,9 +775,7 @@ class InsightsEngineClient {
     let began = false;
     let committed = false;
     let nextSequence = "0";
-    const sessionTimeoutMs = this.#adaptiveCommitTimeout
-      ? Math.max(this.#timeoutMs, adaptiveCommitTimeoutMs(delta))
-      : this.#timeoutMs;
+    const sessionTimeoutMs = this.#sessionTimeoutMs;
 
     try {
       for await (const message of createSessionDeltaMessages(delta, sessionOptions)) {
@@ -854,7 +839,7 @@ class InsightsEngineClient {
           requestId,
           { sessionKey: delta.session.sessionKey, deltaId: delta.deltaId },
           "waiting for SESSION_COMMITTED",
-          this.#adaptiveCommitTimeout ? Math.max(this.#commitTimeoutMs, sessionTimeoutMs) : this.#commitTimeoutMs,
+          this.#commitTimeoutMs,
         );
         committed = true;
         return {
@@ -1335,8 +1320,9 @@ export async function createInsightsEngineClient(options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const commitTimeoutMs = options.commitTimeoutMs ??
     (options.timeoutMs === undefined ? DEFAULT_COMMIT_TIMEOUT_MS : timeoutMs);
-  const adaptiveCommitTimeout = options.commitTimeoutMs === undefined &&
-    options.timeoutMs === undefined;
+  const sessionTimeoutMs = options.commitTimeoutMs === undefined && options.timeoutMs === undefined
+    ? commitTimeoutMs
+    : timeoutMs;
   const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
   const stderrLimitBytes = options.stderrLimitBytes ?? DEFAULT_STDERR_LIMIT_BYTES;
   assertPositiveInteger(timeoutMs, "timeoutMs");
@@ -1376,7 +1362,7 @@ export async function createInsightsEngineClient(options = {}) {
     options.requiredContract,
     timeoutMs,
     commitTimeoutMs,
-    adaptiveCommitTimeout,
+    sessionTimeoutMs,
   );
   try {
     await client.handshake(options.clientVersion ?? "threadshare-node@1");

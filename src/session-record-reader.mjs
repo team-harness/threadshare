@@ -39,20 +39,11 @@ function decimalOffset(value, name) {
   return offset;
 }
 
-function explicitStartOffset(value, fileSize) {
+function explicitStartOffset(value, fileSize, name = "startOffset") {
   if (value === undefined) return null;
-  const offset = typeof value === "number" ? value : decimalOffset(value, "startOffset");
+  const offset = typeof value === "number" ? value : decimalOffset(value, name);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > fileSize) {
-    throw new RangeError("startOffset is outside the current file bounds");
-  }
-  return offset;
-}
-
-function explicitEndOffset(value, fileSize, startOffset) {
-  if (value === undefined) return fileSize;
-  const offset = typeof value === "number" ? value : decimalOffset(value, "endOffset");
-  if (!Number.isSafeInteger(offset) || offset < startOffset || offset > fileSize) {
-    throw new RangeError("endOffset is outside the current file bounds");
+    throw new RangeError(`${name} is outside the current file bounds`);
   }
   return offset;
 }
@@ -245,7 +236,8 @@ export async function* streamSessionRecords(file, options = {}) {
     chunkSize,
     options.onBytesRead,
   );
-  const endOffset = explicitEndOffset(options.endOffset, fileSize, startOffset);
+  const endOffset = explicitStartOffset(options.endOffset, fileSize, "endOffset") ?? fileSize;
+  if (endOffset < startOffset) throw new RangeError("endOffset precedes startOffset");
   const diagnostics = new Map();
   let completeOffset = startOffset;
   let lineStart = startOffset;

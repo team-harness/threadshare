@@ -340,9 +340,7 @@ export async function reindexInsightsState(options = {}) {
             bytesProcessed: report?.index?.bytesProcessed ?? "0",
             bytesTotal: report?.index?.bytesTotal ?? "0",
           }))).catch(() => {});
-        } catch {
-          // Candidate installation cannot be undone by a progress observer.
-        }
+        } catch {}
       }
     } catch (error) {
       if (await fileStat(swap.manifest) !== null) {

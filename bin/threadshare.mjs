@@ -767,10 +767,10 @@ function insightsFailure(error, action) {
     const failed = Number.isSafeInteger(summary?.failed) ? summary.failed : "unknown";
     return cliDiagnostic(
       error.code,
-      `Insights reindex did not complete: ${failed} failed session operation(s). Diagnostics: ${diagnostics}.`,
+      `Insights reindex failed for ${failed} session operation(s): ${diagnostics}.`,
       {
         command: "insights",
-        next: "Retry `threadshare insights sync`; if the diagnostic recurs, use its provider/error-code summary to resolve the failing source or storage condition.",
+        next: "Retry `threadshare insights sync`; if it recurs, resolve the reported provider/error code.",
       },
     );
   }

@@ -902,8 +902,6 @@ function diagnosticForItem(code, item, error) {
     provider: source.provider,
     sessionId: source.sessionId.toLowerCase(),
     errorCode: typeof error?.code === "string" ? error.code : null,
-    errorAction: typeof error?.action === "string" ? error.action : null,
-    errorName: typeof error?.name === "string" ? error.name : null,
   };
 }
 

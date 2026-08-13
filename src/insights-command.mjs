@@ -60,20 +60,7 @@ function incompleteIndexError(index) {
     "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "Insights candidate contains failed session operations",
   );
-  Object.defineProperty(error, "failureSummary", {
-    value: failureSummary,
-    enumerable: false,
-  });
-  Object.defineProperty(error, "failureSamples", {
-    value: Object.freeze((index.diagnostics ?? []).slice(0, 8).map((diagnostic) => Object.freeze({
-      provider: diagnostic.provider ?? "unknown",
-      sessionId: diagnostic.sessionId ?? null,
-      errorCode: diagnostic.errorCode ?? null,
-      errorAction: diagnostic.errorAction ?? null,
-      errorName: diagnostic.errorName ?? null,
-    }))),
-    enumerable: false,
-  });
+  Object.defineProperty(error, "failureSummary", { value: failureSummary });
   return error;
 }
 
@@ -141,17 +128,13 @@ function mergeReindexRetryReport(index, committedSourceKeys) {
 
 function notifyProgress(options, phase, index = null) {
   if (typeof options.onProgress !== "function") return;
-  const bytesProcessed = index?.bytesProcessed ?? "0";
-  const bytesTotal = index?.bytesTotal ?? "0";
   try {
     void Promise.resolve(options.onProgress(Object.freeze({
       phase,
-      bytesProcessed,
-      bytesTotal,
+      bytesProcessed: index?.bytesProcessed ?? "0",
+      bytesTotal: index?.bytesTotal ?? "0",
     }))).catch(() => {});
-  } catch {
-    // Progress observers cannot affect reconciliation or commit ordering.
-  }
+  } catch {}
 }
 
 async function waitForSourceChangedRetry(signal) {
@@ -558,9 +541,12 @@ function exclusionResult(config) {
 
 function defaultServices(options) {
   const paths = options.paths ?? resolveInsightsPaths(options);
-  const statusTimeoutMs = options.lifecycleOptions?.timeoutMs ?? 300_000;
   return {
-    status: () => inspectInsightsState({ ...options.lifecycleOptions, paths, timeoutMs: statusTimeoutMs }),
+    status: () => inspectInsightsState({
+      ...options.lifecycleOptions,
+      paths,
+      timeoutMs: options.lifecycleOptions?.timeoutMs ?? 300_000,
+    }),
     reset: () => resetInsightsState({ ...options.lifecycleOptions, paths }),
     loadConfig: () => loadInsightsConfig({ ...options.configOptions, paths }),
     updateExclusion: (change) =>
@@ -701,12 +687,8 @@ export function createInsightsProgressReporter({ format = "text", stream = proce
       const percent = total === 0n
         ? 100n
         : (processed * 100n / total > 100n ? 100n : processed * 100n / total);
-      const phase = progress?.phase === "finalizing"
-        ? "finalizing"
-        : progress?.phase === "ready"
-          ? "ready"
-          : "indexing";
-      const displayedPercent = phase !== "ready" && percent >= 100n ? 99n : percent;
+      const phase = ["finalizing", "ready"].includes(progress?.phase) ? progress.phase : "indexing";
+      const displayedPercent = phase === "ready" || percent < 100n ? percent : 99n;
       stream.write(
         `\rInsights ${phase}: ${displayedPercent}% (${formatByteCount(processed)} / ${formatByteCount(total)})`,
       );
