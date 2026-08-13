@@ -322,6 +322,17 @@ function registryPackageUrl(packageName) {
   return `${REGISTRY_URL}/${encodedName}`;
 }
 
+function registryVersionUrl(packageName, version) {
+  return `${registryPackageUrl(packageName)}/${encodeURIComponent(version)}`;
+}
+
+function registryDistTagsUrl(packageName) {
+  const encodedName = packageName.startsWith("@")
+    ? packageName.replace("/", "%2f")
+    : encodeURIComponent(packageName);
+  return `${REGISTRY_URL}/-/package/${encodedName}/dist-tags`;
+}
+
 function defaultSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -366,6 +377,120 @@ export async function fetchPackument({
     }
   }
   throw new Error(`registry packument probe failed after ${maxAttempts} attempt(s): ${lastError.message}`);
+}
+
+/**
+ * The full packument is CDN-cached for several minutes after a publish. The
+ * version endpoint is the authoritative, low-latency publication probe and is
+ * intentionally separate so release retries do not mistake stale tags for a
+ * missing package.
+ */
+export async function fetchPublishedVersion({
+  packageName,
+  version,
+  fetchImpl = globalThis.fetch,
+  maxAttempts = 4,
+  sleep = defaultSleep,
+  retryDelay = (attempt) => Math.min(1_000 * 2 ** attempt, 10_000),
+  allowMissing = false,
+} = {}) {
+  if (
+    typeof packageName !== "string" ||
+    typeof version !== "string" ||
+    typeof fetchImpl !== "function" ||
+    !Number.isInteger(maxAttempts) ||
+    maxAttempts < 1
+  ) {
+    throw new Error("registry version probe configuration is invalid");
+  }
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetchImpl(registryVersionUrl(packageName, version), {
+        headers: {
+          accept: "application/json",
+          "cache-control": "no-cache, no-store",
+          pragma: "no-cache",
+        },
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (allowMissing && response.status === 404) return null;
+      if (response.status !== 200) {
+        throw new Error(`registry version probe returned HTTP ${response.status}`);
+      }
+      let document;
+      try {
+        document = await response.json();
+      } catch (error) {
+        throw new Error(`registry version probe returned invalid JSON: ${error.message}`);
+      }
+      if (
+        !document ||
+        typeof document !== "object" ||
+        Array.isArray(document) ||
+        document.name !== packageName ||
+        document.version !== version
+      ) {
+        throw new Error("registry version probe returned mismatched package metadata");
+      }
+      return document;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < maxAttempts) await sleep(retryDelay(attempt));
+    }
+  }
+  throw new Error(`registry version probe failed after ${maxAttempts} attempt(s): ${lastError.message}`);
+}
+
+export async function fetchPublishedDistTags({
+  packageName,
+  fetchImpl = globalThis.fetch,
+  maxAttempts = 4,
+  sleep = defaultSleep,
+  retryDelay = (attempt) => Math.min(1_000 * 2 ** attempt, 10_000),
+} = {}) {
+  if (
+    typeof packageName !== "string" ||
+    typeof fetchImpl !== "function" ||
+    !Number.isInteger(maxAttempts) ||
+    maxAttempts < 1
+  ) {
+    throw new Error("registry dist-tags probe configuration is invalid");
+  }
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetchImpl(registryDistTagsUrl(packageName), {
+        headers: {
+          accept: "application/json",
+          "cache-control": "no-cache, no-store",
+          pragma: "no-cache",
+        },
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.status !== 200) {
+        throw new Error(`registry dist-tags probe returned HTTP ${response.status}`);
+      }
+      const document = await response.json();
+      if (!document || typeof document !== "object" || Array.isArray(document)) {
+        throw new Error("registry dist-tags probe returned invalid JSON");
+      }
+      for (const [tag, version] of Object.entries(document)) {
+        if (typeof tag !== "string" || typeof version !== "string") {
+          throw new Error("registry dist-tags probe returned invalid tag metadata");
+        }
+      }
+      return document;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < maxAttempts) await sleep(retryDelay(attempt));
+    }
+  }
+  throw new Error(`registry dist-tags probe failed after ${maxAttempts} attempt(s): ${lastError.message}`);
 }
 
 async function readJson(filePath) {

@@ -13,7 +13,7 @@ import {
 } from "./publish-insights-release.mjs";
 import { inspectPlatformTarball } from "./package-insights-release.mjs";
 import {
-  fetchPackument,
+  fetchPublishedVersion,
   validatePublishedRelease,
 } from "./verify-release.mjs";
 import {
@@ -49,18 +49,26 @@ export async function fetchExistingInsightsEngine({
   const target = INSIGHTS_ENGINE_TARGETS.find((candidate) => candidate.target === targetName);
   if (!target) throw new TypeError("target is unsupported");
   const packageName = insightsEnginePackageName(target.target);
-  const packument = await fetchPackument({
+  // Probe the immutable version endpoint first. It avoids a stale full
+  // packument and lets a missing target return immediately without waiting
+  // for CDN retries.
+  const published = await fetchPublishedVersion({
     packageName,
+    version,
     allowMissing: true,
     fetchImpl,
     maxAttempts: 4,
     sleep,
   });
-  const published = packument.versions?.[version];
   if (!published) {
     await writeGithubOutput(githubOutput, false);
     return { exists: false, packageName, target: target.target, version };
   }
+  const packument = {
+    name: packageName,
+    "dist-tags": {},
+    versions: { [version]: published },
+  };
   const integrity = published.dist?.integrity;
   const provenanceDocument = await fetchProvenance(
     published.dist?.attestations?.url,

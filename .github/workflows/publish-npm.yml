@@ -335,6 +335,26 @@ jobs:
         with:
           subject-path: release-artifacts/*
 
+      - name: Smoke the exact staged root and Linux Engine before publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT_TARBALL="$(node -e "const m=require('./release-artifacts/release-manifest.json');process.stdout.write(m.packages.find((p)=>p.kind==='root').tarball)")"
+          ENGINE_TARBALL="$(node -e "const m=require('./release-artifacts/release-manifest.json');process.stdout.write(m.packages.find((p)=>p.target==='linux-x64').tarball)")"
+          CONSUMER="$RUNNER_TEMP/threadshare-staged-consumer"
+          mkdir -p "$CONSUMER"
+          npm install --prefix "$CONSUMER" \
+            "./release-artifacts/$ROOT_TARBALL" \
+            --ignore-scripts --omit=optional --no-audit --no-fund --prefer-online \
+            --cache "$RUNNER_TEMP/threadshare-staged-npm-cache" \
+            --registry=https://registry.npmjs.org
+          PLATFORM_DIR="$CONSUMER/node_modules/@team-harness/threadshare-linux-x64"
+          mkdir -p "$PLATFORM_DIR"
+          tar -xzf "release-artifacts/$ENGINE_TARBALL" -C "$PLATFORM_DIR" --strip-components=1
+          node scripts/smoke-installed-insights.mjs \
+            --prefix "$CONSUMER" \
+            --version "$RELEASE_TAG"
+
       - name: Upload immutable release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -439,9 +459,38 @@ jobs:
         run: |
           set -euo pipefail
           ROOT_TARBALL="$(node -e "const m=require('./release-artifacts/release-manifest.json');process.stdout.write(m.packages.find((p)=>p.kind==='root').tarball)")"
-          mkdir -p "$RUNNER_TEMP/threadshare-consumer"
-          npm install --prefix "$RUNNER_TEMP/threadshare-consumer" "./release-artifacts/$ROOT_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org
+          CONSUMER="$RUNNER_TEMP/threadshare-consumer"
+          CACHE="$RUNNER_TEMP/threadshare-consumer-npm-cache"
+          ENGINE_PACKAGE="@team-harness/threadshare-${{ matrix.target }}"
+          installed=false
+          for attempt in 1 2 3 4 5 6 7 8; do
+            rm -rf "$CONSUMER"
+            mkdir -p "$CONSUMER"
+            rm -rf "$CACHE"
+            if npm install --prefix "$CONSUMER" \
+              "./release-artifacts/$ROOT_TARBALL" \
+              --ignore-scripts --omit=optional --no-audit --no-fund --prefer-online --cache "$CACHE" \
+              --registry=https://registry.npmjs.org; then
+              installed=true
+              break
+            fi
+            if [[ "$attempt" != 8 ]]; then
+              sleep $((attempt < 4 ? attempt * 10 : 60))
+            fi
+          done
+          test "$installed" = true
           if [[ "${{ matrix.smoke }}" == "insights" ]]; then
+            ENGINE_PACK="$RUNNER_TEMP/threadshare-engine-pack"
+            rm -rf "$ENGINE_PACK"
+            mkdir -p "$ENGINE_PACK"
+            ENGINE_TARBALL="$ENGINE_PACK/engine.tgz"
+            node scripts/fetch-published-tarball.mjs \
+              --package "$ENGINE_PACKAGE" \
+              --version "$RELEASE_TAG" \
+              --output "$ENGINE_TARBALL"
+            npm install --prefix "$CONSUMER" "$ENGINE_TARBALL" \
+              --ignore-scripts --no-audit --no-fund --prefer-online --cache "$CACHE" \
+              --registry=https://registry.npmjs.org
             node scripts/smoke-installed-insights.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"
           else
             node scripts/smoke-installed-core.mjs --prefix "$RUNNER_TEMP/threadshare-consumer" --version "$RELEASE_TAG"

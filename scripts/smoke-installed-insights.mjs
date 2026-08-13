@@ -73,7 +73,12 @@ function validateInstalledQuery(validators, value) {
   }
 }
 
-export async function smokeInstalledAgentQueries({ rootDirectory, createInsightsEngineClient, protocol }) {
+export async function smokeInstalledAgentQueries({
+  rootDirectory,
+  createInsightsEngineClient,
+  protocol,
+  runtimeOptions = undefined,
+}) {
   const stateDirectory = await mkdtemp(path.join(os.tmpdir(), "threadshare-agent-insights-smoke-"));
   try {
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -86,10 +91,17 @@ export async function smokeInstalledAgentQueries({ rootDirectory, createInsights
       new URL("../test/fixtures/insights-fact-mutations/v1-basic.json", import.meta.url),
       "utf8",
     ));
-    const { assertSessionFactsDelta, canonicalJson, hashKey } = await import(
+    const { assertSessionFactsDeltaV2, canonicalJson, hashKey } = await import(
       pathToFileURL(path.join(rootDirectory, "src", "session-facts.mjs")).href
     );
     const delta = structuredClone(fixture.initial);
+    delta.format = "session-facts-delta@v2";
+    delta.factSchemaVersion = 2;
+    delta.providerAdapterVersion = "codex@2";
+    delta.privacyPolicyVersion = 2;
+    delta.historyEvents = [];
+    delta.historyPayloads = [];
+    delta.historyPayloadChunks = [];
     const mutation = structuredClone(delta);
     delete mutation.deltaId;
     const mutationDigest = createHash("sha256").update(canonicalJson(mutation)).digest();
@@ -106,11 +118,12 @@ export async function smokeInstalledAgentQueries({ rootDirectory, createInsights
     const client = await createInsightsEngineClient({
       databasePath: path.join(stateDirectory, "insights.sqlite3"),
       requiredContract: protocol.createInsightsRequiredContract(SMOKE_ORIGIN_SECRET_EPOCH),
+      runtimeOptions,
       timeoutMs: 10_000,
       commitTimeoutMs: 30_000,
     });
     try {
-      await client.applySessionFacts(assertSessionFactsDelta(delta));
+      await client.applySessionFacts(assertSessionFactsDeltaV2(delta));
     } finally {
       await client.close();
     }
@@ -165,7 +178,12 @@ export async function smokeInstalledAgentQueries({ rootDirectory, createInsights
   }
 }
 
-export async function smokeInstalledInsights({ prefix, version, runAgentQuerySmoke = smokeInstalledAgentQueries }) {
+export async function smokeInstalledInsights({
+  prefix,
+  version,
+  runtimeOptions = undefined,
+  runAgentQuerySmoke = smokeInstalledAgentQueries,
+}) {
   const scopeDirectory = path.join(path.resolve(prefix), "node_modules", "@team-harness");
   const rootDirectory = path.join(scopeDirectory, "threadshare");
   const packageDocument = JSON.parse(await readFile(path.join(rootDirectory, "package.json"), "utf8"));
@@ -191,10 +209,16 @@ export async function smokeInstalledInsights({ prefix, version, runAgentQuerySmo
   }
   const client = await createInsightsEngineClient({
     requiredContract: protocol.createInsightsRequiredContract(SMOKE_ORIGIN_SECRET_EPOCH),
+    runtimeOptions,
     timeoutMs: 5_000,
   });
   await client.close();
-  const agentQueries = await runAgentQuerySmoke({ rootDirectory, createInsightsEngineClient, protocol });
+  const agentQueries = await runAgentQuerySmoke({
+    rootDirectory,
+    createInsightsEngineClient,
+    protocol,
+    runtimeOptions,
+  });
   return { packageName: packageDocument.name, target: target.target, version, agentQueries };
 }
 

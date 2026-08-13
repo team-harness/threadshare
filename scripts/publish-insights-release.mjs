@@ -16,6 +16,8 @@ import { INSIGHTS_ENGINE_RELEASE_TARGETS } from "../src/insights-engine-targets.
 import {
   decidePublish,
   fetchPackument,
+  fetchPublishedDistTags,
+  fetchPublishedVersion,
   validatePublishedRelease,
 } from "./verify-release.mjs";
 
@@ -115,6 +117,9 @@ export async function verifyRegistryAttestations({
         "--no-fund",
         "--force",
         "--save-exact",
+        "--prefer-online",
+        "--cache",
+        path.join(directory, "npm-cache"),
         `--registry=${REGISTRY}`,
       ],
       { cwd: directory, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
@@ -126,6 +131,8 @@ export async function verifyRegistryAttestations({
         "signatures",
         "--json",
         "--include-attestations",
+        "--cache",
+        path.join(directory, "npm-cache"),
         `--registry=${REGISTRY}`,
       ],
       { cwd: directory, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
@@ -135,23 +142,50 @@ export async function verifyRegistryAttestations({
   }
 }
 
-async function confirmPackage(item, manifest, fetchImpl, auditExec, npmCommand) {
+function mergePublishedVersion(packument, packageName, version, published) {
+  return {
+    name: packageName,
+    "dist-tags": { ...(packument?.["dist-tags"] ?? {}) },
+    versions: { ...(packument?.versions ?? {}), [version]: published },
+  };
+}
+
+async function confirmPackage(
+  item,
+  manifest,
+  fetchImpl,
+  auditExec,
+  npmCommand,
+  { maxAttempts = 12, sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) } = {},
+) {
   let lastError;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      const packument = await fetchPackument({
+      // npm's full packument is CDN-cached after publish. Probe the immutable
+      // version endpoint first, then merge it into the packument used by the
+      // existing provenance/integrity validators.
+      const published = await fetchPublishedVersion({
         packageName: item.packageName,
-        allowMissing: item.kind === "platform",
+        version: manifest.version,
         fetchImpl,
         maxAttempts: 1,
       });
+      // Platform packages do not require the mutable `latest` tag for
+      // confirmation. Avoid the CDN-cached full packument entirely; the
+      // immutable version document plus tarball/provenance is sufficient.
+      const packument = {
+        name: item.packageName,
+        "dist-tags": item.kind === "root"
+          ? await fetchPublishedDistTags({ packageName: item.packageName, fetchImpl, maxAttempts: 1 })
+          : {},
+        versions: { [manifest.version]: published },
+      };
       await verifyRegistryAttestations({
         packageName: item.packageName,
         version: manifest.version,
         npmCommand,
         exec: auditExec,
       });
-      const published = packument.versions[manifest.version];
       const provenanceDocument = await fetchProvenance(published?.dist?.attestations?.url, fetchImpl);
       const provenance = validateNpmProvenance(provenanceDocument, {
         integrity: published.dist.integrity,
@@ -169,10 +203,12 @@ async function confirmPackage(item, manifest, fetchImpl, auditExec, npmCommand) 
       });
     } catch (error) {
       lastError = error;
-      if (attempt + 1 < 8) await new Promise((resolve) => setTimeout(resolve, 2_000 * (attempt + 1)));
+      if (attempt + 1 < maxAttempts) {
+        await sleep(Math.min(5_000 * 2 ** attempt, 60_000));
+      }
     }
   }
-  throw new Error(`${item.packageName} registry confirmation failed: ${lastError.message}`);
+  throw new Error(`${item.packageName} registry confirmation failed after ${maxAttempts} attempt(s): ${lastError.message}`);
 }
 
 async function inspectPublishedPlatform({
@@ -236,18 +272,52 @@ export async function publishReleaseArtifacts({
     runId,
     runAttempt,
   });
-  const outcomes = [];
   const packages = kind === "all"
     ? manifest.packages
     : manifest.packages.filter((item) => item.kind === kind);
   if (packages.length === 0) throw new Error(`release manifest has no ${kind} packages`);
+  const publishEntries = [];
   for (const item of packages) {
-    const packument = await fetchPackument({
-      packageName: item.packageName,
-      allowMissing: item.kind === "platform",
-      fetchImpl,
-    });
-    const decision = decidePublish({
+    let publishedVersion = null;
+    try {
+      // The immutable endpoint is authoritative for an exact-version rerun
+      // and avoids waiting on the CDN-cached full packument.
+      publishedVersion = await fetchPublishedVersion({
+        packageName: item.packageName,
+        version,
+        allowMissing: true,
+        fetchImpl,
+        maxAttempts: 1,
+      });
+    } catch {
+      // Fall back to the full packument for a transient endpoint failure.
+    }
+    let packument;
+    if (publishedVersion && item.kind === "platform") {
+      packument = mergePublishedVersion(null, item.packageName, version, publishedVersion);
+    } else if (publishedVersion && item.kind === "root") {
+      try {
+        packument = {
+          name: item.packageName,
+          "dist-tags": await fetchPublishedDistTags({
+            packageName: item.packageName,
+            fetchImpl,
+            maxAttempts: 1,
+          }),
+          versions: { [version]: publishedVersion },
+        };
+      } catch {
+        packument = await fetchPackument({ packageName: item.packageName, fetchImpl });
+        packument = mergePublishedVersion(packument, item.packageName, version, publishedVersion);
+      }
+    } else {
+      packument = await fetchPackument({
+        packageName: item.packageName,
+        allowMissing: item.kind === "platform",
+        fetchImpl,
+      });
+    }
+    let decision = decidePublish({
       packument,
       packageName: item.packageName,
       version,
@@ -276,10 +346,19 @@ export async function publishReleaseArtifacts({
         fetchImpl,
       });
     }
-    const confirmed = await confirmPackage(item, manifest, fetchImpl, auditExec, npmCommand);
-    outcomes.push({ packageName: item.packageName, published: decision.shouldPublish, ...confirmed });
+    publishEntries.push({ item, decision });
   }
-  return outcomes;
+  const confirmations = await Promise.all(
+    publishEntries.map(({ item }) => confirmPackage(item, manifest, fetchImpl, auditExec, npmCommand)),
+  );
+  return [
+    ...publishEntries.map(({ item, decision }, index) => ({
+      packageName: item.packageName,
+      published: decision.shouldPublish,
+      ...confirmations[index],
+      latest: confirmations[index].latest ?? decision.latest ?? null,
+    })),
+  ];
 }
 
 function parseArguments(argv) {

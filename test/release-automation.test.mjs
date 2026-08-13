@@ -15,6 +15,8 @@ import {
   compareStableVersions,
   decidePublish,
   fetchPackument,
+  fetchPublishedDistTags,
+  fetchPublishedVersion,
   npmPackFilename,
   parseArguments,
   validatePackOutput,
@@ -24,6 +26,7 @@ import {
 } from "../scripts/verify-release.mjs";
 import { validateSkillDirectory } from "../scripts/validate-skill.mjs";
 import { fetchExistingInsightsEngine } from "../scripts/fetch-existing-insights-engine.mjs";
+import { fetchPublishedTarball } from "../scripts/fetch-published-tarball.mjs";
 import {
   createBuildManifest,
   createPlatformManifest,
@@ -606,6 +609,116 @@ test("registry probing accepts only a successful JSON packument", async () => {
   }
 });
 
+test("registry version probing bypasses stale full-packument propagation", async () => {
+  const packageName = "@team-harness/threadshare-linux-x64";
+  const version = "0.8.0";
+  let request;
+  const published = {
+    name: packageName,
+    version,
+    dist: { integrity: "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" },
+  };
+  const result = await fetchPublishedVersion({
+    packageName,
+    version,
+    maxAttempts: 1,
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return Response.json(published);
+    },
+  });
+  assert.deepEqual(result, published);
+  assert.equal(
+    request.url,
+    `https://registry.npmjs.org/${packageName.replace("/", "%2f")}/${version}`,
+  );
+  assert.equal(request.options.cache, "no-store");
+  assert.equal(request.options.headers["cache-control"], "no-cache, no-store");
+});
+
+test("registry dist-tags probing avoids the full packument during root confirmation", async () => {
+  let request;
+  const packageName = "@team-harness/threadshare";
+  const tags = { latest: "0.8.0" };
+  const result = await fetchPublishedDistTags({
+    packageName,
+    maxAttempts: 1,
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return Response.json(tags);
+    },
+  });
+  assert.deepEqual(result, tags);
+  assert.equal(
+    request.url,
+    "https://registry.npmjs.org/-/package/@team-harness%2fthreadshare/dist-tags",
+  );
+  assert.equal(request.options.cache, "no-store");
+});
+
+test("published tarball helper verifies immutable bytes before writing", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-published-tarball-"));
+  const outputPath = path.join(fixture, "engine.tgz");
+  const packageName = "@team-harness/threadshare-darwin-arm64";
+  const version = "0.8.0";
+  const bytes = Buffer.from("deterministic release tarball");
+  const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+  const versionDocument = {
+    name: packageName,
+    version,
+    dist: {
+      integrity,
+      tarball: `https://registry.npmjs.org/${packageName.replace("/", "%2f")}/-/threadshare-darwin-arm64-${version}.tgz`,
+    },
+  };
+  try {
+    const result = await fetchPublishedTarball({
+      packageName,
+      version,
+      outputPath,
+      maxAttempts: 1,
+      fetchImpl: async (url) => url.endsWith(`/${version}`)
+        ? Response.json(versionDocument)
+        : new Response(bytes),
+    });
+    assert.equal(result.integrity, integrity);
+    assert.deepEqual(await readFile(outputPath), bytes);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("published tarball helper rejects bytes that do not match registry integrity", async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-published-tarball-invalid-"));
+  const outputPath = path.join(fixture, "engine.tgz");
+  const packageName = "@team-harness/threadshare-darwin-arm64";
+  const version = "0.8.0";
+  try {
+    await assert.rejects(
+      fetchPublishedTarball({
+        packageName,
+        version,
+        outputPath,
+        maxAttempts: 1,
+        fetchImpl: async (url) => url.endsWith(`/${version}`)
+          ? Response.json({
+            name: packageName,
+            version,
+            dist: {
+              integrity: "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              tarball: `https://registry.npmjs.org/${packageName}/-/threadshare-darwin-arm64-${version}.tgz`,
+            },
+          })
+          : new Response("tampered"),
+      }),
+      /tarball integrity is invalid/,
+    );
+    await assert.rejects(readFile(outputPath), { code: "ENOENT" });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("platform registry probing accepts the bootstrap and not-yet-created states", async () => {
   const packageName = "@team-harness/threadshare-linux-arm64";
   const missing = await fetchPackument({
@@ -678,7 +791,7 @@ test("missing platform probe records the build path without creating package sta
   }
 });
 
-test("platform build probe retries four transient registry failures", async () => {
+test("platform build probe retries the immutable version endpoint", async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), "threadshare-engine-retry-"));
   let attempts = 0;
   try {
@@ -828,6 +941,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
     for (const item of packages.filter((candidate) => candidate.kind === "platform")) {
       const tarballBytes = await readFile(path.join(artifactDirectory, item.tarball));
       const packageUrl = `https://registry.npmjs.org/${item.packageName.replace("/", "%2f")}`;
+      const versionUrl = `${packageUrl}/${version}`;
       const tarballUrl = `https://registry.npmjs.org/${item.target}/${version}.tgz`;
       const attestationsUrl = `https://registry.npmjs.org/-/npm/v1/attestations/${item.target}`;
       const statement = {
@@ -847,7 +961,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
           },
         },
       };
-      responses.set(packageUrl, () => Response.json({
+      const packageDocument = {
         name: item.packageName,
         "dist-tags": { latest: version },
         versions: {
@@ -862,6 +976,12 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
             },
           },
         },
+      };
+      responses.set(packageUrl, () => Response.json(packageDocument));
+      responses.set(versionUrl, () => Response.json(packageDocument.versions[version] && {
+        name: item.packageName,
+        version,
+        ...packageDocument.versions[version],
       }));
       responses.set(tarballUrl, () => new Response(tarballBytes));
       responses.set(attestationsUrl, () => Response.json({
@@ -894,7 +1014,7 @@ test("publish rechecks a platform tarball when build saw 404 and publish sees 20
     });
     assert.equal(publishCalls, 0);
     assert.equal(outcomes.length, INSIGHTS_ENGINE_RELEASE_TARGETS.length);
-    assert.ok(outcomes.every((outcome) => outcome.latest === version && !outcome.published));
+    assert.ok(outcomes.every((outcome) => outcome.latest === null && !outcome.published));
     assert.deepEqual(fetchedTarballs.sort(), [...tarballUrls].sort());
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -919,6 +1039,7 @@ test("release-time modules import from a clean tree without node_modules", async
     "scripts/smoke-insights-engine.mjs",
     "scripts/smoke-installed-core.mjs",
     "scripts/smoke-installed-insights.mjs",
+    "scripts/fetch-published-tarball.mjs",
   ];
   try {
     for (const relative of modulePaths) {
@@ -1205,9 +1326,31 @@ test("workflow builds, signs, stages, and publishes one attempt-scoped release b
   assert.match(packageCommands, /cmp "\$RUNNER_TEMP\/root-pack-a/);
   assert.match(packageCommands, /package-insights-release\.mjs pack/);
   assert.match(packageCommands, /package-insights-release\.mjs verify/);
+  assert.match(packageCommands, /smoke-installed-insights\.mjs/);
+  assert.match(packageCommands, /--omit=optional/);
+  assert.match(packageCommands, /tar -xzf/);
+  const stagedSmokeStep = packageRelease.steps.find(
+    (step) => step.name === "Smoke the exact staged root and Linux Engine before publish",
+  );
+  assert.ok(stagedSmokeStep);
+  assert.match(stagedSmokeStep.run, /smoke-installed-insights\.mjs/);
+  const bundleUploadStep = packageRelease.steps.find(
+    (step) => step.name === "Upload immutable release bundle",
+  );
+  assert.ok(bundleUploadStep);
+  assert.ok(
+    packageRelease.steps.indexOf(stagedSmokeStep) < packageRelease.steps.indexOf(bundleUploadStep),
+    "staged smoke must pass before the immutable bundle is uploaded",
+  );
   assert.match(platformCommands, /publish-insights-release\.mjs/);
   assert.match(platformCommands, /--kind platform/);
   assert.match(consumerCommands, /npm install --prefix/);
+  assert.match(consumerCommands, /--omit=optional/);
+  assert.match(consumerCommands, /fetch-published-tarball\.mjs/);
+  assert.match(consumerCommands, /ENGINE_TARBALL=/);
+  assert.match(consumerCommands, /--prefer-online/);
+  assert.match(consumerCommands, /--cache "\$CACHE"/);
+  assert.match(consumerCommands, /for attempt in 1 2 3 4 5 6 7 8/);
   assert.match(consumerCommands, /smoke-installed-insights/);
   assert.match(consumerCommands, /smoke-installed-core/);
   assert.match(rootCommands, /publish-insights-release\.mjs/);
