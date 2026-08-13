@@ -333,6 +333,17 @@ export async function reindexInsightsState(options = {}) {
       await syncGroup(swap.candidateDatabase);
       if (typeof options.stopEngine === "function") await options.stopEngine();
       await installCandidate(paths, swap, regenerateSecret, options);
+      if (typeof options.onProgress === "function") {
+        try {
+          void Promise.resolve(options.onProgress(Object.freeze({
+            phase: "ready",
+            bytesProcessed: report?.index?.bytesProcessed ?? "0",
+            bytesTotal: report?.index?.bytesTotal ?? "0",
+          }))).catch(() => {});
+        } catch {
+          // Candidate installation cannot be undone by a progress observer.
+        }
+      }
     } catch (error) {
       if (await fileStat(swap.manifest) !== null) {
         await recoverInsightsReindexSwap({ ...options, paths });

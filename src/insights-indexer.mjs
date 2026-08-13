@@ -830,8 +830,14 @@ async function captureSourceState(item, delta, dependencies) {
   };
   if (
     checkpoint?.sourceSnapshotStable !== true ||
-    !sameMetadata(before, item.metadata) ||
-    !sameMetadata(before, committedMetadata)
+    item.metadata.dev !== committedMetadata.dev ||
+    item.metadata.ino !== committedMetadata.ino ||
+    BigInt(committedMetadata.size) < BigInt(item.metadata.size) ||
+    (committedMetadata.size === item.metadata.size &&
+      committedMetadata.mtimeNs !== item.metadata.mtimeNs) ||
+    before.dev !== committedMetadata.dev ||
+    before.ino !== committedMetadata.ino ||
+    BigInt(before.size) < BigInt(committedMetadata.size)
   ) {
     throw sourceChangedError();
   }
@@ -858,7 +864,11 @@ async function captureSourceState(item, delta, dependencies) {
     };
   }
   const after = normalizeMetadata(await dependencies.statSource(item.source.file));
-  if (!sameMetadata(after, before)) {
+  if (
+    after.dev !== committedMetadata.dev ||
+    after.ino !== committedMetadata.ino ||
+    BigInt(after.size) < BigInt(committedMetadata.size)
+  ) {
     throw sourceChangedError();
   }
   return {
@@ -892,6 +902,8 @@ function diagnosticForItem(code, item, error) {
     provider: source.provider,
     sessionId: source.sessionId.toLowerCase(),
     errorCode: typeof error?.code === "string" ? error.code : null,
+    errorAction: typeof error?.action === "string" ? error.action : null,
+    errorName: typeof error?.name === "string" ? error.name : null,
   };
 }
 

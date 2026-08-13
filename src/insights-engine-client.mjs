@@ -30,7 +30,8 @@ import {
 import { resolveInsightsEngine } from "./insights-engine-runtime.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_COMMIT_TIMEOUT_MS = 120_000;
+const DEFAULT_COMMIT_TIMEOUT_MS = 30 * 60 * 1_000;
+const MAX_ADAPTIVE_COMMIT_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_STDERR_LIMIT_BYTES = 16 * 1_024;
 const MAX_STDERR_LIMIT_BYTES = 1_048_576;
@@ -46,6 +47,10 @@ export class InsightsEngineClientError extends Error {
       value: options.stderr ?? "",
       enumerable: false,
     });
+    Object.defineProperty(this, "action", {
+      value: options.action ?? null,
+      enumerable: false,
+    });
   }
 }
 
@@ -57,6 +62,14 @@ function assertPositiveInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) 
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new TypeError(`${label} must be a positive integer no greater than ${maximum}`);
   }
+}
+
+function adaptiveCommitTimeoutMs(delta) {
+  const sourceSize = delta?.checkpoint?.sourceSize;
+  if (typeof sourceSize !== "string" || !/^(?:0|[1-9][0-9]*)$/u.test(sourceSize)) {
+    return DEFAULT_COMMIT_TIMEOUT_MS;
+  }
+  return MAX_ADAPTIVE_COMMIT_TIMEOUT_MS;
 }
 
 function lifecycleSessionKey(input, operation) {
@@ -113,7 +126,7 @@ function timeoutError(action, stderr) {
   return clientError(
     "TS_INSIGHTS_ENGINE_TIMEOUT",
     `Insights Engine timed out while ${action}`,
-    { retryable: true, stderr },
+    { action, retryable: true, stderr },
   );
 }
 
@@ -389,18 +402,20 @@ class InsightsEngineClient {
   #resolved;
   #timeoutMs;
   #commitTimeoutMs;
+  #adaptiveCommitTimeout;
   #requestId = 2n;
   #tail = Promise.resolve();
   #closed = false;
   #broken = false;
   #closePromise = null;
 
-  constructor(transport, resolved, requiredContract, timeoutMs, commitTimeoutMs) {
+  constructor(transport, resolved, requiredContract, timeoutMs, commitTimeoutMs, adaptiveCommitTimeout) {
     this.#transport = transport;
     this.#resolved = resolved;
     this.#requiredContract = requiredContract;
     this.#timeoutMs = timeoutMs;
     this.#commitTimeoutMs = commitTimeoutMs;
+    this.#adaptiveCommitTimeout = adaptiveCommitTimeout;
   }
 
   async handshake(clientVersion) {
@@ -773,6 +788,9 @@ class InsightsEngineClient {
     let began = false;
     let committed = false;
     let nextSequence = "0";
+    const sessionTimeoutMs = this.#adaptiveCommitTimeout
+      ? Math.max(this.#timeoutMs, adaptiveCommitTimeoutMs(delta))
+      : this.#timeoutMs;
 
     try {
       for await (const message of createSessionDeltaMessages(delta, sessionOptions)) {
@@ -789,7 +807,7 @@ class InsightsEngineClient {
           }
           throwIfAborted(signal, this.#transport.stderr);
           began = true;
-          await this.#transport.write(message, "sending BEGIN_SESSION", this.#timeoutMs);
+          await this.#transport.write(message, "sending BEGIN_SESSION", sessionTimeoutMs);
           await this.#expect(
             "SESSION_ACCEPTED",
             requestId,
@@ -799,7 +817,7 @@ class InsightsEngineClient {
               nextSequence: "0",
             },
             "waiting for SESSION_ACCEPTED",
-            this.#timeoutMs,
+            sessionTimeoutMs,
           );
           throwIfAborted(signal, this.#transport.stderr);
           continue;
@@ -810,7 +828,7 @@ class InsightsEngineClient {
           await this.#transport.write(
             message,
             `sending ${message.type}`,
-            this.#timeoutMs,
+            sessionTimeoutMs,
           );
           // Frames on one stdin pipe are ordered, so ABORT must name the post-write sequence
           // even when cancellation wins the race with BATCH_ACCEPTED.
@@ -820,7 +838,7 @@ class InsightsEngineClient {
             requestId,
             { sequence: message.sequence },
             "waiting for BATCH_ACCEPTED",
-            this.#timeoutMs,
+            sessionTimeoutMs,
           );
           throwIfAborted(signal, this.#transport.stderr);
           continue;
@@ -830,13 +848,13 @@ class InsightsEngineClient {
           throw unexpectedResponse("COMMIT_SESSION", message, this.#transport.stderr);
         }
         throwIfAborted(signal, this.#transport.stderr);
-        await this.#transport.write(message, "sending COMMIT_SESSION", this.#timeoutMs);
+        await this.#transport.write(message, "sending COMMIT_SESSION", sessionTimeoutMs);
         const response = await this.#expect(
           "SESSION_COMMITTED",
           requestId,
           { sessionKey: delta.session.sessionKey, deltaId: delta.deltaId },
           "waiting for SESSION_COMMITTED",
-          this.#commitTimeoutMs,
+          this.#adaptiveCommitTimeout ? Math.max(this.#commitTimeoutMs, sessionTimeoutMs) : this.#commitTimeoutMs,
         );
         committed = true;
         return {
@@ -1317,6 +1335,8 @@ export async function createInsightsEngineClient(options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const commitTimeoutMs = options.commitTimeoutMs ??
     (options.timeoutMs === undefined ? DEFAULT_COMMIT_TIMEOUT_MS : timeoutMs);
+  const adaptiveCommitTimeout = options.commitTimeoutMs === undefined &&
+    options.timeoutMs === undefined;
   const closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
   const stderrLimitBytes = options.stderrLimitBytes ?? DEFAULT_STDERR_LIMIT_BYTES;
   assertPositiveInteger(timeoutMs, "timeoutMs");
@@ -1356,6 +1376,7 @@ export async function createInsightsEngineClient(options = {}) {
     options.requiredContract,
     timeoutMs,
     commitTimeoutMs,
+    adaptiveCommitTimeout,
   );
   try {
     await client.handshake(options.clientVersion ?? "threadshare-node@1");

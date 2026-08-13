@@ -801,7 +801,6 @@ impl EngineStorage {
         items: &[serde_json::Value],
         session_key: &str,
         provider: &str,
-        current_staged_payload_bytes: usize,
     ) -> Result<crate::fact_staging::StageBatchOutcome, StorageError> {
         crate::fact_staging::stage_batch(
             &mut self.connection,
@@ -810,7 +809,6 @@ impl EngineStorage {
             items,
             session_key,
             provider,
-            current_staged_payload_bytes,
         )
     }
 
@@ -1170,7 +1168,6 @@ mod tests {
                 &[item],
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "codex",
-                0,
             )
             .unwrap();
         assert_eq!(storage.staged_session_fact_count("turns").unwrap(), 1);

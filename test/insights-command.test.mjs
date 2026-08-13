@@ -200,6 +200,43 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
   ]);
 });
 
+test("explicit status allows a bounded long-running integrity check", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-status-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = {
+    stateDirectory: directory,
+    databaseFile: path.join(directory, "insights.sqlite3"),
+    originSecretFile: path.join(directory, "origin-secret.json"),
+    lockFile: path.join(directory, "insights.lock"),
+    tempDirectory: path.join(directory, "tmp"),
+    configFile: path.join(directory, "config.json"),
+  };
+  await writeFile(paths.databaseFile, "database", { mode: 0o600 });
+  await writeFile(paths.originSecretFile, "secret", { mode: 0o600 });
+  const observed = [];
+
+  const result = await executeInsightsCommand(
+    parseInsightsInvocation(["insights", "status"], { format: "json" }),
+    {
+      paths,
+      lifecycleOptions: {
+        createEngineClient(options) {
+          observed.push(options.timeoutMs);
+          return {
+            async readEngineStatus() {
+              return { snapshotSeq: "1" };
+            },
+            async close() {},
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(result.state, "ready");
+  assert.deepEqual(observed, [300_000]);
+});
+
 test("sync reports initialization when no active index existed", async () => {
   const result = await executeInsightsCommand(
     parseInsightsInvocation(["insights", "sync"]),
@@ -225,11 +262,23 @@ test("progress renders bounded byte progress only for a text TTY", () => {
   const progress = createInsightsProgressReporter({ format: "text", stream });
   progress.update({ bytesProcessed: "524288", bytesTotal: "1048576" });
   progress.update({ bytesProcessed: "1048576", bytesTotal: "1048576" });
+  progress.update({
+    phase: "finalizing",
+    bytesProcessed: "1048576",
+    bytesTotal: "1048576",
+  });
+  progress.update({
+    phase: "ready",
+    bytesProcessed: "1048576",
+    bytesTotal: "1048576",
+  });
   progress.finish();
   progress.finish();
   assert.deepEqual(writes, [
     "\rInsights indexing: 50% (512 KiB / 1 MiB)",
-    "\rInsights indexing: 100% (1 MiB / 1 MiB)",
+    "\rInsights indexing: 99% (1 MiB / 1 MiB)",
+    "\rInsights finalizing: 99% (1 MiB / 1 MiB)",
+    "\rInsights ready: 100% (1 MiB / 1 MiB)",
     "\n",
   ]);
 
@@ -459,6 +508,9 @@ test("real sidecar sync initializes once and then reconciles only changed source
     ...fixture.reconcileOptions,
     onProgress(value) {
       progress.push(value);
+      if (value.phase === "ready") {
+        throw new Error("injected installed-candidate progress observer failure");
+      }
     },
   };
 
@@ -484,9 +536,20 @@ test("real sidecar sync initializes once and then reconciles only changed source
   assert.equal(changed.report.failed, 0);
   assert.equal(progress.length > 0, true);
   assert.deepEqual(progress.at(-1), {
+    phase: "ready",
     bytesProcessed: progress.at(-1).bytesTotal,
     bytesTotal: progress.at(-1).bytesTotal,
   });
+
+  const observerFailure = await executeInsightsCommand(invocation, {
+    ...fixture.reconcileOptions,
+    onProgress() {
+      throw new Error("injected progress observer failure");
+    },
+  });
+  assert.equal(observerFailure.mode, "incremental");
+  assert.equal(observerFailure.report.failed, 0);
+  assert.equal(observerFailure.report.unchanged, 1);
 });
 
 test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", {
@@ -549,7 +612,7 @@ test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", 
   }
 });
 
-test("real sidecar reindex reports unique committed sources across source-change retries", {
+test("real sidecar reindex commits a stable prefix while a source keeps appending", {
   timeout: 30_000,
   skip: INSIGHTS_E2E_SKIP,
 }, async (t) => {
@@ -585,7 +648,7 @@ test("real sidecar reindex reports unique committed sources across source-change
     },
   });
 
-  assert.equal(reads.get(fixture.sessionFile), 2);
+  assert.equal(reads.get(fixture.sessionFile), 1);
   assert.equal(reads.get(secondSessionFile), 1);
   assert.equal(result.report.planned, 2);
   assert.equal(result.report.committed, 2);
@@ -657,11 +720,8 @@ test("real sidecar reindex does not retry mixed source-change and read failures"
           throw Object.assign(new Error("injected read failure"), { code: "EACCES" });
         }
         const delta = await readProviderSessionDelta(provider, file, options);
-        await appendFile(file, `${JSON.stringify({
-          type: "event_msg",
-          timestamp: "2026-08-10T09:00:11.000Z",
-          payload: { type: "token_count", info: {} },
-        })}\n`);
+        await rename(file, `${file}.replaced`);
+        await writeFile(file, "{}\n", { mode: 0o600 });
         return delta;
       },
     }),
@@ -679,7 +739,7 @@ test("real sidecar reindex does not retry mixed source-change and read failures"
   assert.equal(reads.get(secondSessionFile), 1);
 });
 
-test("real sidecar reindex bounds repeated source-change retries", {
+test("real sidecar reindex bounds repeated source replacement retries", {
   timeout: 30_000,
   skip: INSIGHTS_E2E_SKIP,
 }, async (t) => {
@@ -694,11 +754,9 @@ test("real sidecar reindex bounds repeated source-change retries", {
       async readDelta(provider, file, options) {
         const delta = await readProviderSessionDelta(provider, file, options);
         reads += 1;
-        await appendFile(file, `${JSON.stringify({
-          type: "event_msg",
-          timestamp: `2026-08-10T09:00:${String(11 + reads).padStart(2, "0")}.000Z`,
-          payload: { type: "token_count", info: {} },
-        })}\n`);
+        const replaced = `${file}.replaced-${reads}`;
+        await rename(file, replaced);
+        await writeFile(file, await readFile(replaced), { mode: 0o600 });
         return delta;
       },
     }),

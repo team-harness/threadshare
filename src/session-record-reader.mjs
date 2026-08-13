@@ -48,6 +48,15 @@ function explicitStartOffset(value, fileSize) {
   return offset;
 }
 
+function explicitEndOffset(value, fileSize, startOffset) {
+  if (value === undefined) return fileSize;
+  const offset = typeof value === "number" ? value : decimalOffset(value, "endOffset");
+  if (!Number.isSafeInteger(offset) || offset < startOffset || offset > fileSize) {
+    throw new RangeError("endOffset is outside the current file bounds");
+  }
+  return offset;
+}
+
 function checkpointError(message) {
   return new RangeError(`invalid session record checkpoint: ${message}`);
 }
@@ -236,13 +245,18 @@ export async function* streamSessionRecords(file, options = {}) {
     chunkSize,
     options.onBytesRead,
   );
+  const endOffset = explicitEndOffset(options.endOffset, fileSize, startOffset);
   const diagnostics = new Map();
   let completeOffset = startOffset;
   let lineStart = startOffset;
   let position = startOffset;
   let line = new LineAccumulator(maxRecordBytes);
 
-  for await (const chunk of createReadStream(file, { start: startOffset, highWaterMark: chunkSize })) {
+  if (startOffset < endOffset) for await (const chunk of createReadStream(file, {
+    start: startOffset,
+    end: endOffset - 1,
+    highWaterMark: chunkSize,
+  })) {
     observeRead(options.onBytesRead, "records", position, chunk.length);
     let cursor = 0;
     while (cursor < chunk.length) {

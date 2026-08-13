@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -62,6 +63,22 @@ function historyPayloadContent(delta, payloadKind) {
   return { payload, chunks, content };
 }
 
+function expectedDeltaId(delta) {
+  const mutation = structuredClone(delta);
+  delete mutation.deltaId;
+  const mutationDigest = createHash("sha256").update(canonicalJson(mutation)).digest();
+  return hashKey(
+    "delta",
+    Buffer.from(delta.session.sessionKey, "hex"),
+    delta.expectedGeneration,
+    delta.mode,
+    delta.originSecretEpoch,
+    String(delta.duplicatePolicyVersion),
+    mutationDigest,
+    delta.checkpoint.completeOffset,
+  );
+}
+
 test("stream reader preserves byte ranges and resumes an incomplete tail", async () => {
   const first = JSON.stringify({ type: "one", value: "alpha" });
   const invalid = "{not-json}";
@@ -102,6 +119,72 @@ test("stream reader preserves byte ranges and resumes an incomplete tail", async
     assert.deepEqual(resumed.records.map(({ value }) => value.type), ["three"]);
     assert.equal(resumed.checkpoint.partialTailLength, "0");
     assert.equal(resumed.checkpoint.eofObserved, true);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("stream reader freezes the source length while an active session keeps appending", async () => {
+  const first = JSON.stringify({ type: "one", value: "snapshot" });
+  const second = JSON.stringify({ type: "two", value: "later" });
+  const fixture = await fixtureFile("active.jsonl", `${first}\n`);
+  try {
+    let appended = false;
+    const batch = await readSessionRecordBatch(fixture.file, {
+      endOffset: Buffer.byteLength(`${first}\n`),
+      chunkSize: 7,
+      onBytesRead({ phase }) {
+        if (phase === "records" && !appended) {
+          appended = true;
+          appendFileSync(fixture.file, `${second}\n`);
+        }
+      },
+    });
+    assert.deepEqual(batch.records.map(({ value }) => value.type), ["one"]);
+    assert.equal(batch.checkpoint.completeOffset, String(Buffer.byteLength(`${first}\n`)));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("provider adapter commits complete records before an actively written partial tail", async () => {
+  const complete = jsonl([
+    {
+      type: "session_meta",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      payload: { id: IDS.codex, cwd: "/private/work/project" },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:01.000Z",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Index the complete prefix" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:02.000Z",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "The prefix is complete." }],
+      },
+    },
+  ]);
+  const partial = '{"type":"event_msg","payload":';
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, `${complete}${partial}`);
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    assert.equal(delta.checkpoint.sourceSnapshotStable, true);
+    assert.equal(delta.checkpoint.partialTailLength, String(Buffer.byteLength(partial)));
+    assert.equal(delta.turns.length, 1);
+    assert.equal(delta.turns[0].finalAnswerExcerpt, "The prefix is complete.");
+    assert.equal(delta.turns[0].rawClosure.observedEofClosed, false);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
@@ -348,6 +431,55 @@ test("Codex Fact V2 preserves canonical Tool input and chunked unredacted output
     assert.equal(result.chunks.length > 1, true);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Fact V2 preserves provider JSON payloads containing finite decimals", async () => {
+  const cases = [
+    {
+      provider: "codex",
+      file: `rollout-${IDS.codex}.jsonl`,
+      records: [
+        {
+          type: "session_meta",
+          payload: { id: IDS.codex, sampling: { temperature: 0.25 } },
+        },
+      ],
+    },
+    {
+      provider: "claude",
+      file: `${IDS.claude}.jsonl`,
+      records: [
+        {
+          type: "user",
+          sessionId: IDS.claude,
+          uuid: "decimal-user-1",
+          timestamp: "2026-08-01T01:00:00.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "Preserve decimal tool input" }],
+          },
+          metadata: { score: 0.75 },
+        },
+      ],
+    },
+  ];
+
+  for (const fixtureCase of cases) {
+    const fixture = await fixtureFile(fixtureCase.file, jsonl(fixtureCase.records));
+    try {
+      const delta = await readProviderSessionDelta(fixtureCase.provider, fixture.file, {
+        privacyContext: privacyContext(),
+        factSchemaVersion: 2,
+      });
+      assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+      assert.equal(delta.deltaId, expectedDeltaId(delta));
+      const payload = historyPayloadContent(delta, "provider-payload");
+      assert.equal(payload.payload.encoding, "utf-8");
+      assert.deepEqual(JSON.parse(payload.content), fixtureCase.records[0]);
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1091,6 +1223,38 @@ test("provider records replace unpaired surrogates without dropping the session"
       "Bash",
       `{"command":"echo ${high}"}`,
     ));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Fact V2 hashes the NFC payload bytes sent to the Engine", async () => {
+  const decomposed = "e\u0301";
+  const fixture = await fixtureFile(
+    `rollout-${IDS.codex}.jsonl`,
+    jsonl([
+      { type: "session_meta", payload: { id: IDS.codex } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `normalize ${decomposed}` }],
+        },
+      },
+    ]),
+  );
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(),
+      factSchemaVersion: 2,
+    });
+    for (const chunk of delta.historyPayloadChunks) {
+      const bytes = Buffer.from(chunk.content, "utf8");
+      assert.equal(chunk.content, chunk.content.normalize("NFC"));
+      assert.equal(chunk.byteLength, String(bytes.length));
+      assert.equal(chunk.sha256, createHash("sha256").update(bytes).digest("hex"));
+    }
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

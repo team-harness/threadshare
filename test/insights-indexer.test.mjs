@@ -1413,6 +1413,58 @@ test("rejects a checkpoint whose size or mtime differs from the sampled snapshot
   assert.equal(report.diagnostics[0].errorCode, "TS_INSIGHTS_SOURCE_CHANGED");
 });
 
+test("commits a stable prefix when an active session appends after the adapter snapshot", async () => {
+  const source = {
+    provider: "codex",
+    sessionId: SESSION_ID,
+    file: "/sessions/active.jsonl",
+  };
+  const epoch = "44444444-4444-4444-8444-444444444444";
+  let statCalls = 0;
+  const commits = [];
+  const report = await runInsightsIndexer({
+    sources: [source],
+    concurrency: 1,
+    privacyContext: { originSecretEpoch: epoch },
+    engine: {
+      async readSourceStates() { return []; },
+      async commitSourceDelta(batch) { commits.push(batch); },
+    },
+    async statSource() {
+      statCalls += 1;
+      return metadata(statCalls === 1
+        ? { size: "8192", mtimeNs: "1000000000" }
+        : { size: "12288", mtimeNs: "2000000000" });
+    },
+    async sampleSource(_file, range) { return Buffer.alloc(range.length); },
+    async readDelta(provider, _file, options) {
+      return {
+        format: "session-facts-delta@v1",
+        factSchemaVersion: 1,
+        providerAdapterVersion: "codex@1",
+        privacyPolicyVersion: 1,
+        duplicatePolicyVersion: 1,
+        originSecretEpoch: epoch,
+        mode: options.mode,
+        session: { provider, sessionKey: SESSION_KEY },
+        checkpoint: {
+          completeOffset: "8192",
+          sourceSize: "8192",
+          sourceMtimeNs: "1000000000",
+          sourceSnapshotStable: true,
+          generation: "1",
+        },
+      };
+    },
+  });
+
+  assert.equal(report.failed, 0);
+  assert.equal(report.committed, 1);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].sourceState.metadata.size, "8192");
+  assert.equal(commits[0].sourceState.checkpoint.completeOffset, "8192");
+});
+
 test("rejects a provider delta that violates the required index contract", async () => {
   const source = {
     provider: "codex",

@@ -187,6 +187,7 @@ test("renders a self-describing root and command help contract", () => {
     "TS_INSIGHTS_REINDEX_SPACE_REQUIRED",
     "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED",
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
+    "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
     "TS_OPERATION_FAILED",
   ];
@@ -377,6 +378,7 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_INSIGHTS_REINDEX_SPACE_REQUIRED",
     "TS_INSIGHTS_PROJECTION_SPACE_REQUIRED",
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
+    "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
   ]) {
     const reserved = {

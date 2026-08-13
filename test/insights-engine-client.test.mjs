@@ -447,7 +447,7 @@ process.stdin.on("data", (chunk) => {
   return binaryPath;
 }
 
-async function createDelayedCommitEngine(directory, delayMs) {
+async function createDelayedCommitEngine(directory, delayMs, batchDelayMs = 0) {
   const binaryPath = path.join(directory, "delayed-commit-engine");
   const binary = `#!/usr/bin/env node
 function canonical(value) {
@@ -496,12 +496,12 @@ process.stdin.on("data", (chunk) => {
         nextSequence: "0",
       });
     } else if (message.type === "RETRACT_FACTS" || message.type === "UPSERT_FACTS") {
-      send({
+      setTimeout(() => send({
         format: "threadshare-insights-protocol@v1",
         type: "BATCH_ACCEPTED",
         requestId: message.requestId,
         sequence: message.sequence,
-      });
+      }), ${batchDelayMs});
     } else if (message.type === "COMMIT_SESSION") {
       setTimeout(() => send({
         format: "threadshare-insights-protocol@v1",
@@ -1381,6 +1381,31 @@ test("session commit uses its bounded transaction timeout", {
   t.after(() => client.close());
 
   assert.deepEqual(await client.applySessionFacts(sampleDelta()), {
+    snapshotSeq: "1",
+    sessionKey: SESSION_KEY,
+    idempotent: false,
+  });
+});
+
+test("large sessions use their adaptive timeout for fact batch acknowledgements", {
+  timeout: 20_000,
+  skip: process.platform === "win32" ? "temporary shebang fixture is POSIX-only" : false,
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "threadshare-insights-batch-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const binaryPath = await createDelayedCommitEngine(directory, 0, 10_500);
+  const client = await createInsightsEngineClient({
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: binaryPath },
+    },
+    requiredContract: handshakeContract(),
+  });
+  t.after(() => client.close());
+  const delta = sampleDelta({ largePayload: true });
+  delta.checkpoint.sourceSize = String(33 * 1024 * 1024);
+  finalizeDelta(delta);
+
+  assert.deepEqual(await client.applySessionFacts(delta), {
     snapshotSeq: "1",
     sessionKey: SESSION_KEY,
     idempotent: false,

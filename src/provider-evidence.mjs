@@ -88,6 +88,33 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function canonicalMutationDigest(value) {
+  const hash = createHash("sha256");
+  const keys = Object.keys(value)
+    .filter((key) => key !== "deltaId")
+    .sort();
+  hash.update("{");
+  for (let index = 0; index < keys.length; index += 1) {
+    if (index > 0) hash.update(",");
+    const key = keys[index];
+    hash.update(canonicalJson(key));
+    hash.update(":");
+    const field = value[key];
+    if (!Array.isArray(field)) {
+      hash.update(canonicalJson(field));
+      continue;
+    }
+    hash.update("[");
+    for (let itemIndex = 0; itemIndex < field.length; itemIndex += 1) {
+      if (itemIndex > 0) hash.update(",");
+      hash.update(canonicalJson(field[itemIndex]));
+    }
+    hash.update("]");
+  }
+  hash.update("}");
+  return hash.digest();
+}
+
 function hexBytes(value) {
   return Buffer.from(value, "hex");
 }
@@ -212,7 +239,14 @@ function semanticPayload(value, { parseJsonString = false } = {}) {
     }
     return { content: value, encoding: "utf-8" };
   }
-  return { content: canonicalJson(value), encoding: "canonical-json" };
+  try {
+    return { content: canonicalJson(value), encoding: "canonical-json" };
+  } catch (error) {
+    if (!(error instanceof TypeError) || error.message !== "canonical JSON only permits integers") {
+      throw error;
+    }
+    return { content: JSON.stringify(value), encoding: "utf-8" };
+  }
 }
 
 function chunkUtf8(value, maxBytes = HISTORY_PAYLOAD_CHUNK_BYTES) {
@@ -864,15 +898,16 @@ class EvidenceBuilder {
     if (this.factSchemaVersion !== FACT_SCHEMA_VERSION_V2 || !event) return null;
     const semantic = semanticPayload(value, options);
     if (semantic === null) return null;
+    const content = toWellFormedUnicode(semantic.content).normalize("NFC");
     const historyEvent = this.historyEventByKey.get(event.eventKey);
     if (!historyEvent) throw new TypeError("history payload event is missing");
-    const contentBytes = Buffer.from(semantic.content, "utf8");
+    const contentBytes = Buffer.from(content, "utf8");
     const payloadKey = hashKey(
       "history-payload",
       hexBytes(event.eventKey),
       payloadKind,
     );
-    const chunks = chunkUtf8(semantic.content);
+    const chunks = chunkUtf8(content);
     const payload = {
       payloadKey,
       ownerSessionKey: this.sessionKey,
@@ -2386,7 +2421,7 @@ function finalizeHistoryFacts(builder) {
 }
 
 function finalizeDelta(builder, sourceSnapshot) {
-  const stableEof = sourceSnapshot.stable;
+  const stableEof = sourceSnapshot.atPhysicalEof ?? sourceSnapshot.stable;
   if (
     builder.currentTurn &&
     stableEof &&
@@ -2528,9 +2563,7 @@ function finalizeDelta(builder, sourceSnapshot) {
     delta.diagnostics.push({ code: "invalid-unicode-replaced", count: outboundUnicode.replacements });
     delta.diagnostics = aggregateDiagnostics(delta.diagnostics);
   }
-  const mutation = { ...delta, checkpoint: { ...checkpoint } };
-  delete mutation.deltaId;
-  const mutationDigest = sha256(canonicalJson(mutation));
+  const mutationDigest = canonicalMutationDigest(delta);
   delta.deltaId = hashKey(
     "delta",
     hexBytes(builder.sessionKey),
@@ -2571,6 +2604,7 @@ export async function readProviderSessionDelta(provider, source, options = {}) {
     chunkSize: options.chunkSize,
     maxRecordBytes: options.maxRecordBytes ?? MAX_PROVIDER_RECORD_BYTES,
     onBytesRead: options.onBytesRead,
+    endOffset: String(before.size),
   };
   const metadataSummary = options.checkpoint
     ? createMetadataSummary()
@@ -2626,17 +2660,21 @@ export async function readProviderSessionDelta(provider, source, options = {}) {
     builder.diagnose("unknown-session-scope");
   }
   const after = await stat(source, { bigint: true });
-  const stableEof =
+  const stableSnapshot =
     readResult.checkpoint.eofObserved === true &&
-    readResult.checkpoint.partialTailLength === "0" &&
-    before.size === after.size &&
-    before.mtimeNs === after.mtimeNs &&
     before.dev === after.dev &&
-    before.ino === after.ino;
+    before.ino === after.ino &&
+    after.size >= before.size &&
+    (after.size > before.size || after.mtimeNs === before.mtimeNs);
   const delta = finalizeDelta(builder, {
-    stable: stableEof,
-    size: after.size,
-    mtimeNs: after.mtimeNs,
+    stable: stableSnapshot,
+    atPhysicalEof:
+      stableSnapshot &&
+      readResult.checkpoint.partialTailLength === "0" &&
+      before.size === after.size &&
+      before.mtimeNs === after.mtimeNs,
+    size: before.size,
+    mtimeNs: before.mtimeNs,
   });
   const validation = delta.factSchemaVersion === FACT_SCHEMA_VERSION_V2
     ? validateSessionFactsDeltaV2(delta)

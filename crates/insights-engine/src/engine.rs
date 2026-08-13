@@ -130,7 +130,6 @@ pub struct SessionAccumulator {
     expected_counts: BTreeMap<String, usize>,
     received_counts: BTreeMap<String, usize>,
     canonical_fact_bytes: usize,
-    staged_payload_bytes: usize,
     next_sequence: u64,
     last_collection_rank: Option<usize>,
 }
@@ -229,7 +228,6 @@ impl SessionAccumulator {
             expected_counts,
             received_counts: BTreeMap::new(),
             canonical_fact_bytes: session_fact_bytes,
-            staged_payload_bytes: 0,
             next_sequence: 0,
             last_collection_rank: None,
         })
@@ -336,7 +334,6 @@ impl SessionAccumulator {
                 items,
                 self.session_key(),
                 &self.provider,
-                self.staged_payload_bytes,
             )
             .map_err(EngineError::from)?;
         let next_fact_bytes = self
@@ -353,16 +350,6 @@ impl SessionAccumulator {
         self.received_counts
             .insert(collection.to_owned(), next_count);
         self.canonical_fact_bytes = next_fact_bytes;
-        self.staged_payload_bytes = self
-            .staged_payload_bytes
-            .checked_add(staged.staged_payload_bytes)
-            .ok_or_else(|| {
-                EngineError::new(
-                    "TS_INSIGHTS_INVALID_DELTA",
-                    "validation",
-                    "staged session payload byte count exceeds platform limits",
-                )
-            })?;
         self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
             EngineError::new(
                 "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",

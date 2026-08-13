@@ -756,6 +756,24 @@ function insightsFailure(error, action) {
       next: "Run `threadshare insights status`, then retry maintenance after the current writer finishes.",
     });
   }
+  if (error?.code === "TS_INSIGHTS_REINDEX_INCOMPLETE") {
+    const summary = error.failureSummary;
+    const diagnostics = Array.isArray(summary?.diagnostics)
+      ? summary.diagnostics
+        .map(({ provider, code, errorCode, count }) =>
+          `${provider}/${code}/${errorCode}: ${count}`)
+        .join(", ")
+      : "unavailable";
+    const failed = Number.isSafeInteger(summary?.failed) ? summary.failed : "unknown";
+    return cliDiagnostic(
+      error.code,
+      `Insights reindex did not complete: ${failed} failed session operation(s). Diagnostics: ${diagnostics}.`,
+      {
+        command: "insights",
+        next: "Retry `threadshare insights sync`; if the diagnostic recurs, use its provider/error-code summary to resolve the failing source or storage condition.",
+      },
+    );
+  }
   if (error?.code === "TS_INSIGHTS_EXCLUSION_APPLY_FAILED") {
     return cliDiagnostic(error.code, "Not all configured Insight exclusions could be hidden.", {
       command: "insights",

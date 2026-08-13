@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
 pub const STAGED_FACT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_STAGED_SESSION_PAYLOAD_BYTES: usize = 512 * 1024 * 1024;
 const STAGED_FACT_CHUNK_ROWS: usize = 512;
 
 const STAGING_SCHEMA: &str = r#"
@@ -40,7 +39,6 @@ pub struct StagedSessionFacts {
 #[derive(Debug)]
 pub struct StageBatchOutcome {
     pub canonical_bytes: usize,
-    pub staged_payload_bytes: usize,
 }
 
 struct HashWriter(Sha256);
@@ -87,11 +85,9 @@ pub fn stage_batch(
     items: &[Value],
     session_key: &str,
     provider: &str,
-    current_staged_payload_bytes: usize,
 ) -> Result<StageBatchOutcome, StorageError> {
     let transaction = connection.savepoint()?;
     let mut canonical_bytes = 0_usize;
-    let mut added_staged_payload_bytes = 0_usize;
     for (offset, item) in items.iter().enumerate() {
         let wire_json = try_canonical_json(item)
             .map_err(|_| invalid("batch item is outside the canonical JSON domain"))?;
@@ -103,18 +99,6 @@ pub fn stage_batch(
         }
         let (identity, parent_identity, normalized_json) =
             normalize_item(collection, item, session_key, provider)?;
-        added_staged_payload_bytes = added_staged_payload_bytes
-            .checked_add(wire_json.len())
-            .and_then(|total| total.checked_add(normalized_json.len()))
-            .ok_or_else(|| invalid("staged session byte count exceeds platform limits"))?;
-        if current_staged_payload_bytes
-            .checked_add(added_staged_payload_bytes)
-            .is_none_or(|total| total > MAX_STAGED_SESSION_PAYLOAD_BYTES)
-        {
-            return Err(invalid(
-                "session fact staging exceeds the 512 MiB logical payload budget",
-            ));
-        }
         let ordinal = first_ordinal
             .checked_add(offset)
             .ok_or_else(|| invalid("staged fact ordinal exceeds platform limits"))?;
@@ -147,10 +131,7 @@ pub fn stage_batch(
         }
     }
     transaction.commit()?;
-    Ok(StageBatchOutcome {
-        canonical_bytes,
-        staged_payload_bytes: added_staged_payload_bytes,
-    })
+    Ok(StageBatchOutcome { canonical_bytes })
 }
 
 fn decode<T: DeserializeOwned + Serialize>(value: &Value) -> Result<(T, String), StorageError> {
@@ -361,7 +342,7 @@ fn validate_staged_history_event_revisions(connection: &Connection) -> Result<()
     let mut statement = connection.prepare(
         "SELECT event.normalized_json,payload.normalized_json
            FROM temp.session_fact_staging event
-           LEFT JOIN temp.session_fact_staging payload
+           LEFT JOIN temp.session_fact_staging payload INDEXED BY session_fact_staging_parent
              ON payload.collection='historyPayloads'
             AND payload.parent_identity=event.identity
           WHERE event.collection='historyEvents'
@@ -423,7 +404,7 @@ fn validate_staged_history_payload_chunks(connection: &Connection) -> Result<(),
     let mut statement = connection.prepare(
         "SELECT payload.normalized_json,chunk.normalized_json
            FROM temp.session_fact_staging payload
-           LEFT JOIN temp.session_fact_staging chunk
+           LEFT JOIN temp.session_fact_staging chunk INDEXED BY session_fact_staging_parent
              ON chunk.collection='historyPayloadChunks'
             AND chunk.parent_identity=payload.identity
           WHERE payload.collection='historyPayloads'
@@ -684,10 +665,7 @@ pub fn contains_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_STAGED_SESSION_PAYLOAD_BYTES, STAGED_FACT_CHUNK_BYTES, count, for_each_chunk,
-        initialize, prepare, stage_batch,
-    };
+    use super::{STAGED_FACT_CHUNK_BYTES, count, for_each_chunk, initialize, prepare, stage_batch};
     use crate::engine::RETRACTION_COLLECTIONS;
     use crate::fact_model::{HistoryEventFact, HistoryPayloadFact, SessionFactsDeltaV1};
     use crate::protocol::upsert_collections_for_delta_format;
@@ -802,23 +780,12 @@ mod tests {
     fn stage_fixture(connection: &mut Connection, delta: &mut Value) {
         let session_key = delta["session"]["sessionKey"].as_str().unwrap().to_owned();
         let provider = delta["session"]["provider"].as_str().unwrap().to_owned();
-        let mut staged_payload_bytes = 0;
         for collection in RETRACTION_COLLECTIONS {
             let items = std::mem::take(delta["retractions"][collection].as_array_mut().unwrap());
             if items.is_empty() {
                 continue;
             }
-            let outcome = stage_batch(
-                connection,
-                collection,
-                0,
-                &items,
-                &session_key,
-                &provider,
-                staged_payload_bytes,
-            )
-            .unwrap();
-            staged_payload_bytes += outcome.staged_payload_bytes;
+            stage_batch(connection, collection, 0, &items, &session_key, &provider).unwrap();
         }
         let delta_format = delta["format"].as_str().unwrap();
         for collection in upsert_collections_for_delta_format(delta_format).unwrap() {
@@ -826,40 +793,25 @@ mod tests {
             if items.is_empty() {
                 continue;
             }
-            let outcome = stage_batch(
-                connection,
-                collection,
-                0,
-                &items,
-                &session_key,
-                &provider,
-                staged_payload_bytes,
-            )
-            .unwrap();
-            staged_payload_bytes += outcome.staged_payload_bytes;
+            stage_batch(connection, collection, 0, &items, &session_key, &provider).unwrap();
         }
     }
 
     #[test]
-    fn rejects_the_exact_temp_storage_budget_without_leaving_rows() {
+    fn stages_a_batch_after_the_legacy_session_payload_budget() {
         let mut connection = Connection::open_in_memory().unwrap();
         initialize(&connection).unwrap();
-        let error = stage_batch(
+        let outcome = stage_batch(
             &mut connection,
             "turnKeys",
             0,
             &[Value::String("11".repeat(32))],
             &"aa".repeat(32),
             "codex",
-            MAX_STAGED_SESSION_PAYLOAD_BYTES,
         )
-        .unwrap_err();
-        assert_eq!(error.code, "TS_INSIGHTS_INVALID_DELTA");
-        assert_eq!(
-            error.message,
-            "session fact staging exceeds the 512 MiB logical payload budget"
-        );
-        assert_eq!(super::count(&connection, "turnKeys").unwrap(), 0);
+        .unwrap();
+        assert!(outcome.canonical_bytes > 0);
+        assert_eq!(super::count(&connection, "turnKeys").unwrap(), 1);
     }
 
     #[test]
@@ -876,7 +828,6 @@ mod tests {
             &[Value::String("11".repeat(32))],
             &"aa".repeat(32),
             "codex",
-            0,
         )
         .unwrap_err();
         assert_eq!(error.code, "TS_INSIGHTS_STORAGE_FAILED");

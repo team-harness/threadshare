@@ -64,6 +64,16 @@ function incompleteIndexError(index) {
     value: failureSummary,
     enumerable: false,
   });
+  Object.defineProperty(error, "failureSamples", {
+    value: Object.freeze((index.diagnostics ?? []).slice(0, 8).map((diagnostic) => Object.freeze({
+      provider: diagnostic.provider ?? "unknown",
+      sessionId: diagnostic.sessionId ?? null,
+      errorCode: diagnostic.errorCode ?? null,
+      errorAction: diagnostic.errorAction ?? null,
+      errorName: diagnostic.errorName ?? null,
+    }))),
+    enumerable: false,
+  });
   return error;
 }
 
@@ -127,6 +137,21 @@ function mergeReindexRetryReport(index, committedSourceKeys) {
     committed,
     unchanged: index.unchanged - previouslyCommitted,
   };
+}
+
+function notifyProgress(options, phase, index = null) {
+  if (typeof options.onProgress !== "function") return;
+  const bytesProcessed = index?.bytesProcessed ?? "0";
+  const bytesTotal = index?.bytesTotal ?? "0";
+  try {
+    void Promise.resolve(options.onProgress(Object.freeze({
+      phase,
+      bytesProcessed,
+      bytesTotal,
+    }))).catch(() => {});
+  } catch {
+    // Progress observers cannot affect reconciliation or commit ordering.
+  }
 }
 
 async function waitForSourceChangedRetry(signal) {
@@ -333,6 +358,7 @@ export async function reconcileInsights(options = {}) {
     ...options.reindexOptions,
     paths,
     signal: options.signal,
+    onProgress: options.onProgress,
     regenerateSecret: regeneratedSecret,
     confirmation: options.confirmation,
     async buildCandidate({ databaseFile, originSecretEpoch, privacyContext, signal }) {
@@ -376,13 +402,16 @@ export async function reconcileInsights(options = {}) {
             },
           });
           if (index.failed === 0) break;
-          if (!onlySourceChangedFailures(index) ||
-              attempt === MAX_REINDEX_SOURCE_CHANGED_RETRIES) {
+          if (!onlySourceChangedFailures(index)) {
+            throw incompleteIndexError(index);
+          }
+          if (attempt === MAX_REINDEX_SOURCE_CHANGED_RETRIES) {
             throw incompleteIndexError(index);
           }
           await waitForSourceChangedRetry(signal);
         }
         index = mergeReindexRetryReport(index, committedSourceKeys);
+        notifyProgress(options, "finalizing", index);
         const purge = await finishPurgeMaintenance(engine, { ...options, signal });
         if (insightsPurgeWorkPending(purge)) {
           throw commandError(
@@ -478,7 +507,9 @@ export async function reconcileActiveInsights(options = {}) {
         readDelta: options.readDelta,
         onProgress: options.onProgress,
       });
+      notifyProgress(options, "finalizing", index);
       const purge = await finishPurgeMaintenance(engine, { ...options, signal: options.signal });
+      notifyProgress(options, "ready", index);
       return Object.freeze({
         format: "threadshare-insights-reconciliation@v1",
         report: Object.freeze({
@@ -527,8 +558,9 @@ function exclusionResult(config) {
 
 function defaultServices(options) {
   const paths = options.paths ?? resolveInsightsPaths(options);
+  const statusTimeoutMs = options.lifecycleOptions?.timeoutMs ?? 300_000;
   return {
-    status: () => inspectInsightsState({ ...options.lifecycleOptions, paths }),
+    status: () => inspectInsightsState({ ...options.lifecycleOptions, paths, timeoutMs: statusTimeoutMs }),
     reset: () => resetInsightsState({ ...options.lifecycleOptions, paths }),
     loadConfig: () => loadInsightsConfig({ ...options.configOptions, paths }),
     updateExclusion: (change) =>
@@ -669,8 +701,14 @@ export function createInsightsProgressReporter({ format = "text", stream = proce
       const percent = total === 0n
         ? 100n
         : (processed * 100n / total > 100n ? 100n : processed * 100n / total);
+      const phase = progress?.phase === "finalizing"
+        ? "finalizing"
+        : progress?.phase === "ready"
+          ? "ready"
+          : "indexing";
+      const displayedPercent = phase !== "ready" && percent >= 100n ? 99n : percent;
       stream.write(
-        `\rInsights indexing: ${percent}% (${formatByteCount(processed)} / ${formatByteCount(total)})`,
+        `\rInsights ${phase}: ${displayedPercent}% (${formatByteCount(processed)} / ${formatByteCount(total)})`,
       );
       active = true;
     },
