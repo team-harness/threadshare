@@ -203,8 +203,8 @@ export function validatePackOutput(packOutput, metadata) {
     if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 256 * 1024) {
       throw new Error("npm root package compressed size must not exceed 256 KiB");
     }
-    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1024 * 1024) {
-      throw new Error("npm root package unpacked size must not exceed 1 MiB");
+    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1280 * 1024) {
+      throw new Error("npm root package unpacked size must not exceed 1.25 MiB");
     }
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };

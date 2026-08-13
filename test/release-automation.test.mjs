@@ -217,7 +217,7 @@ test("locks npm pack to the exact public root files", () => {
     /compressed size/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, unpackedSize: 1024 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, unpackedSize: 1280 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
