@@ -135,86 +135,58 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### Query Local Insights with an Agent
 
-Initialize or incrementally update the local Insights index with `sync`, then use the JSON-only query
-actions to inspect committed local history without uploading it or rereading provider session files
-during queries. Deep Query can return complete local messages, analysis, Tool input/output, errors, and
-file paths; treat stdout as sensitive local data:
+Local Insights lets your Agent investigate patterns across your recorded Codex and Claude work. Ask a
+concrete question in natural language. The Agent chooses the queries, checks coverage, and reads only
+the evidence needed for its answer.
 
 ```bash
-threadshare insights status
 threadshare insights sync
-threadshare insights spec --format json
-threadshare insights mcp --stdio
 ```
 
-Users ask the Agent a concrete question in natural language. The Agent reads the static spec, chooses
-the appropriate actions, versioned analysis plan, filters, and evidence depth, then builds the strict
-JSON requests. Users do not need to know Recipe names, resource names, schema versions, or cursor
-rules. For example:
+Run `sync` once before the first analysis and whenever you want fresher results. Later runs are
+incremental. Use `reindex` only for an explicit complete rebuild or origin-secret recovery.
 
-- Which Skills do I use most, and what kinds of work do I use them for?
-- Which Tool attempts keep failing, and did the same attempt later succeed?
-- Where did this exact error happen before, and what verified step followed it?
-- Which projects or models recorded the most tokens, and how complete is that data?
+Then ask your Agent questions like these:
 
-Agents start with the discovery contract instead of guessing option combinations:
+| Ask your Agent | What the answer can guide |
+|---|---|
+| Which Skills and Tools do I use most, and in what kinds of work? | Standardize useful workflows, consolidate aliases, and remove low-value integrations. |
+| Which Tool attempts keep failing, and did the same attempt chain later succeed? | Separate high-volume friction from broken integrations, then improve Tool setup, prompts, or documentation. |
+| Which Sessions were research-heavy, implementation-heavy, or missing supporting documentation? | Add design or review checkpoints where implementation is outrunning recorded evidence. |
+| When did Tool density, Skill use, or project switching change? | Compare workflow changes over time and identify coordination or automation overhead. |
+| Where did this exact error happen before, and what evidence-backed step succeeded later? | Reuse a previously successful procedure without treating historical correlation as a guarantee. |
 
-```bash
-threadshare insights spec --format json
-threadshare insights query --help
-threadshare insights recipe --help
-threadshare insights evidence --help
-threadshare insights mcp --help
-```
+The user does not choose commands, resource names, schemas, or internal analysis plans. A compatible
+Agent reads `threadshare insights spec --format json`, selects bounded queries, and reports the
+snapshot, time window, coverage, truncation, and evidence behind its conclusion.
 
-The lower-level request files are strict JSON contracts shipped in the package. A minimal Agent-built
-typed event query is:
+#### Real report from a local index
 
-```json
-{"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
-```
+The following findings came from one real local index containing more than 3,600 Sessions and 11,000
+Turns. No Session text, paths, stable keys, or evidence identifiers are included here.
 
-Save it as `query.json`, then run:
+| Question | What the Agent found | Development decision |
+|---|---|---|
+| Which Skills are used most? | Review and design-convergence Skills dominated recorded use; the top two represented 48.9% of Skill invocations. | Productize the review and design workflows before adding more low-frequency entry points. |
+| Which Tools keep failing? | `Bash` had the most failures by volume but completed 13,345 of 13,674 calls. `WebFetch` failed 9/9 and a retired MCP search failed 4/4. | Classify recurring `Bash` failures, but remove or replace integrations that never record a successful call. |
+| Did failed attempts recover? | All 50 returned representative failure chains were `never-succeeded`; 34 were `Bash` chains. | Track recovery per attempt chain instead of assuming that a generally reliable Tool recovered a specific failure. |
+| How did the workflow change? | Recorded Turns fell 50.3% between two 13-week windows while Tool calls per Turn rose 36.4%. | Investigate whether work became more deeply automated or accumulated extra orchestration overhead. |
+| Where are token hotspots? | The largest group recorded about 2.84B tokens, with roughly 98% of input tokens served from cache. | Compare uncached input, output, and delivered results before treating total tokens as avoidable cost. |
 
-```bash
-threadshare insights query --request query.json --format json
-```
+Read the [complete real-index Agent report](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)
+for the questions, evidence limits, conclusions, and follow-up decisions behind these findings.
 
-Use `nextCursor` unchanged for the next page. Use the exact revision from a returned evidence target
-when requesting full content. Query and Recipe do not implicitly run `sync`; run it explicitly first.
-
-`sync` creates the index when it is missing and otherwise commits only new, changed, deleted, or newly
-excluded Sessions. In an interactive terminal it reports byte progress on stderr. Use `reindex` only
-when you explicitly need a complete atomic rebuild or origin-secret recovery.
-
-Use `threadshare insights spec --format json`, `threadshare insights --help`, and each action's help for
-the canonical routing and request shapes. The query
-surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filtered Turn search,
-capability discovery, typed records and aggregates across seven local resources, versioned recipes,
-and revision-checked full evidence pages. The stdio MCP server exposes one discovery tool plus the
-same Query, Recipe, and Evidence contracts; it does not listen on a network port. Responses include the
-committed snapshot identity needed to cite results and detect an atomic reindex between pages.
-
-Internally, the Agent uses versioned plans so the same natural-language intent stays reproducible as
-the implementation evolves. Those protocol names are an automation detail, not something the user
-must select. Plans return structured facts, provenance, coverage, and directly readable evidence
-targets rather than a natural-language verdict. The Agent forms the answer and should distinguish
-recorded facts, derived signals, estimates, and co-occurrence.
-
-See [the worked Agent analysis case study](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md) for a real-index example
-covering workflow shifts, Skill adoption, Tool alias drift, failure prioritization, token reuse, and
-evidence-aware follow-up questions.
+Local Insights queries committed local history without uploading it. Deep Query can return complete
+messages, analysis, Tool input/output, errors, and file paths. Treat its output as sensitive local
+data, and do not share or publish it unless the user explicitly asks.
 
 Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
 core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
 available in the 0.8.x release line while the owner-only Windows ACL adapter remains unimplemented.
 
-Usage counts are recorded invocations, not inferred independent uses. Agents must report grouped and
-ungrouped invocations with the returned dedupe support, and must describe Capability terminal states
-separately from the outcome of the containing Turn. Co-occurrence is not evidence that a Tool or Skill
-caused a Turn to succeed or fail. Deep Query and Evidence may return raw Tool payloads,
-system/developer/analysis content, provider payloads, and local paths. They remain local unless the
-user separately asks to share or publish them.
+Usage counts are recorded invocations, not inferred independent uses. Agents should distinguish Tool
+terminal states from the outcome of the containing Turn. Co-occurrence does not prove that a Tool or
+Skill caused a Turn to succeed or fail.
 
 ### Use Another Threadshare Server
 

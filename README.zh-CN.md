@@ -135,76 +135,55 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### 让 Agent 查询本地 Insights
 
-先用 `sync` 初始化或增量更新本地 Insights 索引，再通过 JSON-only 查询动作分析已提交的本地历史；
-查询本身不会上传数据，也不会重新扫描 provider session 文件。Deep Query 可以返回完整本地消息、
-analysis、Tool 输入输出、错误和文件路径，因此应把 stdout 视为本机敏感数据：
+Local Insights 可以让 Agent 从已记录的 Codex 和 Claude 工作中发现跨 Session 的规律。用户只需用
+自然语言提出具体问题；Agent 会选择查询、检查覆盖范围，并只读取回答问题所需的证据。
 
 ```bash
-threadshare insights status
 threadshare insights sync
-threadshare insights spec --format json
-threadshare insights mcp --stdio
 ```
 
-用户只需要用自然语言向 Agent 提出具体问题。Agent 读取静态 spec，自行选择 action、版本化分析计划、
-过滤条件和 evidence 深度，再构造严格 JSON 请求。用户不需要记住 Recipe 名称、resource 名称、schema
-版本或 cursor 规则。例如：
+第一次分析前运行一次 `sync`；希望结果包含最新工作时再运行。后续 `sync` 是增量更新。只有明确需要
+完整原子重建或恢复 origin secret 时才使用 `reindex`。
 
-- 最近哪些 Skill 用得最多，通常用在什么工作场景？
-- 哪些 Tool attempt 反复失败，同一次尝试后来成功了吗？
-- 以前哪里出现过这个具体错误，随后哪个经过验证的步骤奏效了？
-- 哪些项目或模型记录的 token 最多，这份统计有多完整？
+然后直接把这些问题交给 Agent：
 
-Agent 构造请求时，先读取发现契约，不要猜测参数组合：
+| 发给 Agent 的问题 | 回答可以指导什么决策 |
+|---|---|
+| 我最常使用哪些 Skill 和 Tool，通常用在什么工作中？ | 固化有效工作流、合并重复别名、停用低价值集成。 |
+| 哪些 Tool 尝试反复失败，同一尝试链后来成功了吗？ | 区分高频摩擦与失效集成，再改进 Tool 配置、提示词或文档。 |
+| 哪些 Session 偏研究、偏实现，或者缺少配套文档？ | 在实现快于证据沉淀的环节增加设计或审查检查点。 |
+| Tool 密度、Skill 使用或项目切换在什么时候发生了变化？ | 比较工作流迭代，识别协调成本或自动化开销。 |
+| 这个具体错误以前在哪里出现过，后来哪个有证据的步骤成功了？ | 复用历史上成功的候选方案，同时避免把相关性当成必然因果。 |
 
-```bash
-threadshare insights spec --format json
-threadshare insights query --help
-threadshare insights recipe --help
-threadshare insights evidence --help
-threadshare insights mcp --help
-```
+用户不需要选择命令、resource、schema 或内部分析计划。兼容的 Agent 会读取
+`threadshare insights spec --format json`，选择有边界的查询，并在结论中报告 snapshot、时间窗口、
+coverage、截断状态和证据。
 
-底层请求文件是随 npm 包发布的严格 JSON 契约。最小的 Agent 构造事件查询示例：
+#### 一份真实本地索引报告
 
-```json
-{"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
-```
+下面的结论来自一个包含 3,600 多个 Session、11,000 多个 Turn 的真实本地索引。这里不包含 Session
+正文、本地路径、stable key 或 evidence 标识。
 
-保存为 `query.json` 后执行：
+| 问题 | Agent 得到的结论 | 可采取的开发决策 |
+|---|---|---|
+| 哪些 Skill 用得最多？ | Review 和设计收敛类 Skill 占主导，前两项占全部 Skill invocation 的 48.9%。 | 先产品化审查和设计工作流，再增加更多低频入口。 |
+| 哪些 Tool 反复失败？ | `Bash` 失败总数最高，但 13,674 次调用中完成了 13,345 次；`WebFetch` 9/9 失败，退役 MCP 搜索 4/4 失败。 | 对 `Bash` 做失败分类，同时移除或替换从未记录成功的集成。 |
+| 失败尝试后来恢复了吗？ | 返回的 50 条代表性失败链全部为 `never-succeeded`，其中 34 条是 `Bash`。 | 按尝试链跟踪恢复，不能因为 Tool 整体可靠就假定某次失败已恢复。 |
+| 工作方式发生了什么变化？ | 两个 13 周窗口相比，Turn 减少 50.3%，但每个 Turn 的 Tool 调用增加 36.4%。 | 判断工作是否进入更深的自动化，或是否增加了额外编排成本。 |
+| Token 热点在哪里？ | 最大分组记录约 28.4 亿 token，其中约 98% 的 input token 来自缓存。 | 先比较未缓存 input、output 和交付结果，再判断 total token 是否属于可避免成本。 |
 
-```bash
-threadshare insights query --request query.json --format json
-```
+阅读[完整的真实索引 Agent 分析报告](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)，
+可以看到每个问题的证据边界、结论和后续决策。
 
-下一页必须原样复用返回的 `nextCursor`；请求完整内容时，必须使用结果中的准确 revision。
-Query 和 Recipe 不会隐式执行 `sync`，首次查询或需要最新数据时先显式运行 `sync`。
-
-`sync` 会在索引不存在时创建它；索引已存在时只提交新增、变更、删除或刚被排除的 Session。
-在交互式终端中，它会把字节进度写到 stderr。只有明确需要完整原子重建或恢复 origin secret 时才使用
-`reindex`。
-
-规范路由与请求形状以 `threadshare insights spec --format json`、`threadshare insights --help` 和各
-action 的 help 为准。查询面包括 Overview、
-Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录、七类本地资源的类型化
-记录与聚合、版本化 Recipe，以及带 revision 校验的完整证据分页。stdio MCP server 暴露一个发现
-tool 以及同一套 Query、Recipe、Evidence 契约，不监听网络端口。响应包含用于引用结果、检测
-分页期间原子 reindex 的 committed snapshot 身份。
-
-Agent 内部使用版本化计划，使同一种自然语言意图在实现演进时仍然可复核。这些协议名称只是自动化
-细节，不需要用户选择。计划返回结构化事实、provenance、coverage 与可直接读取的 evidence target，
-而不是自然语言结论。Agent 负责形成回答，并区分 recorded fact、derived signal、estimate 与
-co-occurrence。
+Local Insights 查询已提交的本地历史，不会上传数据。Deep Query 可以返回完整消息、analysis、Tool
+输入输出、错误和文件路径。应把输出视为本机敏感数据；除非用户明确要求，否则不要 share 或 publish。
 
 本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
 `share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，
 0.8.x 不提供本地 Insights。
 
-Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 必须同时报告 grouped、
-ungrouped invocation 与返回的 dedupe support；Capability 调用终态和所在 Turn 的结果必须分开陈述，
-共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。Deep Query 与 Evidence 可以返回原始
-Tool payload、system/developer/analysis 内容、provider payload 与本地路径；除非用户另行要求
-share 或 publish，这些内容始终只留在本机。
+Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 应把 Tool 调用终态与所在
+Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。
 
 ### 使用其他 Threadshare 服务端
 

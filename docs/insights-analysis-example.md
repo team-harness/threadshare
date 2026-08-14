@@ -6,7 +6,7 @@
 
 ## 分析边界
 
-主体趋势来自 committed snapshot `3657`，7 个 recipe 案例来自后续 snapshot `3718`。两组结果回答不同层级的问题，本文不把跨 snapshot 的小幅计数差异解释成行为变化。
+主体趋势来自 committed snapshot `3657`，深度案例来自 snapshot `3718`，失败分析更新于 snapshot `3729`。这些结果回答不同层级的问题，本文不把跨 snapshot 的小幅计数差异解释成行为变化。
 
 | 指标 | 观测值 |
 |---|---:|
@@ -47,17 +47,19 @@ Tool 趋势还暴露了命名迁移：`exec_command` 从 119,754 降至 32,181�
 
 | Tool | 失败 / 调用 | 失败率 | Agent 判断的优先级 |
 |---|---:|---:|---|
-| `Bash` | 248 / 9,616 | 2.58% | 绝对失败量最高，最适合先做错误分类 |
-| `ExitPlanMode` | 18 / 21 | 85.71% | 状态机或交互前提可能不匹配 |
-| `Write` | 14 / 337 | 4.15% | 检查路径、权限和并发冲突 |
-| `WebFetch` | 8 / 8 | 100% | 集成可能不可用或已被替代 |
+| `Bash` | 329 / 13,674 | 2.41% | 绝对失败量最高，最适合先做错误分类 |
+| `ExitPlanMode` | 39 / 47 | 82.98% | 39 次失败、8 次终态未知、没有完成记录 |
+| `Write` | 25 / 482 | 5.19% | 大部分终态未知，需先改善记录再判断可靠性 |
+| `WebFetch` | 9 / 9 | 100% | 没有成功记录，应检查是否仍应启用 |
 | 已下线 MCP 搜索 | 4 / 4 | 100% | 清理仍在引用旧能力的工作流 |
 
-Agent 在同一索引中统计到 144,710 个候选链。返回的 Top 5 代表链全部是 `never-succeeded`：3 个 `Bash`、1 个 `Read`、1 个 `Write`，每条都记录了一次失败且没有后续 completion。
+Agent 在同一索引中统计到 307,956 个候选链。返回的 50 条代表链全部是 `never-succeeded`，其中 34 条来自 `Bash`；这些具体失败链都没有记录到后续成功。
 
 **有价值的回答**：先治理 `Bash` 能减少最多重试；同时应删除 100% 失败的退役集成。高失败率和高失败量是两种不同问题，不能合成一个不透明分数。
 
-**下一步**：按更短时间窗和 capability 下钻 `Bash`，读取代表链的 evidence，把失败分成环境缺失、命令错误、权限、超时和并发冲突，再决定修文档、修工具还是修 Agent 提示。
+**下一步**：按更短时间窗下钻 `Bash`，读取代表链的完整证据，把失败分成环境缺失、命令错误、权限、超时和并发冲突，再决定修文档、修工具还是修 Agent 提示。
+
+本次按单个 Tool 缩小范围的下钻没有完成。因此报告能确认返回的 50 条链没有恢复，但不把它们外推成所有 Tool 的完整恢复率。
 
 Top 5 不是总体分布。Tool terminal state 与 containing Turn outcome 也是两条不同事实轴；“同一 Turn 共现”不能写成“Tool 失败导致任务失败”。
 
@@ -120,7 +122,7 @@ Context transition 是连续事件中的项目变化信号，不等于人的注�
 
 **下一步**：Agent 应把这个历史方案当作候选操作，再核对当前 toolchain 与 workflow 是否相同。这份证据只证明“历史上随后观察到成功”，不保证同一步骤必然解决当前环境。
 
-像 `TS_OPERATION_FAILED` 这样的通用词会被拒绝为过宽查询。先用 Search 定位具体错误、项目或 Session，再运行 recipe，既更快，也能避免把不相关历史拼成伪答案。
+像 `TS_OPERATION_FAILED` 这样的通用词会被拒绝为过宽查询。Agent 应先定位具体错误、项目或 Session，再读取相关尝试链，既更快，也能避免把不相关历史拼成伪答案。
 
 ## 问题 7：某个 Session 中到底发生了什么？
 
@@ -140,8 +142,8 @@ Context transition 是连续事件中的项目变化信号，不等于人的注�
 
 1. 先运行 `threadshare insights sync`，再用 `threadshare insights status --format json` 记录当前索引状态。日常使用增量 `sync`；只有明确需要完整原子重建时才用 `reindex`。
 2. 先用 `overview`、`usage` 或 `activity` 做聚合定位。要求 Agent 固定 UTC 窗口，并报告 snapshot、分子、分母和 coverage。
-3. 用户只描述具体分析问题；Agent 先读取 `threadshare insights spec --format json`，再自行选择查询、过滤条件和内部版本化计划。大索引不要从通用词或无限时间窗开始。
+3. 用户只描述具体分析问题；Agent 自行选择查询、过滤条件和内部分析计划。大索引不要从通用词或无限时间窗开始。
 4. 内部分析计划只返回结构化事实、派生信号、估计和 evidence target。让 Agent 明确区分四者，并检查 `truncated`、`coverage.degraded` 与 diagnostics。
 5. 对要引用的结论再运行 `insights evidence`。保留 revision；若 revision 已变化，重新查询，不要把旧 evidence 与新 snapshot 混用。
 
-命令和 request schema 以 `threadshare insights spec --format json`、`threadshare insights --help`、各 action 的 `--help` 以及已发布 JSON Schema 为准。Agent 也可以通过 `threadshare insights mcp --stdio` 先发现分析计划，再使用底层 Query、Recipe 和 Evidence 契约。
+Agent 的底层入口以 `threadshare insights spec --format json`、`threadshare insights --help` 和已发布 JSON Schema 为准。用户不需要记忆或选择这些协议。
