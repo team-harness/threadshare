@@ -784,6 +784,17 @@ function compareNewest(left, right) {
   return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
+function reconciliationItemBytes(item) {
+  return BigInt(item.metadata?.size ?? item.previous?.metadata?.size ?? "0");
+}
+
+function compareLargestFirst(left, right) {
+  const leftBytes = reconciliationItemBytes(left);
+  const rightBytes = reconciliationItemBytes(right);
+  if (leftBytes !== rightBytes) return leftBytes > rightBytes ? -1 : 1;
+  return compareNewest(left, right);
+}
+
 function reconciliationFingerprint(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -1051,11 +1062,13 @@ export async function runInsightsIndexer(options = {}) {
     statSource,
     sampleSource,
   });
-  const itemBytes = (item) => BigInt(item.metadata?.size ?? item.previous?.metadata?.size ?? "0");
-  const bytesTotal = plan.items.reduce((total, item) => total + itemBytes(item), 0n);
+  const bytesTotal = plan.items.reduce(
+    (total, item) => total + reconciliationItemBytes(item),
+    0n,
+  );
   let bytesProcessed = plan.items
     .filter(({ action }) => action === "unchanged")
-    .reduce((total, item) => total + itemBytes(item), 0n);
+    .reduce((total, item) => total + reconciliationItemBytes(item), 0n);
   const notifyProgress = () => {
     if (options.onProgress === undefined) return;
     try {
@@ -1068,7 +1081,7 @@ export async function runInsightsIndexer(options = {}) {
     }
   };
   const markProcessed = (item) => {
-    bytesProcessed += itemBytes(item);
+    bytesProcessed += reconciliationItemBytes(item);
     notifyProgress();
   };
   notifyProgress();
@@ -1109,7 +1122,7 @@ export async function runInsightsIndexer(options = {}) {
 
   const actionable = plan.items
     .filter(({ action }) => action === "append" || action === "replace-session")
-    .sort(compareNewest);
+    .sort(compareLargestFirst);
   const exclusions = buildExclusions(options.config, options.privacyContext);
   const results = await mapLimit(actionable, concurrency, async (item) => {
     try {

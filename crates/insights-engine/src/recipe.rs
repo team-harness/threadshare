@@ -1588,19 +1588,7 @@ fn failure_chains(
     for window in segmented_windows(&request.window)? {
         let mut segment = request.clone();
         segment.window = window;
-        let (scope, values) = event_scope(&segment, Some("ace.chain_key IS NOT NULL"))?;
-        let sql = format!(
-            "SELECT lower(hex(ace.chain_key)),json_extract(he.metadata_json,'$.providerState'),
-                    json_extract(he.metadata_json,'$.capabilityKey'),
-                    he.observed_timestamp,he.completeness,
-                    hec.missing_payload,he.record_start_offset,he.content_index,
-                    he.event_ordinal,he.event_key
-             FROM history_events he INDEXED BY history_events_observed
-             CROSS JOIN attempt_chain_events ace ON ace.event_key=he.event_key
-             CROSS JOIN history_event_coverage hec ON hec.event_key=he.event_key
-             CROSS JOIN sessions s ON s.session_id=he.session_id
-             WHERE {scope}"
-        );
+        let (sql, values) = failure_chain_summary_statement(&segment)?;
         let mut statement = connection.prepare(&sql).map_err(query_failed)?;
         let mut rows = statement
             .query(params_from_iter(values))
@@ -1692,6 +1680,36 @@ fn failure_chains(
         }
     }
     Ok((result, detail_limited, total_item_count))
+}
+
+fn failure_chain_summary_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = event_scope(request, Some("ace.chain_key IS NOT NULL"))?;
+    let source = if request.filters.session_keys.is_empty() {
+        "history_events he INDEXED BY history_events_observed
+         CROSS JOIN attempt_chain_events ace ON ace.event_key=he.event_key
+         CROSS JOIN history_event_coverage hec ON hec.event_key=he.event_key
+         CROSS JOIN sessions s ON s.session_id=he.session_id"
+    } else {
+        "sessions s
+         JOIN attempt_chain_events ace INDEXED BY attempt_chain_events_correlation
+           ON ace.session_id=s.session_id
+         JOIN history_events he ON he.event_key=ace.event_key
+         JOIN history_event_coverage hec ON hec.event_key=he.event_key"
+    };
+    Ok((
+        format!(
+            "SELECT lower(hex(ace.chain_key)),json_extract(he.metadata_json,'$.providerState'),
+                    json_extract(he.metadata_json,'$.capabilityKey'),
+                    he.observed_timestamp,he.completeness,
+                    hec.missing_payload,he.record_start_offset,he.content_index,
+                    he.event_ordinal,he.event_key
+             FROM {source}
+             WHERE {scope}"
+        ),
+        values,
+    ))
 }
 
 fn chain_summary_value(chain_key: String, chain: &ChainSummary) -> Option<Value> {
@@ -1897,18 +1915,7 @@ fn file_workflow_signals(
     for window in segmented_windows(&request.window)? {
         let mut segment = request.clone();
         segment.window = window;
-        let (scope, values) = file_scope(&segment)?;
-        let sql = format!(
-            "SELECT lower(hex(s.session_key)),lower(hex(sc.canonical_digest)),s.provider,
-                    CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
-                    fa.action,fa.phase,fa.normalized_path
-             FROM file_activity fa INDEXED BY file_activity_observed
-             CROSS JOIN history_events he ON he.event_key=fa.event_key
-             CROSS JOIN sessions s ON s.session_id=he.session_id
-             CROSS JOIN session_commits sc ON sc.session_id=s.session_id
-             WHERE {scope}
-             ORDER BY fa.observed_timestamp,fa.event_key,fa.activity_ordinal"
-        );
+        let (sql, values) = file_workflow_summary_statement(&segment)?;
         let mut statement = connection.prepare(&sql).map_err(query_failed)?;
         let mut rows = statement
             .query(params_from_iter(values))
@@ -2010,6 +2017,35 @@ fn file_workflow_signals(
         item["events"] = Value::Array(details.remove(session_key).unwrap_or_default());
     }
     Ok((result, detail_limited))
+}
+
+fn file_workflow_summary_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = file_scope(request)?;
+    let source = if request.filters.session_keys.is_empty() {
+        "file_activity fa INDEXED BY file_activity_observed
+         CROSS JOIN history_events he ON he.event_key=fa.event_key
+         CROSS JOIN sessions s ON s.session_id=he.session_id
+         CROSS JOIN session_commits sc ON sc.session_id=s.session_id"
+    } else {
+        "sessions s
+         JOIN history_events he INDEXED BY history_events_session_order
+           ON he.session_id=s.session_id
+         JOIN file_activity fa ON fa.event_key=he.event_key
+         JOIN session_commits sc ON sc.session_id=s.session_id"
+    };
+    Ok((
+        format!(
+            "SELECT lower(hex(s.session_key)),lower(hex(sc.canonical_digest)),s.provider,
+                    CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                    fa.action,fa.phase,fa.normalized_path
+             FROM {source}
+             WHERE {scope}
+             ORDER BY fa.observed_timestamp,fa.event_key,fa.activity_ordinal"
+        ),
+        values,
+    ))
 }
 
 fn file_event_count(item: &Value) -> u128 {
@@ -3672,7 +3708,8 @@ mod tests {
 
     use super::{
         MAX_RECIPE_PAGE_BYTES, RecipeFilters, RecipeName, RecipeRequest, RecipeResponse,
-        RecipeWindow, exact_activity_order_statement, fit_degraded_recipe_response,
+        RecipeWindow, exact_activity_order_statement, failure_chain_summary_statement,
+        file_workflow_summary_statement, fit_degraded_recipe_response,
         projected_activity_coverage_statement, projected_capability_cooccurrences_statement,
         projected_capability_representatives_statement, read_recipe_coverage, recipe_provenance,
         solution_recall_statement, truncate_recipe_details,
@@ -3957,6 +3994,94 @@ mod tests {
                 "projected capability detail must not scan the rollup: {details:?}"
             );
         }
+    }
+
+    #[test]
+    fn failure_chain_summary_uses_the_bounded_session_plan_when_scoped() {
+        let connection = coverage_connection();
+        let mut request = activity_request(RecipeName::FailureChains);
+        request.filters.session_keys = vec!["11".repeat(32)];
+        let (sql, values) = failure_chain_summary_statement(&request).unwrap();
+        let details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("attempt_chain_events_correlation")),
+            "session-scoped failure chains must start from the bounded chain index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("history_events_observed")),
+            "session-scoped failure chains must not scan the global time index: {details:?}"
+        );
+
+        request.filters.session_keys.clear();
+        let (sql, values) = failure_chain_summary_statement(&request).unwrap();
+        let global_details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            global_details
+                .iter()
+                .any(|detail| detail.contains("history_events_observed")),
+            "global failure chains must retain the bounded time-index scan: {global_details:?}"
+        );
+    }
+
+    #[test]
+    fn file_workflow_summary_uses_the_bounded_session_plan_when_scoped() {
+        let connection = coverage_connection();
+        let mut request = activity_request(RecipeName::FileWorkflowSignals);
+        request.filters.session_keys = vec!["11".repeat(32)];
+        let (sql, values) = file_workflow_summary_statement(&request).unwrap();
+        let details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("history_events_session_order")),
+            "session-scoped file workflows must start from the bounded event index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("file_activity_observed")),
+            "session-scoped file workflows must not scan the global time index: {details:?}"
+        );
+
+        request.filters.session_keys.clear();
+        let (sql, values) = file_workflow_summary_statement(&request).unwrap();
+        let global_details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            global_details
+                .iter()
+                .any(|detail| detail.contains("file_activity_observed")),
+            "global file workflows must retain the bounded time-index scan: {global_details:?}"
+        );
     }
 
     #[test]

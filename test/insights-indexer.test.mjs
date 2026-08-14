@@ -692,18 +692,22 @@ test("applies provider, session, and known project exclusions before stat or bod
   );
 });
 
-test("runs session batches newest first with fixed concurrency", async () => {
+test("runs the largest session batches first with stable ties and dynamic concurrency", async () => {
+  const sessionOrdinals = [0, 1, 3, 2, 4];
   const sources = Array.from({ length: 5 }, (_, index) => ({
     provider: "codex",
-    sessionId: `00000000-0000-4000-8000-00000000000${index}`,
+    sessionId: `00000000-0000-4000-8000-00000000000${sessionOrdinals[index]}`,
     file: `/sessions/${index}.jsonl`,
   }));
-  const metadataByFile = new Map(sources.map((source, index) => [
-    source.file,
-    metadata({ size: "10", mtimeNs: String((index + 1) * 100) }),
-  ]));
+  const metadataByFile = new Map([
+    [sources[0].file, metadata({ size: "9007199254740992", mtimeNs: "200" })],
+    [sources[1].file, metadata({ size: "9007199254740993", mtimeNs: "100" })],
+    [sources[2].file, metadata({ size: "30", mtimeNs: "500" })],
+    [sources[3].file, metadata({ size: "30", mtimeNs: "500" })],
+    [sources[4].file, metadata({ size: "20", mtimeNs: "1000" })],
+  ]);
   const started = [];
-  const releases = [];
+  const releases = new Map();
   const commits = [];
   const progress = [];
   let active = 0;
@@ -737,7 +741,7 @@ test("runs session batches newest first with fixed concurrency", async () => {
       started.push(file);
       active += 1;
       maximumActive = Math.max(maximumActive, active);
-      await new Promise((resolve) => releases.push(resolve));
+      await new Promise((resolve) => releases.set(file, resolve));
       active -= 1;
       const sourceMetadata = metadataByFile.get(file);
       return {
@@ -764,28 +768,38 @@ test("runs session batches newest first with fixed concurrency", async () => {
   });
 
   await waitFor(() => started.length === 2);
-  assert.deepEqual(started, ["/sessions/4.jsonl", "/sessions/3.jsonl"]);
-  for (let index = 0; index < sources.length; index += 1) {
-    releases[index]();
-    if (index + 2 < sources.length) {
-      await waitFor(() => started.length === index + 3);
-    }
-  }
+  assert.deepEqual(started, ["/sessions/1.jsonl", "/sessions/0.jsonl"]);
+  releases.get("/sessions/0.jsonl")();
+  await waitFor(() => started.length === 3);
+  assert.equal(started[2], "/sessions/3.jsonl");
+  releases.get("/sessions/3.jsonl")();
+  await waitFor(() => started.length === 4);
+  assert.equal(started[3], "/sessions/2.jsonl");
+  releases.get("/sessions/1.jsonl")();
+  await waitFor(() => started.length === 5);
+  releases.get("/sessions/2.jsonl")();
+  releases.get("/sessions/4.jsonl")();
   const report = await running;
   assert.equal(maximumActive, 2);
   assert.deepEqual(started, [
-    "/sessions/4.jsonl",
-    "/sessions/3.jsonl",
-    "/sessions/2.jsonl",
     "/sessions/1.jsonl",
     "/sessions/0.jsonl",
+    "/sessions/3.jsonl",
+    "/sessions/2.jsonl",
+    "/sessions/4.jsonl",
   ]);
   assert.equal(commits.length, 5);
   assert.equal(report.committed, 5);
-  assert.equal(report.bytesProcessed, "50");
-  assert.equal(report.bytesTotal, "50");
-  assert.deepEqual(progress[0], { bytesProcessed: "0", bytesTotal: "50" });
-  assert.deepEqual(progress.at(-1), { bytesProcessed: "50", bytesTotal: "50" });
+  assert.equal(report.bytesProcessed, "18014398509482065");
+  assert.equal(report.bytesTotal, "18014398509482065");
+  assert.deepEqual(progress[0], {
+    bytesProcessed: "0",
+    bytesTotal: "18014398509482065",
+  });
+  assert.deepEqual(progress.at(-1), {
+    bytesProcessed: "18014398509482065",
+    bytesTotal: "18014398509482065",
+  });
   assert.deepEqual(report.diagnostics, []);
 });
 
