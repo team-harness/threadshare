@@ -1,12 +1,12 @@
 # 用 Insights 分析 Agent 编程工作：一个真实索引案例
 
-这份报告演示如何让 Agent 基于 Threadshare Insights 回答比“搜到哪段对话”更有价值的问题：工作方式是否变化、哪些 Skill 真正进入日常流程、Tool 失败应先治理哪里，以及上下文成本是否得到有效复用。
+这份报告展示的不是“Insights 有哪些字段”，而是用户可以把哪些问题交给 Agent，以及 Agent 如何用 Threadshare Insights 给出可行动、可下钻、不会过度推断的回答。
 
-报告使用一个真实的本地个人索引，但只保留聚合结果和经过归类的结论。代表 Turn 文本、项目 key、本地路径、稳定记录 key 和 snapshot token 均不进入本文。
+案例来自一个真实的本地个人索引。文中只保留聚合数字和归类结论，不公开项目 key、Session key、本地路径、事件正文或 evidence key。
 
 ## 分析边界
 
-正文中的分析数字来自 committed snapshot `3657`。生成初稿时，索引状态为 `ready`，SQLite quick check 与 FTS integrity check 均为 `ok`，但一次 `sync` 返回了 `TS_OPERATION_FAILED`；因此正文保留当时的历史口径，不把 snapshot `3657` 表述为原始文件的最新完整视图。该故障随后推动了大 Session 分块 staging、活跃文件重试与大库查询分段优化；修复后的同一索引已成功同步到 snapshot `3718`，`failed=0`。
+主体趋势来自 committed snapshot `3657`，7 个 recipe 案例来自后续 snapshot `3718`。两组结果回答不同层级的问题，本文不把跨 snapshot 的小幅计数差异解释成行为变化。
 
 | 指标 | 观测值 |
 |---|---:|
@@ -17,165 +17,131 @@
 | Capability | 207（176 Tool、31 Skill） |
 | 本地派生状态 | 约 12.1 GiB |
 
-趋势窗口使用 13 个完整 UTC 周：
+趋势比较使用 13 个完整 UTC 周：当前窗口为 `2026-05-11` 至 `2026-08-10`，对照窗口为 `2026-02-09` 至 `2026-05-11`。
 
-- 当前窗口：`2026-05-11T00:00:00.000Z` 至 `2026-08-10T00:00:00.000Z`
-- 对照窗口：`2026-02-09T00:00:00.000Z` 至 `2026-05-11T00:00:00.000Z`
+Insights 查询只读取已提交索引，不会隐式运行 `sync`。因此 Agent 的回答应同时给出 snapshot、查询窗口、coverage 和 evidence，而不是把索引内容表述成实时事实。
 
-Insights 查询不会读取原始 provider 文件，也不会隐式运行 `sync`。所有 response 的 `sourceFreshness` 均为 `not-evaluated`，因此本文只声称“snapshot 中记录了什么”，不声称 snapshot 与报告生成瞬间的原始文件完全同步。
+## 问题 1：哪些 Skill 或 Tool 用得最多，用在什么场景？
 
-## 结论 1：snapshot 记录的 Turn 减少，但单个 Turn 的工具密度上升
+> 请用 Threadshare Insights 找出最近 13 个完整周使用最多的 5 个 Skill，并说明它们通常出现在什么工作场景。区分调用次数、独立 Turn、Session 和 dedupe group。
+
+Agent 先用 `insights usage skill` 排名，再把前 5 个 capability 交给 `capability-contexts@1` 获取代表上下文。
+
+| Skill | 调用 | Turn | Session / group | Agent 归纳的常见场景 |
+|---|---:|---:|---:|---|
+| `codestable:cs-review` | 24 | 24 | 24 / 24 | 冻结 diff、独立审查、契约与证据核验 |
+| `cs` | 20 | 20 | 9 / 8 | 实现前讨论、设计收敛、canonical 决策 |
+| `codestable:cs-epic` | 4 | 4 | 2 / 2 | 多阶段迁移、长程交付、阶段验收 |
+| `paseo` | 3 | 3 | 3 / 3 | 多 Agent 分工、并行实现与验证 |
+| `cs-onboard` | 3 | 3 | 3 / 3 | 新仓库接入、建立维护边界 |
+
+**有价值的回答**：Skill 已进入正式工程流程，但采用高度集中。前两个 Skill 占全部 90 次 Skill invocation 的 48.9%，前五个占 60.0%。最值得产品化的是 review 与设计收敛流程，而不是继续增加低频入口。
+
+**下一步**：把 `cs-onboard` 与 `codestable:cs-onboard` 归为同一 capability family，再观察长期采用率。`cs` 的 20 次调用只分布在 8 个 group，不能被写成 20 个独立成功案例。
+
+Tool 趋势还暴露了命名迁移：`exec_command` 从 119,754 降至 32,181，而 `exec` 从 0 增至 42,054；`write_stdin` 下降时，`wait` 同期上升。Agent 应先验证 alias，再解释行为变化。
+
+## 问题 2：哪些 Tool 一直失败，同一尝试链后来成功了吗？
+
+> 请按绝对失败量和失败率分别找出 Tool 热点，再用 `failure-chains@1` 判断代表性失败链是后来成功、从未成功，还是被放弃。
+
+| Tool | 失败 / 调用 | 失败率 | Agent 判断的优先级 |
+|---|---:|---:|---|
+| `Bash` | 248 / 9,616 | 2.58% | 绝对失败量最高，最适合先做错误分类 |
+| `ExitPlanMode` | 18 / 21 | 85.71% | 状态机或交互前提可能不匹配 |
+| `Write` | 14 / 337 | 4.15% | 检查路径、权限和并发冲突 |
+| `WebFetch` | 8 / 8 | 100% | 集成可能不可用或已被替代 |
+| 已下线 MCP 搜索 | 4 / 4 | 100% | 清理仍在引用旧能力的工作流 |
+
+`failure-chains@1` 在同一索引中统计到 144,710 个候选链。返回的 Top 5 代表链全部是 `never-succeeded`：3 个 `Bash`、1 个 `Read`、1 个 `Write`，每条都记录了一次失败且没有后续 completion。
+
+**有价值的回答**：先治理 `Bash` 能减少最多重试；同时应删除 100% 失败的退役集成。高失败率和高失败量是两种不同问题，不能合成一个不透明分数。
+
+**下一步**：按更短时间窗和 capability 下钻 `Bash`，读取代表链的 evidence，把失败分成环境缺失、命令错误、权限、超时和并发冲突，再决定修文档、修工具还是修 Agent 提示。
+
+Top 5 不是总体分布。Tool terminal state 与 containing Turn outcome 也是两条不同事实轴；“同一 Turn 共现”不能写成“Tool 失败导致任务失败”。
+
+## 问题 3：哪些 Session 偏研究、偏实现，哪些缺少文档支撑？
+
+> 请用 `file-workflow-signals@1` 找出 research-heavy、implementation-heavy、doc void 和 spec precision gap Session，并解释判断依据，不评价代码质量。
+
+`file-workflow-signals@1` 统计到 633 个 Session。Top 5 全部被估计为 `implementationHeavy`；最密集的两个 Session 分别涉及 224 和 241 个 distinct path。
+
+其中一个代表 Session 记录了 248 次文件尝试、53 个 distinct path 和 21 次失败，同时有 428 个 document-like 事件。它不是 doc void，更像“有文档支撑但执行摩擦较高”的实现任务。
+
+**有价值的回答**：当前排名由大规模实现任务主导。对团队复盘更有用的分组是“高实现量且低失败”与“高实现量且高失败”，而不是简单地把文件多解释成产出高。
+
+**下一步**：对高失败 Session 运行 `session-timeline@1`，检查失败集中在哪个阶段；对 doc void 或 spec precision gap Session，再验证是否真的缺少设计材料，而不是适配器未记录到文档事件。
+
+Recipe 的 `implementationHeavy`、`researchHeavy`、`docVoid` 和 `specPrecisionGap` 都是版本化估计。它们描述被记录的文件工作流，不是质量评分。
+
+## 问题 4：活动强度和项目切换何时发生变化？
+
+> 请比较最近 13 个完整 UTC 周与前一个等长窗口，找出 Turn、Tool、Skill 和 context transition 的变化，并指出峰值周。
 
 | 指标 | 对照窗口 | 当前窗口 | 变化 |
 |---|---:|---:|---:|
-| Turn | 6,988 | 3,489 | -50.1% |
-| Tool 调用 | 158,944 | 107,972 | -32.1% |
-| 每 Turn Tool 调用 | 22.7 | 30.9 | +36.1% |
+| Turn | 6,988 | 3,474 | -50.3% |
+| Tool invocation | 158,944 | 107,831 | -32.2% |
+| Skill invocation | 1 | 90 | +89 |
+| 每 Turn Tool 调用 | 22.7 | 31.0 | +36.4% |
 
-这不能直接解释为“实际工作量减半”。当前窗口在 snapshot 中记录的 Turn 数减半，但每个 Turn 内的工具调用更密集，说明任务形态可能正在向更长、更自动化、编排程度更高的工作集中。对照窗口的前三周没有记录活动，也应在复用这个比较时单独核查。
+最后一个完整周贡献了当前窗口 29.7% 的 Turn、49.8% 的 Tool invocation，以及 86.7% 的 recorded context transition。
 
-最后一个完整周尤其突出：它占当前窗口 29.8% 的 Turn，却占 49.8% 的 Tool 调用。对 Agent 工作流更有意义的后续问题不是“为什么少了一半 Turn”，而是：
+**有价值的回答**：snapshot 中记录的 Turn 变少，但单个 Turn 的工具密度明显上升，工作更集中在少数高编排任务。Skill 从几乎未记录增长到 90 次，也说明显式工作流开始替代临时操作。
 
-1. 高密度 Turn 是否产出了更多已验证结果；
-2. 调用增长来自实现工作，还是轮询、等待和协调开销；
-3. 是否有少数长任务贡献了过多失败重试与上下文成本。
+**下一步**：把峰值周与交付结果、失败链和 Session workflow 联合分析。若高 Tool 密度没有带来更多验证通过或可复用产物，应优先减少轮询、等待和协调开销。
 
-## 结论 2：Skill 已进入正式工程流程，但使用高度集中
+Context transition 是连续事件中的项目变化信号，不等于人的注意力切换，也不能直接解释为生产力下降。对照窗口前三周没有记录活动，复用比较时应单独核查 coverage。
 
-当前窗口记录了 90 次 Skill invocation。前两个 Skill 占 48.9%，前五个占 60.0%。
+## 问题 5：哪些 provider、model、project 组合消耗了最多 token？
 
-| Skill | 调用 | Turn | Session / dedupe group | 代表性使用场景 |
-|---|---:|---:|---:|---|
-| `codestable:cs-review` | 24 | 24 | 24 / 24 | 冻结 diff、独立代码或设计审查、契约与证据核验 |
-| `cs` | 20 | 20 | 9 / 8 | 实现前讨论、设计收敛、canonical 文档决策 |
-| `codestable:cs-epic` | 4 | 4 | 2 / 2 | 多阶段迁移、长程功能交付、阶段验收 |
-| `paseo` | 3 | 3 | 3 / 3 | 多 Agent 分工、团队协调、并行实现与验证 |
-| `cs-onboard` | 3 | 3 | 3 / 3 | 新仓库接入、基线合同与维护边界建立 |
+> 请用 `token-hotspots@1` 找出最近 13 周的 token 热点，分别报告 input、cached input、output 和 reasoning，并说明缺失指标。
 
-代表性场景来自标记为 partial coverage 的 `capability-contexts@1`，适合生成调查假设，不适合声称覆盖了全部 Skill 使用。这里能得出“这些 Skill 在哪些场景被记录使用”，不能得出“这些 Skill 导致任务成功”。尤其是 `cs` 的 20 次调用只分布在 8 个 dedupe group，说明一次工作中可能多次进入同一流程；调用数不能直接当成 20 个独立成功案例。
+查询得到 326 个热点组。排名第一的组记录了约 28.44 亿 total token，其中 input 约 28.28 亿、cached input 约 27.72 亿、output 约 640 万、reasoning 约 228 万。
 
-另一个数据治理信号是命名分裂：`cs-onboard` 与 `codestable:cs-onboard` 分别记录了 3 次。如果要做长期采用率分析，应先把 provider 前缀和历史别名归并为 capability family，否则排行榜会低估同一工作流。
+该组 cached input 约占 input 的 98.0%。Top 5 都来自 Codex 记录，但 model 字段为空；当前适配器也不提供 capability 级 token 归因。
 
-## 结论 3：Tool 名称迁移会制造假的趋势拐点
+**有价值的回答**：主要成本信号不是“输出太长”，而是超大上下文反复进入请求；其中绝大部分被缓存复用。优化时应先比较未缓存 input、output 和任务结果，而不是只按 total 排名。
 
-当前窗口最显眼的 Tool 变化包括：
+**下一步**：按 project group 比较未缓存 input / Turn、output / Turn 和成功交付，找出“上下文反复重建”的组。高 cached 比例是复用信号，不能直接换算为费用节省。
 
-| Tool | 对照窗口 | 当前窗口 | 表面变化 |
-|---|---:|---:|---:|
-| `exec_command` | 119,754 | 32,181 | -87,573 |
-| `exec` | 0 | 42,054 | +42,054 |
-| `write_stdin` | 22,737 | 4,025 | -18,712 |
-| `wait` | 199 | 7,943 | +7,744 |
+本次 coverage 标记为 partial：139,191 个匹配事件缺少至少一种 token metric，`cacheWriteInput` 也没有记录。缺失值不能按 0 处理，Tool 或 Skill 共现更不能被当成 token 归因。
 
-这更像运行时或工具协议迁移，而不是 Agent 突然改变了基本行为。代表 Turn 也显示这些 Tool 仍主要共同出现在代码修改、测试、长进程等待和 Agent 协调任务中。
+## 问题 6：以前出现相似错误时，后来怎样解决？
 
-因此，跨版本趋势分析必须先做两层归一化：
+> 我又遇到了 macOS `LC_UUID` 相关问题。请先搜索相似历史，再用 `solution-recall@1` 找到同一尝试链中随后成功的步骤，只返回有证据的历史做法。
 
-1. 精确 capability：保留原始 provider 与 canonical name，用于证据下钻；
-2. 功能 family：把已确认的历史别名或替代能力合并，用于趋势比较。
+全局 Search 找到 233 个相关 Turn。Agent 选中一个发布审查 Session 后，`solution-recall@1` 收敛到 21 个相关事件；返回的前 10 个事件中，有 4 个关联到了同一 attempt chain 的后续成功事件。
 
-在没有 alias 证据时，Agent 应报告“可能发生命名迁移”，不能把 `exec` 的增长写成新增了 42,054 次独立行为。
+**Agent 给出的历史答案**：移除导致 Mach-O 缺少 UUID 的 linker flag；在两次构建产物上用 `otool -l` 正向断言 `LC_UUID`；把检查放在 `cmp` 和复制之前，并继续执行签名、公证后的真实产物 smoke。
 
-## 结论 4：失败治理要同时看绝对量和失败率
+历史记录还显示该路径随后通过了定向测试、release 测试和独立审查。它比“尝试重新构建”更有价值，因为答案包含失败签名、修正动作、验证顺序和成功证据。
 
-| Tool | 失败 / 调用 | 失败率 | 适合回答的问题 |
-|---|---:|---:|---|
-| `Bash` | 248 / 9,616 | 2.58% | 哪类 shell 错误贡献了最多可消除的重试？ |
-| `ExitPlanMode` | 18 / 21 | 85.71% | 是否存在协议、状态机或交互前提不匹配？ |
-| `Write` | 14 / 337 | 4.15% | 写入失败是否集中在路径、权限或冲突？ |
-| `WebFetch` | 8 / 8 | 100% | 该集成是否在环境中不可用或已被替代？ |
-| `mcp__codebase-memory-mcp__search_code` | 4 / 4 | 100% | 已下线依赖是否仍被旧工作流调用？ |
+**下一步**：Agent 应把这个历史方案当作候选操作，再核对当前 toolchain 与 workflow 是否相同。`solution-recall@1` 证明的是“历史上随后观察到成功”，不保证同一步骤必然解决当前环境。
 
-`Bash` 是“绝对失败量”优先级最高的对象；`ExitPlanMode`、`WebFetch` 和已下线 MCP 是“失败率或环境兼容性”问题。两种优先级不能混成一个分数。
+像 `TS_OPERATION_FAILED` 这样的通用词会被拒绝为过宽查询。先用 Search 定位具体错误、项目或 Session，再运行 recipe，既更快，也能避免把不相关历史拼成伪答案。
 
-这些数字是 invocation terminal state，而且本次失败榜主要来自 Claude 的结构化终态记录；不能把 Codex Tool 的零失败计数解释为没有失败。Containing Turn outcome 是另一条事实轴；本次 Claude Tool 所在 Turn 的 outcome 覆盖大多为 `unknown`。因此不能说“Tool 失败导致 Turn 被放弃”，只能说两者可能共现，随后应使用 `failure-chains@1` 和 evidence 验证具体链条。
+## 问题 7：某个 Session 中到底发生了什么？
 
-## 结论 5：上下文复用很强，但 token 结论需要覆盖说明
+> 请对刚才定位出的发布审查 Session 运行 `session-timeline@1`，按原始顺序总结消息、Tool、token 和 lifecycle 事件。不要把分页首屏当成完整时间线。
 
-最大的一组已记录 token hotspot 包含约 28.28 亿 input token，其中约 27.72 亿为 cached input，比例约 98.0%。因此该组记录主要由 cached input 构成；这提示应优先分析上下文复用，不能单凭这个比例证明节省了多少费用。
+该 Session 在查询窗口内共有 223 个事件。首个有界页面返回 50 个：9 个 capability invocation、9 个 capability result、20 个 token usage、3 个 visible message，以及 9 个 provider-unknown 事件。
 
-但这个数字不能直接解释为费用：
+这 50 个事件全部来自 main scope，completeness 都是 `full`，时间跨度约 2 分 30 秒。首屏没有 compaction、rollback、resume、fork 或 lifecycle 事件，但这不能证明后续 173 个事件也没有。
 
-- provider 的 token 与计费口径可能不同；
-- `token-hotspots@1` 在本次运行中标记为 partial coverage；
-- 139,662 个匹配事件缺少至少一种 token metric；
-- capability attribution 为 `unavailable`，不能把 token 成本归因给某个 Tool 或 Skill。
+**有价值的回答**：Agent 可以把“收到审查任务 -> 执行检查 -> 读取结果 -> 形成结论”的顺序还原出来，并精确区分 Tool 调用与 Tool 结果。它适合解释为何作出某个判断，而不是只看最终回答。
 
-更可靠的优化方向是比较“非缓存 input、output、reasoning 与任务结果”，而不是只按 total token 排名。若一个项目总 token 很高但 cached input 比例也很高，它与“每次都重新注入大量未缓存上下文”是两类问题。
+**下一步**：继续分页直到 `truncated=false`，再按 revision 获取关键 event evidence。若问题只关心 rollback 或 compaction，可缩小窗口或过滤 event kind，避免把整个 Session 塞进 Agent 上下文。
 
-## 可复用的 Agent 分析流程
+时间线是证据索引，不是自动生成的因果故事。`provider-unknown` 与缺少 lifecycle 事件都应如实保留，Agent 不应根据相邻顺序补写不存在的关系。
 
-### 1. 固定 snapshot 与完整周窗口
+## Agent 使用方式
 
-```bash
-threadshare insights status --format json
-threadshare insights overview --format json
-```
+1. 先运行 `threadshare insights sync`，再用 `threadshare insights status --format json` 记录当前索引状态。日常使用增量 `sync`；只有明确需要完整原子重建时才用 `reindex`。
+2. 先用 `overview`、`usage` 或 `activity` 做聚合定位。要求 Agent 固定 UTC 窗口，并报告 snapshot、分子、分母和 coverage。
+3. 把候选 capability、Session、项目或具体错误交给对应 recipe。大索引不要从通用词或无限时间窗开始。
+4. Recipe 只返回结构化事实、派生信号、估计和 evidence target。让 Agent 明确区分四者，并检查 `truncated`、`coverage.degraded` 与 diagnostics。
+5. 对要引用的结论再运行 `insights evidence`。保留 revision；若 revision 已变化，重新查询，不要把旧 evidence 与新 snapshot 混用。
 
-先记录 snapshot seq、integrity、coverage 和 `sourceFreshness`。时间趋势优先使用完整 UTC 周，避免把尚未结束的一周误判为下降。
-
-### 2. 先聚合，再读取上下文
-
-`usage.json`：
-
-```json
-{
-  "format": "threadshare-insights-usage-request@v1",
-  "window": {
-    "observedAtOrAfter": "2026-05-11T00:00:00.000Z",
-    "observedBefore": "2026-08-10T00:00:00.000Z"
-  },
-  "comparisonWindow": {
-    "observedAtOrAfter": "2026-02-09T00:00:00.000Z",
-    "observedBefore": "2026-05-11T00:00:00.000Z"
-  },
-  "orderBy": "recorded-invocation-count",
-  "limit": 15
-}
-```
-
-```bash
-threadshare insights usage skill --request usage.json --format json > usage-result.json
-threadshare insights usage tool --request usage.json --format json
-```
-
-先用 Usage 找 capability key，再把少量 key 传给 `capability-contexts@1`。不要一开始就拉取所有代表 Turn。
-
-```bash
-jq '{format:"threadshare-insights-recipe-request@v1",window:{after:.window.observedAtOrAfter,before:.window.observedBefore},filters:{capabilityKeys:[.items[:5][].capabilityKey]},limit:5,allowDegraded:true}' usage-result.json > contexts.json
-threadshare insights recipe capability-contexts@1 --request contexts.json --format json
-```
-
-### 3. 把失败量与失败率拆开
-
-把 `orderBy` 改成 `recorded-failing-invocation-count`，先定位绝对失败热点；再由 Agent 计算 `failed / invocation`，识别低频但高失败率的集成。任何结论都应同时给出分子和分母。
-
-### 4. 用 recipe 定位，用 evidence 定案
-
-```bash
-threadshare insights recipe capability-contexts@1 --request recipe.json --format json
-threadshare insights recipe failure-chains@1 --request recipe.json --format json
-threadshare insights recipe solution-recall@1 --request recall.json --format json
-```
-
-Recipe 返回的是 recorded facts、derived signals、estimates 与 evidence target，不是自然语言裁决。Agent 应保留 revision，并在需要引用完整输入、输出或错误时再调用 `evidence`。
-
-### 5. 给每个结论附上限制
-
-至少回答以下问题：
-
-- 数据是否 fresh，还是仅来自 committed snapshot；
-- invocation 是否可能被重复 Session 或 alias 放大；
-- terminal state 与 containing Turn outcome 是否被分开；
-- recipe 是否 `degraded`，缺少哪些时间戳、revision、payload 或 token metric；
-- 当前结论是记录事实、派生信号、估计，还是 Agent 的解释。
-
-## 下一轮最有价值的探索
-
-1. **失败恢复**：对 `Bash` 和 `ExitPlanMode` 分别跑小窗口 `failure-chains@1`，区分最终恢复、从未成功与放弃。
-2. **方案复用**：针对反复出现的构建、发布、索引和协议错误跑 `solution-recall@1`，引用后续成功 attempt，而不是只做文本相似搜索。
-3. **编程闭环**：用 `file-workflow-signals@1` 找 research-heavy、implementation-heavy、doc void 与 spec precision gap Session，并核对代表 evidence。
-4. **上下文成本**：按项目比较未缓存 input 与 output，识别“上下文反复重建”而非“缓存复用良好”的热点。
-5. **编排效率**：把 `spawn/create → wait → review → fix` 作为功能 family 观察，衡量协调调用是否随可验证交付同步增长。
-
-修复后，同一约 13 GiB 索引上的宽范围查询均成功：`failure-chains@1` 统计到 144,710 个候选链，`file-workflow-signals@1` 统计到 633 个 Session，`activity-shifts@1` 返回 13 个周 bucket。前两类只返回 Top 5 明细并明确标记 `truncated`；三类结果都保留 `TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE`，用于提醒 Agent 聚合总量是精确结果，但代表明细和部分事件字段并不完整。推荐顺序仍然是：大索引先聚合定位，再按 capability、project、session 或更短时间窗做有界下钻。
+命令和 request schema 以 `threadshare insights --help`、各 action 的 `--help` 以及已发布 JSON Schema 为准。Agent 也可以通过 `threadshare insights mcp --stdio` 使用同一套 Query、Recipe 和 Evidence 契约。
