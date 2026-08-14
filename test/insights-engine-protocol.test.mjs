@@ -1895,6 +1895,34 @@ test("Recipe protocol keeps requests exact and rejects forged response counts", 
       name,
     );
   }
+
+  const fileWorkflow = recipes.find(({ name }) => name === "file-workflow-signals@1");
+  const sampledDetails = structuredClone(fileWorkflow.item);
+  sampledDetails.recordedCounts.read = "2";
+  sampledDetails.recordedCounts.attempted = "2";
+  assert.equal(
+    createInsightsRecipeMessage({
+      requestId: "43",
+      response: recipeResponse({
+        name: fileWorkflow.name,
+        items: [sampledDetails],
+      }),
+    }).response.items[0].events.length,
+    1,
+  );
+  assert.throws(
+    () => createInsightsRecipeMessage({
+      requestId: "43",
+      response: recipeResponse({
+        name: fileWorkflow.name,
+        items: [{
+          ...sampledDetails,
+          recordedCounts: { ...sampledDetails.recordedCounts, attempted: "1" },
+        }],
+      }),
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
 });
 
 test("session sequence rejects gaps, count mismatch, collection regression, and request mismatch", () => {

@@ -213,6 +213,10 @@ class FrameTransport {
     return this.#failure !== null;
   }
 
+  get failure() {
+    return this.#failure;
+  }
+
   #appendStderr(chunk) {
     const bytes = Buffer.from(chunk);
     if (bytes.byteLength >= this.#stderrLimitBytes) {
@@ -760,7 +764,7 @@ class InsightsEngineClient {
   async #applySessionFacts(delta, sourceState, signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) {
-      throw disconnectedError(this.#transport.stderr);
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
     }
     const requestId = this.#nextRequestId();
     const sessionOptions = {
@@ -915,7 +919,7 @@ class InsightsEngineClient {
   async #readSourceStates(signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) {
-      throw disconnectedError(this.#transport.stderr);
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
     }
     const states = [];
     const seenCursors = new Set();
@@ -948,7 +952,7 @@ class InsightsEngineClient {
   async #readSourceCheckpoint(sessionKey, signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) {
-      throw disconnectedError(this.#transport.stderr);
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
     }
     const requestId = this.#nextRequestId();
     const request = createReadSourceCheckpointMessage({ requestId, sessionKey });
@@ -965,7 +969,9 @@ class InsightsEngineClient {
 
   async #removeSource(sessionKey, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     const requestId = this.#nextRequestId();
     const request = createRemoveSourceMessage({ requestId, sessionKey });
     await this.#transport.write(request, "sending REMOVE_SOURCE", this.#timeoutMs);
@@ -982,7 +988,9 @@ class InsightsEngineClient {
 
   async #excludeSource(sessionKey, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     const requestId = this.#nextRequestId();
     const request = createExcludeSourceMessage({ requestId, sessionKey });
     await this.#transport.write(request, "sending EXCLUDE_SOURCE", this.#timeoutMs);
@@ -1003,7 +1011,9 @@ class InsightsEngineClient {
 
   async #readPurgeStatus(sessionKey, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     const requestId = this.#nextRequestId();
     const request = createReadPurgeStatusMessage({ requestId, sessionKey });
     await this.#transport.write(request, "sending READ_PURGE_STATUS", this.#timeoutMs);
@@ -1025,7 +1035,9 @@ class InsightsEngineClient {
 
   async #readEngineStatus(signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     const requestId = this.#nextRequestId();
     const request = createReadEngineStatusMessage({ requestId });
     await this.#transport.write(request, "sending READ_ENGINE_STATUS", this.#timeoutMs);
@@ -1042,7 +1054,9 @@ class InsightsEngineClient {
 
   async #readInsightsOverview(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readInsightsOverview input must be an object");
     }
@@ -1062,7 +1076,9 @@ class InsightsEngineClient {
 
   async #listCapabilities(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("listCapabilities input must be an object");
     }
@@ -1085,7 +1101,9 @@ class InsightsEngineClient {
 
   async #searchTurns(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("searchTurns input must be an object");
     }
@@ -1105,7 +1123,9 @@ class InsightsEngineClient {
 
   async #readTurnEvidence(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readTurnEvidence input must be an object");
     }
@@ -1125,7 +1145,9 @@ class InsightsEngineClient {
 
   async #readCapabilityUsage(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readCapabilityUsage input must be an object");
     }
@@ -1145,7 +1167,9 @@ class InsightsEngineClient {
 
   async #readInsightsActivity(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readInsightsActivity input must be an object");
     }
@@ -1165,7 +1189,9 @@ class InsightsEngineClient {
 
   async #readInsightsQueryV2(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readInsightsQueryV2 input must be an object");
     }
@@ -1185,7 +1211,9 @@ class InsightsEngineClient {
 
   async #readInsightsEvidenceV2(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readInsightsEvidenceV2 input must be an object");
     }
@@ -1205,7 +1233,9 @@ class InsightsEngineClient {
 
   async #readInsightsRecipe(input, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new TypeError("readInsightsRecipe input must be an object");
     }
@@ -1225,7 +1255,9 @@ class InsightsEngineClient {
 
   async #runPurgeMaintenance(limit, signal) {
     throwIfAborted(signal, this.#transport.stderr);
-    if (this.#broken || this.#transport.failed) throw disconnectedError(this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
     const requestId = this.#nextRequestId();
     const request = createRunPurgeMaintenanceMessage({ requestId, limit });
     await this.#transport.write(request, "sending RUN_PURGE_MAINTENANCE", this.#timeoutMs);

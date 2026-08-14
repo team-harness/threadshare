@@ -48,7 +48,11 @@ function emptyConfig() {
 test("parses the bounded insights subcommand grammar", () => {
   assert.deepEqual(
     parseInsightsInvocation(["insights", "status"], {}),
-    { action: "status", format: "text", regenerateSecret: false },
+    { action: "status", format: "text", regenerateSecret: false, verify: false },
+  );
+  assert.deepEqual(
+    parseInsightsInvocation(["insights", "status"], { verify: true }),
+    { action: "status", format: "text", regenerateSecret: false, verify: true },
   );
   assert.deepEqual(
     parseInsightsInvocation(
@@ -79,6 +83,7 @@ test("parses the bounded insights subcommand grammar", () => {
     [["insights", "exclude", "remove", "session"], {}, "TS_USAGE_MISSING_ARGUMENT"],
     [["insights", "sync"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
     [["insights", "reset"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "sync"], { verify: true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
   ]) {
     assert.throws(() => parseInsightsInvocation(positionals, options), { code });
   }
@@ -88,8 +93,8 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
   const config = emptyConfig();
   const calls = [];
   const services = {
-    async status() {
-      calls.push("status");
+    async status({ verify }) {
+      calls.push(`status:${verify}`);
       return {
         format: "threadshare-insights-status@v1",
         state: "ready",
@@ -189,7 +194,7 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
   );
   assert.match(formatInsightsCommandResult(reindexed), /Origin secret: preserved/u);
   assert.deepEqual(calls, [
-    "status",
+    "status:false",
     "add:provider:codex",
     "hide:codex",
     "reindex:false",
@@ -200,7 +205,7 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
   ]);
 });
 
-test("explicit status allows a bounded long-running integrity check", async (t) => {
+test("status is fast by default and verifies integrity only when requested", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-status-timeout-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const paths = {
@@ -215,7 +220,7 @@ test("explicit status allows a bounded long-running integrity check", async (t) 
   await writeFile(paths.originSecretFile, "secret", { mode: 0o600 });
   const observed = [];
 
-  const result = await executeInsightsCommand(
+  const fast = await executeInsightsCommand(
     parseInsightsInvocation(["insights", "status"], { format: "json" }),
     {
       paths,
@@ -232,8 +237,28 @@ test("explicit status allows a bounded long-running integrity check", async (t) 
       },
     },
   );
+  assert.equal(fast.state, "engine-status-skipped");
+  assert.deepEqual(observed, []);
 
-  assert.equal(result.state, "ready");
+  const verified = await executeInsightsCommand(
+    parseInsightsInvocation(["insights", "status"], { format: "json", verify: true }),
+    {
+      paths,
+      lifecycleOptions: {
+        createEngineClient(options) {
+          observed.push(options.timeoutMs);
+          return {
+            async readEngineStatus() {
+              return { snapshotSeq: "1" };
+            },
+            async close() {},
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(verified.state, "ready");
   assert.deepEqual(observed, [300_000]);
 });
 

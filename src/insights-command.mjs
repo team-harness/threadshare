@@ -182,6 +182,12 @@ export function parseInsightsInvocation(positionals, options = {}) {
       "--regenerate-secret is only valid for insights reindex",
     );
   }
+  if (options.verify === true && action !== "status") {
+    throw commandError(
+      "TS_USAGE_OPTION_NOT_ALLOWED",
+      "--verify is only valid for insights status",
+    );
+  }
   if (action !== "exclude") {
     if (operation !== undefined || kind !== undefined || value !== undefined) {
       throw commandError("TS_USAGE_UNEXPECTED_ARGUMENT", `Unexpected argument for insights ${action}`);
@@ -190,6 +196,7 @@ export function parseInsightsInvocation(positionals, options = {}) {
       action,
       format,
       regenerateSecret: options["regenerate-secret"] === true,
+      ...(action === "status" ? { verify: options.verify === true } : {}),
     });
   }
   if (!EXCLUSION_OPERATIONS.has(operation)) {
@@ -542,10 +549,11 @@ function exclusionResult(config) {
 function defaultServices(options) {
   const paths = options.paths ?? resolveInsightsPaths(options);
   return {
-    status: () => inspectInsightsState({
+    status: ({ verify }) => inspectInsightsState({
       ...options.lifecycleOptions,
       paths,
       timeoutMs: options.lifecycleOptions?.timeoutMs ?? 300_000,
+      includeEngineStatus: verify,
     }),
     reset: () => resetInsightsState({ ...options.lifecycleOptions, paths }),
     loadConfig: () => loadInsightsConfig({ ...options.configOptions, paths }),
@@ -570,7 +578,7 @@ function defaultServices(options) {
 export async function executeInsightsCommand(invocation, options = {}) {
   const services = options.services ?? defaultServices(options);
   if (invocation.action === "status") {
-    const status = await services.status();
+    const status = await services.status({ verify: invocation.verify });
     return status.diagnostics?.includes("TS_INSIGHTS_ORIGIN_SECRET_MISSING")
       ? Object.freeze({
           ...status,

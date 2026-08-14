@@ -2340,8 +2340,8 @@ function assertFileWorkflowItem(item, label) {
     .reduce((sum, field) => sum + BigInt(item.recordedCounts[field]), 0n);
   const phaseTotal = ["attempted", "confirmed", "failed", "unknown"]
     .reduce((sum, field) => sum + BigInt(item.recordedCounts[field]), 0n);
-  if (actionTotal !== BigInt(item.events.length) || phaseTotal !== BigInt(item.events.length) ||
-      BigInt(item.recordedCounts.distinctPath) > BigInt(item.events.length)) {
+  if (actionTotal !== phaseTotal || BigInt(item.events.length) > actionTotal ||
+      BigInt(item.recordedCounts.distinctPath) > actionTotal) {
     throw invalidFrame(`${label}.recordedCounts is inconsistent`);
   }
   const mutations = ["edit", "write", "delete", "move"]

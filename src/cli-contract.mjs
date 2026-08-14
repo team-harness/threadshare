@@ -40,6 +40,10 @@ export const OPTION_DEFINITIONS = Object.freeze({
     type: "boolean",
     description: "Rebuild keyed Facts with a newly generated origin secret after interactive confirmation.",
   },
+  verify: {
+    type: "boolean",
+    description: "Run the explicit full SQLite and FTS integrity check for Insights status.",
+  },
   json: {
     type: "boolean",
     description: "Write the command's documented one-line JSON success result.",
@@ -199,16 +203,17 @@ export const COMMAND_SPECS = Object.freeze({
       argument("kind", "[provider|project|session]", "Required only for exclusion add or remove.", true),
       argument("value", "[value]", "Provider, project path, or session ID to exclude.", true),
     ],
-    options: ["cursor", "format", "limit", "query", "regenerate-secret", "request", "revision", "stdio"],
+    options: ["cursor", "format", "limit", "query", "regenerate-secret", "request", "revision", "stdio", "verify"],
     optionDetails: {
       format: "Queries require json; maintenance uses text by default or json for agents.",
       limit: "Return 1 through 50 query items; Insights query actions default to 50.",
       "regenerate-secret": "Only for reindex. Requires an interactive typed confirmation and atomically replaces the complete index.",
+      verify: "Only for status. Runs the slower full SQLite and FTS integrity check.",
     },
     defaults: ["--format text", "A normal reindex preserves the origin secret and stable keyed Facts."],
     output: [
       "no action: opens the authenticated local Dashboard and waits until stopped.",
-      "status: content-free index state and storage footprint.",
+      "status: fast content-free index state and storage footprint; --verify adds full integrity checks.",
       "overview/search/capabilities/usage/activity/evidence/query/recipe: one-line versioned JSON for agents.",
       "mcp --stdio: local JSON-RPC MCP server for Agent tools.",
       "sync/reindex/reset/exclude: bounded text or one-line JSON result.",
@@ -493,7 +498,10 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
   "TS_INSIGHTS_COVERAGE_INCOMPLETE",
   "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
+  "TS_INSIGHTS_ENGINE_TIMEOUT",
+  "TS_INSIGHTS_ENGINE_DISCONNECTED",
   "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+  "TS_INSIGHTS_WRITER_LOCKED",
   "TS_INSIGHTS_ENGINE_INVALID",
   "TS_INSIGHTS_STORAGE_FAILED",
   "TS_INSIGHTS_STORAGE_CORRUPT",
@@ -573,6 +581,16 @@ export function renderCommandHelp(name) {
 }
 
 const INSIGHTS_ACTION_HELP = Object.freeze({
+  status: [
+    "Inspect local Insights state without scanning the full database.",
+    "",
+    "Usage:",
+    "  threadshare insights status [--verify] [--format text|json]",
+    "",
+    "Behavior:",
+    "  The default reads only state metadata and does not start the Engine.",
+    "  --verify explicitly runs SQLite quick_check and both FTS integrity checks; large indexes can take minutes.",
+  ],
   sync: [
     "Incrementally index local provider Sessions into the committed Insights snapshot.",
     "",
@@ -629,6 +647,7 @@ const INSIGHTS_ACTION_HELP = Object.freeze({
     "",
     "Agent notes:",
     "  Results are structured facts and evidence targets, not an LLM-generated verdict.",
+    "  With allowDegraded=true, aggregate totals remain exact while oversized event or attempt details may be a bounded sample; inspect coverage diagnostics.",
     "  Do not describe co-occurrence as causation; report coverage and estimated fields explicitly.",
   ],
   evidence: [

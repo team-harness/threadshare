@@ -1759,6 +1759,8 @@ export function insightsQueryDiagnostic(error, action) {
     "TS_INSIGHTS_PAYLOAD_CHANGED",
     "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
     "TS_INSIGHTS_COVERAGE_INCOMPLETE",
+    "TS_INSIGHTS_ENGINE_TIMEOUT",
+    "TS_INSIGHTS_ENGINE_DISCONNECTED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_ORIGIN_SECRET_MISSING",
     "TS_INSIGHTS_ORIGIN_SECRET_INVALID",
@@ -1771,8 +1773,8 @@ export function insightsQueryDiagnostic(error, action) {
   if (error?.code === "EVIDENCE_INVALID_CURSOR" || error?.code === "USAGE_INVALID_CURSOR") {
     code = "TS_INSIGHTS_CURSOR_STALE";
   }
-  if (error?.fatal === true || [
-    "TS_INSIGHTS_ENGINE_ABORTED", "TS_INSIGHTS_ENGINE_DISCONNECTED", "TS_INSIGHTS_ENGINE_TIMEOUT",
+  if ((error?.fatal === true && !direct.has(error?.code)) || [
+    "TS_INSIGHTS_ENGINE_ABORTED",
     "TS_INSIGHTS_ENGINE_INVALID", "TS_INSIGHTS_STORAGE_FAILED",
     "TS_INSIGHTS_STORAGE_CORRUPT", "TS_INSIGHTS_WAL_BACKPRESSURE",
   ].includes(error?.code)) code = "TS_INSIGHTS_ENGINE_UNAVAILABLE";
@@ -1794,6 +1796,8 @@ export function insightsQueryDiagnostic(error, action) {
     TS_INSIGHTS_PAYLOAD_CHANGED: "The requested Insights evidence changed after the result was read.",
     TS_INSIGHTS_EVIDENCE_NOT_FOUND: "The requested Insights evidence is no longer available.",
     TS_INSIGHTS_COVERAGE_INCOMPLETE: "The Insights recipe cannot provide complete coverage for this request.",
+    TS_INSIGHTS_ENGINE_TIMEOUT: "The local Insights query exceeded its 120 second execution limit.",
+    TS_INSIGHTS_ENGINE_DISCONNECTED: "The local Insights Engine stopped before the query completed.",
     TS_INSIGHTS_ORIGIN_SECRET_MISSING: "The Insights origin secret is missing.",
     TS_INSIGHTS_ORIGIN_SECRET_INVALID: "The Insights origin secret is invalid.",
     TS_INSIGHTS_ENGINE_UNAVAILABLE: "The local Insights Engine is unavailable.",
@@ -1810,6 +1814,10 @@ export function insightsQueryDiagnostic(error, action) {
         ? "Repeat the preceding Insights query and use its new snapshot, revision, or cursor."
         : code === "TS_INSIGHTS_COVERAGE_INCOMPLETE"
           ? "Run `threadshare insights sync`; use allowDegraded only when partial results are acceptable."
+        : code === "TS_INSIGHTS_ENGINE_TIMEOUT"
+          ? "Narrow the time window or filters, then retry the Insights query."
+        : code === "TS_INSIGHTS_ENGINE_DISCONNECTED"
+          ? "Retry once; if it recurs, run `threadshare insights status --verify`."
         : `Check \`threadshare insights --help\` and retry insights ${action ?? "query"}.`,
   });
 }

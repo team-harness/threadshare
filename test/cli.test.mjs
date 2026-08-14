@@ -117,6 +117,7 @@ test("renders a self-describing root and command help contract", () => {
       "request",
       "revision",
       "stdio",
+      "verify",
     ],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
@@ -176,7 +177,10 @@ test("renders a self-describing root and command help contract", () => {
     "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
     "TS_INSIGHTS_COVERAGE_INCOMPLETE",
     "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
+    "TS_INSIGHTS_ENGINE_TIMEOUT",
+    "TS_INSIGHTS_ENGINE_DISCONNECTED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+    "TS_INSIGHTS_WRITER_LOCKED",
     "TS_INSIGHTS_ENGINE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",
     "TS_INSIGHTS_STORAGE_CORRUPT",
@@ -231,6 +235,7 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("sessions"), /does not list Paseo agents.*paseo ls --json/is);
   assert.match(renderCommandHelp("insights"), /normal reindex preserves the origin secret/is);
   assert.match(renderCommandHelp("insights"), /sync initializes a missing index or incrementally applies/is);
+  assert.match(renderCommandHelp("insights"), /status.*--verify.*full integrity/is);
   assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
   assert.match(renderCommandHelp("insights"), /overview.*search.*capabilities.*usage.*activity.*evidence/is);
   assert.match(renderCommandHelp("insights"), /Queries require --format json/is);
@@ -239,6 +244,7 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderInsightsActionHelp("recipe"), /capability-contexts@1.*failure-chains@1/is);
   assert.match(renderInsightsActionHelp("evidence"), /target\.kind: event, turn, session, or attempt-chain/);
   assert.match(renderInsightsActionHelp("mcp"), /stdout is JSON-RPC only/);
+  assert.match(renderInsightsActionHelp("status"), /does not start the Engine/is);
   assert.match(renderCommandHelp("publish"), /run `threadshare validate/);
   assert.match(renderCommandHelp("publish"), /revokeToken.*human mode.*stderr/is);
   assert.match(renderCommandHelp("share"), /revokeToken.*human mode.*stderr/is);
@@ -248,7 +254,7 @@ test("renders a self-describing root and command help contract", () => {
 });
 
 test("renders action-specific Insights help without touching the index", () => {
-  for (const action of ["sync", "query", "recipe", "evidence", "mcp"]) {
+  for (const action of ["status", "sync", "query", "recipe", "evidence", "mcp"]) {
     const result = spawnSync(process.execPath, [cli, "insights", action, "--help"], {
       encoding: "utf8",
       env: { ...process.env, THREADSHARE_INSIGHTS_HOME: "/definitely/not/read" },
@@ -367,7 +373,10 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
     "TS_INSIGHTS_COVERAGE_INCOMPLETE",
     "TS_INSIGHTS_ENGINE_STATUS_SKIPPED",
+    "TS_INSIGHTS_ENGINE_TIMEOUT",
+    "TS_INSIGHTS_ENGINE_DISCONNECTED",
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+    "TS_INSIGHTS_WRITER_LOCKED",
     "TS_INSIGHTS_ENGINE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",
     "TS_INSIGHTS_STORAGE_CORRUPT",

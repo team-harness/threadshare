@@ -204,6 +204,10 @@ Recipes return structured facts, provenance, coverage, and directly readable evi
 than a natural-language verdict. An Agent forms the answer and should distinguish recorded facts,
 derived signals, estimates, and co-occurrence.
 
+See [the worked Agent analysis case study](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md) for a real-index example
+covering workflow shifts, Skill adoption, Tool alias drift, failure prioritization, token reuse, and
+evidence-aware follow-up questions.
+
 Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
 core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
 available in the 0.8.x release line while the owner-only Windows ACL adapter remains unimplemented.

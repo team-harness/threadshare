@@ -59,6 +59,7 @@ test("query reader opens existing state and reopens after database replacement",
   assert.equal((await reader.queryV2({ format: "request-v2" })).number, 1);
   assert.equal((await reader.evidenceV2({ format: "evidence-v2" })).number, 1);
   assert.equal(createOptions[0].openExisting, true);
+  assert.equal(createOptions[0].timeoutMs, 120_000);
   assert.equal(createOptions[0].databasePath, path.join(await realpath(root), "insights.sqlite3"));
 
   await appendFile(databaseFile, "-replacement");

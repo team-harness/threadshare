@@ -25,6 +25,7 @@ const MAX_RECIPE_ITEMS: usize = 10_000;
 const MAX_RECIPE_DETAIL_ITEMS: usize = 10_000;
 const MAX_RECIPE_PAGE_BYTES: usize = 3_932_160;
 const RECIPE_QUIESCENCE_SECONDS: u32 = 300;
+const RECIPE_SCAN_SEGMENT_MS: u64 = 7 * 86_400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RecipeName {
@@ -729,6 +730,137 @@ impl RecipeWindow {
     }
 }
 
+fn segmented_windows(window: &RecipeWindow) -> Result<Vec<RecipeWindow>, QueryError> {
+    let bounds = window.bounds("window")?;
+    let mut after = bounds.after_ms;
+    let mut result = Vec::new();
+    while after < bounds.before_ms {
+        let before = after
+            .saturating_add(RECIPE_SCAN_SEGMENT_MS)
+            .min(bounds.before_ms);
+        result.push(RecipeWindow {
+            after: crate::agent_query::canonical_timestamp(after)?,
+            before: crate::agent_query::canonical_timestamp(before)?,
+        });
+        after = before;
+    }
+    Ok(result)
+}
+
+fn canonical_recipe_bytes(response: &RecipeResponse) -> Result<usize, QueryError> {
+    let wire = serde_json::to_value(response)
+        .map_err(|_| QueryError::new("QUERY_FAILED", "recipe response could not be encoded"))?;
+    crate::try_canonical_json(&wire)
+        .map(|encoded| encoded.len())
+        .map_err(|_| QueryError::new("QUERY_FAILED", "recipe response is not canonical"))
+}
+
+fn detail_field(name: RecipeName) -> Option<&'static str> {
+    match name {
+        RecipeName::FailureChains => Some("attempts"),
+        RecipeName::FileWorkflowSignals => Some("events"),
+        _ => None,
+    }
+}
+
+fn truncate_recipe_details(
+    items: &mut [Value],
+    name: RecipeName,
+    mut byte_budget: usize,
+) -> Result<bool, QueryError> {
+    let Some(field) = detail_field(name) else {
+        return Ok(false);
+    };
+    let mut details = Vec::with_capacity(items.len());
+    for item in items.iter_mut() {
+        let values = item
+            .get_mut(field)
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "recipe detail array is missing"))?;
+        details.push(std::mem::take(values));
+    }
+    let total_detail_count = details.iter().map(Vec::len).sum::<usize>();
+    let mut included = 0_usize;
+    let mut exhausted = false;
+    for (item, values) in items.iter_mut().zip(details) {
+        let target = item[field]
+            .as_array_mut()
+            .ok_or_else(|| QueryError::new("QUERY_FAILED", "recipe detail array is invalid"))?;
+        if exhausted {
+            continue;
+        }
+        for value in values {
+            let bytes = crate::try_canonical_json(&value)
+                .map_err(|_| QueryError::new("QUERY_FAILED", "recipe detail is not canonical"))?
+                .len();
+            let cost = bytes.saturating_add(usize::from(!target.is_empty()));
+            if cost > byte_budget {
+                exhausted = true;
+                break;
+            }
+            byte_budget -= cost;
+            target.push(value);
+            included += 1;
+        }
+    }
+    Ok(included < total_detail_count)
+}
+
+fn fit_degraded_recipe_response(
+    response: &mut RecipeResponse,
+    allow_degraded: bool,
+) -> Result<(), QueryError> {
+    if canonical_recipe_bytes(response)? <= MAX_RECIPE_PAGE_BYTES {
+        return Ok(());
+    }
+    if !allow_degraded || detail_field(response.name).is_none() {
+        return Err(QueryError::new(
+            "TS_QUERY_TOO_BROAD",
+            "recipe response exceeds the bounded response budget",
+        ));
+    }
+    response.coverage.degraded = true;
+    if !response
+        .coverage
+        .diagnostics
+        .iter()
+        .any(|code| code == "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE")
+    {
+        response
+            .coverage
+            .diagnostics
+            .push("TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE".to_owned());
+    }
+    let saved_items = response.items.clone();
+    let removed = truncate_recipe_details(&mut response.items, response.name, 0)?;
+    if !removed {
+        return Err(QueryError::new(
+            "TS_QUERY_TOO_BROAD",
+            "recipe response exceeds the bounded response budget",
+        ));
+    }
+    let base_bytes = canonical_recipe_bytes(response)?;
+    if base_bytes > MAX_RECIPE_PAGE_BYTES {
+        return Err(QueryError::new(
+            "TS_QUERY_TOO_BROAD",
+            "recipe response metadata exceeds the bounded response budget",
+        ));
+    }
+    response.items = saved_items;
+    truncate_recipe_details(
+        &mut response.items,
+        response.name,
+        MAX_RECIPE_PAGE_BYTES - base_bytes,
+    )?;
+    if canonical_recipe_bytes(response)? > MAX_RECIPE_PAGE_BYTES {
+        return Err(QueryError::new(
+            "QUERY_FAILED",
+            "recipe response budget calculation is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
 pub fn read_recipe(
     connection: &Connection,
     request: &RecipeRequest,
@@ -737,33 +869,69 @@ pub fn read_recipe(
     require_fact_v2(connection)?;
     let transaction = connection.unchecked_transaction().map_err(query_failed)?;
     let (database_uuid, snapshot_seq) = read_identity(&transaction)?;
-    let coverage = read_recipe_coverage(&transaction, request)?;
+    let mut coverage = read_recipe_coverage(&transaction, request)?;
     if coverage.degraded && !request.allow_degraded {
         return Err(QueryError::new(
             "TS_INSIGHTS_COVERAGE_INCOMPLETE",
             "recipe coverage is incomplete; retry with allowDegraded only when partial results are acceptable",
         ));
     }
-    let mut items = match request.name {
-        RecipeName::CapabilityContexts => capability_contexts(&transaction, request)?,
+    let (mut items, detail_limited, exact_total) = match request.name {
+        RecipeName::CapabilityContexts => {
+            let items = capability_contexts(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
         RecipeName::FailureChains => failure_chains(&transaction, request)?,
-        RecipeName::FileWorkflowSignals => file_workflow_signals(&transaction, request)?,
-        RecipeName::ActivityShifts => activity_shifts(&transaction, request)?,
-        RecipeName::TokenHotspots => token_hotspots(&transaction, request)?,
-        RecipeName::SolutionRecall => solution_recall(&transaction, request)?,
-        RecipeName::SessionTimeline => session_timeline(&transaction, request)?,
+        RecipeName::FileWorkflowSignals => {
+            let (items, limited) = file_workflow_signals(&transaction, request)?;
+            let total = items.len();
+            (items, limited, total)
+        }
+        RecipeName::ActivityShifts => {
+            let items = activity_shifts(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
+        RecipeName::TokenHotspots => {
+            let items = token_hotspots(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
+        RecipeName::SolutionRecall => {
+            let items = solution_recall(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
+        RecipeName::SessionTimeline => {
+            let items = session_timeline(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
     };
+    if detail_limited {
+        coverage.degraded = true;
+        if !coverage
+            .diagnostics
+            .iter()
+            .any(|code| code == "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE")
+        {
+            coverage
+                .diagnostics
+                .push("TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE".to_owned());
+        }
+    }
     if items.len() > MAX_RECIPE_ITEMS {
         return Err(QueryError::new(
             "TS_QUERY_TOO_BROAD",
             "recipe produced too many exact result groups",
         ));
     }
-    let total_item_count = items.len();
+    let total_item_count = exact_total;
     let truncated = total_item_count > usize::from(request.limit);
     items.truncate(usize::from(request.limit));
     let provenance = recipe_provenance(request.name);
-    let response = RecipeResponse {
+    let mut response = RecipeResponse {
         format: RECIPE_RESPONSE_FORMAT.to_owned(),
         database_uuid,
         snapshot_seq,
@@ -778,18 +946,8 @@ pub fn read_recipe(
         provenance,
     };
     response.validate()?;
-    let wire = serde_json::to_value(&response)
-        .map_err(|_| QueryError::new("QUERY_FAILED", "recipe response could not be encoded"))?;
-    if crate::try_canonical_json(&wire)
-        .map_err(|_| QueryError::new("QUERY_FAILED", "recipe response is not canonical"))?
-        .len()
-        > MAX_RECIPE_PAGE_BYTES
-    {
-        return Err(QueryError::new(
-            "TS_QUERY_TOO_BROAD",
-            "recipe response exceeds the bounded response budget",
-        ));
-    }
+    fit_degraded_recipe_response(&mut response, request.allow_degraded)?;
+    response.validate()?;
     transaction.commit().map_err(query_failed)?;
     Ok(response)
 }
@@ -1389,116 +1547,305 @@ fn capability_co_occurrences(
     Ok(result)
 }
 
+struct ChainAttempt {
+    event_key: String,
+    revision: String,
+    event_kind: String,
+    observed_at: Option<String>,
+    capability_key: Option<String>,
+    capability_name: Option<String>,
+    input_fingerprint: Option<String>,
+    provider_state: Option<String>,
+    exit_code: Option<String>,
+}
+
+#[derive(Default)]
+struct ChainSummary {
+    capability_key: Option<String>,
+    first_at: Option<String>,
+    last_at: Option<String>,
+    event_count: u64,
+    failed: u64,
+    completed: u64,
+    first_failure: Option<ChainEventOrder>,
+    last_completion: Option<ChainEventOrder>,
+    incomplete: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ChainEventOrder {
+    record_start_offset: Vec<u8>,
+    content_index: i64,
+    event_ordinal: i64,
+    event_key: Vec<u8>,
+}
+
 fn failure_chains(
     connection: &Connection,
     request: &RecipeRequest,
-) -> Result<Vec<Value>, QueryError> {
-    let (scope, values) = event_scope(request, Some("ace.chain_key IS NOT NULL"))?;
-    let sql = format!(
-        "SELECT lower(hex(ace.chain_key)),he.event_kind,he.metadata_json,
-                lower(hex(he.event_key)),lower(hex(he.revision)),he.observed_timestamp,
-                c.canonical_name,he.completeness
-         FROM attempt_chain_events ace
-         JOIN history_events he ON he.event_key=ace.event_key
-         JOIN sessions s ON s.session_id=he.session_id
-         LEFT JOIN capabilities c
-           ON lower(hex(c.capability_key))=json_extract(he.metadata_json,'$.capabilityKey')
-         WHERE {scope}
-         ORDER BY ace.chain_key,he.record_start_offset,he.content_index,he.event_ordinal,he.event_key"
-    );
-    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    let mut rows = statement
-        .query(params_from_iter(values))
-        .map_err(query_failed)?;
-    #[derive(Default)]
-    struct Chain {
-        attempts: Vec<ChainAttempt>,
-        capability: Option<String>,
-        first_at: Option<String>,
-        last_at: Option<String>,
-    }
-    struct ChainAttempt {
-        event_key: String,
-        revision: String,
-        event_kind: String,
-        observed_at: Option<String>,
-        capability_key: Option<String>,
-        capability_name: Option<String>,
-        input_fingerprint: Option<String>,
-        provider_state: Option<String>,
-        exit_code: Option<String>,
-        full: bool,
-    }
-    let mut chains = BTreeMap::<String, Chain>::new();
-    let mut event_revisions = BTreeMap::<String, String>::new();
-    while let Some(row) = rows.next().map_err(query_failed)? {
-        let chain_key: String = row.get(0).map_err(query_failed)?;
-        let kind: String = row.get(1).map_err(query_failed)?;
-        let metadata: String = row.get(2).map_err(query_failed)?;
-        let metadata: Value = serde_json::from_str(&metadata)
-            .map_err(|_| QueryError::new("QUERY_FAILED", "stored event metadata is invalid"))?;
-        let observed_at: Option<String> = row.get(5).map_err(query_failed)?;
-        let entry = chains.entry(chain_key).or_default();
-        let event_key: String = row.get(3).map_err(query_failed)?;
-        let revision: String = row.get(4).map_err(query_failed)?;
-        event_revisions.insert(event_key.clone(), revision.clone());
-        let capability_name = row.get::<_, Option<String>>(6).map_err(query_failed)?;
-        entry.attempts.push(ChainAttempt {
-            event_key,
-            revision,
-            event_kind: kind,
-            observed_at: observed_at.clone(),
-            capability_key: metadata
-                .get("capabilityKey")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            capability_name: capability_name.clone(),
-            input_fingerprint: metadata
-                .get("inputFingerprint")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            provider_state: metadata
-                .get("providerState")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            exit_code: metadata
-                .get("exitCode")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            full: row.get::<_, String>(7).map_err(query_failed)? == "full",
-        });
-        entry.capability = entry.capability.take().or(capability_name);
-        entry.first_at = entry.first_at.take().or(observed_at.clone());
-        if observed_at.is_some() {
-            entry.last_at = observed_at;
+) -> Result<(Vec<Value>, bool, usize), QueryError> {
+    let mut chains = BTreeMap::<String, ChainSummary>::new();
+    for window in segmented_windows(&request.window)? {
+        let mut segment = request.clone();
+        segment.window = window;
+        let (scope, values) = event_scope(&segment, Some("ace.chain_key IS NOT NULL"))?;
+        let sql = format!(
+            "SELECT lower(hex(ace.chain_key)),json_extract(he.metadata_json,'$.providerState'),
+                    json_extract(he.metadata_json,'$.capabilityKey'),
+                    he.observed_timestamp,he.completeness,
+                    hec.missing_payload,he.record_start_offset,he.content_index,
+                    he.event_ordinal,he.event_key
+             FROM history_events he INDEXED BY history_events_observed
+             CROSS JOIN attempt_chain_events ace ON ace.event_key=he.event_key
+             CROSS JOIN history_event_coverage hec ON hec.event_key=he.event_key
+             CROSS JOIN sessions s ON s.session_id=he.session_id
+             WHERE {scope}"
+        );
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+        let mut rows = statement
+            .query(params_from_iter(values))
+            .map_err(query_failed)?;
+        while let Some(row) = rows.next().map_err(query_failed)? {
+            let chain_key: String = row.get(0).map_err(query_failed)?;
+            let provider_state = row.get::<_, Option<String>>(1).map_err(query_failed)?;
+            let capability_key = row.get::<_, Option<String>>(2).map_err(query_failed)?;
+            let observed_at = row.get::<_, Option<String>>(3).map_err(query_failed)?;
+            let completeness = row.get::<_, String>(4).map_err(query_failed)?;
+            let missing_payload = row.get::<_, i64>(5).map_err(query_failed)? != 0;
+            let order = ChainEventOrder {
+                record_start_offset: row.get(6).map_err(query_failed)?,
+                content_index: row.get(7).map_err(query_failed)?,
+                event_ordinal: row.get(8).map_err(query_failed)?,
+                event_key: row.get(9).map_err(query_failed)?,
+            };
+            let entry = chains.entry(chain_key).or_default();
+            entry.event_count = entry
+                .event_count
+                .checked_add(1)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "attempt chain is too large"))?;
+            if provider_state.as_deref() == Some("failed") {
+                entry.failed += 1;
+                if entry
+                    .first_failure
+                    .as_ref()
+                    .is_none_or(|first| order < *first)
+                {
+                    entry.first_failure = Some(order.clone());
+                }
+            } else if provider_state.as_deref() == Some("completed") {
+                entry.completed += 1;
+                if entry
+                    .last_completion
+                    .as_ref()
+                    .is_none_or(|last| order > *last)
+                {
+                    entry.last_completion = Some(order);
+                }
+            }
+            entry.incomplete |= completeness != "full" || missing_payload;
+            entry.capability_key = entry.capability_key.take().or(capability_key);
+            entry.first_at = match (entry.first_at.take(), observed_at.clone()) {
+                (Some(current), Some(observed)) => Some(current.min(observed)),
+                (current, observed) => current.or(observed),
+            };
+            entry.last_at = match (entry.last_at.take(), observed_at) {
+                (Some(current), Some(observed)) => Some(current.max(observed)),
+                (current, observed) => current.or(observed),
+            };
         }
     }
-    drop(rows);
-    drop(statement);
-    if event_revisions.len() > MAX_RECIPE_DETAIL_ITEMS {
+    let mut result = Vec::with_capacity(usize::from(request.limit));
+    let mut total_item_count = 0_usize;
+    for (chain_key, summary) in chains {
+        if let Some(item) = chain_summary_value(chain_key, &summary) {
+            total_item_count += 1;
+            retain_ranked_chain(&mut result, item, usize::from(request.limit));
+        }
+    }
+    let selected_chain_keys = result
+        .iter()
+        .map(|item| item["chainKey"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let capability_names = capability_names_for_recipe_items(connection, &result)?;
+    let (details, detail_limited) =
+        failure_chain_details(connection, request, &selected_chain_keys)?;
+    if detail_limited && !request.allow_degraded {
         return Err(QueryError::new(
             "TS_QUERY_TOO_BROAD",
             "failure chain detail exceeds the bounded recipe budget",
         ));
     }
-    let payloads = payload_references_for_events(connection, &event_revisions)?;
-    let mut result = Vec::with_capacity(chains.len());
-    for (chain_key, chain) in chains {
-        let revision = crate::deep_query::read_attempt_chain_revision(connection, &chain_key)?;
-        let mut failed = 0_u64;
-        let mut completed = 0_u64;
-        let mut failure_seen = false;
-        let mut resolved_after_failure = false;
-        let mut incomplete = false;
-        let mut attempts = Vec::with_capacity(chain.attempts.len());
-        for attempt in chain.attempts {
-            if attempt.provider_state.as_deref() == Some("failed") {
-                failed += 1;
-                failure_seen = true;
-            } else if attempt.provider_state.as_deref() == Some("completed") {
-                completed += 1;
-                resolved_after_failure |= failure_seen;
+    for item in &mut result {
+        if let Some(capability_key) = item["capabilityKey"].as_str() {
+            item["capabilityName"] = capability_names
+                .get(capability_key)
+                .cloned()
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+        }
+        item.as_object_mut().unwrap().remove("capabilityKey");
+        if let Some(chain_key) = item["chainKey"].as_str().map(str::to_owned) {
+            item["attempts"] = Value::Array(details.get(&chain_key).cloned().unwrap_or_default());
+            let revision = crate::deep_query::read_attempt_chain_revision(connection, &chain_key)?;
+            item["revision"] = Value::String(revision.clone());
+            item["evidence"]["revision"] = Value::String(revision);
+        }
+    }
+    Ok((result, detail_limited, total_item_count))
+}
+
+fn chain_summary_value(chain_key: String, chain: &ChainSummary) -> Option<Value> {
+    let status = if chain.incomplete {
+        "unknown"
+    } else if chain.failed > 0
+        && chain
+            .first_failure
+            .as_ref()
+            .zip(chain.last_completion.as_ref())
+            .is_some_and(|(failure, completion)| completion > failure)
+    {
+        "resolved"
+    } else if chain.failed > 0 {
+        "never-succeeded"
+    } else if chain.completed == 0 {
+        "abandoned"
+    } else {
+        return None;
+    };
+    Some(json!({
+        "chainKey": chain_key,
+        "revision": "",
+        "status": status,
+        "capabilityKey": chain.capability_key,
+        "capabilityName": null,
+        "eventCount": chain.event_count.to_string(),
+        "failedResultCount": chain.failed.to_string(),
+        "completedResultCount": chain.completed.to_string(),
+        "firstObservedAt": chain.first_at,
+        "lastObservedAt": chain.last_at,
+        "attempts": [],
+        "evidence": {"kind":"attempt-chain","chainKey":chain_key,"revision":""},
+    }))
+}
+
+fn capability_names_for_recipe_items(
+    connection: &Connection,
+    items: &[Value],
+) -> Result<BTreeMap<String, String>, QueryError> {
+    let keys = items
+        .iter()
+        .filter_map(|item| item["capabilityKey"].as_str())
+        .collect::<BTreeSet<_>>();
+    if keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut values = Vec::with_capacity(keys.len());
+    for key in &keys {
+        values.push(SqlValue::Blob(decode_key(key, "capabilityKey")?));
+    }
+    let sql = format!(
+        "SELECT lower(hex(capability_key)),canonical_name FROM capabilities
+         WHERE capability_key IN ({})",
+        placeholders(values.len())
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    statement
+        .query_map(params_from_iter(values), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(query_failed)?
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map_err(query_failed)
+}
+
+fn retain_ranked_chain(result: &mut Vec<Value>, item: Value, limit: usize) {
+    result.push(item);
+    result.sort_by(|left, right| {
+        decimal_json(right.get("failedResultCount"))
+            .cmp(&decimal_json(left.get("failedResultCount")))
+            .then_with(|| left["chainKey"].as_str().cmp(&right["chainKey"].as_str()))
+    });
+    result.truncate(limit);
+}
+
+fn failure_chain_details(
+    connection: &Connection,
+    request: &RecipeRequest,
+    chain_keys: &[String],
+) -> Result<(BTreeMap<String, Vec<Value>>, bool), QueryError> {
+    let mut attempts = BTreeMap::<String, Vec<ChainAttempt>>::new();
+    let mut event_revisions = BTreeMap::<String, String>::new();
+    let mut detail_limited = false;
+    for chain_key in chain_keys {
+        if event_revisions.len() >= MAX_RECIPE_DETAIL_ITEMS {
+            detail_limited = true;
+            break;
+        }
+        let (scope, mut values) = event_scope(request, Some("ace.chain_key=?"))?;
+        values.push(SqlValue::Blob(decode_key(chain_key, "attempt chainKey")?));
+        let remaining = MAX_RECIPE_DETAIL_ITEMS - event_revisions.len();
+        let sql = format!(
+            "SELECT he.event_kind,he.metadata_json,lower(hex(he.event_key)),
+                    lower(hex(he.revision)),he.observed_timestamp,c.canonical_name,he.completeness
+             FROM attempt_chain_events ace
+             JOIN history_events he ON he.event_key=ace.event_key
+             JOIN sessions s ON s.session_id=he.session_id
+             LEFT JOIN capabilities c
+               ON lower(hex(c.capability_key))=json_extract(he.metadata_json,'$.capabilityKey')
+             WHERE {scope}
+             ORDER BY he.record_start_offset,he.content_index,he.event_ordinal,he.event_key
+             LIMIT {}",
+            remaining + 1
+        );
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+        let mut rows = statement
+            .query(params_from_iter(values))
+            .map_err(query_failed)?;
+        while let Some(row) = rows.next().map_err(query_failed)? {
+            if event_revisions.len() >= MAX_RECIPE_DETAIL_ITEMS {
+                detail_limited = true;
+                break;
             }
+            let metadata: Value = serde_json::from_str(
+                &row.get::<_, String>(1).map_err(query_failed)?,
+            )
+            .map_err(|_| QueryError::new("QUERY_FAILED", "stored event metadata is invalid"))?;
+            let event_key = row.get::<_, String>(2).map_err(query_failed)?;
+            let revision = row.get::<_, String>(3).map_err(query_failed)?;
+            event_revisions.insert(event_key.clone(), revision.clone());
+            attempts
+                .entry(chain_key.clone())
+                .or_default()
+                .push(ChainAttempt {
+                    event_key,
+                    revision,
+                    event_kind: row.get(0).map_err(query_failed)?,
+                    observed_at: row.get(4).map_err(query_failed)?,
+                    capability_key: metadata
+                        .get("capabilityKey")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    capability_name: row.get(5).map_err(query_failed)?,
+                    input_fingerprint: metadata
+                        .get("inputFingerprint")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    provider_state: metadata
+                        .get("providerState")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    exit_code: metadata
+                        .get("exitCode")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+        }
+    }
+    let payloads = payload_references_for_events(connection, &event_revisions)?;
+    let mut result = BTreeMap::new();
+    for (chain_key, values) in attempts {
+        let mut details = Vec::with_capacity(values.len());
+        for attempt in values {
             let input = payload_for_kind(&payloads, &attempt.event_key, "tool-input");
             let output = payload_for_kind(&payloads, &attempt.event_key, "tool-output");
             let error =
@@ -1507,9 +1854,6 @@ fn failure_chains(
                         .then(|| output.clone())
                         .flatten()
                 });
-            incomplete |= !attempt.full
-                || (attempt.event_kind == "capability-invocation" && input.is_none())
-                || (attempt.provider_state.as_deref() == Some("failed") && error.is_none());
             let evidence = input
                 .as_ref()
                 .or(error.as_ref())
@@ -1518,160 +1862,173 @@ fn failure_chains(
                 .filter(|value| !value.is_null())
                 .cloned()
                 .unwrap_or_else(|| {
-                    json!({
-                        "kind":"event",
-                        "eventKey":attempt.event_key,
-                        "revision":attempt.revision,
-                    })
+                    json!({"kind":"event","eventKey":attempt.event_key,"revision":attempt.revision})
                 });
-            attempts.push(json!({
-                "eventKey": attempt.event_key,
-                "revision": attempt.revision,
-                "eventKind": attempt.event_kind,
-                "observedAt": attempt.observed_at,
-                "capabilityKey": attempt.capability_key,
-                "capabilityName": attempt.capability_name,
-                "inputFingerprint": attempt.input_fingerprint,
-                "providerState": attempt.provider_state,
-                "exitCode": attempt.exit_code,
-                "input": input,
-                "output": output,
-                "error": error,
-                "evidence": evidence,
+            details.push(json!({
+                "eventKey":attempt.event_key,"revision":attempt.revision,
+                "eventKind":attempt.event_kind,"observedAt":attempt.observed_at,
+                "capabilityKey":attempt.capability_key,"capabilityName":attempt.capability_name,
+                "inputFingerprint":attempt.input_fingerprint,"providerState":attempt.provider_state,
+                "exitCode":attempt.exit_code,"input":input,"output":output,"error":error,
+                "evidence":evidence,
             }));
         }
-        let status = if incomplete {
-            "unknown"
-        } else if failed > 0 && resolved_after_failure {
-            "resolved"
-        } else if failed > 0 {
-            "never-succeeded"
-        } else if completed == 0 {
-            "abandoned"
-        } else {
-            continue;
-        };
-        result.push(json!({
-            "chainKey": chain_key,
-            "revision": revision,
-            "status": status,
-            "capabilityName": chain.capability,
-            "eventCount": attempts.len().to_string(),
-            "failedResultCount": failed.to_string(),
-            "completedResultCount": completed.to_string(),
-            "firstObservedAt": chain.first_at,
-            "lastObservedAt": chain.last_at,
-            "attempts": attempts,
-            "evidence": {"kind":"attempt-chain","chainKey":chain_key,"revision":revision},
-        }));
+        result.insert(chain_key, details);
     }
-    result.sort_by(|left, right| {
-        decimal_json(right.get("failedResultCount"))
-            .cmp(&decimal_json(left.get("failedResultCount")))
-            .then_with(|| left["chainKey"].as_str().cmp(&right["chainKey"].as_str()))
-    });
-    Ok(result)
+    Ok((result, detail_limited))
 }
 
 fn file_workflow_signals(
     connection: &Connection,
     request: &RecipeRequest,
-) -> Result<Vec<Value>, QueryError> {
-    let (scope, values) = file_scope(request)?;
-    let sql = format!(
-        "SELECT lower(hex(s.session_key)),lower(hex(sc.canonical_digest)),s.provider,
-                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
-                SUM(CASE WHEN fa.action='read' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='edit' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='write' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='delete' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='move' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='search' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.action='list' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.phase='attempted' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.phase='confirmed' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.phase='failed' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN fa.phase NOT IN ('attempted','confirmed','failed') THEN 1 ELSE 0 END),
-                COUNT(DISTINCT fa.normalized_path),
-                SUM(CASE WHEN lower(fa.normalized_path) GLOB '*.md'
-                              OR lower(fa.normalized_path) GLOB '*.txt'
-                              OR lower(fa.normalized_path) GLOB '*.rst' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN lower(fa.normalized_path) GLOB '*.rs'
-                              OR lower(fa.normalized_path) GLOB '*.js'
-                              OR lower(fa.normalized_path) GLOB '*.mjs'
-                              OR lower(fa.normalized_path) GLOB '*.ts'
-                              OR lower(fa.normalized_path) GLOB '*.py' THEN 1 ELSE 0 END)
-         FROM file_activity fa
-         JOIN history_events he ON he.event_key=fa.event_key
-         JOIN sessions s ON s.session_id=he.session_id
-         JOIN session_commits sc ON sc.session_id=s.session_id
-         WHERE {scope}
-         GROUP BY s.session_id
-         ORDER BY COUNT(*) DESC,s.session_key ASC"
-    );
-    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    let mut result = statement
-        .query_map(params_from_iter(values), |row| {
-            let session_key: String = row.get(0)?;
-            let revision: String = row.get(1)?;
-            let reads = nonnegative_u64(row.get(4)?)?;
-            let edits = nonnegative_u64(row.get(5)?)?;
-            let writes = nonnegative_u64(row.get(6)?)?;
-            let deletes = nonnegative_u64(row.get(7)?)?;
-            let moves = nonnegative_u64(row.get(8)?)?;
-            let mutations = edits + writes + deletes + moves;
-            let document_events = nonnegative_u64(row.get(16)?)?;
-            let implementation_events = nonnegative_u64(row.get(17)?)?;
+) -> Result<(Vec<Value>, bool), QueryError> {
+    #[derive(Default)]
+    struct Summary {
+        revision: String,
+        provider: String,
+        project_key: Option<String>,
+        actions: [u64; 7],
+        phases: [u64; 4],
+        paths: BTreeSet<String>,
+        document_events: u64,
+        implementation_events: u64,
+    }
+    let mut summaries = BTreeMap::<String, Summary>::new();
+    for window in segmented_windows(&request.window)? {
+        let mut segment = request.clone();
+        segment.window = window;
+        let (scope, values) = file_scope(&segment)?;
+        let sql = format!(
+            "SELECT lower(hex(s.session_key)),lower(hex(sc.canonical_digest)),s.provider,
+                    CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                    fa.action,fa.phase,fa.normalized_path
+             FROM file_activity fa INDEXED BY file_activity_observed
+             CROSS JOIN history_events he ON he.event_key=fa.event_key
+             CROSS JOIN sessions s ON s.session_id=he.session_id
+             CROSS JOIN session_commits sc ON sc.session_id=s.session_id
+             WHERE {scope}
+             ORDER BY fa.observed_timestamp,fa.event_key,fa.activity_ordinal"
+        );
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+        let mut rows = statement
+            .query(params_from_iter(values))
+            .map_err(query_failed)?;
+        while let Some(row) = rows.next().map_err(query_failed)? {
+            let session_key = row.get::<_, String>(0).map_err(query_failed)?;
+            let entry = summaries.entry(session_key).or_default();
+            if entry.revision.is_empty() {
+                entry.revision = row.get(1).map_err(query_failed)?;
+                entry.provider = row.get(2).map_err(query_failed)?;
+                entry.project_key = row.get(3).map_err(query_failed)?;
+            }
+            let action = row.get::<_, String>(4).map_err(query_failed)?;
+            if let Some(index) = ["read", "edit", "write", "delete", "move", "search", "list"]
+                .iter()
+                .position(|candidate| *candidate == action)
+            {
+                entry.actions[index] += 1;
+            }
+            let phase = row.get::<_, String>(5).map_err(query_failed)?;
+            let phase_index = ["attempted", "confirmed", "failed"]
+                .iter()
+                .position(|candidate| *candidate == phase)
+                .unwrap_or(3);
+            entry.phases[phase_index] += 1;
+            let path = row.get::<_, String>(6).map_err(query_failed)?;
+            let lower = path.to_ascii_lowercase();
+            entry.document_events += u64::from(
+                [".md", ".txt", ".rst"]
+                    .iter()
+                    .any(|suffix| lower.ends_with(suffix)),
+            );
+            entry.implementation_events += u64::from(
+                [".rs", ".js", ".mjs", ".ts", ".py"]
+                    .iter()
+                    .any(|suffix| lower.ends_with(suffix)),
+            );
+            entry.paths.insert(path);
+        }
+    }
+    let mut result = summaries
+        .into_iter()
+        .map(|(session_key, summary)| {
+            let reads = summary.actions[0];
+            let mutations = summary.actions[1..=4].iter().sum::<u64>();
             let research_heavy = reads >= 3 * mutations.max(1);
             let implementation_heavy = mutations >= 5 && reads.saturating_mul(10) <= mutations * 8;
-            Ok(json!({
+            json!({
                 "sessionKey": session_key,
-                "provider": row.get::<_, String>(2)?,
-                "projectKey": row.get::<_, Option<String>>(3)?,
+                "provider": summary.provider,
+                "projectKey": summary.project_key,
                 "recordedCounts": {
                     "read": reads.to_string(),
-                    "edit": edits.to_string(),
-                    "write": writes.to_string(),
-                    "delete": deletes.to_string(),
-                    "move": moves.to_string(),
-                    "search": nonnegative_json(row.get(9)?)?,
-                    "list": nonnegative_json(row.get(10)?)?,
-                    "attempted": nonnegative_json(row.get(11)?)?,
-                    "confirmed": nonnegative_json(row.get(12)?)?,
-                    "failed": nonnegative_json(row.get(13)?)?,
-                    "unknown": nonnegative_json(row.get(14)?)?,
-                    "distinctPath": nonnegative_json(row.get(15)?)?,
-                    "documentLike": document_events.to_string(),
-                    "implementationLike": implementation_events.to_string(),
+                    "edit": summary.actions[1].to_string(),
+                    "write": summary.actions[2].to_string(),
+                    "delete": summary.actions[3].to_string(),
+                    "move": summary.actions[4].to_string(),
+                    "search": summary.actions[5].to_string(),
+                    "list": summary.actions[6].to_string(),
+                    "attempted": summary.phases[0].to_string(),
+                    "confirmed": summary.phases[1].to_string(),
+                    "failed": summary.phases[2].to_string(),
+                    "unknown": summary.phases[3].to_string(),
+                    "distinctPath": summary.paths.len().to_string(),
+                    "documentLike": summary.document_events.to_string(),
+                    "implementationLike": summary.implementation_events.to_string(),
                 },
                 "estimated": {
                     "researchHeavy": research_heavy,
                     "implementationHeavy": implementation_heavy,
-                    "docVoid": research_heavy && document_events == 0,
-                    "specPrecisionGap": implementation_heavy && document_events == 0,
+                    "docVoid": research_heavy && summary.document_events == 0,
+                    "specPrecisionGap": implementation_heavy && summary.document_events == 0,
                     "method": "file-workflow-signals@1",
                 },
-                "evidence": {"kind":"session","sessionKey":session_key,"revision":revision},
-            }))
+                "evidence": {"kind":"session","sessionKey":session_key,"revision":summary.revision},
+            })
         })
-        .map_err(query_failed)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(query_failed)?;
-    drop(statement);
-    let mut details = file_workflow_details(connection, request)?;
+        .collect::<Vec<_>>();
+    result.sort_by(|left, right| {
+        file_event_count(right)
+            .cmp(&file_event_count(left))
+            .then_with(|| {
+                left["sessionKey"]
+                    .as_str()
+                    .cmp(&right["sessionKey"].as_str())
+            })
+    });
+    let selected_session_keys = result
+        .iter()
+        .take(usize::from(request.limit))
+        .filter_map(|item| item["sessionKey"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let (mut details, detail_limited) =
+        file_workflow_details(connection, request, &selected_session_keys)?;
     for item in &mut result {
         let session_key = item["sessionKey"]
             .as_str()
             .ok_or_else(|| QueryError::new("QUERY_FAILED", "file workflow session is missing"))?;
         item["events"] = Value::Array(details.remove(session_key).unwrap_or_default());
     }
-    Ok(result)
+    Ok((result, detail_limited))
+}
+
+fn file_event_count(item: &Value) -> u128 {
+    ["read", "edit", "write", "delete", "move", "search", "list"]
+        .iter()
+        .map(|key| {
+            decimal_json(
+                item.get("recordedCounts")
+                    .and_then(|counts| counts.get(key)),
+            )
+        })
+        .sum()
 }
 
 fn file_workflow_details(
     connection: &Connection,
     request: &RecipeRequest,
-) -> Result<BTreeMap<String, Vec<Value>>, QueryError> {
+    session_keys: &[String],
+) -> Result<(BTreeMap<String, Vec<Value>>, bool), QueryError> {
     struct FileDetail {
         session_key: String,
         event_key: String,
@@ -1688,7 +2045,17 @@ fn file_workflow_details(
         absolute: bool,
         project_relative: bool,
     }
-    let (scope, values) = file_scope(request)?;
+    if session_keys.is_empty() {
+        return Ok((BTreeMap::new(), false));
+    }
+    let (mut scope, mut values) = file_scope(request)?;
+    scope.push_str(&format!(
+        " AND s.session_key IN ({})",
+        placeholders(session_keys.len())
+    ));
+    for session_key in session_keys {
+        values.push(SqlValue::Blob(decode_key(session_key, "sessionKey")?));
+    }
     let sql = format!(
         "SELECT lower(hex(s.session_key)),lower(hex(he.event_key)),lower(hex(he.revision)),
                 fa.observed_timestamp,he.event_kind,fa.activity_ordinal,fa.action,fa.phase,
@@ -1699,10 +2066,12 @@ fn file_workflow_details(
          JOIN sessions s ON s.session_id=he.session_id
          WHERE {scope}
          ORDER BY s.session_key,he.record_start_offset,he.content_index,
-                  he.event_ordinal,he.event_key,fa.activity_ordinal"
+                  he.event_ordinal,he.event_key,fa.activity_ordinal
+         LIMIT {}",
+        MAX_RECIPE_DETAIL_ITEMS + 1
     );
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params_from_iter(values), |row| {
             Ok(FileDetail {
                 session_key: row.get(0)?,
@@ -1725,11 +2094,15 @@ fn file_workflow_details(
         .collect::<Result<Vec<_>, _>>()
         .map_err(query_failed)?;
     drop(statement);
-    if rows.len() > MAX_RECIPE_DETAIL_ITEMS {
+    let detail_limited = rows.len() > MAX_RECIPE_DETAIL_ITEMS;
+    if detail_limited && !request.allow_degraded {
         return Err(QueryError::new(
             "TS_QUERY_TOO_BROAD",
             "file workflow detail exceeds the bounded recipe budget",
         ));
+    }
+    if detail_limited {
+        rows.truncate(MAX_RECIPE_DETAIL_ITEMS);
     }
     let event_revisions = rows
         .iter()
@@ -1771,7 +2144,7 @@ fn file_workflow_details(
             "evidence": evidence,
         }));
     }
-    Ok(result)
+    Ok((result, detail_limited))
 }
 
 fn activity_shifts(
@@ -1934,86 +2307,78 @@ fn read_activity_buckets(
             "unknownDedupeSessionCount": row.support.unknown_dedupe_session_count,
         }));
     }
-    if complete_day_window(&request.window)?.is_some()
-        && projected_activity_order_is_exact(connection, request)?
-    {
-        enrich_projected_activity_buckets(connection, request, bounds, width_ms, &mut buckets)?;
-        return Ok(buckets);
-    }
-    let (scope, values) = event_scope(request, None)?;
-    let sql = format!(
-        "SELECT he.observed_timestamp,lower(hex(s.session_key)),
-                CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
-                CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END,
-                he.event_kind,lower(hex(sc.canonical_digest))
-         FROM history_events he
-         JOIN sessions s ON s.session_id=he.session_id
-         JOIN session_commits sc ON sc.session_id=s.session_id
-         LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
-         WHERE {scope}
-         ORDER BY he.observed_timestamp,he.event_key"
-    );
-    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    let mut rows = statement
-        .query(params_from_iter(values))
-        .map_err(query_failed)?;
-    let mut last_project = None::<String>;
-    while let Some(row) = rows.next().map_err(query_failed)? {
-        let observed: String = row.get(0).map_err(query_failed)?;
-        let observed_ms = parse_canonical_timestamp(&observed, "stored observedAt")?;
-        let start = bounds.after_ms + ((observed_ms - bounds.after_ms) / width_ms) * width_ms;
-        let state = buckets.entry(start).or_default();
-        let session_key: String = row.get(1).map_err(query_failed)?;
-        let project_key: Option<String> = row.get(2).map_err(query_failed)?;
-        let _turn_key: Option<String> = row.get(3).map_err(query_failed)?;
-        let _event_kind: String = row.get(4).map_err(query_failed)?;
-        let session_revision: String = row.get(5).map_err(query_failed)?;
-        if let Some(project_key) = &project_key {
-            state.projects.insert(project_key.clone());
-            if last_project
-                .as_ref()
-                .is_some_and(|last| last != project_key)
-            {
-                state.context_switches += 1;
-            }
-            last_project = Some(project_key.clone());
+    enrich_projected_activity_buckets(connection, request, bounds, width_ms, &mut buckets)?;
+    if !projected_activity_order_is_exact(connection, request)? {
+        for state in buckets.values_mut() {
+            state.context_switches = 0;
         }
-        state.evidence.get_or_insert_with(
-            || json!({"kind":"session","sessionKey":session_key,"revision":session_revision}),
-        );
-    }
-    drop(rows);
-    drop(statement);
-
-    let (scope, values) = token_scope(request)?;
-    let sql = format!(
-        "SELECT tu.observed_timestamp,tu.input_tokens,tu.cached_input_tokens,
-                tu.cache_write_input_tokens,tu.output_tokens,tu.reasoning_tokens,tu.total_tokens
-         FROM token_usage tu
-         JOIN history_events he ON he.event_key=tu.event_key
-         JOIN sessions s ON s.session_id=he.session_id
-         WHERE {scope}
-         ORDER BY tu.observed_timestamp,tu.event_key"
-    );
-    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
-    let mut rows = statement
-        .query(params_from_iter(values))
-        .map_err(query_failed)?;
-    while let Some(row) = rows.next().map_err(query_failed)? {
-        let observed: String = row.get(0).map_err(query_failed)?;
-        let observed_ms = parse_canonical_timestamp(&observed, "stored observedAt")?;
-        let start = bounds.after_ms + ((observed_ms - bounds.after_ms) / width_ms) * width_ms;
-        let state = buckets.entry(start).or_default();
-        state.token_events += 1;
-        for index in 0..6 {
-            let value: Option<Vec<u8>> = row.get(1 + index).map_err(query_failed)?;
-            if let Some(value) = value {
-                state.token_values[index] += u128::from(blob_u64(value).map_err(query_failed)?);
-                state.token_present[index] += 1;
-            }
-        }
+        enrich_exact_activity_order(connection, request, bounds, width_ms, &mut buckets)?;
     }
     Ok(buckets)
+}
+
+fn enrich_exact_activity_order(
+    connection: &Connection,
+    request: &RecipeRequest,
+    bounds: WindowBounds,
+    width_ms: u64,
+    buckets: &mut BTreeMap<u64, ActivityBucketState>,
+) -> Result<(), QueryError> {
+    let mut last_project = None::<String>;
+    let mut exact_evidence_buckets = BTreeSet::<u64>::new();
+    for window in segmented_windows(&request.window)? {
+        let mut segment = request.clone();
+        segment.window = window;
+        let (sql, values) = exact_activity_order_statement(&segment)?;
+        let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+        let mut rows = statement
+            .query(params_from_iter(values))
+            .map_err(query_failed)?;
+        while let Some(row) = rows.next().map_err(query_failed)? {
+            let observed: String = row.get(0).map_err(query_failed)?;
+            let observed_ms = parse_canonical_timestamp(&observed, "stored observedAt")?;
+            let start = bounds.after_ms + ((observed_ms - bounds.after_ms) / width_ms) * width_ms;
+            let state = buckets.entry(start).or_default();
+            let session_key: String = row.get(1).map_err(query_failed)?;
+            let project_key: Option<String> = row.get(2).map_err(query_failed)?;
+            let session_revision: String = row.get(3).map_err(query_failed)?;
+            if let Some(project_key) = &project_key {
+                state.projects.insert(project_key.clone());
+                if last_project
+                    .as_ref()
+                    .is_some_and(|last| last != project_key)
+                {
+                    state.context_switches += 1;
+                }
+                last_project = Some(project_key.clone());
+            }
+            if exact_evidence_buckets.insert(start) {
+                state.evidence = Some(
+                    json!({"kind":"session","sessionKey":session_key,"revision":session_revision}),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn exact_activity_order_statement(
+    request: &RecipeRequest,
+) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let (scope, values) = event_scope(request, None)?;
+    Ok((
+        format!(
+            "SELECT he.observed_timestamp,lower(hex(s.session_key)),
+                    CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
+                    lower(hex(sc.canonical_digest))
+             FROM history_events he INDEXED BY history_events_observed
+             CROSS JOIN sessions s ON s.session_id=he.session_id
+             CROSS JOIN session_commits sc ON sc.session_id=s.session_id
+             WHERE {scope}
+             ORDER BY he.observed_timestamp,he.event_key"
+        ),
+        values,
+    ))
 }
 
 fn enrich_projected_activity_buckets(
@@ -2780,7 +3145,8 @@ fn read_recipe_coverage(
             (
                 format!("WITH {matched_events}"),
                 "matched_events matched JOIN history_event_coverage he
-                   ON he.event_key=matched.event_key"
+                   ON he.event_key=matched.event_key
+                   JOIN sessions s ON s.session_id=he.session_id"
                     .to_owned(),
                 result_scope,
                 values,
@@ -2789,7 +3155,9 @@ fn read_recipe_coverage(
             let (scope, values) = event_scope(request, extra)?;
             (
                 String::new(),
-                "history_event_coverage he".to_owned(),
+                "history_event_coverage he INDEXED BY history_event_coverage_observed
+                   CROSS JOIN sessions s ON s.session_id=he.session_id"
+                    .to_owned(),
                 format!("WHERE {scope}"),
                 values,
             )
@@ -2804,7 +3172,7 @@ fn read_recipe_coverage(
            SUM(CASE WHEN he.completeness='unavailable' THEN 1 ELSE 0 END),
            SUM(CASE WHEN he.observed_timestamp IS NULL THEN 1 ELSE 0 END),
            SUM(he.missing_revision),SUM(he.missing_token_metric),SUM(he.missing_payload)
-         FROM {event_source} JOIN sessions s ON s.session_id=he.session_id
+         FROM {event_source}
          {where_clause}"
     );
     let counts = connection
@@ -3303,11 +3671,64 @@ mod tests {
     use rusqlite::{Connection, params_from_iter};
 
     use super::{
-        RecipeFilters, RecipeName, RecipeRequest, RecipeWindow,
+        MAX_RECIPE_PAGE_BYTES, RecipeFilters, RecipeName, RecipeRequest, RecipeResponse,
+        RecipeWindow, exact_activity_order_statement, fit_degraded_recipe_response,
         projected_activity_coverage_statement, projected_capability_cooccurrences_statement,
-        projected_capability_representatives_statement, read_recipe_coverage,
-        solution_recall_statement,
+        projected_capability_representatives_statement, read_recipe_coverage, recipe_provenance,
+        solution_recall_statement, truncate_recipe_details,
     };
+
+    #[test]
+    fn degraded_recipe_details_keep_a_ranked_prefix_within_the_byte_budget() {
+        let first = serde_json::json!({"eventKey":"first"});
+        let first_bytes = crate::try_canonical_json(&first).unwrap().len();
+        let mut items = vec![
+            serde_json::json!({"attempts":[first, {"eventKey":"second"}]}),
+            serde_json::json!({"attempts":[{"eventKey":"third"}]}),
+        ];
+
+        assert!(
+            truncate_recipe_details(&mut items, RecipeName::FailureChains, first_bytes).unwrap()
+        );
+        assert_eq!(items[0]["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(items[0]["attempts"][0]["eventKey"], "first");
+        assert!(items[1]["attempts"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn degraded_recipe_response_marks_oversized_details_as_partial() {
+        let connection = coverage_connection();
+        let request = capability_contexts_request();
+        let coverage = read_recipe_coverage(&connection, &request).unwrap();
+        let mut response = RecipeResponse {
+            format: super::RECIPE_RESPONSE_FORMAT.to_owned(),
+            database_uuid: "00000000-0000-4000-8000-000000000000".to_owned(),
+            snapshot_seq: "0".to_owned(),
+            name: RecipeName::FailureChains,
+            window: request.window,
+            comparison_window: None,
+            evaluated_at: request.evaluated_at,
+            items: vec![
+                serde_json::json!({"attempts":[{"payload":"x".repeat(MAX_RECIPE_PAGE_BYTES)}]}),
+            ],
+            total_item_count: "1".to_owned(),
+            truncated: false,
+            coverage,
+            provenance: recipe_provenance(RecipeName::FailureChains),
+        };
+
+        fit_degraded_recipe_response(&mut response, true).unwrap();
+        assert!(response.items[0]["attempts"].as_array().unwrap().is_empty());
+        assert!(response.coverage.degraded);
+        assert!(
+            response
+                .coverage
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic == "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE" })
+        );
+        assert!(super::canonical_recipe_bytes(&response).unwrap() <= MAX_RECIPE_PAGE_BYTES);
+    }
 
     fn solution_recall_request() -> RecipeRequest {
         RecipeRequest {
@@ -3458,6 +3879,32 @@ mod tests {
             details
                 .iter()
                 .all(|detail| !detail.contains("history_event_coverage"))
+        );
+    }
+
+    #[test]
+    fn exact_activity_order_uses_the_observed_time_index() {
+        let connection = coverage_connection();
+        let request = activity_request(RecipeName::ActivityShifts);
+        let (sql, values) = exact_activity_order_statement(&request).unwrap();
+        let details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("history_events_observed")),
+            "exact Activity ordering must be a bounded time-index scan: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "the time index must satisfy the event ordering: {details:?}"
         );
     }
 

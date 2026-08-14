@@ -510,6 +510,14 @@ test("Engine evidence drift maps to public cursor and revision diagnostics", () 
     insightsQueryDiagnostic({ code: "TS_INSIGHTS_ENGINE_UNAVAILABLE" }, "search").code,
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
   );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_ENGINE_TIMEOUT", fatal: true }, "activity").code,
+    "TS_INSIGHTS_ENGINE_TIMEOUT",
+  );
+  assert.equal(
+    insightsQueryDiagnostic({ code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true }, "recipe").code,
+    "TS_INSIGHTS_ENGINE_DISCONNECTED",
+  );
 });
 
 test("Usage and Activity require explicit bounded UTC windows", () => {

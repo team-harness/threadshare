@@ -10,6 +10,7 @@ const FATAL_READ_CODES = new Set([
   "TS_INSIGHTS_ENGINE_DISCONNECTED",
   "TS_INSIGHTS_ENGINE_TIMEOUT",
 ]);
+const DEFAULT_QUERY_TIMEOUT_MS = 120_000;
 
 function readerError(code, message, cause) {
   const error = cause === undefined ? new Error(message) : new Error(message, { cause });
@@ -92,7 +93,7 @@ export function createInsightsQueryReader(options) {
           requiredContract: insightsRequiredContract(options.originSecretEpoch),
           runtimeOptions: options.runtimeOptions,
           childEnv: insightsChildEnv(options.paths, options),
-          timeoutMs: options.timeoutMs,
+          timeoutMs: options.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
           closeTimeoutMs: options.closeTimeoutMs,
         });
         let adopted = false;

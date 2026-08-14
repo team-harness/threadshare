@@ -739,6 +739,24 @@ function insightsFailure(error, action) {
       next: "Install or repair the matching Threadshare platform package, then retry `threadshare insights status`.",
     });
   }
+  if (error?.code === "TS_INSIGHTS_ENGINE_TIMEOUT") {
+    return cliDiagnostic(error.code, "The local Insights maintenance operation exceeded its time limit.", {
+      command: "insights",
+      next: "Retry `threadshare insights sync`; if it recurs, run `threadshare insights status --verify`.",
+    });
+  }
+  if (error?.code === "TS_INSIGHTS_ENGINE_DISCONNECTED") {
+    return cliDiagnostic(error.code, "The local Insights Engine stopped during maintenance.", {
+      command: "insights",
+      next: "Retry `threadshare insights sync`; if it recurs, run `threadshare insights status --verify`.",
+    });
+  }
+  if (error?.code === "TS_INSIGHTS_WRITER_LOCKED") {
+    return cliDiagnostic(error.code, "Another local Insights sync, reindex, or maintenance writer is still running.", {
+      command: "insights",
+      next: "Wait for the active Insights command to finish, then retry; do not start concurrent writers.",
+    });
+  }
   if (error?.code === "TS_INSIGHTS_ORIGIN_SECRET_MISSING" ||
       error?.code === "TS_INSIGHTS_ORIGIN_SECRET_INVALID") {
     return cliDiagnostic(
@@ -1000,6 +1018,7 @@ async function main() {
       invocation = parseInsightsInvocation(positionals, {
         ...options,
         "regenerate-secret": options["regenerate-secret"],
+        verify: options.verify,
       });
       if (invocation.action === "dashboard") {
         const { runInsightsDashboardUntilSignal } = await import("../src/insights-dashboard.mjs");

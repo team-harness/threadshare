@@ -1349,13 +1349,16 @@ test("a session-time disconnect marks the client fatal and close remains joinabl
     timeoutMs: 5_000,
   });
 
+  let firstFailure;
+  await assert.rejects(client.applySessionFacts(sampleDelta()), (error) => {
+    firstFailure = error;
+    assert.equal(error.code, "TS_INSIGHTS_ENGINE_DISCONNECTED");
+    assert.equal(error.fatal, true);
+    return true;
+  });
   await assert.rejects(
     client.applySessionFacts(sampleDelta()),
-    { code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true },
-  );
-  await assert.rejects(
-    client.applySessionFacts(sampleDelta()),
-    { code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true },
+    (error) => error === firstFailure,
   );
   const firstClose = client.close();
   const secondClose = client.close();
