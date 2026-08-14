@@ -46,6 +46,20 @@ const INSIGHTS_QUERY_ACTIONS = new Set([
 ]);
 const MAX_EXPIRES_IN_SECONDS = 365 * 24 * 60 * 60;
 
+async function installedPackageVersion() {
+  try {
+    const document = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    if (typeof document.version !== "string" || !/^\d+\.\d+\.\d+$/u.test(document.version)) {
+      throw new Error("invalid package version");
+    }
+    return document.version;
+  } catch {
+    throw cliDiagnostic("TS_OPERATION_FAILED", "Unable to read the installed Threadshare version.", {
+      next: "Reinstall Threadshare, then retry `threadshare --version`.",
+    });
+  }
+}
+
 function parseExpiresDuration(value, command = "share") {
   if (value === undefined) return undefined;
   const match = /^([1-9]\d*)([mhd])$/.exec(value);
@@ -816,6 +830,15 @@ function insightsFailure(error, action) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === "--version") {
+    if (args.length !== 1) {
+      throw cliDiagnostic("TS_USAGE_UNEXPECTED_ARGUMENT", "--version takes no argument.", {
+        next: "Run `threadshare --version` without additional arguments.",
+      });
+    }
+    process.stdout.write(`${await installedPackageVersion()}\n`);
+    return;
+  }
   const help = preflightHelp(args);
   if (help !== null) {
     process.stdout.write(`${help}\n`);
@@ -926,6 +949,34 @@ async function main() {
   }
   if (command === "insights") {
     validateCommandInvocation(command, positionals, options);
+    if (positionals[1] === "spec") {
+      if (positionals.length !== 2) {
+        throw cliDiagnostic("TS_USAGE_UNEXPECTED_ARGUMENT", "insights spec takes no positional argument.", {
+          command: "insights",
+          next: "Run `threadshare insights spec --format json`.",
+        });
+      }
+      for (const [optionName, optionValue] of Object.entries(options)) {
+        if (optionValue !== undefined && optionName !== "format") {
+          throw cliDiagnostic("TS_USAGE_OPTION_NOT_ALLOWED", `--${optionName} is not valid for insights spec.`, {
+            command: "insights",
+            next: "Run `threadshare insights spec --format json`.",
+          });
+        }
+      }
+      if (options.format !== "json") {
+        const code = options.format === undefined
+          ? "TS_USAGE_OPTION_DEPENDENCY"
+          : "TS_USAGE_INVALID_VALUE";
+        throw cliDiagnostic(code, "insights spec requires --format json.", {
+          command: "insights",
+          next: "Run `threadshare insights spec --format json`.",
+        });
+      }
+      const { createInsightsAgentSpec } = await import("../src/insights-agent-spec.mjs");
+      process.stdout.write(`${JSON.stringify(createInsightsAgentSpec())}\n`);
+      return;
+    }
     const { insightsEngineReleaseTarget } = await import("../src/insights-engine-targets.mjs");
     if (insightsEngineReleaseTarget() === null) {
       throw cliDiagnostic(

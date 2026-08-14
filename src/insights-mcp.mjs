@@ -3,11 +3,13 @@ import process from "node:process";
 import { Readable } from "node:stream";
 import { TextDecoder } from "node:util";
 
+import { createInsightsAgentSpec } from "./insights-agent-spec.mjs";
 import { executeInsightsQuery, insightsQueryDiagnostic } from "./insights-query.mjs";
 
 const PROTOCOL_VERSION = "2025-11-25";
 const MAX_MESSAGE_BYTES = 128 * 1024;
 const TOOL_NAMES = Object.freeze([
+  "threadshare_insights_spec",
   "threadshare_insights_query",
   "threadshare_insights_recipe",
   "threadshare_insights_evidence",
@@ -27,7 +29,8 @@ async function readSchema(name) {
 }
 
 async function toolCatalog() {
-  const [query, recipe, evidence] = await Promise.all([
+  const [spec, query, recipe, evidence] = await Promise.all([
+    readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
     readSchema("threadshare-insights-recipe-request.v1.schema.json"),
     readSchema("threadshare-insights-evidence-request.v2.schema.json"),
@@ -41,15 +44,27 @@ async function toolCatalog() {
   return Object.freeze([
     {
       name: TOOL_NAMES[0],
+      title: "Choose a local Threadshare Insights analysis plan",
+      description: "Map a user's natural-language question to bounded Insights actions and answer rules.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+      },
+      outputSchema: spec,
+      annotations,
+    },
+    {
+      name: TOOL_NAMES[1],
       title: "Query local Threadshare Insights",
       description: "Run a bounded typed records or aggregate query over the committed local Insights index.",
       inputSchema: query,
       annotations,
     },
     {
-      name: TOOL_NAMES[1],
+      name: TOOL_NAMES[2],
       title: "Run a local Threadshare Insights recipe",
-      description: "Run one versioned evidence-bearing Insights recipe over a bounded local time window.",
+      description: "Run the versioned evidence-bearing Recipe selected by threadshare_insights_spec.",
       inputSchema: {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         type: "object",
@@ -70,7 +85,7 @@ async function toolCatalog() {
       annotations,
     },
     {
-      name: TOOL_NAMES[2],
+      name: TOOL_NAMES[3],
       title: "Read local Threadshare Insights evidence",
       description: "Read revision-bound unredacted local evidence using a bounded byte page.",
       inputSchema: evidence,
@@ -92,9 +107,17 @@ function toolInvocation(name, args) {
     code: "TS_INSIGHTS_REQUEST_INVALID",
   });
   if (name === TOOL_NAMES[0]) {
-    return { invocation: { action: "query", requestSource: "-" }, request: args };
+    if (!exactKeys(args, [])) {
+      throw Object.assign(new Error("spec arguments must be empty"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { result: createInsightsAgentSpec() };
   }
   if (name === TOOL_NAMES[1]) {
+    return { invocation: { action: "query", requestSource: "-" }, request: args };
+  }
+  if (name === TOOL_NAMES[2]) {
     if (!exactKeys(args, ["name", "request"]) || typeof args.name !== "string" ||
         !plainObject(args.request)) {
       throw Object.assign(new Error("recipe arguments must contain name and request"), {
@@ -106,7 +129,7 @@ function toolInvocation(name, args) {
       request: args.request,
     };
   }
-  if (name === TOOL_NAMES[2]) {
+  if (name === TOOL_NAMES[3]) {
     return { invocation: { action: "evidence-v2", requestSource: "-" }, request: args };
   }
   return null;
@@ -182,7 +205,7 @@ export function createInsightsMcpServer(options = {}) {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "threadshare-insights", version: "1.0.0" },
-          instructions: "Read-only local Insights tools. Run `threadshare insights sync` before querying stale or missing data.",
+          instructions: "Users ask natural-language questions. Call threadshare_insights_spec to choose the bounded read-only plan; ask before sync when freshness matters.",
         },
       };
     }
@@ -204,6 +227,16 @@ export function createInsightsMcpServer(options = {}) {
       }
       const target = toolInvocation(message.params.name, message.params.arguments ?? {});
       if (target === null) return rpcError(message.id, -32602, "Unknown tool");
+      if (Object.hasOwn(target, "result")) {
+        return {
+          jsonrpc: "2.0", id: message.id,
+          result: {
+            content: [{ type: "text", text: JSON.stringify(target.result) }],
+            structuredContent: target.result,
+            isError: false,
+          },
+        };
+      }
       try {
         const result = await execute(target.invocation, target.request, options);
         return {

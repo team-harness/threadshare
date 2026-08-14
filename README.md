@@ -143,26 +143,32 @@ file paths; treat stdout as sensitive local data:
 ```bash
 threadshare insights status
 threadshare insights sync
-threadshare insights search --query 'database timeout' --format json
-threadshare insights usage skill --request usage.json --format json
-threadshare insights activity --request activity.json --format json
-threadshare insights query --request query.json --format json
-threadshare insights recipe solution-recall@1 --request recipe.json --format json
-threadshare insights evidence --request evidence.json --format json
+threadshare insights spec --format json
 threadshare insights mcp --stdio
 ```
 
-For Agent-built requests, start with the action-specific help instead of guessing option
-combinations:
+Users ask the Agent a concrete question in natural language. The Agent reads the static spec, chooses
+the appropriate actions, versioned analysis plan, filters, and evidence depth, then builds the strict
+JSON requests. Users do not need to know Recipe names, resource names, schema versions, or cursor
+rules. For example:
+
+- Which Skills do I use most, and what kinds of work do I use them for?
+- Which Tool attempts keep failing, and did the same attempt later succeed?
+- Where did this exact error happen before, and what verified step followed it?
+- Which projects or models recorded the most tokens, and how complete is that data?
+
+Agents start with the discovery contract instead of guessing option combinations:
 
 ```bash
+threadshare insights spec --format json
 threadshare insights query --help
 threadshare insights recipe --help
 threadshare insights evidence --help
 threadshare insights mcp --help
 ```
 
-The request files are strict JSON contracts shipped in the package. A minimal typed event query is:
+The lower-level request files are strict JSON contracts shipped in the package. A minimal Agent-built
+typed event query is:
 
 ```json
 {"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
@@ -181,28 +187,19 @@ when requesting full content. Query and Recipe do not implicitly run `sync`; run
 excluded Sessions. In an interactive terminal it reports byte progress on stderr. Use `reindex` only
 when you explicitly need a complete atomic rebuild or origin-secret recovery.
 
-Use `threadshare insights --help` and each action's help for the canonical request shape. The query
+Use `threadshare insights spec --format json`, `threadshare insights --help`, and each action's help for
+the canonical routing and request shapes. The query
 surface supports overview, ranked Tool/Skill usage, UTC activity buckets, filtered Turn search,
 capability discovery, typed records and aggregates across seven local resources, versioned recipes,
-and revision-checked full evidence pages. The stdio MCP server exposes the same Query, Recipe, and
-Evidence contracts as three Agent tools; it does not listen on a network port. Responses include the
+and revision-checked full evidence pages. The stdio MCP server exposes one discovery tool plus the
+same Query, Recipe, and Evidence contracts; it does not listen on a network port. Responses include the
 committed snapshot identity needed to cite results and detect an atomic reindex between pages.
 
-High-value questions map to versioned recipes:
-
-| Question | Recipe |
-|---|---|
-| Which Skills or Tools do I use most, and in which contexts? | `capability-contexts@1` |
-| Which Tool attempts kept failing, and did the same attempt chain later succeed? | `failure-chains@1` |
-| Which sessions were research-heavy, implementation-heavy, or lacked supporting docs? | `file-workflow-signals@1` |
-| When did activity or project switching change compared with a prior UTC window? | `activity-shifts@1` |
-| Which provider, model, and project combinations consumed the most recorded tokens? | `token-hotspots@1` |
-| Where did a similar error occur before, and what successful attempt followed it? | `solution-recall@1` |
-| What exactly happened around compaction, rollback, resume, Tool calls, and lifecycle events? | `session-timeline@1` |
-
-Recipes return structured facts, provenance, coverage, and directly readable evidence targets rather
-than a natural-language verdict. An Agent forms the answer and should distinguish recorded facts,
-derived signals, estimates, and co-occurrence.
+Internally, the Agent uses versioned plans so the same natural-language intent stays reproducible as
+the implementation evolves. Those protocol names are an automation detail, not something the user
+must select. Plans return structured facts, provenance, coverage, and directly readable evidence
+targets rather than a natural-language verdict. The Agent forms the answer and should distinguish
+recorded facts, derived signals, estimates, and co-occurrence.
 
 See [the worked Agent analysis case study](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md) for a real-index example
 covering workflow shifts, Skill adoption, Tool alias drift, failure prioritization, token reuse, and

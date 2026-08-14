@@ -16,6 +16,7 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 - Share a Codex- or Claude-backed Paseo agent: `threadshare share paseo <agent-id-or-prefix> --json`
 - List local native sessions: `threadshare sessions <codex|claude> --format json`
 - Analyze one local native session without uploading: `threadshare analyze <codex|claude> <session> --format json`
+- Route a natural-language analysis question: `threadshare insights spec --format json`, then choose the bounded Insights actions internally
 - Query committed local history: `threadshare insights <overview|search|capabilities|usage|activity|query|recipe|evidence> ... --format json`
 - Expose the same deep read contracts to an Agent: `threadshare insights mcp --stdio`
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
@@ -46,6 +47,11 @@ the user wants fresh results, ask before running the maintenance action `threads
 queries never index implicitly. `sync` initializes a missing index and otherwise applies only changed
 Sessions. Reserve `threadshare insights reindex` for an explicit complete rebuild or origin-secret recovery.
 
+The user states the analysis question in natural language. Do not ask them to choose an action, Recipe,
+resource, schema version, filter field, or evidence target. First run `threadshare insights spec --format
+json` (or call `threadshare_insights_spec` over MCP), match the question to an intent, then execute that
+intent's bounded plan. Use action help and shipped schemas only after choosing the plan.
+
 1. Use `overview` to establish the committed snapshot and coverage. Use `capabilities` to resolve a Tool
    or Skill key before filtering Search or requesting Usage. Query `coverage` counts have
    `scope: "all-indexed-history"`; they do not shrink to a Usage or Activity window. A non-zero
@@ -74,8 +80,9 @@ Query may return raw Tool arguments/output, system/developer/analysis content, p
 local paths. Treat them as local context: quote only what the answer needs, and never pass them to
 `share`, `publish`, a remote MCP server, or another network service unless the user explicitly asks.
 
-For the new Agent surface, use action-specific help before constructing JSON:
-`threadshare insights query --help`, `recipe --help`, `evidence --help`, and `mcp --help`.
+For the Agent surface, read `threadshare insights spec --format json` before constructing JSON, then use
+action-specific help: `threadshare insights query --help`, `recipe --help`, `evidence --help`, and
+`mcp --help`.
 Query requests use `threadshare-insights-query-request@v2`; Recipe requests use
 `threadshare-insights-recipe-request@v1`; Evidence requests use
 `threadshare-insights-evidence-request@v2`. Prefer `payloadMode: "reference"`, carry `nextCursor`

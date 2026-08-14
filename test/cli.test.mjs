@@ -214,6 +214,7 @@ test("renders a self-describing root and command help contract", () => {
   );
   assert.match(renderRootHelp(), /Threadshare shares AI agent conversation threads/);
   assert.match(renderRootHelp(), /threadshare <command> --help/);
+  assert.match(renderRootHelp(), /threadshare --version/);
   assert.match(renderRootHelp(), /https:\/\/cloud-thread\.team-harness\.com/);
   for (const [command, optionNames] of Object.entries(expectedOptions)) {
     const spec = COMMAND_SPECS[command];
@@ -238,9 +239,12 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("insights"), /status.*--verify.*full integrity/is);
   assert.match(renderCommandHelp("insights"), /fails closed without a TTY/is);
   assert.match(renderCommandHelp("insights"), /overview.*search.*capabilities.*usage.*activity.*evidence/is);
+  assert.match(renderCommandHelp("insights"), /natural-language.*spec/is);
   assert.match(renderCommandHelp("insights"), /Queries require --format json/is);
   assert.match(renderInsightsActionHelp("query"), /threadshare insights query --request <file\|-> --format json/);
   assert.match(renderInsightsActionHelp("query"), /threadshare-insights-query-request@v2/);
+  assert.match(renderInsightsActionHelp("spec"), /Users describe.*natural language/is);
+  assert.match(renderInsightsActionHelp("spec"), /Agent chooses the protocol/is);
   assert.match(renderInsightsActionHelp("recipe"), /capability-contexts@1.*failure-chains@1/is);
   assert.match(renderInsightsActionHelp("evidence"), /target\.kind: event, turn, session, or attempt-chain/);
   assert.match(renderInsightsActionHelp("mcp"), /stdout is JSON-RPC only/);
@@ -253,8 +257,31 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderCommandHelp("revoke"), /does not accept --url or read THREADSHARE_URL/);
 });
 
+test("prints the installed package version without touching local state", () => {
+  const packageDocument = JSON.parse(readFileSync(
+    new URL("../package.json", import.meta.url),
+    "utf8",
+  ));
+  const result = spawnSync(process.execPath, [cli, "--version"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CODEX_HOME: "/definitely/not/read",
+      THREADSHARE_INSIGHTS_HOME: "/definitely/not/read",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, `${packageDocument.version}\n`);
+
+  const extra = spawnSync(process.execPath, [cli, "--version", "extra"], { encoding: "utf8" });
+  assert.equal(extra.status, 1);
+  assert.equal(extra.stdout, "");
+  assert.match(extra.stderr, /TS_USAGE_UNEXPECTED_ARGUMENT/u);
+});
+
 test("renders action-specific Insights help without touching the index", () => {
-  for (const action of ["status", "sync", "query", "recipe", "evidence", "mcp"]) {
+  for (const action of ["status", "sync", "spec", "query", "recipe", "evidence", "mcp"]) {
     const result = spawnSync(process.execPath, [cli, "insights", action, "--help"], {
       encoding: "utf8",
       env: { ...process.env, THREADSHARE_INSIGHTS_HOME: "/definitely/not/read" },

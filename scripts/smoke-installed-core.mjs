@@ -83,6 +83,14 @@ export async function smokeInstalledCore({
   ) {
     throw new Error("installed Threadshare core CLI help is invalid");
   }
+  const versionResult = await runCli(binary, ["--version"]);
+  if (
+    versionResult.exitCode !== 0 ||
+    versionResult.stderr !== "" ||
+    versionResult.stdout !== `${version}\n`
+  ) {
+    throw new Error("installed Threadshare core CLI did not report its package version");
+  }
   const insights = await runCli(binary, ["insights", "status"]);
   if (
     insights.exitCode !== 1 ||

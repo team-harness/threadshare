@@ -142,25 +142,30 @@ analysis、Tool 输入输出、错误和文件路径，因此应把 stdout 视�
 ```bash
 threadshare insights status
 threadshare insights sync
-threadshare insights search --query 'database timeout' --format json
-threadshare insights usage skill --request usage.json --format json
-threadshare insights activity --request activity.json --format json
-threadshare insights query --request query.json --format json
-threadshare insights recipe solution-recall@1 --request recipe.json --format json
-threadshare insights evidence --request evidence.json --format json
+threadshare insights spec --format json
 threadshare insights mcp --stdio
 ```
 
-Agent 构造请求时，先查看 action 专属帮助，不要猜测参数组合：
+用户只需要用自然语言向 Agent 提出具体问题。Agent 读取静态 spec，自行选择 action、版本化分析计划、
+过滤条件和 evidence 深度，再构造严格 JSON 请求。用户不需要记住 Recipe 名称、resource 名称、schema
+版本或 cursor 规则。例如：
+
+- 最近哪些 Skill 用得最多，通常用在什么工作场景？
+- 哪些 Tool attempt 反复失败，同一次尝试后来成功了吗？
+- 以前哪里出现过这个具体错误，随后哪个经过验证的步骤奏效了？
+- 哪些项目或模型记录的 token 最多，这份统计有多完整？
+
+Agent 构造请求时，先读取发现契约，不要猜测参数组合：
 
 ```bash
+threadshare insights spec --format json
 threadshare insights query --help
 threadshare insights recipe --help
 threadshare insights evidence --help
 threadshare insights mcp --help
 ```
 
-请求文件是随 npm 包发布的严格 JSON 契约。最小的事件查询示例：
+底层请求文件是随 npm 包发布的严格 JSON 契约。最小的 Agent 构造事件查询示例：
 
 ```json
 {"format":"threadshare-insights-query-request@v2","resource":"event","where":null,"shape":{"kind":"records","select":["eventKey","observedAt"],"payloadMode":"reference"},"orderBy":[{"field":"observedAt","direction":"desc"},{"field":"eventKey","direction":"asc"}],"limit":20}
@@ -179,26 +184,17 @@ Query 和 Recipe 不会隐式执行 `sync`，首次查询或需要最新数据�
 在交互式终端中，它会把字节进度写到 stderr。只有明确需要完整原子重建或恢复 origin secret 时才使用
 `reindex`。
 
-规范请求形状以 `threadshare insights --help` 和各 action 的 help 为准。查询面包括 Overview、
+规范路由与请求形状以 `threadshare insights spec --format json`、`threadshare insights --help` 和各
+action 的 help 为准。查询面包括 Overview、
 Tool/Skill 使用排行、UTC 活动分桶、带过滤条件的 Turn 搜索、Capability 目录、七类本地资源的类型化
-记录与聚合、版本化 Recipe，以及带 revision 校验的完整证据分页。stdio MCP server 把同一套
-Query、Recipe、Evidence 契约暴露为三个 Agent tool，不监听网络端口。响应包含用于引用结果、检测
+记录与聚合、版本化 Recipe，以及带 revision 校验的完整证据分页。stdio MCP server 暴露一个发现
+tool 以及同一套 Query、Recipe、Evidence 契约，不监听网络端口。响应包含用于引用结果、检测
 分页期间原子 reindex 的 committed snapshot 身份。
 
-最有价值的问题可直接映射到版本化 Recipe：
-
-| 问题 | Recipe |
-|---|---|
-| 哪些 Skill/Tool 最常用，分别用在什么上下文？ | `capability-contexts@1` |
-| 哪些 Tool attempt 反复失败，同一 attempt chain 后来成功了吗？ | `failure-chains@1` |
-| 哪些 Session 偏研究、偏实现，或缺少配套文档？ | `file-workflow-signals@1` |
-| 与上一 UTC 时间窗相比，活动量或项目切换何时发生变化？ | `activity-shifts@1` |
-| 哪些 provider/model/project 组合消耗了最多已记录 token？ | `token-hotspots@1` |
-| 以前哪里出现过相似错误，随后哪个 attempt 成功了？ | `solution-recall@1` |
-| compaction、rollback、resume、Tool 调用和 lifecycle 前后究竟发生了什么？ | `session-timeline@1` |
-
-Recipe 返回结构化事实、provenance、coverage 与可直接读取的 evidence target，而不是自然语言结论。
-Agent 负责形成回答，并区分 recorded fact、derived signal、estimate 与 co-occurrence。
+Agent 内部使用版本化计划，使同一种自然语言意图在实现演进时仍然可复核。这些协议名称只是自动化
+细节，不需要用户选择。计划返回结构化事实、provenance、coverage 与可直接读取的 evidence target，
+而不是自然语言结论。Agent 负责形成回答，并区分 recorded fact、derived signal、estimate 与
+co-occurrence。
 
 本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
 `share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，

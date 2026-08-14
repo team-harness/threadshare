@@ -17,7 +17,7 @@ async function runMessages(messages, options = {}) {
   return text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
-test("Insights MCP exposes only the three deep read tools over newline JSON-RPC", async () => {
+test("Insights MCP exposes Agent discovery and three deep read tools over newline JSON-RPC", async () => {
   const calls = [];
   const responses = await runMessages([
     {
@@ -48,6 +48,7 @@ test("Insights MCP exposes only the three deep read tools over newline JSON-RPC"
   const byId = new Map(responses.map((response) => [response.id, response]));
   assert.equal(byId.get(1).result.protocolVersion, "2025-11-25");
   assert.deepEqual(byId.get(2).result.tools.map((tool) => tool.name), [
+    "threadshare_insights_spec",
     "threadshare_insights_query",
     "threadshare_insights_recipe",
     "threadshare_insights_evidence",

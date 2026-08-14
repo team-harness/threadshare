@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 const FORMATS = Object.freeze([
+  "threadshare-insights-agent-spec@v1",
   "threadshare-insights-overview@v1",
   "threadshare-insights-search-request@v1",
   "threadshare-insights-search@v1",
@@ -70,8 +71,8 @@ async function compiledSchemas() {
   return result;
 }
 
-test("ships fifteen strict Agent Insights JSON schemas", async () => {
-  assert.equal((await compiledSchemas()).size, 15);
+test("ships sixteen strict Agent Insights JSON schemas", async () => {
+  assert.equal((await compiledSchemas()).size, 16);
 });
 
 test("usage and activity schemas lock the non-causal aggregate axes", async () => {

@@ -25,7 +25,7 @@ Insights 查询只读取已提交索引，不会隐式运行 `sync`。因此 Age
 
 > 请用 Threadshare Insights 找出最近 13 个完整周使用最多的 5 个 Skill，并说明它们通常出现在什么工作场景。区分调用次数、独立 Turn、Session 和 dedupe group。
 
-Agent 先用 `insights usage skill` 排名，再把前 5 个 capability 交给 `capability-contexts@1` 获取代表上下文。
+Agent 先做 Skill 使用排行，再为前 5 个 Skill 获取代表性上下文。用户不需要指定命令或内部分析计划。
 
 | Skill | 调用 | Turn | Session / group | Agent 归纳的常见场景 |
 |---|---:|---:|---:|---|
@@ -43,7 +43,7 @@ Tool 趋势还暴露了命名迁移：`exec_command` 从 119,754 降至 32,181�
 
 ## 问题 2：哪些 Tool 一直失败，同一尝试链后来成功了吗？
 
-> 请按绝对失败量和失败率分别找出 Tool 热点，再用 `failure-chains@1` 判断代表性失败链是后来成功、从未成功，还是被放弃。
+> 请按绝对失败量和失败率分别找出 Tool 热点，并判断代表性失败链是后来成功、从未成功，还是被放弃。
 
 | Tool | 失败 / 调用 | 失败率 | Agent 判断的优先级 |
 |---|---:|---:|---|
@@ -53,7 +53,7 @@ Tool 趋势还暴露了命名迁移：`exec_command` 从 119,754 降至 32,181�
 | `WebFetch` | 8 / 8 | 100% | 集成可能不可用或已被替代 |
 | 已下线 MCP 搜索 | 4 / 4 | 100% | 清理仍在引用旧能力的工作流 |
 
-`failure-chains@1` 在同一索引中统计到 144,710 个候选链。返回的 Top 5 代表链全部是 `never-succeeded`：3 个 `Bash`、1 个 `Read`、1 个 `Write`，每条都记录了一次失败且没有后续 completion。
+Agent 在同一索引中统计到 144,710 个候选链。返回的 Top 5 代表链全部是 `never-succeeded`：3 个 `Bash`、1 个 `Read`、1 个 `Write`，每条都记录了一次失败且没有后续 completion。
 
 **有价值的回答**：先治理 `Bash` 能减少最多重试；同时应删除 100% 失败的退役集成。高失败率和高失败量是两种不同问题，不能合成一个不透明分数。
 
@@ -63,17 +63,17 @@ Top 5 不是总体分布。Tool terminal state 与 containing Turn outcome 也�
 
 ## 问题 3：哪些 Session 偏研究、偏实现，哪些缺少文档支撑？
 
-> 请用 `file-workflow-signals@1` 找出 research-heavy、implementation-heavy、doc void 和 spec precision gap Session，并解释判断依据，不评价代码质量。
+> 请找出偏研究、偏实现、缺少配套文档或实现与规格脱节的 Session，并解释判断依据，不评价代码质量。
 
-`file-workflow-signals@1` 统计到 633 个 Session。Top 5 全部被估计为 `implementationHeavy`；最密集的两个 Session 分别涉及 224 和 241 个 distinct path。
+工作流分析统计到 633 个 Session。Top 5 全部被估计为 `implementationHeavy`；最密集的两个 Session 分别涉及 224 和 241 个 distinct path。
 
 其中一个代表 Session 记录了 248 次文件尝试、53 个 distinct path 和 21 次失败，同时有 428 个 document-like 事件。它不是 doc void，更像“有文档支撑但执行摩擦较高”的实现任务。
 
 **有价值的回答**：当前排名由大规模实现任务主导。对团队复盘更有用的分组是“高实现量且低失败”与“高实现量且高失败”，而不是简单地把文件多解释成产出高。
 
-**下一步**：对高失败 Session 运行 `session-timeline@1`，检查失败集中在哪个阶段；对 doc void 或 spec precision gap Session，再验证是否真的缺少设计材料，而不是适配器未记录到文档事件。
+**下一步**：让 Agent 对高失败 Session 展开完整时间线，检查失败集中在哪个阶段；对 doc void 或 spec precision gap Session，再验证是否真的缺少设计材料，而不是适配器未记录到文档事件。
 
-Recipe 的 `implementationHeavy`、`researchHeavy`、`docVoid` 和 `specPrecisionGap` 都是版本化估计。它们描述被记录的文件工作流，不是质量评分。
+`implementationHeavy`、`researchHeavy`、`docVoid` 和 `specPrecisionGap` 都是版本化估计。它们描述被记录的文件工作流，不是质量评分。
 
 ## 问题 4：活动强度和项目切换何时发生变化？
 
@@ -96,7 +96,7 @@ Context transition 是连续事件中的项目变化信号，不等于人的注�
 
 ## 问题 5：哪些 provider、model、project 组合消耗了最多 token？
 
-> 请用 `token-hotspots@1` 找出最近 13 周的 token 热点，分别报告 input、cached input、output 和 reasoning，并说明缺失指标。
+> 请找出最近 13 周的 token 热点，分别报告 input、cached input、output 和 reasoning，并说明缺失指标。
 
 查询得到 326 个热点组。排名第一的组记录了约 28.44 亿 total token，其中 input 约 28.28 亿、cached input 约 27.72 亿、output 约 640 万、reasoning 约 228 万。
 
@@ -110,21 +110,21 @@ Context transition 是连续事件中的项目变化信号，不等于人的注�
 
 ## 问题 6：以前出现相似错误时，后来怎样解决？
 
-> 我又遇到了 macOS `LC_UUID` 相关问题。请先搜索相似历史，再用 `solution-recall@1` 找到同一尝试链中随后成功的步骤，只返回有证据的历史做法。
+> 我又遇到了 macOS `LC_UUID` 相关问题。请搜索相似历史，找到同一尝试链中随后成功的步骤，只返回有证据的历史做法。
 
-全局 Search 找到 233 个相关 Turn。Agent 选中一个发布审查 Session 后，`solution-recall@1` 收敛到 21 个相关事件；返回的前 10 个事件中，有 4 个关联到了同一 attempt chain 的后续成功事件。
+全局 Search 找到 233 个相关 Turn。Agent 选中一个发布审查 Session 后，把范围收敛到 21 个相关事件；返回的前 10 个事件中，有 4 个关联到了同一 attempt chain 的后续成功事件。
 
 **Agent 给出的历史答案**：移除导致 Mach-O 缺少 UUID 的 linker flag；在两次构建产物上用 `otool -l` 正向断言 `LC_UUID`；把检查放在 `cmp` 和复制之前，并继续执行签名、公证后的真实产物 smoke。
 
 历史记录还显示该路径随后通过了定向测试、release 测试和独立审查。它比“尝试重新构建”更有价值，因为答案包含失败签名、修正动作、验证顺序和成功证据。
 
-**下一步**：Agent 应把这个历史方案当作候选操作，再核对当前 toolchain 与 workflow 是否相同。`solution-recall@1` 证明的是“历史上随后观察到成功”，不保证同一步骤必然解决当前环境。
+**下一步**：Agent 应把这个历史方案当作候选操作，再核对当前 toolchain 与 workflow 是否相同。这份证据只证明“历史上随后观察到成功”，不保证同一步骤必然解决当前环境。
 
 像 `TS_OPERATION_FAILED` 这样的通用词会被拒绝为过宽查询。先用 Search 定位具体错误、项目或 Session，再运行 recipe，既更快，也能避免把不相关历史拼成伪答案。
 
 ## 问题 7：某个 Session 中到底发生了什么？
 
-> 请对刚才定位出的发布审查 Session 运行 `session-timeline@1`，按原始顺序总结消息、Tool、token 和 lifecycle 事件。不要把分页首屏当成完整时间线。
+> 请按原始顺序总结刚才定位出的发布审查 Session 中的消息、Tool、token 和 lifecycle 事件。不要把分页首屏当成完整时间线。
 
 该 Session 在查询窗口内共有 223 个事件。首个有界页面返回 50 个：9 个 capability invocation、9 个 capability result、20 个 token usage、3 个 visible message，以及 9 个 provider-unknown 事件。
 
@@ -140,8 +140,8 @@ Context transition 是连续事件中的项目变化信号，不等于人的注�
 
 1. 先运行 `threadshare insights sync`，再用 `threadshare insights status --format json` 记录当前索引状态。日常使用增量 `sync`；只有明确需要完整原子重建时才用 `reindex`。
 2. 先用 `overview`、`usage` 或 `activity` 做聚合定位。要求 Agent 固定 UTC 窗口，并报告 snapshot、分子、分母和 coverage。
-3. 把候选 capability、Session、项目或具体错误交给对应 recipe。大索引不要从通用词或无限时间窗开始。
-4. Recipe 只返回结构化事实、派生信号、估计和 evidence target。让 Agent 明确区分四者，并检查 `truncated`、`coverage.degraded` 与 diagnostics。
+3. 用户只描述具体分析问题；Agent 先读取 `threadshare insights spec --format json`，再自行选择查询、过滤条件和内部版本化计划。大索引不要从通用词或无限时间窗开始。
+4. 内部分析计划只返回结构化事实、派生信号、估计和 evidence target。让 Agent 明确区分四者，并检查 `truncated`、`coverage.degraded` 与 diagnostics。
 5. 对要引用的结论再运行 `insights evidence`。保留 revision；若 revision 已变化，重新查询，不要把旧 evidence 与新 snapshot 混用。
 
-命令和 request schema 以 `threadshare insights --help`、各 action 的 `--help` 以及已发布 JSON Schema 为准。Agent 也可以通过 `threadshare insights mcp --stdio` 使用同一套 Query、Recipe 和 Evidence 契约。
+命令和 request schema 以 `threadshare insights spec --format json`、`threadshare insights --help`、各 action 的 `--help` 以及已发布 JSON Schema 为准。Agent 也可以通过 `threadshare insights mcp --stdio` 先发现分析计划，再使用底层 Query、Recipe 和 Evidence 契约。

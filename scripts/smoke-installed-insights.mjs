@@ -14,6 +14,7 @@ const ROOT_PACKAGE = "@team-harness/threadshare";
 const SMOKE_ORIGIN_SECRET_EPOCH = "11111111-2222-4333-8444-555555555555";
 const execFile = promisify(execFileCallback);
 const AGENT_QUERY_FORMATS = Object.freeze([
+  "threadshare-insights-agent-spec@v1",
   "threadshare-insights-overview@v1",
   "threadshare-insights-search-request@v1",
   "threadshare-insights-search@v1",
@@ -152,6 +153,8 @@ export async function smokeInstalledAgentQueries({
     ]);
 
     const outputs = [];
+    outputs.push(await runInstalledQuery(rootDirectory, stateDirectory,
+      ["insights", "spec", "--format", "json"]));
     outputs.push(await runInstalledQuery(rootDirectory, stateDirectory,
       ["insights", "overview", "--format", "json"]));
     outputs.push(await runInstalledQuery(rootDirectory, stateDirectory,

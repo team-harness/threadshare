@@ -465,13 +465,13 @@ export function createInsightsRequiredContract(originSecretEpoch) {
       version,
       runAgentQuerySmoke: async ({ rootDirectory }) => {
         querySmokeRoot = rootDirectory;
-        return { queryCount: 6, schemaCount: 9 };
+        return { queryCount: 7, schemaCount: 10 };
       },
     });
 
     assert.equal(globalThis[protocolCapture], 1);
     assert.equal(querySmokeRoot, root);
-    assert.deepEqual(result.agentQueries, { queryCount: 6, schemaCount: 9 });
+    assert.deepEqual(result.agentQueries, { queryCount: 7, schemaCount: 10 });
     assert.deepEqual(globalThis[contractCapture].projectionVersions, [
       "turn-search@2",
       "turn-summary@1",
@@ -510,6 +510,9 @@ test("installed core smoke accepts a root-only Windows-style installation", asyn
         if (arguments_[0] === "--help") {
           return { exitCode: 0, stderr: "", stdout: "canonical installed help\n" };
         }
+        if (arguments_[0] === "--version") {
+          return { exitCode: 0, stderr: "", stdout: `${version}\n` };
+        }
         return {
           exitCode: 1,
           stderr: [
@@ -525,6 +528,7 @@ test("installed core smoke accepts a root-only Windows-style installation", asyn
     });
     assert.deepEqual(calls, [
       ["--help"],
+      ["--version"],
       ["insights", "status"],
     ]);
     assert.deepEqual(result, {
