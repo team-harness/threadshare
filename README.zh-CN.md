@@ -2,7 +2,8 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Threadshare 可以把 Codex、Claude Code 和 Paseo agent 会话转换成只读 Web 链接。
+Threadshare 让 Agent 历史真正可复用：既能把 Codex、Claude Code 和 Paseo 会话发布为只读 Web
+链接，也能让 Agent 查询本地索引，发现 Tool 失败、工作流模式、历史解法和有证据的开发洞察。
 
 安装 CLI 后即可使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) 提供的默认托管服务，无需先部署服务端。
 

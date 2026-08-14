@@ -2,7 +2,9 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Threadshare turns Codex, Claude Code, and Paseo agent conversations into read-only web links.
+Threadshare makes AI-agent history useful: share Codex, Claude Code, and Paseo sessions as read-only
+web links, or let your Agent query a local index for Tool failures, workflow patterns, prior solutions,
+and evidence-backed development insights.
 
 Install the CLI and share through the hosted service at [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) without deploying anything first.
 
