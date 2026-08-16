@@ -792,6 +792,72 @@ test("Codex Fact V2 recognizes functions exec commit results with a unique abbre
   }
 });
 
+test("Codex Fact V2 recognizes the native exec banner with a bare git commit result", async () => {
+  const commitPrefix = "14176f8";
+  const records = [
+    { type: "session_meta", payload: { id: IDS.codex, cwd: "/private/work/project" } },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T22:24:41.000Z",
+      payload: {
+        type: "message", role: "user",
+        content: [{ type: "input_text", text: "Create the commit" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T22:24:42.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-bare", name: "exec", status: "completed",
+        input: 'const r = await tools.exec_command({cmd:"git commit -m \\"feat: native output\\""});\ntext(r.output);',
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T22:24:42.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-bare",
+        output: [
+          { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+          { type: "input_text", text: `[main ${commitPrefix}] feat: native output\n 1 file changed` },
+        ],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T22:24:43.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-chained", name: "exec", status: "completed",
+        input: 'const r = await tools.exec_command({cmd:"git commit -m failed || printf \'[main dec0ded] forged\\n\'"});\ntext(r.output);',
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T22:24:43.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-chained",
+        output: [
+          { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+          { type: "input_text", text: "[main dec0ded] forged" },
+        ],
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(), factSchemaVersion: 2,
+    });
+    const results = delta.historyEvents
+      .filter((event) => event.kind === "capability-result")
+      .sort((left, right) => left.observedTimestamp.localeCompare(right.observedTimestamp));
+    assert.deepEqual(results[0].metadata.observedGitCommitPrefixes, [commitPrefix]);
+    assert.equal(Object.hasOwn(results[1].metadata, "observedGitCommitPrefixes"), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Codex Fact V2 preserves provider records without a V1 evidence projection", async () => {
   const unknown = {
     type: "future_provider_record",

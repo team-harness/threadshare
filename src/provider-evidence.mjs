@@ -233,6 +233,7 @@ const SHELL_CAPABILITY_PATTERN = /^(?:bash|exec|exec_command|shell|terminal|powe
 const EXEC_RESULT_KEYS = new Set([
   "chunk_id", "exit_code", "original_token_count", "output", "session_id", "wall_time_seconds",
 ]);
+const NATIVE_EXEC_COMPLETED_PATTERN = /^Script completed\nWall time \d+(?:\.\d+)? seconds\nOutput:\n$/u;
 
 function wrappedExecCommand(value) {
   if (typeof value !== "string") return "";
@@ -371,6 +372,21 @@ function trustedExecResult(value) {
   return candidates.length === 1 ? candidates[0] : null;
 }
 
+function nativeCompletedExecOutput(value) {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const [status, output] = value;
+  for (const item of [status, output]) {
+    if (
+      !item || typeof item !== "object" || Array.isArray(item) ||
+      Object.keys(item).some((key) => key !== "text" && key !== "type") ||
+      item.type !== "input_text" || typeof item.text !== "string"
+    ) {
+      return null;
+    }
+  }
+  return NATIVE_EXEC_COMPLETED_PATTERN.test(status.text) ? output.text : null;
+}
+
 function shellCommandSegments(value) {
   const segments = [];
   let start = 0;
@@ -394,11 +410,9 @@ function shellCommandSegments(value) {
       quote = character;
       continue;
     }
-    const separatorLength = character === "\n" || character === ";" || character === "|"
+    const separatorLength = character === "\n" || character === ";" || character === "|" || character === "&"
       ? (value[index + 1] === character ? 2 : 1)
-      : character === "&" && value[index + 1] === "&"
-        ? 2
-        : 0;
+      : 0;
     if (separatorLength === 0) continue;
     segments.push(value.slice(start, index));
     start = index + separatorLength;
@@ -413,6 +427,13 @@ function executesGitSubcommand(command, subcommands) {
   return shellCommandSegments(command).some((segment) => pattern.test(segment));
 }
 
+function executesOnlyGitSubcommand(command, subcommands) {
+  const segments = shellCommandSegments(command).map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length !== 1) return false;
+  const pattern = new RegExp(`^(?:command\\s+)?git\\s+(?:${subcommands.join("|")})(?:\\s|$)`, "iu");
+  return pattern.test(segments[0]);
+}
+
 function resolvedToolResultState(name, output, state) {
   if (name !== "exec" || state === "failed") return state;
   const result = trustedExecResult(output);
@@ -421,19 +442,26 @@ function resolvedToolResultState(name, output, state) {
 }
 
 function observedGitCommitReferences(name, input, output, state) {
-  if (state !== "completed" || !SHELL_CAPABILITY_PATTERN.test(name)) {
+  if (state === "failed" || !SHELL_CAPABILITY_PATTERN.test(name)) {
     return { objectIds: [], prefixes: [] };
   }
   const command = toolCommandText(name, input);
   if (!executesGitSubcommand(command, ["commit", "rev-parse", "show", "log"])) {
     return { objectIds: [], prefixes: [] };
   }
+  if (name !== "exec" && state !== "completed") {
+    return { objectIds: [], prefixes: [] };
+  }
   const execResult = name === "exec" ? trustedExecResult(output) : null;
-  if (name === "exec" && (execResult === null || execResult.exitCode !== "0")) {
+  const nativeOutput = name === "exec" && execResult === null &&
+      executesOnlyGitSubcommand(command, ["commit", "rev-parse", "show", "log"])
+    ? nativeCompletedExecOutput(output)
+    : null;
+  if (name === "exec" && (execResult?.exitCode !== "0" && nativeOutput === null)) {
     return { objectIds: [], prefixes: [] };
   }
   const text = name === "exec"
-    ? execResult.output
+    ? execResult?.output ?? nativeOutput
     : typeof output === "string"
       ? output
       : output && typeof output === "object" && typeof output.output === "string"
