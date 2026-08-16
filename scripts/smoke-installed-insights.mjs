@@ -61,7 +61,7 @@ async function loadInstalledSchemaValidators(rootDirectory) {
   return new Map(documents.map(({ format, document }) => [format, ajv.getSchema(document.$id)]));
 }
 
-function traceSourceDelta({ canonicalJson, protocol }) {
+export function createInstalledSmokeTraceSourceDelta({ canonicalJson, protocol }) {
   const value = {
     format: "threadshare-insights-trace-source-delta@v1",
     expectedGeneration: "0",
@@ -74,7 +74,9 @@ function traceSourceDelta({ canonicalJson, protocol }) {
       scmProvider: "github",
       webBaseUrl: "https://github.com",
       repositoryPath: "team-harness/threadshare",
+      projectKeys: ["3".repeat(64), "4".repeat(64)],
     },
+    intent: null,
     refs: [{ name: "refs/heads/main", objectId: "a".repeat(40) }],
     commits: [{
       objectId: "a".repeat(40),
@@ -91,6 +93,8 @@ function traceSourceDelta({ canonicalJson, protocol }) {
         deletions: "0",
       }],
     }],
+    intentNodes: [],
+    intentRefs: [],
   };
   return {
     ...value,
@@ -193,7 +197,7 @@ export async function smokeInstalledAgentQueries({
     });
     try {
       await client.applySessionFacts(assertSessionFactsDeltaV2(delta));
-      await client.commitTraceSourceDelta(traceSourceDelta({ canonicalJson, protocol }));
+      await client.commitTraceSourceDelta(createInstalledSmokeTraceSourceDelta({ canonicalJson, protocol }));
     } finally {
       await client.close();
     }

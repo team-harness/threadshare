@@ -16,7 +16,10 @@ import {
 import { createInsightsSbom } from "../scripts/generate-insights-sbom.mjs";
 import { smokeInsightsEngine } from "../scripts/smoke-insights-engine.mjs";
 import { smokeInstalledCore } from "../scripts/smoke-installed-core.mjs";
-import { smokeInstalledInsights } from "../scripts/smoke-installed-insights.mjs";
+import {
+  createInstalledSmokeTraceSourceDelta,
+  smokeInstalledInsights,
+} from "../scripts/smoke-installed-insights.mjs";
 import { EXPECTED_PACKAGE_FILES } from "../scripts/verify-release.mjs";
 import {
   INSIGHTS_ENGINE_RELEASE_TARGETS,
@@ -24,9 +27,26 @@ import {
   insightsEnginePackageName,
 } from "../src/insights-engine-runtime.mjs";
 import { canonicalJson } from "../src/session-facts.mjs";
+import {
+  createBeginTraceSourceMessage,
+  traceSourceDigestDocument,
+} from "../src/insights-engine-protocol.mjs";
 
 const version = "0.6.1";
 const sourceSha = "a".repeat(40);
+
+test("installed Insights smoke trace fixture satisfies the current protocol", () => {
+  const delta = createInstalledSmokeTraceSourceDelta({
+    canonicalJson,
+    protocol: { traceSourceDigestDocument },
+  });
+  const begin = createBeginTraceSourceMessage(delta, { requestId: "1" });
+
+  assert.deepEqual(begin.repository.projectKeys, ["3".repeat(64), "4".repeat(64)]);
+  assert.equal(begin.intent, null);
+  assert.deepEqual(delta.intentNodes, []);
+  assert.deepEqual(delta.intentRefs, []);
+});
 
 async function writeFixtureRoot(root) {
   const manifest = {
