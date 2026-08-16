@@ -38,7 +38,7 @@ fn fixture_delta_v2() -> SessionFactsDeltaV1 {
     let mut delta = SessionFactsDeltaV1::try_from(fixture["initial"].clone()).unwrap();
     delta.format = "session-facts-delta@v2".to_owned();
     delta.fact_schema_version = 2;
-    delta.provider_adapter_version = "codex@2".to_owned();
+    delta.provider_adapter_version = "codex@3".to_owned();
     delta.privacy_policy_version = 2;
     delta.delta_id = key(0xd2);
 
@@ -1801,4 +1801,117 @@ fn projected_token_provider_aggregate_matches_the_exact_event_path() {
     assert_eq!(projected.total_group_count, exact.total_group_count);
     assert_eq!(projected.coverage, exact.coverage);
     assert_eq!(projected.provenance, exact.provenance);
+}
+
+fn abbreviated_commit_trace_source(object_ids: &[String]) -> TraceSourceDeltaV1 {
+    TraceSourceDeltaV1 {
+        format: "threadshare-insights-trace-source-delta@v1".to_owned(),
+        delta_id: "0".repeat(64),
+        expected_generation: "0".to_owned(),
+        target_generation: "1".to_owned(),
+        repository: RepositoryDelta {
+            repository_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            repository_key: "1".repeat(64),
+            available: true,
+            ref_digest: "2".repeat(64),
+            scm_provider: Some("github".to_owned()),
+            web_base_url: Some("https://github.com".to_owned()),
+            repository_path: Some("team-harness/threadshare".to_owned()),
+            project_keys: vec!["3".repeat(64), "4".repeat(64)],
+        },
+        intent: None,
+        refs: object_ids
+            .iter()
+            .enumerate()
+            .map(|(index, object_id)| RepositoryRefDelta {
+                name: format!("refs/heads/test-{index}"),
+                object_id: object_id.clone(),
+            })
+            .collect(),
+        commits: object_ids
+            .iter()
+            .map(|object_id| GitCommitDelta {
+                object_id: object_id.clone(),
+                parent_object_ids: vec![],
+                author_timestamp: "2026-08-16T12:51:32.000Z".to_owned(),
+                committer_timestamp: "2026-08-16T12:51:32.000Z".to_owned(),
+                tree_object_id: "b".repeat(40),
+                summary: "feat(insights): add delivery trace".to_owned(),
+                files: vec![],
+            })
+            .collect(),
+        intent_nodes: vec![],
+        intent_refs: vec![],
+    }
+}
+
+fn session_trace_for_abbreviated_commit(object_ids: &[String]) -> serde_json::Value {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut session_delta = fixture_delta_v2();
+    session_delta.session.project_key = Some(key(0x33));
+    let session_key = session_delta.session.session_key;
+    push_history_event(
+        &mut session_delta,
+        key(0x92),
+        21,
+        "capability-result",
+        "2026-08-16T12:51:32.694Z",
+        json!({
+            "providerState": "completed",
+            "observedGitCommitPrefixes": ["5184a5c"]
+        }),
+    );
+    storage.apply_session_facts(session_delta).unwrap();
+    storage
+        .apply_trace_source_delta(abbreviated_commit_trace_source(object_ids))
+        .unwrap();
+    serde_json::to_value(
+        storage
+            .read_delivery_trace(
+                "22222222-2222-4222-8222-222222222222",
+                &DeliveryTraceRequest {
+                    format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                    root: TraceNodeRef {
+                        kind: TraceNodeKind::Session,
+                        key: session_key.to_string(),
+                    },
+                    window: None,
+                    direction: TraceDirection::Outgoing,
+                    max_depth: 1,
+                    include_candidate_edges: false,
+                    include_contextual_edges: false,
+                    limit: 10,
+                    cursor: None,
+                    evaluated_at: "2026-08-16T13:00:00.000Z".to_owned(),
+                },
+            )
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn unique_abbreviated_commit_result_creates_an_observed_session_edge() {
+    let trace = session_trace_for_abbreviated_commit(&[format!("5184a5c{}", "0".repeat(33))]);
+    let edge = trace["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["source"] == "observed-git-result")
+        .unwrap();
+    assert_eq!(edge["relation"], "session-correlates-commit");
+    assert_eq!(edge["strength"], "observed");
+    assert_eq!(
+        edge["facts"],
+        json!([{"kind":"unique-abbreviated-commit-hash"}])
+    );
+}
+
+#[test]
+fn ambiguous_abbreviated_commit_result_does_not_create_a_session_edge() {
+    let trace = session_trace_for_abbreviated_commit(&[
+        format!("5184a5c{}", "0".repeat(33)),
+        format!("5184a5c{}", "1".repeat(33)),
+    ]);
+    assert!(trace["edges"].as_array().unwrap().is_empty());
 }

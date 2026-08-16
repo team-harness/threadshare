@@ -813,7 +813,7 @@ impl SessionFactsDeltaV1 {
             && self.privacy_policy_version == 2
             && matches!(
                 self.provider_adapter_version.as_str(),
-                "codex@2" | "claude@2"
+                "codex@3" | "claude@3"
             );
         if (!v1 && !v2)
             || self.duplicate_policy_version != 1

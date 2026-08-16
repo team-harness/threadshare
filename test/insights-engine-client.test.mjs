@@ -56,7 +56,7 @@ function handshakeContractV2() {
   return {
     ...handshakeContract(),
     factSchemaVersion: 2,
-    providerAdapterVersions: ["claude@2", "codex@2"],
+    providerAdapterVersions: ["claude@3", "codex@3"],
     privacyPolicyVersion: 2,
     factStorageProfile: "normalized-row-v2",
     storageSchemaVersion: 2,
@@ -179,7 +179,7 @@ function sampleDeltaV2() {
   const delta = structuredClone(sampleDelta());
   delta.format = "session-facts-delta@v2";
   delta.factSchemaVersion = 2;
-  delta.providerAdapterVersion = "codex@2";
+  delta.providerAdapterVersion = "codex@3";
   delta.privacyPolicyVersion = 2;
   delta.historyEvents = [];
   delta.historyPayloads = [];

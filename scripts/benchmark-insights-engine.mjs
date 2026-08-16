@@ -599,7 +599,7 @@ export function createBenchmarkCorpus({
     const finalized = finalizeDelta({
       format: "session-facts-delta@v2",
       factSchemaVersion: 2,
-      providerAdapterVersion: sessionIndex % 2 === 0 ? "codex@2" : "claude@2",
+      providerAdapterVersion: sessionIndex % 2 === 0 ? "codex@3" : "claude@3",
       privacyPolicyVersion: 2,
       originSecretEpoch: ORIGIN_SECRET_EPOCH,
       duplicatePolicyVersion: 1,
@@ -1000,7 +1000,7 @@ function createCapacitySession(plan, sessionIndex, {
   const finalized = finalizeDelta({
     format: "session-facts-delta@v2",
     factSchemaVersion: 2,
-    providerAdapterVersion: `${provider}@2`,
+      providerAdapterVersion: `${provider}@3`,
     privacyPolicyVersion: 2,
     originSecretEpoch: ORIGIN_SECRET_EPOCH,
     duplicatePolicyVersion: 1,

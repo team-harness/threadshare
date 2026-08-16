@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS observed_git_commits (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS observed_git_commits_session
   ON observed_git_commits(session_id,object_id,event_key);
+CREATE TABLE IF NOT EXISTS observed_git_commit_prefixes (
+  event_key BLOB NOT NULL REFERENCES history_events(event_key) ON DELETE CASCADE,
+  object_id_prefix TEXT NOT NULL,
+  session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  observed_timestamp TEXT,
+  PRIMARY KEY(event_key,object_id_prefix)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS observed_git_commit_prefixes_session
+  ON observed_git_commit_prefixes(session_id,object_id_prefix,event_key);
 CREATE TABLE IF NOT EXISTS intent_sources (
   repository_id TEXT PRIMARY KEY REFERENCES repository_sources(repository_id) ON DELETE CASCADE,
   source_key BLOB NOT NULL UNIQUE CHECK(length(source_key)=32),
@@ -939,36 +948,65 @@ pub(crate) fn replace_observed_git_commits(
         "DELETE FROM observed_git_commits WHERE event_key=?1",
         [event_key],
     )?;
-    let Some(values) = event
-        .metadata
-        .as_object()
-        .and_then(|metadata| metadata.get("observedGitCommitObjectIds"))
+    connection.execute(
+        "DELETE FROM observed_git_commit_prefixes WHERE event_key=?1",
+        [event_key],
+    )?;
+    let metadata = event.metadata.as_object();
+    if let Some(values) = metadata.and_then(|metadata| metadata.get("observedGitCommitObjectIds")) {
+        let values = values
+            .as_array()
+            .ok_or_else(|| invalid("observed Git commit identities must be an array"))?;
+        if values.len() > 16 {
+            return Err(invalid("observed Git commit identities exceed their bound"));
+        }
+        let mut seen = BTreeSet::new();
+        for value in values {
+            let object_id = value
+                .as_str()
+                .ok_or_else(|| invalid("observed Git commit identity must be a string"))?;
+            if object_id.len() != 40
+                || !object_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || !seen.insert(object_id)
+            {
+                return Err(invalid("observed Git commit identity is invalid"));
+            }
+            connection.execute(
+                "INSERT INTO observed_git_commits(event_key,object_id,session_id,observed_timestamp)
+                 SELECT ?1,?2,session_id,?3 FROM history_events WHERE event_key=?1",
+                params![event_key, object_id, event.observed_timestamp],
+            )?;
+        }
+    }
+    let Some(values) = metadata.and_then(|metadata| metadata.get("observedGitCommitPrefixes"))
     else {
         return Ok(());
     };
     let values = values
         .as_array()
-        .ok_or_else(|| invalid("observed Git commit identities must be an array"))?;
+        .ok_or_else(|| invalid("observed Git commit prefixes must be an array"))?;
     if values.len() > 16 {
-        return Err(invalid("observed Git commit identities exceed their bound"));
+        return Err(invalid("observed Git commit prefixes exceed their bound"));
     }
     let mut seen = BTreeSet::new();
     for value in values {
-        let object_id = value
+        let object_id_prefix = value
             .as_str()
-            .ok_or_else(|| invalid("observed Git commit identity must be a string"))?;
-        if object_id.len() != 40
-            || !object_id
+            .ok_or_else(|| invalid("observed Git commit prefix must be a string"))?;
+        if !(7..40).contains(&object_id_prefix.len())
+            || !object_id_prefix
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            || !seen.insert(object_id)
+            || !seen.insert(object_id_prefix)
         {
-            return Err(invalid("observed Git commit identity is invalid"));
+            return Err(invalid("observed Git commit prefix is invalid"));
         }
         connection.execute(
-            "INSERT INTO observed_git_commits(event_key,object_id,session_id,observed_timestamp)
+            "INSERT INTO observed_git_commit_prefixes(event_key,object_id_prefix,session_id,observed_timestamp)
              SELECT ?1,?2,session_id,?3 FROM history_events WHERE event_key=?1",
-            params![event_key, object_id, event.observed_timestamp],
+            params![event_key, object_id_prefix, event.observed_timestamp],
         )?;
     }
     Ok(())
@@ -1103,6 +1141,64 @@ fn refresh_session_repository_edges(
         )?;
     }
 
+    let mut prefix_statement = connection.prepare(
+        "WITH matches AS (
+           SELECT observed.object_id_prefix,c.object_id,c.commit_key,
+                  COUNT(*) OVER (
+                    PARTITION BY observed.event_key,observed.object_id_prefix
+                  ) AS match_count
+           FROM observed_git_commit_prefixes observed
+           JOIN git_commits c
+             ON c.repository_id=?1 AND c.reachable=1
+            AND substr(c.object_id,1,length(observed.object_id_prefix))=observed.object_id_prefix
+           WHERE observed.session_id=?2
+         )
+         SELECT object_id,commit_key,object_id_prefix FROM matches
+         WHERE match_count=1 ORDER BY object_id,object_id_prefix",
+    )?;
+    let prefix_matches = prefix_statement
+        .query_map(params![repository_id, session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(prefix_statement);
+    let mut observed_prefixes = BTreeMap::new();
+    for (object_id, commit_key, prefix) in prefix_matches {
+        if direct_ids.contains(&object_id) {
+            continue;
+        }
+        let entry = observed_prefixes
+            .entry(object_id)
+            .or_insert((commit_key, prefix.clone()));
+        if prefix.len() > entry.1.len() {
+            entry.1 = prefix;
+        }
+    }
+    for (object_id, (commit_key, _prefix)) in &observed_prefixes {
+        insert_session_edge(
+            connection,
+            SessionEdgeSpec {
+                repository_id,
+                object_id,
+                from_key: &session_key,
+                to_kind: "git-commit",
+                to_key: commit_key,
+                relation: "session-correlates-commit",
+                strength: "observed",
+                source: "observed-git-result",
+                facts: &serde_json::json!([{ "kind": "unique-abbreviated-commit-hash" }]),
+                limitations: &serde_json::json!([
+                    "not-authorship",
+                    "not-exclusive-line-attribution"
+                ]),
+            },
+        )?;
+    }
+
     let mut statement = connection.prepare(
         "WITH paths AS (
            SELECT fa.relative_path AS path,MIN(fa.observed_timestamp) AS first_at,
@@ -1170,7 +1266,7 @@ fn refresh_session_repository_edges(
         entry.2 |= in_window;
     }
     for (object_id, (commit_key, count, in_window)) in commit_matches {
-        if direct_ids.contains(&object_id) {
+        if direct_ids.contains(&object_id) || observed_prefixes.contains_key(&object_id) {
             continue;
         }
         let (relation, strength, source, facts, limitations) = if in_window {
@@ -1639,6 +1735,17 @@ pub(crate) fn delivery_graph_digest(connection: &Connection) -> Result<String, S
             }))
         },
     )?;
+    let observed_commit_prefixes = collect_rows(
+        connection,
+        "SELECT hex(event_key),object_id_prefix,session_id,observed_timestamp FROM observed_git_commit_prefixes ORDER BY event_key,object_id_prefix",
+        |row| {
+            Ok(serde_json::json!({
+                "eventKey": row.get::<_, String>(0)?.to_ascii_lowercase(),
+                "objectIdPrefix": row.get::<_, String>(1)?, "sessionId": row.get::<_, i64>(2)?,
+                "observedAt": row.get::<_, Option<String>>(3)?,
+            }))
+        },
+    )?;
     let intent_sources = collect_rows(
         connection,
         "SELECT repository_id,hex(source_key),adapter_version,hex(revision),locator,coverage,diagnostics_json FROM intent_sources ORDER BY repository_id",
@@ -1696,6 +1803,7 @@ pub(crate) fn delivery_graph_digest(connection: &Connection) -> Result<String, S
         "files": files,
         "edges": edges,
         "observedCommits": observed_commits,
+        "observedCommitPrefixes": observed_commit_prefixes,
         "intentSources": intent_sources,
         "intentNodes": intent_nodes,
         "intentRefs": intent_refs,

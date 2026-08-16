@@ -180,7 +180,7 @@ export function createQueryQualityDelta(fixture, { dataset = "real-acceptance" }
   const delta = finalizeDelta({
     format: "session-facts-delta@v2",
     factSchemaVersion: 2,
-    providerAdapterVersion: "codex@2",
+    providerAdapterVersion: "codex@3",
     privacyPolicyVersion: 2,
     originSecretEpoch: ORIGIN_SECRET_EPOCH,
     duplicatePolicyVersion: 1,

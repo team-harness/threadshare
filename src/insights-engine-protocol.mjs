@@ -14,7 +14,7 @@ export const ACTIVE_INSIGHTS_ANALYZER_CAPABILITIES = Object.freeze([
 ]);
 const INSIGHTS_PROVIDER_ADAPTER_VERSIONS = Object.freeze({
   1: Object.freeze(["claude@1", "codex@1"]),
-  2: Object.freeze(["claude@2", "codex@2"]),
+  2: Object.freeze(["claude@3", "codex@3"]),
 });
 
 export function createInsightsRequiredContract(originSecretEpoch, options = {}) {
@@ -189,7 +189,8 @@ const TRACE_LIMITATIONS = new Set([
 const TRACE_COVERAGE_STATES = new Set(["complete", "partial", "unavailable"]);
 const TRACE_FACT_KINDS = new Set([
   "exact-path-overlap", "within-observed-commit-window", "full-commit-hash",
-  "explicit-reference", "significant-term-overlap", "same-repository",
+  "unique-abbreviated-commit-hash", "explicit-reference", "significant-term-overlap",
+  "same-repository",
 ]);
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const MAX_DEEP_ORDER_FIELDS = 4;

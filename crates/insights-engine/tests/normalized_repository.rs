@@ -53,7 +53,7 @@ fn fixture_delta_v2() -> SessionFactsDeltaV1 {
     let mut delta = fixture_delta();
     delta.format = "session-facts-delta@v2".to_owned();
     delta.fact_schema_version = 2;
-    delta.provider_adapter_version = "codex@2".to_owned();
+    delta.provider_adapter_version = "codex@3".to_owned();
     delta.privacy_policy_version = 2;
     let event = delta.evidence_events[0].common();
     let history_event_key = key(0x72);

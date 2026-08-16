@@ -1348,6 +1348,7 @@ pub enum TraceFact {
     ExactPathOverlap { count: String },
     WithinObservedCommitWindow,
     FullCommitHash,
+    UniqueAbbreviatedCommitHash,
     ExplicitReference,
     SignificantTermOverlap { count: String },
     SameRepository,

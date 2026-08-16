@@ -170,7 +170,7 @@ export async function smokeInstalledAgentQueries({
     const delta = structuredClone(fixture.initial);
     delta.format = "session-facts-delta@v2";
     delta.factSchemaVersion = 2;
-    delta.providerAdapterVersion = "codex@2";
+    delta.providerAdapterVersion = "codex@3";
     delta.privacyPolicyVersion = 2;
     delta.historyEvents = [];
     delta.historyPayloads = [];

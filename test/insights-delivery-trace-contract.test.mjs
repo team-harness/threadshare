@@ -33,6 +33,20 @@ test("Delivery Trace protocol accepts the shared strict fixture", async () => {
   assert.equal(assertProtocolMessage(response), response);
 });
 
+test("Delivery Trace accepts a uniquely resolved abbreviated commit result", async () => {
+  const value = await fixture();
+  const response = structuredClone(value.response);
+  response.edges[2].source = "observed-git-result";
+  response.edges[2].facts = [{ kind: "unique-abbreviated-commit-hash" }];
+
+  const message = createInsightsDeliveryTraceMessage({
+    requestId: "95",
+    request: value.request,
+    response,
+  });
+  assert.equal(assertProtocolMessage(message), message);
+});
+
 test("Delivery Trace rejects missing endpoints and hidden weak edges", async () => {
   const value = await fixture();
   const missingEndpoint = structuredClone(value.response);

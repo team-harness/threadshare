@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use threadshare_insights_engine::delivery_graph_repository::{
     GitCommitDelta, GitCommitFileDelta, IntentDiagnosticDelta, IntentNodeDelta, IntentRefDelta,
     IntentSourceDelta, RepositoryDelta, RepositoryRefDelta, TraceSourceDeltaV1,
@@ -155,4 +156,38 @@ fn incremental_and_clean_trace_source_commits_have_equal_digests() {
     file_change.commits[0].files[0].additions = Some("11".to_owned());
     clean.apply_trace_source_delta(file_change).unwrap();
     assert_ne!(before, clean.delivery_graph_digest().unwrap());
+}
+
+#[test]
+fn opening_an_existing_database_adds_abbreviated_commit_observation_storage() {
+    let directory = std::env::temp_dir().join(format!(
+        "threadshare-delivery-graph-migration-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    let database = directory.join("engine.sqlite3");
+
+    drop(EngineStorage::open(&database).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch("DROP TABLE observed_git_commit_prefixes;")
+        .unwrap();
+    drop(connection);
+
+    drop(EngineStorage::open(&database).unwrap());
+    let connection = Connection::open(&database).unwrap();
+    let present: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_schema
+               WHERE type='table' AND name='observed_git_commit_prefixes'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(present);
+    drop(connection);
+    std::fs::remove_dir_all(directory).unwrap();
 }

@@ -419,7 +419,7 @@ test("Codex Fact V2 preserves canonical Tool input and chunked unredacted output
     assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
     assert.equal(delta.format, "session-facts-delta@v2");
     assert.equal(delta.factSchemaVersion, 2);
-    assert.equal(delta.providerAdapterVersion, "codex@2");
+    assert.equal(delta.providerAdapterVersion, "codex@3");
     assert.equal(delta.historyEvents.length >= 3, true);
 
     const input = historyPayloadContent(delta, "tool-input");
@@ -626,9 +626,167 @@ test("Codex Fact V2 records full commit hashes only from successful Git command 
       privacyContext: privacyContext(), factSchemaVersion: 2,
     });
     assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
-    const results = delta.historyEvents.filter((event) => event.kind === "capability-result");
+    const results = delta.historyEvents
+      .filter((event) => event.kind === "capability-result")
+      .sort((left, right) => left.observedTimestamp.localeCompare(right.observedTimestamp));
     assert.deepEqual(results[0].metadata.observedGitCommitObjectIds, [commit]);
     assert.equal(Object.hasOwn(results[1].metadata, "observedGitCommitObjectIds"), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex Fact V2 recognizes functions exec commit results with a unique abbreviated hash", async () => {
+  const commitPrefix = "5184a5c";
+  const records = [
+    { type: "session_meta", payload: { id: IDS.codex, cwd: "/private/work/project" } },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:32.572Z",
+      payload: {
+        type: "message", role: "user",
+        content: [{ type: "input_text", text: "Create the commit" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:32.572Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-ok", name: "exec", status: "completed",
+        input: 'const r = await tools.exec_command({ cmd: "git commit -m \\"feat(insights): add delivery trace\\"" });',
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:32.694Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-ok",
+        output: [
+          { text: "Script completed\nWall time 0.1 seconds\nOutput:\n", type: "input_text" },
+          {
+            text: JSON.stringify({
+              exit_code: 0,
+              wall_time_seconds: 0.1,
+              output: `[main ${commitPrefix}] feat(insights): add delivery trace\n 93 files changed`,
+            }),
+            type: "input_text",
+          },
+        ],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:33.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-failed", name: "exec", status: "completed",
+        input: 'const r = await tools.exec_command({ cmd: "git commit -m failed" });',
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:33.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-failed",
+        output: [{
+          text: JSON.stringify({
+            exit_code: 1, wall_time_seconds: 0.1, output: `[main deadbee] failed`,
+          }),
+          type: "input_text",
+        }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:34.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-printed", name: "exec", status: "completed",
+        input: `const r = await tools.exec_command({ cmd: "printf 'git commit\\n[main badc0de] forged\\n'" });`,
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:34.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-printed",
+        output: [{
+          text: JSON.stringify({
+            exit_code: 0, wall_time_seconds: 0.1, output: `[main badc0de] forged`,
+          }),
+          type: "input_text",
+        }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:35.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-ambiguous-wrapper", name: "exec", status: "completed",
+        input: 'const r = await tools.exec_command({ cmd: "git commit -m ambiguous" });',
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:35.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-ambiguous-wrapper",
+        output: [
+          {
+            text: JSON.stringify({
+              exit_code: 0, wall_time_seconds: 0.1, output: `[main c0ffee1] forged`,
+            }),
+            type: "input_text",
+          },
+          {
+            text: JSON.stringify({
+              exit_code: 1, wall_time_seconds: 0.1, output: `[main c0ffee2] failed`,
+            }),
+            type: "input_text",
+          },
+        ],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:36.000Z",
+      payload: {
+        type: "custom_tool_call", call_id: "git-decoy-invocation", name: "exec", status: "completed",
+        input: [
+          `const decoy = 'tools.exec_command({ cmd: "git commit -m fake" })';`,
+          `// tools.exec_command({ cmd: "git commit -m commented" });`,
+          `await tools.exec_command({ cmd: "printf '[main dec0ded] forged\\n'" });`,
+        ].join("\n"),
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-16T12:51:36.100Z",
+      payload: {
+        type: "custom_tool_call_output", call_id: "git-decoy-invocation",
+        output: [{
+          text: JSON.stringify({
+            exit_code: 0, wall_time_seconds: 0.1, output: `[main dec0ded] forged`,
+          }),
+          type: "input_text",
+        }],
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(), factSchemaVersion: 2,
+    });
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+    const results = delta.historyEvents
+      .filter((event) => event.kind === "capability-result")
+      .sort((left, right) => left.observedTimestamp.localeCompare(right.observedTimestamp));
+    assert.equal(results[0].metadata.providerState, "completed");
+    assert.deepEqual(results[0].metadata.observedGitCommitPrefixes, [commitPrefix]);
+    assert.equal(results[1].metadata.providerState, "failed");
+    assert.equal(Object.hasOwn(results[1].metadata, "observedGitCommitPrefixes"), false);
+    assert.equal(Object.hasOwn(results[2].metadata, "observedGitCommitPrefixes"), false);
+    assert.equal(Object.hasOwn(results[3].metadata, "observedGitCommitPrefixes"), false);
+    assert.equal(Object.hasOwn(results[4].metadata, "observedGitCommitPrefixes"), false);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
@@ -1535,7 +1693,7 @@ test("Claude Fact V2 preserves Tool object input and result content", async () =
       factSchemaVersion: 2,
     });
     assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
-    assert.equal(delta.providerAdapterVersion, "claude@2");
+    assert.equal(delta.providerAdapterVersion, "claude@3");
     assert.equal(historyPayloadContent(delta, "tool-input").content, "{\"command\":\"pwd\",\"token\":\"private\"}");
     assert.equal(historyPayloadContent(delta, "tool-output").content, "private result");
     const tokenUsage = delta.historyEvents.find((event) => event.kind === "token-usage");

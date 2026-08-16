@@ -731,7 +731,7 @@ mod tests {
         let payload_key = "71".repeat(32);
         delta["format"] = Value::String("session-facts-delta@v2".to_owned());
         delta["factSchemaVersion"] = Value::from(2);
-        delta["providerAdapterVersion"] = Value::String("codex@2".to_owned());
+        delta["providerAdapterVersion"] = Value::String("codex@3".to_owned());
         delta["privacyPolicyVersion"] = Value::from(2);
         delta["historyEvents"] = serde_json::json!([{
             "eventKey": event["eventKey"],

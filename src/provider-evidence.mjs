@@ -228,9 +228,98 @@ function outputByteLength(value) {
 }
 
 const FULL_GIT_OBJECT_ID_PATTERN = /(?<![0-9a-f])([0-9a-f]{40})(?![0-9a-f])/giu;
+const ABBREVIATED_COMMIT_RESULT_PATTERN = /\[[^\]\r\n]*\s([0-9a-f]{7,39})\](?=\s)/giu;
+const SHELL_CAPABILITY_PATTERN = /^(?:bash|exec|exec_command|shell|terminal|powershell)$/iu;
+const EXEC_RESULT_KEYS = new Set([
+  "chunk_id", "exit_code", "original_token_count", "output", "session_id", "wall_time_seconds",
+]);
 
-function toolCommandText(input) {
+function wrappedExecCommand(value) {
+  if (typeof value !== "string") return "";
+  const token = "tools.exec_command";
+  const commands = [];
+  const skipWhitespace = (start) => {
+    let cursor = start;
+    while (/\s/u.test(value[cursor] ?? "")) cursor += 1;
+    return cursor;
+  };
+  const parseCommandAt = (start) => {
+    let cursor = skipWhitespace(start + token.length);
+    if (value[cursor] !== "(") return null;
+    cursor = skipWhitespace(cursor + 1);
+    if (value[cursor] !== "{") return null;
+    cursor = skipWhitespace(cursor + 1);
+    if (!value.startsWith("cmd", cursor) || /[A-Za-z0-9_$]/u.test(value[cursor + 3] ?? "")) {
+      return null;
+    }
+    cursor = skipWhitespace(cursor + 3);
+    if (value[cursor] !== ":") return null;
+    cursor = skipWhitespace(cursor + 1);
+    if (value[cursor] !== '"') return null;
+    const stringStart = cursor;
+    cursor += 1;
+    while (cursor < value.length) {
+      if (value[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (value[cursor] === '"') {
+        try {
+          const command = JSON.parse(value.slice(stringStart, cursor + 1));
+          return typeof command === "string" ? command : null;
+        } catch {
+          return null;
+        }
+      }
+      cursor += 1;
+    }
+    return null;
+  };
+
+  for (let index = 0; index < value.length;) {
+    const character = value[index];
+    if (character === "'" || character === '"' || character === "`") {
+      const quote = character;
+      index += 1;
+      while (index < value.length) {
+        if (value[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        const current = value[index];
+        index += 1;
+        if (current === quote) break;
+      }
+      continue;
+    }
+    if (character === "/" && value[index + 1] === "/") {
+      index += 2;
+      while (index < value.length && value[index] !== "\n") index += 1;
+      continue;
+    }
+    if (character === "/" && value[index + 1] === "*") {
+      const end = value.indexOf("*/", index + 2);
+      index = end === -1 ? value.length : end + 2;
+      continue;
+    }
+    if (
+      value.startsWith(token, index) &&
+      !/[A-Za-z0-9_$.]/u.test(value[index - 1] ?? "") &&
+      !/[A-Za-z0-9_$]/u.test(value[index + token.length] ?? "") &&
+      value[skipWhitespace(index + token.length)] === "("
+    ) {
+      commands.push(parseCommandAt(index));
+      index += token.length;
+      continue;
+    }
+    index += 1;
+  }
+  return commands.length === 1 && typeof commands[0] === "string" ? commands[0] : "";
+}
+
+function toolCommandText(name, input) {
   const value = parseJsonInput(input);
+  if (name === "exec") return wrappedExecCommand(value);
   if (typeof value === "string") return value;
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   for (const field of ["cmd", "command", "script", "input"]) {
@@ -242,23 +331,122 @@ function toolCommandText(input) {
   return "";
 }
 
-function observedGitCommitObjectIds(name, input, output, state) {
-  if (state !== "completed" || !/(?:bash|exec_command|shell|terminal|powershell)/iu.test(name)) {
-    return [];
+function execResultCandidate(value) {
+  if (typeof value === "string") {
+    if (value.length > MAX_PROVIDER_RECORD_BYTES) return null;
+    try {
+      return execResultCandidate(JSON.parse(value));
+    } catch {
+      return null;
+    }
   }
-  const command = toolCommandText(input);
-  if (!/(?:^|[;&|\s])git\s+(?:commit|rev-parse|show|log)\b/iu.test(command)) return [];
-  const text = typeof output === "string"
-    ? output
-    : (() => {
-        try {
-          return canonicalJson(output);
-        } catch {
-          return "";
-        }
-      })();
-  return [...new Set([...text.matchAll(FULL_GIT_OBJECT_ID_PATTERN)]
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Object.keys(value).some((key) => !EXEC_RESULT_KEYS.has(key))) return null;
+  const exitCode = validDecimal(value.exit_code);
+  if (
+    exitCode !== null &&
+    typeof value.output === "string" &&
+    Number.isFinite(value.wall_time_seconds) &&
+    value.wall_time_seconds >= 0
+  ) {
+    return { exitCode, output: value.output };
+  }
+  return null;
+}
+
+function trustedExecResult(value) {
+  if (!Array.isArray(value)) return execResultCandidate(value);
+  const candidates = [];
+  for (const item of value) {
+    if (
+      !item || typeof item !== "object" || Array.isArray(item) ||
+      Object.keys(item).some((key) => key !== "text" && key !== "type") ||
+      item.type !== "input_text" || typeof item.text !== "string"
+    ) {
+      continue;
+    }
+    const candidate = execResultCandidate(item.text);
+    if (candidate) candidates.push(candidate);
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function shellCommandSegments(value) {
+  const segments = [];
+  let start = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      continue;
+    }
+    const separatorLength = character === "\n" || character === ";" || character === "|"
+      ? (value[index + 1] === character ? 2 : 1)
+      : character === "&" && value[index + 1] === "&"
+        ? 2
+        : 0;
+    if (separatorLength === 0) continue;
+    segments.push(value.slice(start, index));
+    start = index + separatorLength;
+    index += separatorLength - 1;
+  }
+  segments.push(value.slice(start));
+  return segments;
+}
+
+function executesGitSubcommand(command, subcommands) {
+  const pattern = new RegExp(`^\\s*(?:command\\s+)?git\\s+(?:${subcommands.join("|")})(?:\\s|$)`, "iu");
+  return shellCommandSegments(command).some((segment) => pattern.test(segment));
+}
+
+function resolvedToolResultState(name, output, state) {
+  if (name !== "exec" || state === "failed") return state;
+  const result = trustedExecResult(output);
+  if (result === null) return state;
+  return result.exitCode === "0" ? "completed" : "failed";
+}
+
+function observedGitCommitReferences(name, input, output, state) {
+  if (state !== "completed" || !SHELL_CAPABILITY_PATTERN.test(name)) {
+    return { objectIds: [], prefixes: [] };
+  }
+  const command = toolCommandText(name, input);
+  if (!executesGitSubcommand(command, ["commit", "rev-parse", "show", "log"])) {
+    return { objectIds: [], prefixes: [] };
+  }
+  const execResult = name === "exec" ? trustedExecResult(output) : null;
+  if (name === "exec" && (execResult === null || execResult.exitCode !== "0")) {
+    return { objectIds: [], prefixes: [] };
+  }
+  const text = name === "exec"
+    ? execResult.output
+    : typeof output === "string"
+      ? output
+      : output && typeof output === "object" && typeof output.output === "string"
+        ? output.output
+        : "";
+  const objectIds = [...new Set([...text.matchAll(FULL_GIT_OBJECT_ID_PATTERN)]
     .map((match) => match[1].toLowerCase()))].slice(0, 16);
+  const prefixes = executesGitSubcommand(command, ["commit"])
+    ? [...new Set([...text.matchAll(ABBREVIATED_COMMIT_RESULT_PATTERN)]
+      .map((match) => match[1].toLowerCase())
+      .filter((prefix) => !objectIds.some((objectId) => objectId.startsWith(prefix))))].slice(0, 16)
+    : [];
+  return { objectIds, prefixes };
 }
 
 function semanticPayload(value, { parseJsonString = false } = {}) {
@@ -1438,13 +1626,13 @@ function processCodexInvocation(builder, record, payload) {
 function processCodexResult(builder, record, payload) {
   const providerRecordClass = `response_item:${payload.type}`;
   const correlation = correlationDigest(builder, payload.call_id ?? payload.id);
-  const state = eventState(payload);
   const result = payload.error ?? payload.output;
   const pending = correlation ? builder.pendingUses.get(correlation) : null;
+  const state = resolvedToolResultState(pending?.name, result, eventState(payload));
   const signature = state === "failed" ? errorSignature(result) : null;
-  const observedCommitObjectIds = pending
-    ? observedGitCommitObjectIds(pending.name, pending.input, result, state)
-    : [];
+  const observedCommits = pending
+    ? observedGitCommitReferences(pending.name, pending.input, result, state)
+    : { objectIds: [], prefixes: [] };
   const event = builder.addEvent(
     record,
     -1,
@@ -1471,8 +1659,11 @@ function processCodexResult(builder, record, payload) {
       ...(signature
         ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
         : {}),
-      ...(observedCommitObjectIds.length > 0
-        ? { observedGitCommitObjectIds: observedCommitObjectIds }
+      ...(observedCommits.objectIds.length > 0
+        ? { observedGitCommitObjectIds: observedCommits.objectIds }
+        : {}),
+      ...(observedCommits.prefixes.length > 0
+        ? { observedGitCommitPrefixes: observedCommits.prefixes }
         : {}),
     },
   );
@@ -1748,9 +1939,9 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
   const state = eventState(part);
   const pending = correlation ? builder.pendingUses.get(correlation) : null;
   const signature = state === "failed" ? errorSignature(part.content) : null;
-  const observedCommitObjectIds = pending
-    ? observedGitCommitObjectIds(pending.name, pending.input, part.content, state)
-    : [];
+  const observedCommits = pending
+    ? observedGitCommitReferences(pending.name, pending.input, part.content, state)
+    : { objectIds: [], prefixes: [] };
   const event = builder.addEvent(
     record,
     contentIndex,
@@ -1774,8 +1965,11 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
       ...(signature
         ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
         : {}),
-      ...(observedCommitObjectIds.length > 0
-        ? { observedGitCommitObjectIds: observedCommitObjectIds }
+      ...(observedCommits.objectIds.length > 0
+        ? { observedGitCommitObjectIds: observedCommits.objectIds }
+        : {}),
+      ...(observedCommits.prefixes.length > 0
+        ? { observedGitCommitPrefixes: observedCommits.prefixes }
         : {}),
     },
   );
@@ -2575,7 +2769,7 @@ function finalizeDelta(builder, sourceSnapshot) {
   const delta = {
     format: isV2 ? "session-facts-delta@v2" : "session-facts-delta@v1",
     factSchemaVersion: isV2 ? FACT_SCHEMA_VERSION_V2 : FACT_SCHEMA_VERSION,
-    providerAdapterVersion: `${builder.provider}@${isV2 ? 2 : 1}`,
+    providerAdapterVersion: `${builder.provider}@${isV2 ? 3 : 1}`,
     privacyPolicyVersion: isV2 ? PRIVACY_POLICY_VERSION_V2 : PRIVACY_POLICY_VERSION,
     originSecretEpoch: builder.privacyContext.originSecretEpoch,
     duplicatePolicyVersion: DUPLICATE_POLICY_VERSION,

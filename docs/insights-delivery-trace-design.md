@@ -168,13 +168,13 @@ Recorded relation 仍需说明来源；Derived relation 必须包含可复算 fa
 | strength | 可接受依据 | Agent 默认行为 |
 |---|---|---|
 | `direct` | 显式 intent ref；观察到 Git commit 命令并从 result 解析出完整 hash | 可陈述“显式关联/观察到提交” |
-| `observed` | 精确 repo-relative path + 有界事件顺序 + commit 窗口 | 可陈述“观察到相关证据”，不得称作者身份 |
+| `observed` | 成功 Git commit result 中的短 hash 在同仓库唯一解析；或精确 repo-relative path + 有界事件顺序 + commit 窗口 | 可陈述“观察到相关证据”，不得称作者身份 |
 | `candidate` | 唯一的有界文本重合或弱时间/路径组合 | 默认不进入结论，只在要求候选时返回 |
 | `contextual` | 同文件历史、相邻日期、共同仓库 | 只作导航背景 |
 
 ### 6.2 Session-to-Commit
 
-1. Tool result 中记录完整 Commit hash时，生成 `session-observed-commit/direct`。
+1. Tool result 中记录完整 Commit hash时，生成 `session-observed-commit/direct`；普通成功 `git commit` result 中的短 hash 只有在当前注册仓库唯一解析且 Commit reachable 时，才生成 `session-correlates-commit/observed`。Agent 不需要采用指定的 commit 命令。
 2. 对已直接观察的相邻 Commit，只有发生在“上一直接 Commit 之后、当前 Commit 之前”的文件写操作才能贡献当前关联。
 3. 文件必须使用同 repository identity 下的 lexical relative path 精确相等；basename、suffix 或 absolute-path 字符串相似不算 exact。
 4. invocation 只代表 attempted action；只有 result 或 Git object 提供的事实才能提升完成状态。
@@ -497,6 +497,7 @@ Stage 4 的 25k 正式结果归档于
 
 ## 16. Migration、clean rebuild 与发布
 
+- Provider Adapter `claude@3` / `codex@3` 首次启用时，会对既有 Session 做一次 `replace-session` 重放，使历史中的普通 `git commit` result 与新摄入数据采用同一关联语义；完成后后续 sync 恢复增量处理。
 - 新 schema/projection 缺失时，旧 Agent Query 继续工作；Delivery Trace 返回稳定 not-ready diagnostic。
 - candidate shadow rebuild 构建 repository/intent/edge 投影，验证后原子激活；失败保留旧 active DB。
 - 增量 sync 与 clean rebuild 对同一 source snapshot 必须产生逐 node/edge/revision 完全相等的 digest。

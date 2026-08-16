@@ -4713,7 +4713,7 @@ pub fn accepted_contract_from_hello(message: &Value) -> Result<Value, ProtocolEr
         && contract.get("analyzerCapabilities") == Some(&json!(["mixed-cjk-code@1"]))
         && contract.get("rankerVersion").and_then(Value::as_u64) == Some(1);
     let v2 = contract.get("factSchemaVersion").and_then(Value::as_u64) == Some(2)
-        && contract.get("providerAdapterVersions") == Some(&json!(["claude@2", "codex@2"]))
+        && contract.get("providerAdapterVersions") == Some(&json!(["claude@3", "codex@3"]))
         && contract.get("privacyPolicyVersion").and_then(Value::as_u64) == Some(2)
         && contract
             .get("duplicatePolicyVersion")
@@ -4994,7 +4994,7 @@ mod tests {
 
         begin["deltaFormat"] = Value::String("session-facts-delta@v2".to_owned());
         begin["contract"]["factSchemaVersion"] = Value::from(2);
-        begin["contract"]["providerAdapterVersion"] = Value::String("codex@2".to_owned());
+        begin["contract"]["providerAdapterVersion"] = Value::String("codex@3".to_owned());
         begin["contract"]["privacyPolicyVersion"] = Value::from(2);
         begin["counts"]["historyPayloads"] = Value::String("0".to_owned());
         begin["counts"]["historyPayloadChunks"] = Value::String("0".to_owned());

@@ -1493,7 +1493,7 @@ test("rejects a provider delta that violates the required index contract", async
     privacyContext: { originSecretEpoch: epoch },
     requiredContract: {
       factSchemaVersion: 2,
-      providerAdapterVersions: ["claude@2", "codex@2"],
+      providerAdapterVersions: ["claude@3", "codex@3"],
       privacyPolicyVersion: 2,
       duplicatePolicyVersion: 2,
     },
@@ -1536,6 +1536,54 @@ test("rejects a provider delta that violates the required index contract", async
   assert.equal(report.committed, 0);
   assert.equal(report.failed, 1);
   assert.equal(report.diagnostics[0].errorCode, "TS_INSIGHTS_DELTA_MISMATCH");
+});
+
+test("provider adapter upgrades replace previously indexed sessions", async () => {
+  const source = {
+    provider: "codex",
+    sessionId: SESSION_ID,
+    file: "/sessions/adapter-upgrade.jsonl",
+  };
+  const plan = await planInsightsReconciliation({
+    sources: [source],
+    sourceStates: [{
+      provider: "codex",
+      sessionId: SESSION_ID,
+      file: source.file,
+      sessionKey: SESSION_KEY,
+      contract: {
+        factSchemaVersion: 2,
+        providerAdapterVersion: "codex@2",
+        privacyPolicyVersion: 2,
+        duplicatePolicyVersion: 1,
+        originSecretEpoch: "44444444-4444-4444-8444-444444444444",
+      },
+      metadata: metadata({ size: "10" }),
+      checkpoint: {
+        completeOffset: "10",
+        generation: "1",
+        sourceSnapshotStable: true,
+      },
+      projectKey: null,
+    }],
+    requiredContract: {
+      factSchemaVersion: 2,
+      providerAdapterVersions: ["claude@3", "codex@3"],
+      privacyPolicyVersion: 2,
+      duplicatePolicyVersion: 1,
+      originSecretEpoch: "44444444-4444-4444-8444-444444444444",
+    },
+    privacyContext: {
+      originSecretEpoch: "44444444-4444-4444-8444-444444444444",
+    },
+    config: null,
+    concurrency: 1,
+    async statSource() { return metadata({ size: "10" }); },
+    async sampleSource(_file, range) { return Buffer.alloc(range.length); },
+  });
+
+  assert.equal(plan.items[0].action, "replace-session");
+  assert.equal(plan.items[0].reason, "provider-adapter-changed");
 });
 
 test("binds delta session identity and adapter version to the planned source", async () => {

@@ -570,7 +570,7 @@ test("the required Engine contract binds the current Fact identity versions", ()
   const epoch = "11111111-1111-4111-8111-111111111111";
   assert.deepEqual(insightsRequiredContract(epoch), {
     factSchemaVersion: 2,
-    providerAdapterVersions: ["claude@2", "codex@2"],
+    providerAdapterVersions: ["claude@3", "codex@3"],
     privacyPolicyVersion: 2,
     originSecretEpoch: epoch,
     duplicatePolicyVersion: 1,
@@ -860,7 +860,7 @@ test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", 
       "SELECT state_json FROM source_ingestion_states LIMIT 1",
     ).get().state_json);
     assert.equal(state.contract.factSchemaVersion, 2);
-    assert.equal(state.contract.providerAdapterVersion, "codex@2");
+    assert.equal(state.contract.providerAdapterVersion, "codex@3");
     assert.equal(
       after.prepare("SELECT COUNT(*) AS count FROM history_payloads").get().count > 0,
       true,

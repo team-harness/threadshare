@@ -108,6 +108,7 @@
         { "type": "object", "additionalProperties": false, "required": ["kind", "count"], "properties": { "kind": { "const": "exact-path-overlap" }, "count": { "$ref": "#/$defs/decimal" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "within-observed-commit-window" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "full-commit-hash" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "unique-abbreviated-commit-hash" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "explicit-reference" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "count"], "properties": { "kind": { "const": "significant-term-overlap" }, "count": { "$ref": "#/$defs/decimal" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "same-repository" } } }

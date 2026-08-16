@@ -310,7 +310,7 @@ test("required contract builder owns every active Engine contract axis", () => {
   const contract = createInsightsRequiredContract(EPOCH);
   assert.deepEqual(contract, {
     factSchemaVersion: 2,
-    providerAdapterVersions: ["claude@2", "codex@2"],
+    providerAdapterVersions: ["claude@3", "codex@3"],
     privacyPolicyVersion: 2,
     originSecretEpoch: EPOCH,
     duplicatePolicyVersion: 1,
@@ -411,7 +411,7 @@ function sampleDeltaV2(overrides = {}) {
     ...sampleDelta(),
     format: "session-facts-delta@v2",
     factSchemaVersion: 2,
-    providerAdapterVersion: "codex@2",
+    providerAdapterVersion: "codex@3",
     privacyPolicyVersion: 2,
     historyEvents: [],
     historyPayloads: [],
