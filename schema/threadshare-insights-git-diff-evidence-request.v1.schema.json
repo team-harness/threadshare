@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-git-diff-evidence-request.v1.schema.json",
+  "title": "Threadshare Insights Git Diff Evidence Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision", "contextLines", "maxBytes", "cursor"],
+  "properties": {
+    "format": { "const": "threadshare-insights-git-diff-evidence-request@v1" },
+    "repositoryKey": { "$ref": "#/$defs/key" },
+    "commitObjectId": { "$ref": "#/$defs/objectId" },
+    "parentObjectId": { "oneOf": [{ "$ref": "#/$defs/objectId" }, { "type": "null" }] },
+    "path": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 12288 }, { "type": "null" }] },
+    "revision": { "$ref": "#/$defs/key" },
+    "contextLines": { "type": "integer", "minimum": 0, "maximum": 20 },
+    "maxBytes": { "type": "integer", "minimum": 4, "maximum": 1048576 },
+    "cursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[\\x20-\\x7e]+$" }, { "type": "null" }] }
+  },
+  "$defs": {
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+  }
+}

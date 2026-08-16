@@ -7,11 +7,13 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  authorizeInsightsGitDiffEvidence,
   createInsightsCursorCodec,
   executeInsightsQuery,
   insightsQueryDiagnostic,
   normalizeInsightsActivityRequest,
   normalizeInsightsDeepEvidenceRequest,
+  normalizeInsightsGitDiffEvidenceRequest,
   normalizeInsightsDeepQueryRequest,
   normalizeInsightsRecipeRequest,
   normalizeInsightsSearchRequest,
@@ -24,7 +26,7 @@ import {
   projectInsightsUsage,
   readInsightsQueryRequest,
 } from "../src/insights-query.mjs";
-import { createPrivacyContext } from "../src/session-facts.mjs";
+import { createPrivacyContext, hashKey } from "../src/session-facts.mjs";
 
 const KEY = "1".repeat(64);
 const TURN_KEY = "2".repeat(64);
@@ -32,6 +34,7 @@ const SESSION_KEY = "3".repeat(64);
 const REVISION = "4".repeat(64);
 const DATABASE_UUID = "11111111-2222-4333-8444-555555555555";
 const RECIPE_ITEMS_URL = new URL("./fixtures/insights-recipe-items.v1.json", import.meta.url);
+const DELIVERY_TRACE_URL = new URL("./fixtures/insights-delivery-trace-golden.v1.json", import.meta.url);
 
 function privacyContext() {
   return createPrivacyContext({
@@ -166,6 +169,16 @@ test("query action parser enforces JSON-only bounded command shapes", () => {
   );
   assert.deepEqual(
     parseInsightsQueryInvocation(
+      ["insights", "recipe", "delivery-trace@1"],
+      { format: "json", request: "-" },
+    ),
+    {
+      action: "recipe", name: "delivery-trace@1", format: "json",
+      requestSource: "-",
+    },
+  );
+  assert.deepEqual(
+    parseInsightsQueryInvocation(
       ["insights", "evidence"],
       { format: "json", request: "-" },
     ),
@@ -244,6 +257,377 @@ test("deep Query, Recipe, and Evidence public requests normalize into Engine con
     include: ["envelope", "payload"],
     maxBytes: 1024,
   }).cursor, null);
+});
+
+test("delivery-trace@1 normalizes to the bounded graph request instead of a tabular Recipe", () => {
+  const evaluatedAt = "2026-08-16T02:00:00.000Z";
+  assert.deepEqual(normalizeInsightsRecipeRequest({
+    format: "threadshare-insights-recipe-request@v1",
+    root: { kind: "session", key: SESSION_KEY },
+    window: null,
+    direction: "both",
+    maxDepth: 2,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 100,
+    cursor: null,
+  }, { name: "delivery-trace@1", evaluatedAt }), {
+    format: "threadshare-insights-delivery-trace-request@v1",
+    root: { kind: "session", key: SESSION_KEY },
+    window: null,
+    direction: "both",
+    maxDepth: 2,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 100,
+    cursor: null,
+    evaluatedAt,
+  });
+});
+
+test("delivery-trace@1 executes the dedicated Engine read and wraps its page cursor", async () => {
+  const context = privacyContext();
+  const fixture = JSON.parse(await readFile(DELIVERY_TRACE_URL, "utf8"));
+  const input = {
+    format: "threadshare-insights-recipe-request@v1",
+    root: fixture.request.root,
+    window: fixture.request.window,
+    direction: fixture.request.direction,
+    maxDepth: fixture.request.maxDepth,
+    includeCandidateEdges: fixture.request.includeCandidateEdges,
+    includeContextualEdges: fixture.request.includeContextualEdges,
+    limit: fixture.request.limit,
+    cursor: null,
+  };
+  let called = 0;
+  const response = structuredClone(fixture.response);
+  response.nextCursor = "engine-page-2";
+  response.truncated = true;
+  const result = await executeInsightsQuery(
+    { action: "recipe", name: "delivery-trace@1", requestSource: "-" },
+    {
+      async openState() {
+        return {
+          paths: { databaseFile: "/not-read-by-fixture" },
+          originSecretEpoch: context.originSecretEpoch,
+          privacyContext: context,
+        };
+      },
+      createReader() {
+        return {
+          async deliveryTrace(request) {
+            called += 1;
+            assert.equal(request.format, "threadshare-insights-delivery-trace-request@v1");
+            return response;
+          },
+          async recipe() { throw new Error("tabular Recipe must not run"); },
+          async close() {},
+        };
+      },
+      input: Readable.from([JSON.stringify(input)]),
+      now: () => Date.parse(fixture.request.evaluatedAt),
+    },
+  );
+  assert.equal(called, 1);
+  assert.equal(result.format, "threadshare-insights-delivery-trace@v1");
+  assert.equal(result.databaseUuid, DATABASE_UUID);
+  assert.equal(result.snapshotSeq, "42");
+  assert.notEqual(result.nextCursor, "engine-page-2");
+  assert.equal(result.truncated, true);
+});
+
+test("delivery-trace@1 resolves the registered repository containing the current directory", async () => {
+  const context = privacyContext();
+  const fixture = JSON.parse(await readFile(DELIVERY_TRACE_URL, "utf8"));
+  const repositoryId = "12345678-1234-4123-8123-123456789abc";
+  const repositoryKey = context.fingerprint("repository", repositoryId);
+  const input = {
+    format: "threadshare-insights-recipe-request@v1",
+    window: null,
+    direction: "both",
+    maxDepth: 2,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 100,
+    cursor: null,
+  };
+  const response = structuredClone(fixture.response);
+  response.root = { kind: "repository", key: repositoryKey };
+  const result = await executeInsightsQuery(
+    { action: "recipe", name: "delivery-trace@1", requestSource: "-" },
+    {
+      async openState() {
+        return {
+          paths: { databaseFile: "/not-read-by-fixture", configFile: "/not-read-by-fixture" },
+          originSecretEpoch: context.originSecretEpoch,
+          privacyContext: context,
+        };
+      },
+      async readConfig() {
+        return { insights: { repositories: [{
+          repositoryId,
+          rootDirectory: "/workspace/threadshare",
+        }] } };
+      },
+      cwd: "/workspace/threadshare/src",
+      createReader() {
+        return {
+          async deliveryTrace(request) {
+            assert.deepEqual(request.root, { kind: "repository", key: repositoryKey });
+            return response;
+          },
+          async close() {},
+        };
+      },
+      input: Readable.from([JSON.stringify(input)]),
+      now: () => Date.parse(fixture.request.evaluatedAt),
+    },
+  );
+  assert.deepEqual(result.root, { kind: "repository", key: repositoryKey });
+});
+
+test("delivery-trace@1 rejects an implicit root outside registered repositories", async () => {
+  const context = privacyContext();
+  await assert.rejects(executeInsightsQuery(
+    { action: "recipe", name: "delivery-trace@1", requestSource: "-" },
+    {
+      async openState() {
+        return {
+          paths: { databaseFile: "/not-read-by-fixture", configFile: "/not-read-by-fixture" },
+          originSecretEpoch: context.originSecretEpoch,
+          privacyContext: context,
+        };
+      },
+      async readConfig() {
+        return { insights: { repositories: [{
+          repositoryId: "12345678-1234-4123-8123-123456789abc",
+          rootDirectory: "/workspace/other",
+        }] } };
+      },
+      cwd: "/workspace/threadshare",
+      createReader() {
+        return { async close() {} };
+      },
+      input: Readable.from([JSON.stringify({
+        format: "threadshare-insights-recipe-request@v1",
+        window: null,
+        direction: "both",
+        maxDepth: 2,
+        includeCandidateEdges: false,
+        includeContextualEdges: false,
+        limit: 100,
+        cursor: null,
+      })]),
+      now: () => Date.parse("2026-08-16T02:00:00.000Z"),
+    },
+  ), (error) => error.code === "TS_INSIGHTS_DELIVERY_TRACE_NOT_READY" &&
+    /sync --repository \./u.test(error.message));
+});
+
+test("async query helpers keep their reader open until the Engine response completes", async () => {
+  const context = privacyContext();
+  const fixture = JSON.parse(await readFile(DELIVERY_TRACE_URL, "utf8"));
+  let releaseResponse;
+  let reportReadStarted;
+  let closed = false;
+  const responseReady = new Promise((resolve) => { releaseResponse = resolve; });
+  const readStarted = new Promise((resolve) => { reportReadStarted = resolve; });
+  const execution = executeInsightsQuery(
+    { action: "recipe", name: "delivery-trace@1", requestSource: "-" },
+    {
+      async openState() {
+        return {
+          paths: { databaseFile: "/not-read-by-fixture" },
+          originSecretEpoch: context.originSecretEpoch,
+          privacyContext: context,
+        };
+      },
+      createReader() {
+        return {
+          async deliveryTrace() {
+            reportReadStarted();
+            await responseReady;
+            assert.equal(closed, false);
+            return fixture.response;
+          },
+          async close() { closed = true; },
+        };
+      },
+      input: Readable.from([JSON.stringify({
+        ...fixture.request,
+        format: "threadshare-insights-recipe-request@v1",
+        evaluatedAt: undefined,
+      })]),
+      now: () => Date.parse(fixture.request.evaluatedAt),
+    },
+  );
+  await readStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closed, false);
+  releaseResponse();
+  await execution;
+  assert.equal(closed, true);
+});
+
+test("Git diff Evidence authorizes a registered projected commit and rename path", async () => {
+  const context = privacyContext();
+  const repositoryId = "11111111-1111-4111-8111-111111111111";
+  const repositoryKey = context.fingerprint("repository", repositoryId);
+  const commitObjectId = "a".repeat(40);
+  const parentObjectId = "b".repeat(40);
+  const commitKey = hashKey(
+    "git-commit",
+    Buffer.from(repositoryKey, "hex"),
+    commitObjectId,
+  );
+  const input = {
+    format: "threadshare-insights-git-diff-evidence-request@v1",
+    repositoryKey,
+    commitObjectId,
+    parentObjectId,
+    path: "src/new-name.mjs",
+    revision: REVISION,
+    contextLines: 3,
+    maxBytes: 4,
+    cursor: null,
+  };
+  assert.deepEqual(normalizeInsightsGitDiffEvidenceRequest(input), input);
+  let capturedOldPath;
+  let gitReads = 0;
+  const state = {
+    paths: { configFile: "/not-read-by-fixture" },
+    originSecretEpoch: context.originSecretEpoch,
+    privacyContext: context,
+  };
+  const run = (request) => executeInsightsQuery({
+    action: "evidence-v2", requestSource: "-",
+  }, {
+    async openState() { return state; },
+    async readConfig() {
+      return {
+        insights: {
+          repositories: [{
+            repositoryId,
+            rootDirectory: "/work/repository",
+            commonDirectory: "/work/repository/.git",
+            commonDirectoryDevice: "7",
+            commonDirectoryInode: "9",
+          }],
+        },
+      };
+    },
+    async resolveRepository() {
+      return { commonDirectoryDevice: "7", commonDirectoryInode: "9" };
+    },
+    createReader() {
+      return {
+        async deliveryTrace() {
+          return {
+            databaseUuid: DATABASE_UUID,
+            snapshotSeq: "7",
+            nodes: [{
+              kind: "git-commit",
+              key: commitKey,
+              revision: REVISION,
+              attributes: {
+                repositoryKey,
+                objectId: commitObjectId,
+                parentObjectIds: [parentObjectId],
+                reachable: true,
+              },
+            }],
+          };
+        },
+        async queryV2() {
+          return {
+            databaseUuid: DATABASE_UUID,
+            snapshotSeq: "7",
+            totalMatchCount: "1",
+            records: [{
+              edgeKey: KEY,
+              repositoryKey,
+              commitHash: commitObjectId,
+              normalizedPath: "src/new-name.mjs",
+              oldPath: "src/old-name.mjs",
+              relation: "commit-changed-file",
+              revision: KEY,
+            }],
+          };
+        },
+        async close() {},
+      };
+    },
+    async readGitDiff(requestValue, options) {
+      gitReads += 1;
+      capturedOldPath = options.oldPath;
+      const start = options.offset ?? 0;
+      const end = start + 4;
+      return {
+        format: "threadshare-insights-git-diff-evidence@v1",
+        repositoryKey,
+        commitObjectId,
+        parentObjectId,
+        path: requestValue.path,
+        revision: REVISION,
+        provenance: "local-git-object",
+        payloadSha256: "c".repeat(64),
+        totalBytes: "8",
+        range: { start: String(start), end: String(end) },
+        content: start === 0 ? "diff" : "done",
+        nextCursor: end === 8 ? null : options.createCursor({
+          offset: end,
+          payloadSha256: "c".repeat(64),
+          totalBytes: "8",
+        }),
+        complete: end === 8,
+        binary: false,
+      };
+    },
+    input: Readable.from([JSON.stringify(request)]),
+    now: () => 1_786_406_400_000,
+  });
+
+  const first = await run(input);
+  assert.equal(capturedOldPath, "src/old-name.mjs");
+  assert.equal(first.content, "diff");
+  assert.notEqual(first.nextCursor, null);
+  const second = await run({ ...input, cursor: first.nextCursor });
+  assert.equal(second.content, "done");
+  assert.equal(second.complete, true);
+  await assert.rejects(
+    run({ ...input, parentObjectId: "d".repeat(40) }),
+    (error) => error?.code === "TS_INSIGHTS_REQUEST_INVALID",
+  );
+  assert.equal(gitReads, 2);
+});
+
+test("Git diff Evidence maps repository resolution failures to a content-free diagnostic", async () => {
+  const context = privacyContext();
+  const repositoryId = "11111111-1111-4111-8111-111111111111";
+  const repositoryKey = context.fingerprint("repository", repositoryId);
+  await assert.rejects(
+    authorizeInsightsGitDiffEvidence({ repositoryKey }, {
+      state: { paths: {}, privacyContext: context },
+      async readConfig() {
+        return {
+          insights: {
+            repositories: [{
+              repositoryId,
+              rootDirectory: "/private/repository/path",
+              commonDirectoryDevice: "7",
+              commonDirectoryInode: "9",
+            }],
+          },
+        };
+      },
+      async resolveRepository() {
+        throw new Error("private repository resolution failure at /private/repository/path");
+      },
+    }),
+    (error) => error?.code === "TS_INSIGHTS_EVIDENCE_NOT_FOUND" &&
+      error.message === "The registered Git repository is unavailable" &&
+      !error.message.includes("/private/"),
+  );
 });
 
 test("deep Query, Recipe, and Evidence execution publish MAC snapshots without database UUIDs", async () => {

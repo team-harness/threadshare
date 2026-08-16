@@ -57,6 +57,9 @@ export const V2_UPSERT_COLLECTION_ORDER = Object.freeze([
   "historyPayloads",
   "historyPayloadChunks",
 ]);
+export const TRACE_SOURCE_COLLECTION_ORDER = Object.freeze([
+  "refs", "commits", "files", "intentNodes", "intentRefs",
+]);
 const ALL_UPSERT_COLLECTIONS = Object.freeze([...new Set(V2_UPSERT_COLLECTION_ORDER)]);
 
 const MESSAGE_TYPES = new Set([
@@ -69,6 +72,14 @@ const MESSAGE_TYPES = new Set([
   "BATCH_ACCEPTED",
   "COMMIT_SESSION",
   "SESSION_COMMITTED",
+  "BEGIN_TRACE_SOURCE",
+  "TRACE_SOURCE_ACCEPTED",
+  "TRACE_SOURCE_BATCH",
+  "TRACE_SOURCE_BATCH_ACCEPTED",
+  "COMMIT_TRACE_SOURCE",
+  "TRACE_SOURCE_COMMITTED",
+  "READ_REPOSITORY_STATE",
+  "REPOSITORY_STATE",
   "LIST_SOURCE_STATES",
   "SOURCE_STATES",
   "READ_SOURCE_CHECKPOINT",
@@ -101,8 +112,12 @@ const MESSAGE_TYPES = new Set([
   "INSIGHTS_EVIDENCE_V2",
   "READ_INSIGHTS_RECIPE",
   "INSIGHTS_RECIPE",
+  "READ_INSIGHTS_DELIVERY_TRACE",
+  "INSIGHTS_DELIVERY_TRACE",
   "ABORT_SESSION",
   "SESSION_ABORTED",
+  "ABORT_TRACE_SOURCE",
+  "TRACE_SOURCE_ABORTED",
   "ERROR",
 ]);
 
@@ -147,6 +162,36 @@ const MAX_DEEP_QUERY_REQUEST_BYTES = 64 * 1_024;
 const MAX_DEEP_CURSOR_BYTES = 4 * 1_024;
 const MAX_DEEP_EVIDENCE_BYTES = 1_048_576;
 const MAX_DEEP_QUERY_FIELDS = 64;
+const TRACE_NODE_KINDS = new Set([
+  "intent", "repository", "session", "turn", "capability-use", "file", "git-commit",
+]);
+const TRACE_DIRECTIONS = new Set(["incoming", "outgoing", "both"]);
+const TRACE_STRENGTHS = new Set(["direct", "observed", "candidate", "contextual"]);
+const TRACE_RELATIONS = new Set([
+  "intent-declares-session", "intent-declares-commit", "session-contains-turn",
+  "turn-contains-capability-use", "session-touched-file", "commit-changed-file",
+  "session-observed-commit", "session-correlates-commit", "intent-correlates-session",
+  "contextual-same-file",
+]);
+const TRACE_DERIVED_RELATIONS = new Set([
+  "session-correlates-commit", "intent-correlates-session", "contextual-same-file",
+]);
+const TRACE_SOURCES = new Set([
+  "intent-explicit-session-ref", "intent-explicit-commit-ref", "session-membership",
+  "turn-membership", "normalized-file-event", "git-tree-diff", "observed-git-result",
+  "ordered-exact-path-overlap", "unique-text-overlap", "same-file-history",
+]);
+const TRACE_LIMITATIONS = new Set([
+  "not-authorship", "not-exclusive-line-attribution", "not-causality",
+  "incomplete-timestamps", "unverified-intent-reference", "unreachable-commit",
+  "path-only-context", "candidate-not-default",
+]);
+const TRACE_COVERAGE_STATES = new Set(["complete", "partial", "unavailable"]);
+const TRACE_FACT_KINDS = new Set([
+  "exact-path-overlap", "within-observed-commit-window", "full-commit-hash",
+  "explicit-reference", "significant-term-overlap", "same-repository",
+]);
+const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const MAX_DEEP_ORDER_FIELDS = 4;
 const MAX_DEEP_PREDICATE_DEPTH = 8;
 const MAX_DEEP_PREDICATE_LEAVES = 64;
@@ -170,7 +215,7 @@ const ACTIVITY_BUCKETS = new Set(["day", "week"]);
 const FTS_FIELDS = new Set(["capability", "code", "natural"]);
 const DEEP_RESOURCES = new Set([
   "session", "turn", "event", "capability-use", "file-activity", "token-usage",
-  "error-occurrence",
+  "error-occurrence", "delivery-edge",
 ]);
 const DEEP_PREDICATE_OPERATORS = new Set([
   "eq", "ne", "in", "not-in", "exists", "lt", "lte", "gt", "gte", "between",
@@ -773,6 +818,148 @@ function assertSessionCommitted(message) {
   assertDecimal(message.snapshotSeq, "SESSION_COMMITTED.snapshotSeq");
   if (typeof message.idempotent !== "boolean") {
     throw invalidFrame("SESSION_COMMITTED.idempotent must be boolean");
+  }
+}
+
+function assertBeginTraceSource(message) {
+  assertEnvelope(message, "BEGIN_TRACE_SOURCE", [
+    "deltaFormat", "deltaId", "expectedGeneration", "targetGeneration", "repository", "intent",
+    "counts",
+  ]);
+  if (message.deltaFormat !== "threadshare-insights-trace-source-delta@v1") {
+    throw invalidFrame("BEGIN_TRACE_SOURCE.deltaFormat is unsupported");
+  }
+  assertHex64(message.deltaId, "BEGIN_TRACE_SOURCE.deltaId");
+  assertDecimal(message.expectedGeneration, "BEGIN_TRACE_SOURCE.expectedGeneration");
+  assertDecimal(message.targetGeneration, "BEGIN_TRACE_SOURCE.targetGeneration");
+  assertExactKeys(message.repository, "BEGIN_TRACE_SOURCE.repository", [
+    "repositoryId", "repositoryKey", "available", "refDigest", "scmProvider", "webBaseUrl",
+    "repositoryPath",
+    "projectKeys",
+  ]);
+  assertUuid(message.repository.repositoryId, "BEGIN_TRACE_SOURCE.repository.repositoryId");
+  assertHex64(message.repository.repositoryKey, "BEGIN_TRACE_SOURCE.repository.repositoryKey");
+  assertHex64(message.repository.refDigest, "BEGIN_TRACE_SOURCE.repository.refDigest");
+  if (typeof message.repository.available !== "boolean") {
+    throw invalidFrame("BEGIN_TRACE_SOURCE.repository.available must be boolean");
+  }
+  const scm = [
+    message.repository.scmProvider,
+    message.repository.webBaseUrl,
+    message.repository.repositoryPath,
+  ];
+  const projectKeys = assertArray(message.repository.projectKeys, "BEGIN_TRACE_SOURCE.repository.projectKeys");
+  if (projectKeys.length !== 2) throw invalidFrame("BEGIN_TRACE_SOURCE.repository.projectKeys must contain two keys");
+  for (const key of projectKeys) assertHex64(key, "BEGIN_TRACE_SOURCE.repository.projectKeys[]");
+  if (!(scm.every((value) => value === null) || scm.every((value) =>
+    typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= 12 * 1024))) {
+    throw invalidFrame("BEGIN_TRACE_SOURCE.repository SCM metadata is invalid");
+  }
+  if (message.intent !== null) {
+    assertExactKeys(message.intent, "BEGIN_TRACE_SOURCE.intent", [
+      "sourceKey", "adapterVersion", "revision", "locator", "coverage", "diagnostics",
+    ]);
+    assertHex64(message.intent.sourceKey, "BEGIN_TRACE_SOURCE.intent.sourceKey");
+    assertNonEmptyString(message.intent.adapterVersion, "BEGIN_TRACE_SOURCE.intent.adapterVersion");
+    assertHex64(message.intent.revision, "BEGIN_TRACE_SOURCE.intent.revision");
+    assertNonEmptyString(message.intent.locator, "BEGIN_TRACE_SOURCE.intent.locator");
+    assertEnum(message.intent.coverage, "BEGIN_TRACE_SOURCE.intent.coverage", TRACE_COVERAGE_STATES);
+    const diagnostics = assertArray(message.intent.diagnostics, "BEGIN_TRACE_SOURCE.intent.diagnostics");
+    if (diagnostics.length > 4096) throw invalidFrame("BEGIN_TRACE_SOURCE intent diagnostics exceed 4096");
+    for (const diagnostic of diagnostics) {
+      assertExactKeys(diagnostic, "BEGIN_TRACE_SOURCE.intent.diagnostics[]", ["line", "code"]);
+      assertDecimal(diagnostic.line, "BEGIN_TRACE_SOURCE.intent.diagnostics[].line");
+      assertNonEmptyString(diagnostic.code, "BEGIN_TRACE_SOURCE.intent.diagnostics[].code");
+    }
+  }
+  assertExactKeys(message.counts, "BEGIN_TRACE_SOURCE.counts", TRACE_SOURCE_COLLECTION_ORDER);
+  for (const collection of TRACE_SOURCE_COLLECTION_ORDER) {
+    assertDecimal(message.counts[collection], `BEGIN_TRACE_SOURCE.counts.${collection}`);
+  }
+}
+
+function assertTraceSourceIdentity(message, type, sequenceField) {
+  assertEnvelope(message, type, ["repositoryKey", "deltaId", sequenceField]);
+  assertHex64(message.repositoryKey, `${type}.repositoryKey`);
+  assertHex64(message.deltaId, `${type}.deltaId`);
+  assertDecimal(message[sequenceField], `${type}.${sequenceField}`);
+}
+
+function assertTraceSourceBatch(message) {
+  assertBatch(message, "TRACE_SOURCE_BATCH", TRACE_SOURCE_COLLECTION_ORDER);
+}
+
+function assertTraceSourceBatchAccepted(message) {
+  assertEnvelope(message, "TRACE_SOURCE_BATCH_ACCEPTED", ["sequence"]);
+  assertDecimal(message.sequence, "TRACE_SOURCE_BATCH_ACCEPTED.sequence");
+}
+
+function assertTraceSourceTerminalRequest(message, type) {
+  assertEnvelope(message, type, ["nextSequence"]);
+  assertDecimal(message.nextSequence, `${type}.nextSequence`);
+}
+
+function assertTraceSourceCommitted(message) {
+  assertEnvelope(message, "TRACE_SOURCE_COMMITTED", [
+    "repositoryKey", "deltaId", "snapshotSeq", "idempotent",
+  ]);
+  assertHex64(message.repositoryKey, "TRACE_SOURCE_COMMITTED.repositoryKey");
+  assertHex64(message.deltaId, "TRACE_SOURCE_COMMITTED.deltaId");
+  assertDecimal(message.snapshotSeq, "TRACE_SOURCE_COMMITTED.snapshotSeq");
+  if (typeof message.idempotent !== "boolean") {
+    throw invalidFrame("TRACE_SOURCE_COMMITTED.idempotent must be boolean");
+  }
+}
+
+function assertReadRepositoryState(message) {
+  assertEnvelope(message, "READ_REPOSITORY_STATE", ["repositoryId", "cursor", "limit"]);
+  assertUuid(message.repositoryId, "READ_REPOSITORY_STATE.repositoryId");
+  if (message.cursor !== null) {
+    assertNonEmptyString(message.cursor, "READ_REPOSITORY_STATE.cursor");
+    if (Buffer.byteLength(message.cursor, "utf8") > 4_096) {
+      throw invalidFrame("READ_REPOSITORY_STATE.cursor exceeds 4096 bytes");
+    }
+  }
+  if (!Number.isSafeInteger(message.limit) || message.limit < 1 || message.limit > 256) {
+    throw invalidFrame("READ_REPOSITORY_STATE.limit must be between 1 and 256");
+  }
+}
+
+function assertRepositoryState(message) {
+  assertEnvelope(message, "REPOSITORY_STATE", [
+    "repositoryId", "generation", "available", "refDigest", "intentRevision", "coverageAfter",
+    "refs", "nextCursor",
+  ]);
+  assertUuid(message.repositoryId, "REPOSITORY_STATE.repositoryId");
+  assertDecimal(message.generation, "REPOSITORY_STATE.generation");
+  if (message.available !== null && typeof message.available !== "boolean") {
+    throw invalidFrame("REPOSITORY_STATE.available must be a boolean or null");
+  }
+  if (message.refDigest !== null) assertHex64(message.refDigest, "REPOSITORY_STATE.refDigest");
+  if (message.intentRevision !== null) {
+    assertHex64(message.intentRevision, "REPOSITORY_STATE.intentRevision");
+  }
+  if (message.coverageAfter !== null) {
+    assertCanonicalTimestamp(message.coverageAfter, "REPOSITORY_STATE.coverageAfter");
+  }
+  if (!Array.isArray(message.refs) || message.refs.length > 256) {
+    throw invalidFrame("REPOSITORY_STATE.refs must contain at most 256 items");
+  }
+  let previous = null;
+  for (const reference of message.refs) {
+    assertExactKeys(reference, "REPOSITORY_STATE.refs[]", ["name", "objectId"]);
+    assertNonEmptyString(reference.name, "REPOSITORY_STATE.refs[].name");
+    if (!reference.name.startsWith("refs/") ||
+        (previous !== null && reference.name.localeCompare(previous) <= 0)) {
+      throw invalidFrame("REPOSITORY_STATE.refs is not strictly sorted");
+    }
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(reference.objectId)) {
+      throw invalidFrame("REPOSITORY_STATE.refs[].objectId is invalid");
+    }
+    previous = reference.name;
+  }
+  if (message.nextCursor !== null) {
+    assertNonEmptyString(message.nextCursor, "REPOSITORY_STATE.nextCursor");
   }
 }
 
@@ -1621,6 +1808,21 @@ function assertDeepTarget(target, label) {
     if (target.payloadKey !== undefined) {
       assertHex64(target.payloadKey, `${label}.payloadKey`);
     }
+    return;
+  }
+  if (target.kind === "delivery-node") {
+    assertExactKeys(target, label, ["kind", "nodeKind", "nodeKey", "revision"]);
+    assertEnum(target.nodeKind, `${label}.nodeKind`, TRACE_NODE_KINDS);
+    assertHex64(target.nodeKey, `${label}.nodeKey`);
+    assertHex64(target.revision, `${label}.revision`);
+    return;
+  }
+  if (target.kind === "delivery-edge") {
+    assertExactKeys(target, label, ["kind", "relation", "from", "to", "revision"]);
+    assertEnum(target.relation, `${label}.relation`, TRACE_RELATIONS);
+    assertTraceNodeRef(target.from, `${label}.from`);
+    assertTraceNodeRef(target.to, `${label}.to`);
+    assertHex64(target.revision, `${label}.revision`);
     return;
   }
   if (typeof target.kind !== "string" || fields[target.kind] === undefined) {
@@ -2581,6 +2783,342 @@ function assertInsightsRecipe(message) {
   assertRecipeResponse(message.response, "INSIGHTS_RECIPE.response");
 }
 
+function assertTraceNodeRef(value, label) {
+  assertExactKeys(value, label, ["kind", "key"]);
+  assertEnum(value.kind, `${label}.kind`, TRACE_NODE_KINDS);
+  assertHex64(value.key, `${label}.key`);
+}
+
+function assertRepositoryPath(value, label) {
+  assertBoundedString(value, label, 12 * 1024, { allowEmpty: false });
+  if (value.startsWith("/") || value.includes("\0") ||
+      value.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw invalidFrame(`${label} must be a lexical repository-relative path`);
+  }
+}
+
+function assertGitObjectId(value, label) {
+  if (typeof value !== "string" || !GIT_OBJECT_ID.test(value)) {
+    throw invalidFrame(`${label} must be a full lowercase Git object id`);
+  }
+}
+
+function assertScmAttributes(value, label) {
+  assertExactKeys(value, label, ["kind", "webBaseUrl", "repositoryPath", "availability"]);
+  assertEnum(value.kind, `${label}.kind`, new Set(["github", "gitlab"]));
+  const expectedBase = value.kind === "github" ? "https://github.com" : "https://gitlab.com";
+  if (value.webBaseUrl !== expectedBase || value.availability !== "not-verified") {
+    throw invalidFrame(`${label} identity is invalid`);
+  }
+  assertRepositoryPath(value.repositoryPath, `${label}.repositoryPath`);
+}
+
+function assertCommitExternalLink(value, objectId, label) {
+  if (value === null) return;
+  assertBoundedString(value, label, 16 * 1024, { allowEmpty: false, ascii: true });
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw invalidFrame(`${label} is invalid`);
+  }
+  const supportedHost = parsed.hostname === "github.com" || parsed.hostname === "gitlab.com";
+  if (parsed.protocol !== "https:" || !supportedHost || parsed.username !== "" ||
+      parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" ||
+      !parsed.pathname.endsWith(`/commit/${objectId}`)) {
+    throw invalidFrame(`${label} is invalid`);
+  }
+}
+
+function assertTraceNodeAttributes(kind, value, label) {
+  if (kind === "intent") {
+    assertExactKeys(value, label, ["intentKind", "status", "parentIntentKey"]);
+    assertEnum(value.intentKind, `${label}.intentKind`, new Set(["feature", "story"]));
+    assertEnum(value.status, `${label}.status`, new Set(["complete", "todo", "unknown"]));
+    assertNullableHex64(value.parentIntentKey, `${label}.parentIntentKey`);
+  } else if (kind === "repository") {
+    assertExactKeys(value, label, ["projectKey", "scm"]);
+    assertNullableHex64(value.projectKey, `${label}.projectKey`);
+    if (value.scm !== null) assertScmAttributes(value.scm, `${label}.scm`);
+  } else if (kind === "session") {
+    assertExactKeys(value, label, ["provider", "projectKey"]);
+    assertBoundedString(value.provider, `${label}.provider`, 64, { allowEmpty: false, ascii: true });
+    assertNullableHex64(value.projectKey, `${label}.projectKey`);
+  } else if (kind === "turn") {
+    assertExactKeys(value, label, ["sessionKey"]);
+    assertHex64(value.sessionKey, `${label}.sessionKey`);
+  } else if (kind === "capability-use") {
+    assertExactKeys(value, label, ["turnKey", "capabilityKind", "canonicalName"]);
+    assertHex64(value.turnKey, `${label}.turnKey`);
+    assertEnum(value.capabilityKind, `${label}.capabilityKind`, new Set(["tool", "skill"]));
+    assertBoundedString(value.canonicalName, `${label}.canonicalName`, 512, { allowEmpty: false });
+  } else if (kind === "file") {
+    assertExactKeys(value, label, ["repositoryKey", "path"]);
+    assertHex64(value.repositoryKey, `${label}.repositoryKey`);
+    assertRepositoryPath(value.path, `${label}.path`);
+  } else {
+    assertExactKeys(value, label, [
+      "repositoryKey", "objectId", "parentObjectIds", "reachable", "externalLinks",
+    ]);
+    assertHex64(value.repositoryKey, `${label}.repositoryKey`);
+    assertGitObjectId(value.objectId, `${label}.objectId`);
+    if (!Array.isArray(value.parentObjectIds) || value.parentObjectIds.length > 16) {
+      throw invalidFrame(`${label}.parentObjectIds exceeds 16 items`);
+    }
+    value.parentObjectIds.forEach((item, index) =>
+      assertGitObjectId(item, `${label}.parentObjectIds[${index}]`));
+    assertBoolean(value.reachable, `${label}.reachable`);
+    assertExactKeys(value.externalLinks, `${label}.externalLinks`, ["commit"]);
+    assertCommitExternalLink(value.externalLinks.commit, value.objectId, `${label}.externalLinks.commit`);
+  }
+}
+
+function assertTraceNode(value, label) {
+  assertExactKeys(value, label, ["kind", "key", "revision", "label", "observedAt", "attributes"]);
+  assertEnum(value.kind, `${label}.kind`, TRACE_NODE_KINDS);
+  assertHex64(value.key, `${label}.key`);
+  assertHex64(value.revision, `${label}.revision`);
+  assertBoundedString(value.label, `${label}.label`, 1024, { allowEmpty: false });
+  assertCanonicalTimestamp(value.observedAt, `${label}.observedAt`);
+  assertTraceNodeAttributes(value.kind, value.attributes, `${label}.attributes`);
+}
+
+function assertTraceFact(value, label) {
+  assertPlainObject(value, label);
+  assertEnum(value.kind, `${label}.kind`, TRACE_FACT_KINDS);
+  const counted = value.kind === "exact-path-overlap" || value.kind === "significant-term-overlap";
+  assertExactKeys(value, label, counted ? ["kind", "count"] : ["kind"]);
+  if (counted) {
+    assertDecimal(value.count, `${label}.count`);
+    if (value.count === "0") throw invalidFrame(`${label}.count must be positive`);
+  }
+}
+
+function assertTraceEdge(value, label) {
+  assertExactKeys(value, label, [
+    "relation", "from", "to", "strength", "source", "facts", "limitations", "revision",
+  ]);
+  assertEnum(value.relation, `${label}.relation`, TRACE_RELATIONS);
+  assertTraceNodeRef(value.from, `${label}.from`);
+  assertTraceNodeRef(value.to, `${label}.to`);
+  assertEnum(value.strength, `${label}.strength`, TRACE_STRENGTHS);
+  assertEnum(value.source, `${label}.source`, TRACE_SOURCES);
+  if (!Array.isArray(value.facts) || value.facts.length > 16) {
+    throw invalidFrame(`${label}.facts exceeds 16 items`);
+  }
+  value.facts.forEach((fact, index) => assertTraceFact(fact, `${label}.facts[${index}]`));
+  if (!Array.isArray(value.limitations) || value.limitations.length > 16 ||
+      new Set(value.limitations).size !== value.limitations.length) {
+    throw invalidFrame(`${label}.limitations is invalid`);
+  }
+  value.limitations.forEach((limitation, index) =>
+    assertEnum(limitation, `${label}.limitations[${index}]`, TRACE_LIMITATIONS));
+  assertHex64(value.revision, `${label}.revision`);
+  if (TRACE_DERIVED_RELATIONS.has(value.relation) &&
+      (value.facts.length === 0 || value.limitations.length === 0)) {
+    throw invalidFrame(`${label} derived edges require facts and limitations`);
+  }
+  if (value.relation === "contextual-same-file" && value.strength !== "contextual") {
+    throw invalidFrame(`${label} shared-file context cannot be upgraded`);
+  }
+  if (value.relation === "session-correlates-commit" && value.strength === "direct") {
+    throw invalidFrame(`${label} derived commit correlation cannot be direct`);
+  }
+}
+
+function assertDeliveryTraceRequest(request, label) {
+  assertExactKeys(request, label, [
+    "format", "root", "window", "direction", "maxDepth", "includeCandidateEdges",
+    "includeContextualEdges", "limit", "cursor", "evaluatedAt",
+  ]);
+  if (request.format !== "threadshare-insights-delivery-trace-request@v1") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertTraceNodeRef(request.root, `${label}.root`);
+  if (request.window !== null) {
+    assertExactKeys(request.window, `${label}.window`, ["after", "before"]);
+    requiredTimestamp(request.window.after, `${label}.window.after`);
+    requiredTimestamp(request.window.before, `${label}.window.before`);
+    if (request.window.after >= request.window.before) throw invalidFrame(`${label}.window is empty`);
+  }
+  assertEnum(request.direction, `${label}.direction`, TRACE_DIRECTIONS);
+  assertSafeInteger(request.maxDepth, `${label}.maxDepth`, { min: 1, max: 3 });
+  assertBoolean(request.includeCandidateEdges, `${label}.includeCandidateEdges`);
+  assertBoolean(request.includeContextualEdges, `${label}.includeContextualEdges`);
+  assertSafeInteger(request.limit, `${label}.limit`, { min: 1, max: 200 });
+  if (request.cursor !== null) {
+    assertBoundedString(request.cursor, `${label}.cursor`, 32 * 1024, {
+      allowEmpty: false,
+      ascii: true,
+    });
+  }
+  requiredTimestamp(request.evaluatedAt, `${label}.evaluatedAt`);
+}
+
+function assertDeliveryTraceResponse(response, label) {
+  assertExactKeys(response, label, [
+    "format", "databaseUuid", "snapshotSeq", "evaluatedAt", "root", "nodes", "edges",
+    "nextCursor", "truncated", "coverage",
+  ]);
+  if (response.format !== "threadshare-insights-delivery-trace@v1") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertUuid(response.databaseUuid, `${label}.databaseUuid`);
+  assertDecimal(response.snapshotSeq, `${label}.snapshotSeq`);
+  requiredTimestamp(response.evaluatedAt, `${label}.evaluatedAt`);
+  assertTraceNodeRef(response.root, `${label}.root`);
+  if (!Array.isArray(response.nodes) || response.nodes.length > 401) {
+    throw invalidFrame(`${label}.nodes exceeds 401 items`);
+  }
+  if (!Array.isArray(response.edges) || response.edges.length > 200) {
+    throw invalidFrame(`${label}.edges exceeds 200 items`);
+  }
+  const endpoints = new Set();
+  response.nodes.forEach((node, index) => {
+    assertTraceNode(node, `${label}.nodes[${index}]`);
+    const identity = `${node.kind}:${node.key}`;
+    if (endpoints.has(identity)) throw invalidFrame(`${label}.nodes contains a duplicate`);
+    endpoints.add(identity);
+  });
+  if (!endpoints.has(`${response.root.kind}:${response.root.key}`)) {
+    throw invalidFrame(`${label}.root is missing from nodes`);
+  }
+  response.edges.forEach((edge, index) => {
+    assertTraceEdge(edge, `${label}.edges[${index}]`);
+    if (!endpoints.has(`${edge.from.kind}:${edge.from.key}`) ||
+        !endpoints.has(`${edge.to.kind}:${edge.to.key}`)) {
+      throw invalidFrame(`${label}.edges[${index}] references a missing node`);
+    }
+  });
+  if (response.nextCursor !== null) {
+    assertBoundedString(response.nextCursor, `${label}.nextCursor`, 32 * 1024, {
+      allowEmpty: false,
+      ascii: true,
+    });
+  }
+  assertBoolean(response.truncated, `${label}.truncated`);
+  if (response.truncated !== (response.nextCursor !== null)) {
+    throw invalidFrame(`${label}.pagination is inconsistent`);
+  }
+  assertExactKeys(response.coverage, `${label}.coverage`, [
+    "repositoryState", "intentState", "unresolvedRefCount", "excludedCandidateEdgeCount",
+    "excludedContextualEdgeCount", "unreachableCommitCount",
+  ]);
+  assertEnum(response.coverage.repositoryState, `${label}.coverage.repositoryState`,
+    TRACE_COVERAGE_STATES);
+  assertEnum(response.coverage.intentState, `${label}.coverage.intentState`, TRACE_COVERAGE_STATES);
+  for (const field of [
+    "unresolvedRefCount", "excludedCandidateEdgeCount", "excludedContextualEdgeCount",
+    "unreachableCommitCount",
+  ]) assertDecimal(response.coverage[field], `${label}.coverage.${field}`);
+  assertMessagePayloadBound({ response }, label);
+}
+
+function assertDeliveryTracePair(request, response, label) {
+  assertDeliveryTraceRequest(request, `${label}.request`);
+  assertDeliveryTraceResponse(response, `${label}.response`);
+  if (canonicalJson(response.root) !== canonicalJson(request.root) ||
+      response.evaluatedAt !== request.evaluatedAt || response.edges.length > request.limit) {
+    throw invalidFrame(`${label}.response changed or exceeded the request`);
+  }
+  if (!request.includeCandidateEdges &&
+      response.edges.some((edge) => edge.strength === "candidate")) {
+    throw invalidFrame(`${label}.response exposed candidate edges`);
+  }
+  if (!request.includeContextualEdges &&
+      response.edges.some((edge) => edge.strength === "contextual")) {
+    throw invalidFrame(`${label}.response exposed contextual edges`);
+  }
+}
+
+function assertReadInsightsDeliveryTrace(message) {
+  assertEnvelope(message, "READ_INSIGHTS_DELIVERY_TRACE", ["request"]);
+  assertDeliveryTraceRequest(message.request, "READ_INSIGHTS_DELIVERY_TRACE.request");
+}
+
+function assertInsightsDeliveryTrace(message) {
+  assertEnvelope(message, "INSIGHTS_DELIVERY_TRACE", ["request", "response"]);
+  assertDeliveryTracePair(message.request, message.response, "INSIGHTS_DELIVERY_TRACE");
+}
+
+export function assertGitDiffEvidenceRequest(request, label = "Git diff request") {
+  assertExactKeys(request, label, [
+    "format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision",
+    "contextLines", "maxBytes", "cursor",
+  ]);
+  if (request.format !== "threadshare-insights-git-diff-evidence-request@v1") {
+    throw invalidFrame(`${label}.format is invalid`);
+  }
+  assertHex64(request.repositoryKey, `${label}.repositoryKey`);
+  assertGitObjectId(request.commitObjectId, `${label}.commitObjectId`);
+  if (request.parentObjectId !== null) {
+    assertGitObjectId(request.parentObjectId, `${label}.parentObjectId`);
+  }
+  if (request.path !== null) assertRepositoryPath(request.path, `${label}.path`);
+  assertHex64(request.revision, `${label}.revision`);
+  assertSafeInteger(request.contextLines, `${label}.contextLines`, { min: 0, max: 20 });
+  assertSafeInteger(request.maxBytes, `${label}.maxBytes`, { min: 4, max: 1_048_576 });
+  if (request.cursor !== null) {
+    assertBoundedString(request.cursor, `${label}.cursor`, 32 * 1024, {
+      allowEmpty: false,
+      ascii: true,
+    });
+  }
+}
+
+export function assertGitDiffEvidenceResponse(response, label = "Git diff response") {
+  assertExactKeys(response, label, [
+    "format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision",
+    "provenance", "payloadSha256", "totalBytes", "range", "content", "nextCursor",
+    "complete", "binary",
+  ]);
+  if (response.format !== "threadshare-insights-git-diff-evidence@v1" ||
+      response.provenance !== "local-git-object") {
+    throw invalidFrame(`${label} identity is invalid`);
+  }
+  assertHex64(response.repositoryKey, `${label}.repositoryKey`);
+  assertGitObjectId(response.commitObjectId, `${label}.commitObjectId`);
+  if (response.parentObjectId !== null) {
+    assertGitObjectId(response.parentObjectId, `${label}.parentObjectId`);
+  }
+  if (response.path !== null) assertRepositoryPath(response.path, `${label}.path`);
+  assertHex64(response.revision, `${label}.revision`);
+  assertHex64(response.payloadSha256, `${label}.payloadSha256`);
+  assertDecimal(response.totalBytes, `${label}.totalBytes`);
+  assertExactKeys(response.range, `${label}.range`, ["start", "end"]);
+  assertDecimal(response.range.start, `${label}.range.start`);
+  assertDecimal(response.range.end, `${label}.range.end`);
+  assertBoundedString(response.content, `${label}.content`, 1_048_576);
+  if (BigInt(response.range.start) > BigInt(response.range.end) ||
+      BigInt(response.range.end) > BigInt(response.totalBytes) ||
+      Buffer.byteLength(response.content, "utf8") !==
+        Number(BigInt(response.range.end) - BigInt(response.range.start))) {
+    throw invalidFrame(`${label}.range is inconsistent`);
+  }
+  if (response.nextCursor !== null) {
+    assertBoundedString(response.nextCursor, `${label}.nextCursor`, 32 * 1024, {
+      allowEmpty: false,
+      ascii: true,
+    });
+  }
+  assertBoolean(response.complete, `${label}.complete`);
+  assertBoolean(response.binary, `${label}.binary`);
+  if (response.complete !== (response.nextCursor === null && response.range.end === response.totalBytes)) {
+    throw invalidFrame(`${label}.completion is inconsistent`);
+  }
+}
+
+export function assertGitDiffEvidencePair(request, response) {
+  assertGitDiffEvidenceRequest(request, "Git diff request");
+  assertGitDiffEvidenceResponse(response, "Git diff response");
+  for (const field of ["repositoryKey", "commitObjectId", "parentObjectId", "path", "revision"]) {
+    if (request[field] !== response[field]) {
+      throw invalidFrame(`Git diff response changed ${field}`);
+    }
+  }
+  return true;
+}
+
 function assertSearchTrace(trace, label) {
   assertExactKeys(trace, label, ["candidateCount", "candidateTurnKeys"]);
   assertSafeInteger(trace.candidateCount, `${label}.candidateCount`, {
@@ -3249,6 +3787,18 @@ function validateProtocolMessage(message, validatedPayloadByteLength = null) {
   } else if (message.type === "BATCH_ACCEPTED") assertBatchAccepted(message);
   else if (message.type === "COMMIT_SESSION") assertCommitSession(message);
   else if (message.type === "SESSION_COMMITTED") assertSessionCommitted(message);
+  else if (message.type === "BEGIN_TRACE_SOURCE") assertBeginTraceSource(message);
+  else if (message.type === "TRACE_SOURCE_ACCEPTED") {
+    assertTraceSourceIdentity(message, "TRACE_SOURCE_ACCEPTED", "nextSequence");
+  }
+  else if (message.type === "TRACE_SOURCE_BATCH") assertTraceSourceBatch(message);
+  else if (message.type === "TRACE_SOURCE_BATCH_ACCEPTED") assertTraceSourceBatchAccepted(message);
+  else if (message.type === "COMMIT_TRACE_SOURCE") {
+    assertTraceSourceTerminalRequest(message, "COMMIT_TRACE_SOURCE");
+  }
+  else if (message.type === "TRACE_SOURCE_COMMITTED") assertTraceSourceCommitted(message);
+  else if (message.type === "READ_REPOSITORY_STATE") assertReadRepositoryState(message);
+  else if (message.type === "REPOSITORY_STATE") assertRepositoryState(message);
   else if (message.type === "LIST_SOURCE_STATES") assertListSourceStates(message);
   else if (message.type === "SOURCE_STATES") assertSourceStates(message);
   else if (message.type === "READ_SOURCE_CHECKPOINT") assertReadSourceCheckpoint(message);
@@ -3284,8 +3834,16 @@ function validateProtocolMessage(message, validatedPayloadByteLength = null) {
   }
   else if (message.type === "READ_INSIGHTS_RECIPE") assertReadInsightsRecipe(message);
   else if (message.type === "INSIGHTS_RECIPE") assertInsightsRecipe(message);
+  else if (message.type === "READ_INSIGHTS_DELIVERY_TRACE") assertReadInsightsDeliveryTrace(message);
+  else if (message.type === "INSIGHTS_DELIVERY_TRACE") assertInsightsDeliveryTrace(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
+  else if (message.type === "ABORT_TRACE_SOURCE") {
+    assertTraceSourceTerminalRequest(message, "ABORT_TRACE_SOURCE");
+  }
+  else if (message.type === "TRACE_SOURCE_ABORTED") {
+    assertTraceSourceIdentity(message, "TRACE_SOURCE_ABORTED", "nextSequence");
+  }
   else if (message.type === "ERROR") assertErrorMessage(message);
   return message;
 }
@@ -3562,6 +4120,82 @@ export function createSessionCommittedMessage({
       idempotent,
     }),
   );
+}
+
+function traceSourceCollections(delta) {
+  assertPlainObject(delta, "TraceSourceDeltaV1");
+  const refs = assertArray(delta.refs, "delta.refs");
+  const commits = assertArray(delta.commits, "delta.commits").map((commit) => {
+    assertPlainObject(commit, "delta.commits[]");
+    const { files: _files, ...record } = commit;
+    return record;
+  });
+  const files = [];
+  for (const commit of delta.commits) {
+    for (const file of assertArray(commit.files, "delta.commits[].files")) {
+      files.push({ objectId: commit.objectId, ...file });
+    }
+  }
+  const intentNodes = assertArray(delta.intentNodes, "delta.intentNodes");
+  const intentRefs = assertArray(delta.intentRefs, "delta.intentRefs");
+  return { refs, commits, files, intentNodes, intentRefs };
+}
+
+export function traceSourceDigestDocument(delta) {
+  const collections = traceSourceCollections(delta);
+  return {
+    commits: collections.commits,
+    deltaFormat: delta.format,
+    expectedGeneration: delta.expectedGeneration,
+    files: collections.files,
+    intent: delta.intent,
+    intentNodes: collections.intentNodes,
+    intentRefs: collections.intentRefs,
+    refs: collections.refs,
+    repository: delta.repository,
+    targetGeneration: delta.targetGeneration,
+  };
+}
+
+export function createBeginTraceSourceMessage(delta, { requestId }) {
+  const collections = traceSourceCollections(delta);
+  return assertProtocolMessage(envelope("BEGIN_TRACE_SOURCE", requestId, {
+    deltaFormat: delta.format,
+    deltaId: delta.deltaId,
+    expectedGeneration: delta.expectedGeneration,
+    targetGeneration: delta.targetGeneration,
+    repository: delta.repository,
+    intent: delta.intent,
+    counts: Object.fromEntries(TRACE_SOURCE_COLLECTION_ORDER.map((collection) => [
+      collection,
+      String(collections[collection].length),
+    ])),
+  }));
+}
+
+export function createTraceSourceBatchMessage(options) {
+  return createBatchMessage("TRACE_SOURCE_BATCH", options);
+}
+
+export function createCommitTraceSourceMessage({ requestId, nextSequence }) {
+  return assertProtocolMessage(envelope("COMMIT_TRACE_SOURCE", requestId, { nextSequence }));
+}
+
+export function createAbortTraceSourceMessage({ requestId, nextSequence }) {
+  return assertProtocolMessage(envelope("ABORT_TRACE_SOURCE", requestId, { nextSequence }));
+}
+
+export function createReadRepositoryStateMessage({
+  requestId,
+  repositoryId,
+  cursor = null,
+  limit = 256,
+}) {
+  return assertProtocolMessage(envelope("READ_REPOSITORY_STATE", requestId, {
+    repositoryId,
+    cursor,
+    limit,
+  }));
 }
 
 export function createListSourceStatesMessage({ requestId, cursor = null, limit = 256 }) {
@@ -3949,6 +4583,14 @@ export function createInsightsRecipeMessage({ requestId, response }) {
   return assertProtocolMessage(envelope("INSIGHTS_RECIPE", requestId, { response }));
 }
 
+export function createReadInsightsDeliveryTraceMessage({ requestId, request }) {
+  return assertProtocolMessage(envelope("READ_INSIGHTS_DELIVERY_TRACE", requestId, { request }));
+}
+
+export function createInsightsDeliveryTraceMessage({ requestId, request, response }) {
+  return assertProtocolMessage(envelope("INSIGHTS_DELIVERY_TRACE", requestId, { request, response }));
+}
+
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {
   return assertProtocolMessage(envelope("ABORT_SESSION", requestId, { nextSequence, reason }));
 }
@@ -4269,6 +4911,78 @@ export async function* createSessionDeltaMessages(
     requestId,
     nextSequence: sequence.toString(),
     sourceState,
+  });
+  assertFits(commit, maxPayloadBytes);
+  yield commit;
+}
+
+/** Lazily emits BEGIN, fixed-order greedy batches, and COMMIT for one trace source delta. */
+export async function* createTraceSourceDeltaMessages(
+  delta,
+  { requestId, maxPayloadBytes = MAX_PROTOCOL_PAYLOAD_BYTES },
+) {
+  assertMaxPayloadBytes(maxPayloadBytes);
+  const begin = createBeginTraceSourceMessage(delta, { requestId });
+  assertFits(begin, maxPayloadBytes);
+  yield begin;
+
+  const collections = traceSourceCollections(delta);
+  let sequence = 0n;
+  for (const collection of TRACE_SOURCE_COLLECTION_ORDER) {
+    let batch = [];
+    let batchBytes = 0;
+    for (const item of collections[collection]) {
+      const sequenceText = sequence.toString();
+      if (batch.length === 0) {
+        batchBytes = Buffer.byteLength(canonicalJson(envelope("TRACE_SOURCE_BATCH", requestId, {
+          sequence: sequenceText,
+          collection,
+          items: [],
+        })), "utf8");
+      }
+      const itemBytes = itemCanonicalByteLength(item, collection);
+      if (batch.length > 0 && batchBytes + itemBytes + 1 > maxPayloadBytes) {
+        const message = createTraceSourceBatchMessage({
+          requestId,
+          sequence: sequenceText,
+          collection,
+          items: batch,
+        });
+        assertFits(message, maxPayloadBytes);
+        yield message;
+        sequence += 1n;
+        batch = [];
+        batchBytes = Buffer.byteLength(canonicalJson(envelope("TRACE_SOURCE_BATCH", requestId, {
+          sequence: sequence.toString(),
+          collection,
+          items: [],
+        })), "utf8");
+      }
+      const nextBytes = batchBytes + itemBytes + (batch.length === 0 ? 0 : 1);
+      if (nextBytes > maxPayloadBytes) {
+        throw protocolError(
+          "TS_INSIGHTS_PROTOCOL_ITEM_TOO_LARGE",
+          `${collection} contains an item that cannot fit in one frame`,
+        );
+      }
+      batch.push(item);
+      batchBytes = nextBytes;
+    }
+    if (batch.length > 0) {
+      const message = createTraceSourceBatchMessage({
+        requestId,
+        sequence: sequence.toString(),
+        collection,
+        items: batch,
+      });
+      assertFits(message, maxPayloadBytes);
+      yield message;
+      sequence += 1n;
+    }
+  }
+  const commit = createCommitTraceSourceMessage({
+    requestId,
+    nextSequence: sequence.toString(),
   });
   assertFits(commit, maxPayloadBytes);
   yield commit;

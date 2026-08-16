@@ -577,6 +577,63 @@ test("Codex Fact V2 records file attempts, failed results, exact errors, and tok
   }
 });
 
+test("Codex Fact V2 records full commit hashes only from successful Git command results", async () => {
+  const commit = "abcdef0123456789abcdef0123456789abcdef01";
+  const records = [
+    { type: "session_meta", payload: { id: IDS.codex, cwd: "/private/work/project" } },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      payload: {
+        type: "message", role: "user",
+        content: [{ type: "input_text", text: "Create the commit" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:01.000Z",
+      payload: {
+        type: "function_call", call_id: "git-ok", name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git commit -m test && git rev-parse HEAD" }),
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:02.000Z",
+      payload: {
+        type: "function_call_output", call_id: "git-ok", output: `${commit}\n`, status: "completed",
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:03.000Z",
+      payload: {
+        type: "function_call", call_id: "git-failed", name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git show HEAD" }),
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-01T00:00:04.000Z",
+      payload: {
+        type: "function_call_output", call_id: "git-failed", output: commit, status: "failed",
+      },
+    },
+  ];
+  const fixture = await fixtureFile(`rollout-${IDS.codex}.jsonl`, jsonl(records));
+  try {
+    const delta = await readProviderSessionDelta("codex", fixture.file, {
+      privacyContext: privacyContext(), factSchemaVersion: 2,
+    });
+    assert.equal(validateSessionFactsDeltaV2(delta).valid, true);
+    const results = delta.historyEvents.filter((event) => event.kind === "capability-result");
+    assert.deepEqual(results[0].metadata.observedGitCommitObjectIds, [commit]);
+    assert.equal(Object.hasOwn(results[1].metadata, "observedGitCommitObjectIds"), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("Codex Fact V2 preserves provider records without a V1 evidence projection", async () => {
   const unknown = {
     type: "future_provider_record",

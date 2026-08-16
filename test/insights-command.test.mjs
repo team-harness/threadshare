@@ -17,6 +17,7 @@ import {
   parseInsightsInvocation,
   reconcileActiveInsights,
   reconcileInsights,
+  syncRegisteredRepositories,
 } from "../src/insights-command.mjs";
 import { readProviderSessionDelta } from "../src/provider-evidence.mjs";
 import {
@@ -44,6 +45,178 @@ function emptyConfig() {
     },
   };
 }
+
+test("repository sync retries bounded ref drift before committing", async () => {
+  let scans = 0;
+  let commits = 0;
+  const repositories = await syncRegisteredRepositories({
+    insights: {
+      repositories: [{ repositoryId: "11111111-1111-4111-8111-111111111111" }],
+    },
+  }, {
+    async readRepositoryState() {
+      return { generation: "1", refDigest: "a".repeat(64), coverageAfter: null, refs: [] };
+    },
+    async commitTraceSourceDelta() {
+      commits += 1;
+      throw new Error("unchanged scans must not commit");
+    },
+  }, {}, {
+    repositoryRetryDelayMs: 0,
+    async scanRepository() {
+      scans += 1;
+      if (scans < 4) {
+        const error = new Error("changed");
+        error.code = "TS_INSIGHTS_REPOSITORY_CHANGED";
+        throw error;
+      }
+      return { mode: "unchanged", refs: [], commits: [] };
+    },
+  });
+  assert.equal(scans, 4);
+  assert.equal(commits, 0);
+  assert.equal(repositories[0].status, "unchanged");
+});
+
+test("repository sync preserves facts and records unavailable sources once", async () => {
+  let available = true;
+  let generation = "4";
+  let commits = 0;
+  const config = {
+    insights: {
+      repositories: [{ repositoryId: "11111111-1111-4111-8111-111111111111" }],
+    },
+  };
+  const engine = {
+    async readRepositoryState() {
+      return {
+        generation,
+        available,
+        refDigest: "a".repeat(64),
+        coverageAfter: null,
+        refs: [{ name: "refs/heads/main", objectId: "b".repeat(40) }],
+      };
+    },
+    async commitTraceSourceDelta(delta) {
+      commits += 1;
+      assert.equal(delta.available, false);
+      available = false;
+      generation = "5";
+      return { idempotent: false };
+    },
+  };
+  const options = {
+    async scanRepository() {
+      const error = new Error("missing");
+      error.code = "TS_INSIGHTS_REPOSITORY_INVALID";
+      throw error;
+    },
+    createTraceSourceDelta(_registration, scan) {
+      return { available: scan.available };
+    },
+  };
+
+  const first = await syncRegisteredRepositories(config, engine, {}, options);
+  const second = await syncRegisteredRepositories(config, engine, {}, options);
+  assert.equal(commits, 1);
+  assert.equal(first[0].status, "unavailable");
+  assert.equal(second[0].status, "unavailable");
+});
+
+test("repository sync commits an Intent-only revision without rescanning Git history", async () => {
+  const oldRevision = "5".repeat(64);
+  const newRevision = "6".repeat(64);
+  let committedDelta;
+  let reads = 0;
+  const repositories = await syncRegisteredRepositories({
+    insights: {
+      repositories: [{
+        repositoryId: "11111111-1111-4111-8111-111111111111",
+        intentPath: "docs/intent.md",
+      }],
+    },
+  }, {
+    async readRepositoryState() {
+      return {
+        generation: "7",
+        available: true,
+        refDigest: "a".repeat(64),
+        intentRevision: oldRevision,
+        coverageAfter: null,
+        refs: [{ name: "refs/heads/main", objectId: "b".repeat(40) }],
+      };
+    },
+    async commitTraceSourceDelta(delta) {
+      committedDelta = delta;
+      return { idempotent: false };
+    },
+  }, {}, {
+    async scanRepository() {
+      return {
+        mode: "unchanged",
+        available: true,
+        refDigest: "a".repeat(64),
+        refs: [{ name: "refs/heads/main", objectId: "b".repeat(40) }],
+        commits: [],
+        scm: null,
+      };
+    },
+    async readIntentSource() {
+      reads += 1;
+      return {
+        sourceKey: "c".repeat(64),
+        adapterVersion: "markdown-checklist@1",
+        revision: newRevision,
+        locator: "docs/intent.md",
+        coverage: "complete",
+        diagnostics: [],
+        nodes: [],
+        refs: [],
+      };
+    },
+    createTraceSourceDelta(_registration, scan, options) {
+      return { mode: scan.mode, intent: options.intentSource };
+    },
+  });
+
+  assert.equal(reads, 1);
+  assert.equal(committedDelta.mode, "intent");
+  assert.equal(committedDelta.intent.revision, newRevision);
+  assert.equal(repositories[0].status, "committed");
+});
+
+test("repository sync does not recommit retained Intent when no source is configured", async () => {
+  let commits = 0;
+  const repositories = await syncRegisteredRepositories({
+    insights: {
+      repositories: [{ repositoryId: "11111111-1111-4111-8111-111111111111" }],
+    },
+  }, {
+    async readRepositoryState() {
+      return {
+        generation: "7",
+        available: true,
+        refDigest: "a".repeat(64),
+        intentRevision: "6".repeat(64),
+        coverageAfter: null,
+        refs: [],
+      };
+    },
+    async commitTraceSourceDelta() {
+      commits += 1;
+    },
+  }, {}, {
+    async scanRepository() {
+      return { mode: "unchanged", refs: [], commits: [] };
+    },
+    async readIntentSource() {
+      throw new Error("unconfigured Intent source must not be read");
+    },
+  });
+
+  assert.equal(commits, 0);
+  assert.equal(repositories[0].status, "unchanged");
+});
 
 test("parses the bounded insights subcommand grammar", () => {
   assert.deepEqual(
@@ -74,7 +247,24 @@ test("parses the bounded insights subcommand grammar", () => {
   );
   assert.deepEqual(
     parseInsightsInvocation(["insights", "sync"]),
-    { action: "sync", format: "text", regenerateSecret: false },
+    { action: "sync", format: "text", regenerateSecret: false, repository: null, intent: null },
+  );
+  assert.deepEqual(
+    parseInsightsInvocation(["insights", "sync"], { repository: "./repo" }),
+    { action: "sync", format: "text", regenerateSecret: false, repository: "./repo", intent: null },
+  );
+  assert.deepEqual(
+    parseInsightsInvocation(["insights", "sync"], {
+      repository: "./repo",
+      intent: "docs/intent.md",
+    }),
+    {
+      action: "sync",
+      format: "text",
+      regenerateSecret: false,
+      repository: "./repo",
+      intent: "docs/intent.md",
+    },
   );
   for (const [positionals, options, code] of [
     [["insights", "unknown"], {}, "TS_USAGE_INVALID_VALUE"],
@@ -84,6 +274,11 @@ test("parses the bounded insights subcommand grammar", () => {
     [["insights", "sync"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
     [["insights", "reset"], { "regenerate-secret": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
     [["insights", "sync"], { verify: true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "status"], { repository: "." }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "reindex"], { repository: "." }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "sync"], { repository: "   " }, "TS_USAGE_INVALID_VALUE"],
+    [["insights", "sync"], { intent: "intent.md" }, "TS_USAGE_OPTION_DEPENDENCY"],
+    [["insights", "status"], { intent: "intent.md" }, "TS_USAGE_OPTION_NOT_ALLOWED"],
   ]) {
     assert.throws(() => parseInsightsInvocation(positionals, options), { code });
   }
@@ -138,8 +333,8 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
         purge: { state: "purged", batches: 0 },
       };
     },
-    async sync() {
-      calls.push("sync");
+    async sync(input) {
+      calls.push(`sync:${input.repository ?? "none"}`);
       return {
         format: "threadshare-insights-reconciliation@v1",
         report: { committed: 1, unchanged: 2, excluded: 0, missing: 0, failed: 0 },
@@ -185,6 +380,7 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
     mode: "incremental",
     report: { committed: 1, unchanged: 2, excluded: 0, missing: 0, failed: 0 },
     purge: { state: "purged", batches: 0 },
+    repositories: [],
   });
   assert.match(formatInsightsCommandResult(synced), /^Insights sync complete\.\nMode: incremental/mu);
 
@@ -200,7 +396,7 @@ test("executes status, exclusions, reset, sync, and reindex through injectable s
     "reindex:false",
     "list",
     "reset",
-    "sync",
+    "sync:none",
     "reindex:false",
   ]);
 });
@@ -575,6 +771,49 @@ test("real sidecar sync initializes once and then reconciles only changed source
   assert.equal(observerFailure.mode, "incremental");
   assert.equal(observerFailure.report.failed, 0);
   assert.equal(observerFailure.report.unchanged, 1);
+});
+
+test("real sidecar sync registers and incrementally commits an explicit repository", {
+  timeout: 60_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "92929292-9292-4292-8292-929292929292",
+  );
+  const repository = await mkdtemp(path.join(os.tmpdir(), "threadshare-trace-sync-"));
+  t.after(() => rm(repository, { recursive: true, force: true }));
+  for (const arguments_ of [
+    ["init", "-q"],
+    ["config", "user.email", "test@example.com"],
+    ["config", "user.name", "Threadshare Test"],
+  ]) {
+    assert.equal(spawnSync("git", arguments_, { cwd: repository }).status, 0);
+  }
+  await writeFile(path.join(repository, "delivery.txt"), "first\n");
+  assert.equal(spawnSync("git", ["add", "delivery.txt"], { cwd: repository }).status, 0);
+  assert.equal(spawnSync("git", ["commit", "-qm", "initial"], {
+    cwd: repository,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: "2026-08-12T00:00:00Z",
+      GIT_COMMITTER_DATE: "2026-08-12T00:00:00Z",
+    },
+  }).status, 0);
+
+  const invocation = parseInsightsInvocation(["insights", "sync"], {
+    format: "json",
+    repository,
+  });
+  const first = await executeInsightsCommand(invocation, fixture.reconcileOptions);
+  assert.equal(first.repositories.length, 1);
+  assert.equal(first.repositories[0].status, "committed");
+  assert.equal(first.repositories[0].commits, 1);
+
+  const second = await executeInsightsCommand(invocation, fixture.reconcileOptions);
+  assert.equal(second.repositories.length, 1);
+  assert.equal(second.repositories[0].status, "unchanged");
+  assert.equal(second.repositories[0].commits, 0);
 });
 
 test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", {

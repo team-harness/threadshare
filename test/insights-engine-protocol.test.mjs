@@ -52,6 +52,7 @@ import {
   createSessionAcceptedMessage,
   createSessionCommittedMessage,
   createSessionDeltaMessages,
+  createTraceSourceDeltaMessages,
   createSourceCheckpointMessage,
   createSourceExcludedMessage,
   createSourceRemovedMessage,
@@ -66,6 +67,7 @@ import {
   encodeSourceLocator,
   encodeProtocolFrame,
   protocolPayloadByteLength,
+  traceSourceDigestDocument,
 } from "../src/insights-engine-protocol.mjs";
 
 const fixtureUrl = new URL("./fixtures/insights-protocol-v1/frames.json", import.meta.url);
@@ -73,6 +75,39 @@ const recipeItemsUrl = new URL("./fixtures/insights-recipe-items.v1.json", impor
 const SESSION_KEY = "a".repeat(64);
 const DELTA_ID = "b".repeat(64);
 const EPOCH = "11111111-2222-4333-8444-555555555555";
+
+function traceSourceDelta() {
+  const value = {
+    format: "threadshare-insights-trace-source-delta@v1",
+    expectedGeneration: "0",
+    targetGeneration: "1",
+    repository: {
+      repositoryId: "11111111-1111-4111-8111-111111111111",
+      repositoryKey: "1".repeat(64),
+      available: true,
+      refDigest: "2".repeat(64),
+      scmProvider: "github",
+      webBaseUrl: "https://github.com",
+      repositoryPath: "team-harness/threadshare",
+      projectKeys: ["3".repeat(64), "4".repeat(64)],
+    },
+    intent: null,
+    refs: [{ name: "refs/heads/main", objectId: "a".repeat(40) }],
+    commits: [{
+      objectId: "a".repeat(40), parentObjectIds: [],
+      authorTimestamp: "2026-08-16T00:00:00.000Z",
+      committerTimestamp: "2026-08-16T00:00:00.000Z",
+      treeObjectId: "b".repeat(40), summary: "initial",
+      files: [{ path: "src/lib.rs", oldPath: null, status: "A", additions: "10", deletions: "0" }],
+    }],
+    intentNodes: [],
+    intentRefs: [],
+  };
+  return {
+    ...value,
+    deltaId: createHash("sha256").update(canonicalJson(traceSourceDigestDocument(value))).digest("hex"),
+  };
+}
 const COMPILE_OPTIONS_DIGEST = "c".repeat(64);
 const BUILD_MANIFEST_DIGEST = "d".repeat(64);
 const TURN_KEY = "e".repeat(64);
@@ -1653,6 +1688,26 @@ test("session generator greedily batches actual canonical bytes in fixed collect
   for (const message of messages.slice(1)) validator.accept(message);
   assert.equal(validator.done, true);
   assert.equal(validator.nextSequence, String(batches.length));
+});
+
+test("trace source batches flatten commit files and stay within the frame limit", async () => {
+  const messages = await collect(createTraceSourceDeltaMessages(traceSourceDelta(), {
+    requestId: "81",
+    maxPayloadBytes: 1_024,
+  }));
+  assert.equal(messages[0].type, "BEGIN_TRACE_SOURCE");
+  assert.deepEqual(messages[0].counts, {
+    refs: "1", commits: "1", files: "1", intentNodes: "0", intentRefs: "0",
+  });
+  assert.equal(messages.at(-1).type, "COMMIT_TRACE_SOURCE");
+  const batches = messages.filter((message) => message.type === "TRACE_SOURCE_BATCH");
+  assert.deepEqual(batches.map((message) => message.collection), ["refs", "commits", "files"]);
+  assert.equal(Object.hasOwn(batches[1].items[0], "files"), false);
+  assert.equal(batches[2].items[0].objectId, "a".repeat(40));
+  for (const message of messages) {
+    assert.ok(protocolPayloadByteLength(message) <= 1_024);
+    assert.equal(assertProtocolMessage(message), message);
+  }
 });
 
 test("Fact V2 session batches history metadata before payload chunks in fixed order", async () => {

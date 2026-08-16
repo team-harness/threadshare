@@ -1,0 +1,141 @@
+{
+  "format": "threadshare-insights-delivery-trace-benchmark@v1",
+  "measuredScope": "local-insights-delivery-trace-25k",
+  "sourceRevision": "3f9edb28e6a22506571c9ccf1832069af549e376",
+  "sourceWorktreeDirty": true,
+  "benchmarkScriptSha256": "e7418a5e6b6178dbb2410bff07a4b7123e847e302791beeef43c19a2cf1cd345",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "darwin 25.5.0",
+    "cpuModel": "Apple M4",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 34359738368,
+    "nodeVersion": "v22.22.2",
+    "v8Version": "12.4.254.21-node.39",
+    "hostLoad": {
+      "atStart": {
+        "oneMinute": 3.16455078125,
+        "fiveMinutes": 3.33203125,
+        "fifteenMinutes": 3.32470703125,
+        "oneMinutePerLogicalCpu": 0.316455078125
+      },
+      "atReport": {
+        "oneMinute": 3.32421875,
+        "fiveMinutes": 3.36279296875,
+        "fifteenMinutes": 3.33544921875,
+        "oneMinutePerLogicalCpu": 0.332421875
+      }
+    }
+  },
+  "corpus": {
+    "seed": "threadshare-insights-delivery-trace-25k-v1",
+    "turns": 25000,
+    "sessions": 250,
+    "commits": 5000,
+    "changedFiles": 20000,
+    "intents": 100
+  },
+  "coverage": {
+    "commits": 5000,
+    "changedFiles": 20000,
+    "intents": 100,
+    "unresolvedRefs": 10,
+    "unreachableCommits": 1,
+    "directEdges": 23893,
+    "observedEdges": 359,
+    "candidateEdges": 1,
+    "contextualEdges": 2791
+  },
+  "incrementalEquivalence": {
+    "incrementalDigest": "8640b00d4f34436767183a9b82380ef101ddf437c4da1064584b12ffc56dc61c",
+    "cleanDigest": "8640b00d4f34436767183a9b82380ef101ddf437c4da1064584b12ffc56dc61c",
+    "equal": true
+  },
+  "latency": {
+    "measuredRequestCount": 100,
+    "warmupRequestCount": 20,
+    "traceInitial": {
+      "unit": "ms",
+      "count": 100,
+      "total": 403.13017199999194,
+      "p50": 3.982416999999259,
+      "p95": 4.297375000000102,
+      "p99": 4.493667000000642,
+      "max": 5.524874999999156
+    },
+    "traceExpansion": {
+      "unit": "ms",
+      "count": 100,
+      "total": 659.6136279999955,
+      "p50": 6.560959000000366,
+      "p95": 10.23700000000099,
+      "p99": 11.415124999999534,
+      "max": 11.910124999998516
+    },
+    "evidenceFirstPage": {
+      "unit": "ms",
+      "count": 100,
+      "total": 3269.926293999999,
+      "p50": 32.51499999999942,
+      "p95": 34.05724999999984,
+      "p99": 35.39058399999885,
+      "max": 38.15625
+    },
+    "gitDiffFirstPage": {
+      "unit": "ms",
+      "count": 100,
+      "total": 1010.5350030000027,
+      "p50": 10.03820799999994,
+      "p95": 10.863624999999956,
+      "p99": 11.119832999998835,
+      "max": 11.17450000000099
+    }
+  },
+  "resources": {
+    "sidecarPeakBytes": 37683200,
+    "maxResponseBytes": 47901
+  },
+  "queryPlans": {
+    "edgeBySource": {
+      "detailDigest": "4a786d7a389809405d927cac0781fae42a553306d4acfa415436f4caaa40e1b2",
+      "indexed": true
+    },
+    "changedFileByPath": {
+      "detailDigest": "4ff6b53b6ca1ff9b23a256af46872485d4250de2c842f8dc8fb47a41ca093fdf",
+      "indexed": true
+    },
+    "repositoryByProject": {
+      "detailDigest": "9729668bcf71cb756efeffaf337f6fceb11eb493fd777a3653ef81dc53be92f2",
+      "indexed": true
+    }
+  },
+  "resultDigest": "7f315770ff2fdfc9de4deba987ac56f2d31180d83820363ceaa0151ba8366c8b",
+  "engineIdentity": {
+    "buildManifestDigest": "a59adc1d2c99a7680d365a22cdd8768f1886f1883956afd96255d2d25f309d8e",
+    "engineVersion": "0.0.0",
+    "format": "threadshare-insights-engine-version@v1",
+    "protocolVersion": 1,
+    "sqliteCompileOptionsDigest": "5d6e1c870b340d17a252fbc26b2e3b553ae2f410d375dced065d133bdfaa150b",
+    "sqliteVersion": "3.53.2",
+    "target": "development",
+    "binarySha256": "d90694c483b00991a71f04ef4eb69fdfdd39d2ccf2a9609c45c8f516b78ed1b5"
+  },
+  "gates": {
+    "corpusComplete": true,
+    "incrementalEqualsClean": true,
+    "traceInitialWithinLimit": true,
+    "traceExpansionWithinLimit": true,
+    "evidenceFirstPageWithinLimit": true,
+    "gitDiffFirstPageWithinLimit": true,
+    "engineRssWithin128MiB": true,
+    "responseWithin4MiB": true,
+    "indexedQueryPlans": true,
+    "allMeasuredDeliveryTraceGatesPassed": true
+  },
+  "notMeasured": [
+    "250k Delivery Trace capacity is deferred to a later iteration",
+    "network SCM availability and remote issue trackers are outside the local evidence boundary",
+    "cross-repository and global filesystem discovery are intentionally unsupported"
+  ]
+}

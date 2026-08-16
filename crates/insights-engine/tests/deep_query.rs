@@ -4,11 +4,19 @@ use threadshare_insights_engine::deep_query::{
     CountMode, DeepEvidenceRequest, DeepEvidenceTarget, DeepOrderBy, DeepPredicate,
     DeepQueryRequest, DeepQueryShape, DeepResource, Direction, PayloadMode, PredicateOperator,
 };
+use threadshare_insights_engine::delivery_graph_repository::{
+    GitCommitDelta, GitCommitFileDelta, IntentNodeDelta, IntentRefDelta, IntentSourceDelta,
+    RepositoryDelta, RepositoryRefDelta, TraceSourceDeltaV1,
+};
+use threadshare_insights_engine::delivery_trace::{
+    DeliveryTraceRequest, TraceDirection, TraceNodeKind, TraceNodeRef,
+};
 use threadshare_insights_engine::fact_model::{
     Completeness, HistoryEventFact, HistoryPayloadChunkFact, HistoryPayloadFact,
     HistoryPayloadKind, PayloadEncoding, SessionFactsDeltaV1, StableKey, WireU64,
     expected_history_event_revision,
 };
+use threadshare_insights_engine::hash_key;
 use threadshare_insights_engine::recipe::{
     RecipeBucket, RecipeFilters, RecipeName, RecipeRequest, RecipeWindow,
 };
@@ -1047,6 +1055,386 @@ fn all_deep_record_resources_have_typed_fields_and_stable_orders() {
         assert_eq!(response.records.len(), expected_count);
         assert!(response.records[0][key_field].is_string());
     }
+}
+
+#[test]
+fn delivery_edge_resource_reads_the_same_projected_edge_as_delivery_trace() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut session_delta = fixture_delta_v2();
+    session_delta.session.project_key = Some(key(0x33));
+    let session_key = session_delta.session.session_key;
+    push_history_event(
+        &mut session_delta,
+        key(0x91),
+        20,
+        "capability-result",
+        "2026-08-16T00:00:00.000Z",
+        json!({
+            "providerState": "completed",
+            "observedGitCommitObjectIds": ["a".repeat(40)],
+            "fileActivities": [{
+                "action": "write", "phase": "confirmed", "pathRole": "target",
+                "rawPath": "src/lib.rs", "normalizedPath": "src/lib.rs",
+                "relativePath": "src/lib.rs", "absolute": false, "projectRelative": true
+            }]
+        }),
+    );
+    storage.apply_session_facts(session_delta).unwrap();
+    let repository_key = "1".repeat(64);
+    let object_id = "a".repeat(40);
+    storage
+        .apply_trace_source_delta(TraceSourceDeltaV1 {
+            format: "threadshare-insights-trace-source-delta@v1".to_owned(),
+            delta_id: "0".repeat(64),
+            expected_generation: "0".to_owned(),
+            target_generation: "1".to_owned(),
+            repository: RepositoryDelta {
+                repository_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                repository_key: repository_key.clone(),
+                available: true,
+                ref_digest: "2".repeat(64),
+                scm_provider: Some("github".to_owned()),
+                web_base_url: Some("https://github.com".to_owned()),
+                repository_path: Some("team-harness/threadshare".to_owned()),
+                project_keys: vec!["3".repeat(64), "4".repeat(64)],
+            },
+            intent: Some(IntentSourceDelta {
+                source_key: "5".repeat(64),
+                adapter_version: "markdown-checklist@1".to_owned(),
+                revision: "6".repeat(64),
+                locator: "docs/intent.md".to_owned(),
+                coverage: "complete".to_owned(),
+                diagnostics: vec![],
+            }),
+            refs: vec![RepositoryRefDelta {
+                name: "refs/heads/main".to_owned(),
+                object_id: object_id.clone(),
+            }],
+            commits: vec![GitCommitDelta {
+                object_id: object_id.clone(),
+                parent_object_ids: vec![],
+                author_timestamp: "2026-08-16T00:00:00.000Z".to_owned(),
+                committer_timestamp: "2026-08-16T00:00:00.000Z".to_owned(),
+                tree_object_id: "b".repeat(40),
+                summary: "initial".to_owned(),
+                files: vec![GitCommitFileDelta {
+                    path: "src/lib.rs".to_owned(),
+                    old_path: None,
+                    status: "A".to_owned(),
+                    additions: Some("10".to_owned()),
+                    deletions: Some("0".to_owned()),
+                }],
+            }],
+            intent_nodes: vec![IntentNodeDelta {
+                id: "delivery-trace".to_owned(),
+                parent_id: None,
+                kind: "feature".to_owned(),
+                title: "Deliver trace evidence".to_owned(),
+                status: "todo".to_owned(),
+                stable_id: true,
+            }],
+            intent_refs: vec![
+                IntentRefDelta {
+                    node_id: "delivery-trace".to_owned(),
+                    kind: "commit".to_owned(),
+                    value: object_id.clone(),
+                },
+                IntentRefDelta {
+                    node_id: "delivery-trace".to_owned(),
+                    kind: "spec".to_owned(),
+                    value: "docs/insights-delivery-trace-design.md".to_owned(),
+                },
+            ],
+        })
+        .unwrap();
+
+    let mut request = records_query(
+        DeepResource::DeliveryEdge,
+        &[
+            "edgeKey",
+            "repositoryKey",
+            "fromKind",
+            "fromKey",
+            "toKind",
+            "toKey",
+            "relation",
+            "strength",
+            "source",
+            "commitHash",
+            "normalizedPath",
+            "additions",
+            "deletions",
+            "reachable",
+            "observedAt",
+            "revision",
+        ],
+        &[("observedAt", Direction::Desc), ("edgeKey", Direction::Asc)],
+    );
+    request.predicate = Some(DeepPredicate::And {
+        and: vec![
+            DeepPredicate::Leaf {
+                field: "repositoryKey".to_owned(),
+                operator: PredicateOperator::Eq,
+                value: Some(json!(repository_key)),
+            },
+            DeepPredicate::Leaf {
+                field: "relation".to_owned(),
+                operator: PredicateOperator::Eq,
+                value: Some(json!("commit-changed-file")),
+            },
+        ],
+    });
+    let query = storage.read_deep_query(&request).unwrap();
+    assert_eq!(query.total_match_count.as_deref(), Some("1"));
+    assert_eq!(query.records[0]["relation"], "commit-changed-file");
+    assert_eq!(query.records[0]["strength"], "direct");
+    assert_eq!(query.records[0]["normalizedPath"], "src/lib.rs");
+
+    request.shape = DeepQueryShape::Aggregate {
+        group_by: vec!["normalizedPath".to_owned()],
+        metrics: vec![json!({ "name": "changes", "op": "count" })],
+    };
+    request.order_by = vec![
+        DeepOrderBy {
+            field: "changes".to_owned(),
+            direction: Direction::Desc,
+        },
+        DeepOrderBy {
+            field: "normalizedPath".to_owned(),
+            direction: Direction::Asc,
+        },
+    ];
+    let aggregate = storage.read_deep_query(&request).unwrap();
+    let groups = aggregate.groups.as_ref().unwrap();
+    assert_eq!(groups[0]["group"]["normalizedPath"], "src/lib.rs");
+    assert_eq!(groups[0]["metrics"]["changes"], "1");
+
+    let commit_key = hash_key(
+        "git-commit",
+        &[
+            hex::decode(&repository_key).unwrap(),
+            object_id.as_bytes().to_vec(),
+        ],
+    );
+    let trace = storage
+        .read_delivery_trace(
+            "22222222-2222-4222-8222-222222222222",
+            &DeliveryTraceRequest {
+                format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                root: TraceNodeRef {
+                    kind: TraceNodeKind::GitCommit,
+                    key: commit_key,
+                },
+                window: None,
+                direction: TraceDirection::Outgoing,
+                max_depth: 1,
+                include_candidate_edges: false,
+                include_contextual_edges: false,
+                limit: 10,
+                cursor: None,
+                evaluated_at: "2026-08-16T01:00:00.000Z".to_owned(),
+            },
+        )
+        .unwrap();
+    assert_eq!(query.records[0]["revision"], trace.edges[0].revision);
+    let trace_json = serde_json::to_value(&trace).unwrap();
+    assert_eq!(
+        trace_json["nodes"][0]["attributes"]["externalLinks"]["commit"],
+        format!("https://github.com/team-harness/threadshare/commit/{object_id}")
+    );
+
+    let session_trace = storage
+        .read_delivery_trace(
+            "22222222-2222-4222-8222-222222222222",
+            &DeliveryTraceRequest {
+                format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                root: TraceNodeRef {
+                    kind: TraceNodeKind::Session,
+                    key: session_key.to_string(),
+                },
+                window: None,
+                direction: TraceDirection::Outgoing,
+                max_depth: 1,
+                include_candidate_edges: false,
+                include_contextual_edges: false,
+                limit: 10,
+                cursor: None,
+                evaluated_at: "2026-08-16T01:00:00.000Z".to_owned(),
+            },
+        )
+        .unwrap();
+    let observed_commit = session_trace
+        .edges
+        .iter()
+        .find(|edge| edge.relation.as_str() == "session-observed-commit")
+        .unwrap();
+    assert_eq!(observed_commit.strength.as_str(), "direct");
+    assert_eq!(observed_commit.source.as_str(), "observed-git-result");
+    assert!(
+        session_trace
+            .edges
+            .iter()
+            .any(|edge| edge.relation.as_str() == "session-touched-file")
+    );
+    let observed_evidence = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: DeepEvidenceTarget::DeliveryEdge {
+                relation: observed_commit.relation,
+                from: observed_commit.from.clone(),
+                to: observed_commit.to.clone(),
+                revision: observed_commit.revision.clone(),
+            },
+            include: vec!["envelope".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap();
+    assert!(observed_evidence.content.contains("full-commit-hash"));
+    assert!(observed_evidence.content.contains("not-authorship"));
+
+    let commit_evidence = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: DeepEvidenceTarget::DeliveryNode {
+                node_kind: TraceNodeKind::GitCommit,
+                node_key: trace.nodes[0].key.clone(),
+                revision: trace.nodes[0].revision.clone(),
+            },
+            include: vec!["envelope".to_owned(), "payload".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap();
+    assert!(commit_evidence.complete);
+    assert!(commit_evidence.content.contains("git-commit"));
+    assert!(commit_evidence.content.contains("src/lib.rs"));
+    assert!(commit_evidence.content.contains(&object_id));
+
+    let edge_evidence = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: DeepEvidenceTarget::DeliveryEdge {
+                relation: trace.edges[0].relation,
+                from: trace.edges[0].from.clone(),
+                to: trace.edges[0].to.clone(),
+                revision: trace.edges[0].revision.clone(),
+            },
+            include: vec!["envelope".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap();
+    assert!(edge_evidence.complete);
+    assert!(edge_evidence.content.contains("commit-changed-file"));
+    assert!(
+        edge_evidence
+            .content
+            .contains("not-exclusive-line-attribution")
+    );
+
+    let intent_key = hash_key(
+        "intent",
+        &[
+            hex::decode(&repository_key).unwrap(),
+            b"delivery-trace".to_vec(),
+        ],
+    );
+    let intent_trace = storage
+        .read_delivery_trace(
+            "22222222-2222-4222-8222-222222222222",
+            &DeliveryTraceRequest {
+                format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                root: TraceNodeRef {
+                    kind: TraceNodeKind::Intent,
+                    key: intent_key,
+                },
+                window: None,
+                direction: TraceDirection::Outgoing,
+                max_depth: 1,
+                include_candidate_edges: false,
+                include_contextual_edges: false,
+                limit: 10,
+                cursor: None,
+                evaluated_at: "2026-08-16T01:00:00.000Z".to_owned(),
+            },
+        )
+        .unwrap();
+    let intent = intent_trace
+        .nodes
+        .iter()
+        .find(|node| node.kind == TraceNodeKind::Intent)
+        .unwrap();
+    let intent_evidence = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: DeepEvidenceTarget::DeliveryNode {
+                node_kind: TraceNodeKind::Intent,
+                node_key: intent.key.clone(),
+                revision: intent.revision.clone(),
+            },
+            include: vec!["envelope".to_owned(), "payload".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap();
+    assert!(intent_evidence.content.contains("delivery-trace"));
+    assert!(
+        intent_evidence
+            .content
+            .contains("docs/insights-delivery-trace-design.md")
+    );
+    let intent_edge = intent_trace
+        .edges
+        .iter()
+        .find(|edge| edge.relation.as_str() == "intent-declares-commit")
+        .unwrap();
+    let intent_edge_evidence = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: DeepEvidenceTarget::DeliveryEdge {
+                relation: intent_edge.relation,
+                from: intent_edge.from.clone(),
+                to: intent_edge.to.clone(),
+                revision: intent_edge.revision.clone(),
+            },
+            include: vec!["envelope".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap();
+    assert!(intent_edge_evidence.content.contains("explicit-reference"));
+    assert!(intent_edge_evidence.content.contains("not-causality"));
+
+    let mut stale_target = match commit_evidence.target {
+        DeepEvidenceTarget::DeliveryNode {
+            node_kind,
+            node_key,
+            ..
+        } => DeepEvidenceTarget::DeliveryNode {
+            node_kind,
+            node_key,
+            revision: "f".repeat(64),
+        },
+        _ => unreachable!(),
+    };
+    if let DeepEvidenceTarget::DeliveryNode { revision, .. } = &mut stale_target {
+        assert_ne!(revision, &trace.nodes[0].revision);
+    }
+    let stale = storage
+        .read_deep_evidence(&DeepEvidenceRequest {
+            format: "threadshare-insights-evidence-request@v2".to_owned(),
+            target: stale_target,
+            include: vec!["envelope".to_owned()],
+            cursor: None,
+            max_bytes: 4096,
+        })
+        .unwrap_err();
+    assert_eq!(stale.code, "TS_INSIGHTS_PAYLOAD_CHANGED");
+
+    request.predicate = None;
+    let unbounded = storage.read_deep_query(&request).unwrap_err();
+    assert_eq!(unbounded.code, "TS_QUERY_TOO_BROAD");
 }
 
 #[test]

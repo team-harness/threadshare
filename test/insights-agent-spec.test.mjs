@@ -18,6 +18,7 @@ const INTENT_IDS = Object.freeze([
   "token-hotspot",
   "solution-reuse",
   "session-explanation",
+  "delivery-trace",
   "custom-query",
 ]);
 const RECIPE_NAMES = Object.freeze([
@@ -28,6 +29,7 @@ const RECIPE_NAMES = Object.freeze([
   "token-hotspots@1",
   "solution-recall@1",
   "session-timeline@1",
+  "delivery-trace@1",
 ]);
 
 async function runMcp(messages, options = {}) {
@@ -61,6 +63,17 @@ test("Agent spec maps natural-language questions to every Insights protocol path
     spec.intents.flatMap((intent) => intent.plan.map((step) => step.recipe).filter(Boolean)).sort(),
     [...RECIPE_NAMES].sort(),
   );
+  const delivery = spec.intents.find(({ id }) => id === "delivery-trace");
+  assert.deepEqual(delivery.userQuestions, [
+    "Which Sessions and commits delivered this feature, and what evidence connects them?",
+    "How was this failure resolved, and what code changed in the successful delivery?",
+    "Which requirements still have no recorded commit evidence?",
+    "Which commits have no recorded Agent or intent evidence?",
+    "What should I know before continuing this work?",
+  ]);
+  assert.equal(delivery.answerRules.some((rule) => rule.includes("never Agent authorship")), true);
+  assert.equal(delivery.answerRules.some((rule) =>
+    rule.includes("cannot restore a Session, code state, or Git state")), true);
   assert.equal(spec.actions.every((action) => action.help.startsWith("threadshare insights ")), true);
 });
 

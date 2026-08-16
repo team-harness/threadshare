@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-git-diff-evidence.v1.schema.json",
+  "title": "Threadshare Insights Git Diff Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision", "provenance", "payloadSha256", "totalBytes", "range", "content", "nextCursor", "complete", "binary"],
+  "properties": {
+    "format": { "const": "threadshare-insights-git-diff-evidence@v1" },
+    "repositoryKey": { "$ref": "#/$defs/key" },
+    "commitObjectId": { "$ref": "#/$defs/objectId" },
+    "parentObjectId": { "oneOf": [{ "$ref": "#/$defs/objectId" }, { "type": "null" }] },
+    "path": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 12288 }, { "type": "null" }] },
+    "revision": { "$ref": "#/$defs/key" },
+    "provenance": { "const": "local-git-object" },
+    "payloadSha256": { "$ref": "#/$defs/key" },
+    "totalBytes": { "$ref": "#/$defs/decimal" },
+    "range": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": { "start": { "$ref": "#/$defs/decimal" }, "end": { "$ref": "#/$defs/decimal" } }
+    },
+    "content": { "type": "string", "maxLength": 1048576 },
+    "nextCursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[\\x20-\\x7e]+$" }, { "type": "null" }] },
+    "complete": { "type": "boolean" },
+    "binary": { "type": "boolean" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+  }
+}

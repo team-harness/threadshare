@@ -111,9 +111,11 @@ test("renders a self-describing root and command help contract", () => {
     insights: [
       "cursor",
       "format",
+      "intent",
       "limit",
       "query",
       "regenerate-secret",
+      "repository",
       "request",
       "revision",
       "stdio",
@@ -170,6 +172,8 @@ test("renders a self-describing root and command help contract", () => {
     "TS_QUERY_TOO_BROAD",
     "TS_INSIGHTS_REQUEST_INVALID",
     "TS_INSIGHTS_NOT_INDEXED",
+    "TS_INSIGHTS_DELIVERY_TRACE_NOT_READY",
+    "TS_INSIGHTS_REPOSITORY_INVALID",
     "TS_INSIGHTS_QUERY_V2_NOT_READY",
     "TS_INSIGHTS_CURSOR_STALE",
     "TS_INSIGHTS_TURN_CHANGED",
@@ -246,6 +250,7 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderInsightsActionHelp("spec"), /Users describe.*natural language/is);
   assert.match(renderInsightsActionHelp("spec"), /Agent chooses the protocol/is);
   assert.match(renderInsightsActionHelp("recipe"), /capability-contexts@1.*failure-chains@1/is);
+  assert.match(renderInsightsActionHelp("recipe"), /delivery-trace@1/is);
   assert.match(renderInsightsActionHelp("evidence"), /target\.kind: event, turn, session, or attempt-chain/);
   assert.match(renderInsightsActionHelp("mcp"), /stdout is JSON-RPC only/);
   assert.match(renderInsightsActionHelp("status"), /does not start the Engine/is);
@@ -349,6 +354,13 @@ test("Insights query CLI rejects invalid automation input before touching raw se
     run(["insights", "status", "--query", "ignored"]),
     "TS_USAGE_OPTION_NOT_ALLOWED",
   );
+  const nonRepository = path.join(directory, "not-a-repository");
+  await mkdir(nonRepository);
+  const invalidRepository = run([
+    "insights", "sync", "--repository", nonRepository, "--format", "json",
+  ]);
+  assertDiagnosticCode(invalidRepository, "TS_INSIGHTS_REPOSITORY_INVALID");
+  assert.equal(invalidRepository.stderr.includes(nonRepository), false);
 
   await mkdir(stateDirectory, { recursive: true });
   await writeFile(path.join(stateDirectory, "insights.sqlite3"), "existing");
@@ -393,6 +405,7 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_QUERY_TOO_BROAD",
     "TS_INSIGHTS_REQUEST_INVALID",
     "TS_INSIGHTS_NOT_INDEXED",
+    "TS_INSIGHTS_DELIVERY_TRACE_NOT_READY",
     "TS_INSIGHTS_QUERY_V2_NOT_READY",
     "TS_INSIGHTS_CURSOR_STALE",
     "TS_INSIGHTS_TURN_CHANGED",

@@ -10,6 +10,7 @@ import {
   loadInsightsConfig,
   saveInsightsConfig,
   updateInsightsExclusion,
+  updateInsightsRepositoryRegistration,
 } from "../src/insights-config.mjs";
 import { resolveInsightsPaths } from "../src/insights-paths.mjs";
 import { openExistingInsightsState, openInsightsState } from "../src/insights-state.mjs";
@@ -246,6 +247,56 @@ test("loads defaults and persists a versioned private insights config", async ()
     assert.deepEqual(JSON.parse(await readFile(configFile, "utf8")), defaults);
     assert.equal((await stat(path.dirname(configFile))).mode & 0o777, 0o700);
     assert.equal((await stat(configFile)).mode & 0o777, 0o600);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registers repositories by Git common-directory identity without colliding on paths", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-repositories-"));
+  const configFile = path.join(directory, "config.json");
+  const options = {
+    platform: "linux",
+    homeDirectory: directory,
+    environment: { THREADSHARE_CONFIG: configFile },
+    randomUuid: (() => {
+      const values = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+      ];
+      return () => values.shift();
+    })(),
+  };
+  try {
+    const first = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "20",
+    }, options);
+    assert.equal(first.changed, true);
+    assert.equal(first.repository.repositoryId, "11111111-1111-4111-8111-111111111111");
+
+    const linkedWorktree = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project-worktree",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "20",
+    }, options);
+    assert.equal(linkedWorktree.repository.repositoryId, first.repository.repositoryId);
+    assert.equal(linkedWorktree.repository.rootDirectory, "/work/project-worktree");
+
+    const replacement = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "21",
+    }, options);
+    assert.equal(replacement.repository.repositoryId, "22222222-2222-4222-8222-222222222222");
+    assert.equal(replacement.config.insights.repositories.length, 2);
+    assert.equal(new Set(replacement.config.insights.repositories.map(
+      ({ repositoryId }) => repositoryId,
+    )).size, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -381,6 +381,8 @@ impl EngineStorage {
         crate::normalized_repository::initialize_schema(&mut connection)?;
         crate::source_state::initialize_schema(&connection)?;
         crate::fact_staging::initialize(&connection)?;
+        crate::trace_staging::initialize(&connection)?;
+        crate::delivery_graph_repository::initialize_schema(&connection)?;
         Ok(Self {
             connection,
             staged_source_state: None,
@@ -790,8 +792,96 @@ impl EngineStorage {
         Ok(outcome)
     }
 
+    pub fn apply_trace_source_delta(
+        &mut self,
+        delta: crate::delivery_graph_repository::TraceSourceDeltaV1,
+    ) -> Result<CommitOutcome, StorageError> {
+        let outcome = crate::delivery_graph_repository::apply_trace_source_delta(
+            &mut self.connection,
+            &delta,
+        )?;
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
+    pub fn repository_generation(
+        &self,
+        repository_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        crate::delivery_graph_repository::repository_generation(&self.connection, repository_id)
+    }
+
+    pub fn repository_state_page(
+        &self,
+        repository_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::delivery_graph_repository::RepositoryStatePage, StorageError> {
+        crate::delivery_graph_repository::repository_state_page(
+            &self.connection,
+            repository_id,
+            cursor,
+            limit,
+        )
+    }
+
+    pub fn repository_commit_counts(
+        &self,
+        repository_id: &str,
+    ) -> Result<(u64, u64), StorageError> {
+        crate::delivery_graph_repository::repository_commit_counts(&self.connection, repository_id)
+    }
+
+    pub fn delivery_graph_digest(&self) -> Result<String, StorageError> {
+        crate::delivery_graph_repository::delivery_graph_digest(&self.connection)
+    }
+
+    pub fn read_delivery_trace(
+        &self,
+        database_uuid: &str,
+        request: &crate::delivery_trace::DeliveryTraceRequest,
+    ) -> Result<
+        crate::delivery_trace::DeliveryTraceResponse,
+        crate::delivery_trace::DeliveryTraceError,
+    > {
+        crate::delivery_trace::read_delivery_trace(&self.connection, database_uuid, request)
+    }
+
     pub fn clear_session_fact_staging(&mut self) -> Result<(), StorageError> {
         crate::fact_staging::clear(&self.connection)
+    }
+
+    pub fn clear_trace_source_staging(&mut self) -> Result<(), StorageError> {
+        crate::trace_staging::clear(&self.connection)
+    }
+
+    pub fn stage_trace_source_batch(
+        &mut self,
+        collection: &str,
+        first_ordinal: usize,
+        items: &[serde_json::Value],
+    ) -> Result<crate::trace_staging::StageTraceBatchOutcome, StorageError> {
+        crate::trace_staging::stage_batch(&mut self.connection, collection, first_ordinal, items)
+    }
+
+    pub fn staged_trace_source_count(&self, collection: &str) -> Result<usize, StorageError> {
+        crate::trace_staging::count(&self.connection, collection)
+    }
+
+    pub fn staged_trace_source_digest(
+        &self,
+        metadata: &crate::trace_staging::TraceSourceMetadata,
+    ) -> Result<String, StorageError> {
+        crate::trace_staging::staged_digest(&self.connection, metadata)
+    }
+
+    pub fn apply_staged_trace_source(
+        &mut self,
+        metadata: &crate::trace_staging::TraceSourceMetadata,
+    ) -> Result<CommitOutcome, StorageError> {
+        let outcome = crate::trace_staging::apply_staged(&mut self.connection, metadata)?;
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
     }
 
     pub(crate) fn stage_session_fact_batch(

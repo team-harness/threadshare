@@ -1,0 +1,238 @@
+{
+  "format": "threadshare-insights-delivery-trace-golden@v1",
+  "request": {
+    "format": "threadshare-insights-delivery-trace-request@v1",
+    "root": {
+      "kind": "session",
+      "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "window": null,
+    "direction": "both",
+    "maxDepth": 1,
+    "includeCandidateEdges": false,
+    "includeContextualEdges": false,
+    "limit": 50,
+    "cursor": null,
+    "evaluatedAt": "2026-08-16T02:00:00.000Z"
+  },
+  "response": {
+    "format": "threadshare-insights-delivery-trace@v1",
+    "databaseUuid": "11111111-2222-4333-8444-555555555555",
+    "snapshotSeq": "42",
+    "evaluatedAt": "2026-08-16T02:00:00.000Z",
+    "root": {
+      "kind": "session",
+      "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "nodes": [
+      {
+        "kind": "intent",
+        "key": "7777777777777777777777777777777777777777777777777777777777777777",
+        "revision": "7878787878787878787878787878787878787878787878787878787878787878",
+        "label": "Delivery Trace Stage 0",
+        "observedAt": null,
+        "attributes": {
+          "intentKind": "feature",
+          "status": "complete",
+          "parentIntentKey": null
+        }
+      },
+      {
+        "kind": "session",
+        "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "label": "Implement delivery trace",
+        "observedAt": "2026-08-16T01:00:00.000Z",
+        "attributes": {
+          "provider": "codex",
+          "projectKey": null
+        }
+      },
+      {
+        "kind": "file",
+        "key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "label": "src/delivery_trace.rs",
+        "observedAt": "2026-08-16T01:30:00.000Z",
+        "attributes": {
+          "repositoryKey": "9999999999999999999999999999999999999999999999999999999999999999",
+          "path": "src/delivery_trace.rs"
+        }
+      },
+      {
+        "kind": "git-commit",
+        "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "label": "Add delivery trace contract",
+        "observedAt": "2026-08-16T01:45:00.000Z",
+        "attributes": {
+          "repositoryKey": "9999999999999999999999999999999999999999999999999999999999999999",
+          "objectId": "1111111111111111111111111111111111111111",
+          "parentObjectIds": ["2222222222222222222222222222222222222222"],
+          "reachable": true,
+          "externalLinks": {
+            "commit": "https://github.com/team-harness/threadshare/commit/1111111111111111111111111111111111111111"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "relation": "intent-declares-session",
+        "from": {
+          "kind": "intent",
+          "key": "7777777777777777777777777777777777777777777777777777777777777777"
+        },
+        "to": {
+          "kind": "session",
+          "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "strength": "direct",
+        "source": "intent-explicit-session-ref",
+        "facts": [{ "kind": "explicit-reference" }],
+        "limitations": ["not-causality"],
+        "revision": "8989898989898989898989898989898989898989898989898989898989898989"
+      },
+      {
+        "relation": "session-touched-file",
+        "from": {
+          "kind": "session",
+          "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "to": {
+          "kind": "file",
+          "key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "strength": "direct",
+        "source": "normalized-file-event",
+        "facts": [],
+        "limitations": ["not-exclusive-line-attribution"],
+        "revision": "1212121212121212121212121212121212121212121212121212121212121212"
+      },
+      {
+        "relation": "session-correlates-commit",
+        "from": {
+          "kind": "session",
+          "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "to": {
+          "kind": "git-commit",
+          "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "strength": "observed",
+        "source": "ordered-exact-path-overlap",
+        "facts": [
+          { "kind": "exact-path-overlap", "count": "1" },
+          { "kind": "within-observed-commit-window" }
+        ],
+        "limitations": ["not-authorship", "not-exclusive-line-attribution"],
+        "revision": "3434343434343434343434343434343434343434343434343434343434343434"
+      }
+    ],
+    "nextCursor": null,
+    "truncated": false,
+    "coverage": {
+      "repositoryState": "complete",
+      "intentState": "complete",
+      "unresolvedRefCount": "0",
+      "excludedCandidateEdgeCount": "1",
+      "excludedContextualEdgeCount": "1",
+      "unreachableCommitCount": "0"
+    }
+  },
+  "classifierCases": [
+    {
+      "name": "full commit hash observed",
+      "input": {
+        "fullCommitHashObserved": true,
+        "exactPathOverlapCount": "0",
+        "withinObservedCommitWindow": false,
+        "significantTermOverlapCount": "0",
+        "uniqueHighestTextMatch": false,
+        "sameRepository": true
+      },
+      "expected": {
+        "relation": "session-observed-commit",
+        "strength": "direct",
+        "source": "observed-git-result"
+      }
+    },
+    {
+      "name": "ordered exact path overlap",
+      "input": {
+        "fullCommitHashObserved": false,
+        "exactPathOverlapCount": "2",
+        "withinObservedCommitWindow": true,
+        "significantTermOverlapCount": "0",
+        "uniqueHighestTextMatch": false,
+        "sameRepository": true
+      },
+      "expected": {
+        "relation": "session-correlates-commit",
+        "strength": "observed",
+        "source": "ordered-exact-path-overlap"
+      }
+    },
+    {
+      "name": "shared path without ordered window",
+      "input": {
+        "fullCommitHashObserved": false,
+        "exactPathOverlapCount": "2",
+        "withinObservedCommitWindow": false,
+        "significantTermOverlapCount": "0",
+        "uniqueHighestTextMatch": false,
+        "sameRepository": true
+      },
+      "expected": {
+        "relation": "contextual-same-file",
+        "strength": "contextual",
+        "source": "same-file-history"
+      }
+    },
+    {
+      "name": "unique significant text overlap",
+      "input": {
+        "fullCommitHashObserved": false,
+        "exactPathOverlapCount": "0",
+        "withinObservedCommitWindow": false,
+        "significantTermOverlapCount": "3",
+        "uniqueHighestTextMatch": true,
+        "sameRepository": true
+      },
+      "expected": {
+        "relation": "session-correlates-commit",
+        "strength": "candidate",
+        "source": "unique-text-overlap"
+      }
+    }
+  ],
+  "gitDiff": {
+    "request": {
+      "format": "threadshare-insights-git-diff-evidence-request@v1",
+      "repositoryKey": "9999999999999999999999999999999999999999999999999999999999999999",
+      "commitObjectId": "1111111111111111111111111111111111111111",
+      "parentObjectId": "2222222222222222222222222222222222222222",
+      "path": "src/delivery_trace.rs",
+      "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "contextLines": 3,
+      "maxBytes": 65536,
+      "cursor": null
+    },
+    "response": {
+      "format": "threadshare-insights-git-diff-evidence@v1",
+      "repositoryKey": "9999999999999999999999999999999999999999999999999999999999999999",
+      "commitObjectId": "1111111111111111111111111111111111111111",
+      "parentObjectId": "2222222222222222222222222222222222222222",
+      "path": "src/delivery_trace.rs",
+      "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "provenance": "local-git-object",
+      "payloadSha256": "abababababababababababababababababababababababababababababababab",
+      "totalBytes": "22",
+      "range": { "start": "0", "end": "22" },
+      "content": "@@ -1 +1 @@\n-old\n+new\n",
+      "nextCursor": null,
+      "complete": true,
+      "binary": false
+    }
+  }
+}

@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertAggregateArtifactPrivacy } from "../../../scripts/package-insights-benchmark-evidence.mjs";
 import { verifyDeepQueryEvidenceDirectory } from "../../../scripts/package-insights-deep-query-evidence.mjs";
+import { verifyDeliveryTraceEvidenceDirectory } from "../../../scripts/package-insights-delivery-trace-evidence.mjs";
 import {
   ITEM6_APPROVED_EPIC_SHA256,
   ITEM6_CAPACITY_CATEGORY_KEYS,
@@ -56,6 +57,14 @@ const DEEP_QUERY_DIRECTORY = path.join(
   "benchmarks",
   "local-session-insights",
   "2026-08-13-deep-query",
+  "evidence",
+);
+const DELIVERY_TRACE_DIRECTORY = path.join(
+  REPOSITORY_ROOT,
+  "docs",
+  "benchmarks",
+  "local-session-insights",
+  "2026-08-16-delivery-trace",
   "evidence",
 );
 
@@ -723,7 +732,13 @@ export async function verifyItem6Evidence({
 }
 
 export async function verifyInsightsEvidence() {
-  const [item4Artifacts, item5Artifacts, item6Artifacts, deepQueryArtifacts] = await Promise.all([
+  const [
+    item4Artifacts,
+    item5Artifacts,
+    item6Artifacts,
+    deepQueryArtifacts,
+    deliveryTraceArtifacts,
+  ] = await Promise.all([
     verifyItem4(),
     verifyItem5(),
     verifyItem6Evidence(),
@@ -731,6 +746,7 @@ export async function verifyInsightsEvidence() {
       directory: DEEP_QUERY_DIRECTORY,
       repositoryRoot: REPOSITORY_ROOT,
     }),
+    verifyDeliveryTraceEvidenceDirectory({ directory: DELIVERY_TRACE_DIRECTORY }),
   ]);
   return {
     format: "threadshare-insights-evidence-verification@v1",
@@ -738,6 +754,7 @@ export async function verifyInsightsEvidence() {
     item5Artifacts,
     item6Artifacts,
     deepQueryArtifacts,
+    deliveryTraceArtifacts,
   };
 }
 

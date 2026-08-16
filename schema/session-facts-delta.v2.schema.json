@@ -93,6 +93,12 @@
         },
         "errorSignatureVersion": { "const": "error-signature@1" },
         "errorSignature": { "$ref": "session-facts-delta.v1.schema.json#/$defs/hex64" },
+        "observedGitCommitObjectIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        },
         "usageScope": { "const": "delta" },
         "model": { "type": "string" },
         "inputTokens": { "$ref": "session-facts-delta.v1.schema.json#/$defs/decimal" },

@@ -72,8 +72,18 @@ intent's bounded plan. Use action help and shipped schemas only after choosing t
 Use `query` for typed records or exact aggregates over session, turn, event, capability-use,
 file-activity, token-usage, and error-occurrence resources. Use a versioned `recipe` when the question
 matches capability contexts, failure chains, file workflow signals, activity shifts, token hotspots,
-solution recall, or a session timeline. Follow each returned evidence target with the v2 `evidence
---request` form when the answer needs the complete recorded content.
+solution recall, a session timeline, or Delivery Trace. Follow each returned evidence target with the
+v2 `evidence --request` form when the answer needs the complete recorded content.
+
+For delivery questions, let `threadshare_insights_spec` select `delivery-trace@1`; do not ask the user
+to remember that Recipe name or a repository key. When root is omitted, the Recipe uses the registered
+repository containing the current working directory. Keep `direct`, `observed`, `candidate`, and
+`contextual` edges separate.
+An observed Session/Commit correlation is not proof that the Agent authored the Commit, and candidate
+or contextual edges cannot support the default conclusion. Read Git diff Evidence only for a projected
+commit/path, preserve its commit, parent, revision, digest, and page order, and call the diff complete
+only after every page is present. A continuation context is an evidence summary; it cannot restore a
+Session, code state, or Git state.
 
 Use `threadshare insights <action> --help` for request files, filters, limits, and cursor syntax. Deep
 Query may return raw Tool arguments/output, system/developer/analysis content, provider payloads, and

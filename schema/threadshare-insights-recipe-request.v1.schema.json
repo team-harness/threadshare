@@ -7,15 +7,55 @@
   "required": ["format", "window"],
   "properties": {
     "format": { "const": "threadshare-insights-recipe-request@v1" },
-    "window": { "$ref": "#/$defs/window" },
+    "window": { "oneOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
     "comparisonWindow": { "oneOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
     "filters": { "$ref": "#/$defs/filters" },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
-    "allowDegraded": { "type": "boolean" }
+    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+    "allowDegraded": { "type": "boolean" },
+    "root": { "$ref": "#/$defs/nodeRef" },
+    "direction": { "enum": ["incoming", "outgoing", "both"] },
+    "maxDepth": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "includeCandidateEdges": { "type": "boolean" },
+    "includeContextualEdges": { "type": "boolean" },
+    "cursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[\\x20-\\x7e]+$" }, { "type": "null" }] }
   },
+  "oneOf": [
+    {
+      "properties": {
+        "root": false,
+        "direction": false,
+        "maxDepth": false,
+        "includeCandidateEdges": false,
+        "includeContextualEdges": false,
+        "cursor": false,
+        "window": { "$ref": "#/$defs/window" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+      }
+    },
+    {
+      "required": ["direction", "maxDepth", "includeCandidateEdges", "includeContextualEdges", "limit", "cursor"],
+      "properties": {
+        "root": true,
+        "direction": true,
+        "maxDepth": true,
+        "includeCandidateEdges": true,
+        "includeContextualEdges": true,
+        "limit": true,
+        "cursor": true,
+        "comparisonWindow": false,
+        "filters": false,
+        "allowDegraded": false
+      }
+    }
+  ],
   "$defs": {
     "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
     "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nodeKind": { "enum": ["intent", "repository", "session", "turn", "capability-use", "file", "git-commit"] },
+    "nodeRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+      "properties": { "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" } }
+    },
     "window": {
       "type": "object", "additionalProperties": false, "required": ["after", "before"],
       "properties": { "after": { "$ref": "#/$defs/timestamp" }, "before": { "$ref": "#/$defs/timestamp" } }

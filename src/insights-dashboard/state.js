@@ -23,6 +23,31 @@ export const INITIAL_STATE = Object.freeze({
     tool: Object.freeze({ items: Object.freeze([]), cursor: null, loading: false, error: null }),
     skill: Object.freeze({ items: Object.freeze([]), cursor: null, loading: false, error: null }),
   }),
+  delivery: Object.freeze({
+    mode: "date",
+    repositories: Object.freeze([]),
+    repositoryKey: "",
+    after: "",
+    before: "",
+    edges: Object.freeze([]),
+    edgeCursor: null,
+    intentRoots: Object.freeze([]),
+    intentCursor: null,
+    trace: null,
+    traceCursor: null,
+    selected: null,
+    relatedNodeKeys: Object.freeze([]),
+    evidence: null,
+    evidenceTarget: null,
+    evidenceLoading: false,
+    timeline: null,
+    timelineLoading: false,
+    diff: null,
+    diffLoading: false,
+    loading: false,
+    traceLoading: false,
+    error: null,
+  }),
   inspector: Object.freeze({
     mode: "closed",
     title: "Evidence",
@@ -41,6 +66,25 @@ function capabilityPage(state, kind) {
 
 function freezeList(value) {
   return Object.freeze(Array.isArray(value) ? [...value] : []);
+}
+
+function nodeIdentity(value) {
+  return typeof value?.kind === "string" && typeof value?.key === "string"
+    ? `${value.kind}:${value.key}`
+    : null;
+}
+
+export function relatedTraceNodeKeys(trace, selected) {
+  const selectedIdentity = nodeIdentity(selected);
+  if (selectedIdentity === null || !Array.isArray(trace?.edges)) return [];
+  const related = new Set();
+  for (const edge of trace.edges) {
+    const from = nodeIdentity(edge?.from);
+    const to = nodeIdentity(edge?.to);
+    if (from === selectedIdentity && to !== null && to !== selectedIdentity) related.add(to);
+    if (to === selectedIdentity && from !== null && from !== selectedIdentity) related.add(from);
+  }
+  return Object.freeze([...related].sort());
 }
 
 function replaceCapabilityPage(state, kind, patch) {
@@ -85,6 +129,211 @@ export function reduceDashboardState(state = INITIAL_STATE, action) {
     }
     case "capabilities/failed":
       return replaceCapabilityPage(state, action.kind, { loading: false, error: action.code ?? "TS_OPERATION_FAILED" });
+    case "delivery/repositories-loading":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, loading: true, error: null }) };
+    case "delivery/repositories-loaded": {
+      const repositories = freezeList(action.response?.items);
+      const repositoryKey = state.delivery.repositoryKey || repositories[0]?.repositoryKey || "";
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          repositories,
+          repositoryKey,
+          loading: false,
+          error: null,
+        }),
+      };
+    }
+    case "delivery/input":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          [action.field]: action.value,
+          edges: Object.freeze([]),
+          edgeCursor: null,
+          intentRoots: Object.freeze([]),
+          intentCursor: null,
+          trace: null,
+          traceCursor: null,
+          selected: null,
+          relatedNodeKeys: Object.freeze([]),
+          evidence: null,
+          evidenceTarget: null,
+          evidenceLoading: false,
+          timeline: null,
+          timelineLoading: false,
+          diff: null,
+          diffLoading: false,
+          error: null,
+        }),
+      };
+    case "delivery/edges-loading":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, loading: true, error: null }) };
+    case "delivery/edges-loaded":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          edges: freezeList(action.append
+            ? [...state.delivery.edges, ...(action.response.records ?? [])]
+            : action.response.records),
+          edgeCursor: action.response.nextCursor ?? null,
+          loading: false,
+          error: null,
+        }),
+      };
+    case "delivery/intents-loaded":
+      {
+        const intentNodes = (action.response.nodes ?? []).filter((node) => node.kind === "intent");
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          intentRoots: freezeList(action.append
+            ? [...state.delivery.intentRoots, ...intentNodes]
+            : intentNodes),
+          intentCursor: action.response.nextCursor ?? null,
+          trace: action.append ? state.delivery.trace : action.response,
+          traceCursor: action.append ? state.delivery.traceCursor : null,
+          selected: action.append ? state.delivery.selected : null,
+          relatedNodeKeys: Object.freeze([]),
+          loading: false,
+          error: null,
+        }),
+      };
+      }
+    case "delivery/trace-loading":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, traceLoading: true, error: null }) };
+    case "delivery/trace-loaded": {
+      const selected = action.selected ?? action.response.root;
+      const response = action.append && state.delivery.trace !== null
+        ? Object.freeze({
+            ...action.response,
+            nodes: freezeList([...state.delivery.trace.nodes, ...action.response.nodes]),
+            edges: freezeList([...state.delivery.trace.edges, ...action.response.edges]),
+          })
+        : action.response;
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          trace: response,
+          traceCursor: response.nextCursor ?? null,
+          selected,
+          relatedNodeKeys: relatedTraceNodeKeys(response, selected),
+          evidence: null,
+          evidenceTarget: null,
+          evidenceLoading: false,
+          timeline: null,
+          timelineLoading: false,
+          diff: null,
+          diffLoading: false,
+          traceLoading: false,
+          error: null,
+        }),
+      };
+    }
+    case "delivery/select":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          selected: action.node,
+          relatedNodeKeys: relatedTraceNodeKeys(state.delivery.trace, action.node),
+          evidence: null,
+          evidenceTarget: null,
+          evidenceLoading: false,
+          timeline: null,
+          timelineLoading: false,
+          diff: null,
+          diffLoading: false,
+        }),
+      };
+    case "delivery/evidence-loading":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          evidenceLoading: true,
+          evidenceTarget: action.target ?? state.delivery.evidenceTarget,
+          error: null,
+        }),
+      };
+    case "delivery/evidence-loaded":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          evidenceLoading: false,
+          evidence: action.append && state.delivery.evidence !== null
+            ? Object.freeze({
+                ...action.response,
+                content: `${state.delivery.evidence.content}${action.response.content}`,
+                range: Object.freeze({
+                  start: state.delivery.evidence.range.start,
+                  end: action.response.range.end,
+                }),
+              })
+            : action.response,
+          error: null,
+        }),
+      };
+    case "delivery/timeline-loading":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, timelineLoading: true, error: null }) };
+    case "delivery/timeline-loaded":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, timelineLoading: false, timeline: action.response, error: null }) };
+    case "delivery/diff-loading":
+      return { ...state, delivery: Object.freeze({ ...state.delivery, diffLoading: true, error: null }) };
+    case "delivery/diff-loaded":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          diffLoading: false,
+          diff: action.append && state.delivery.diff !== null
+            ? Object.freeze({
+                ...action.response,
+                content: `${state.delivery.diff.content}${action.response.content}`,
+                range: Object.freeze({
+                  start: state.delivery.diff.range.start,
+                  end: action.response.range.end,
+                }),
+              })
+            : action.response,
+          error: null,
+        }),
+      };
+    case "delivery/close":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          selected: null,
+          relatedNodeKeys: Object.freeze([]),
+          evidence: null,
+          evidenceTarget: null,
+          evidenceLoading: false,
+          timeline: null,
+          timelineLoading: false,
+          diff: null,
+          diffLoading: false,
+        }),
+      };
+    case "delivery/failed":
+      return {
+        ...state,
+        delivery: Object.freeze({
+          ...state.delivery,
+          loading: false,
+          traceLoading: false,
+          evidenceLoading: false,
+          timelineLoading: false,
+          diffLoading: false,
+          error: action.code ?? "TS_OPERATION_FAILED",
+        }),
+      };
     case "inspector/family":
       return {
         ...state,
@@ -215,6 +464,36 @@ export function buildSearchRequest(search) {
     closureStates: search.closure ? [search.closure] : [],
   };
   return Object.freeze({ query, filters, limit: 50, pathLimit: 10 });
+}
+
+function utcDateTimestamp(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return null;
+  const milliseconds = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
+}
+
+export function buildInspectorEdgeRequest(delivery, cursor = null) {
+  return Object.freeze({
+    repositoryKey: delivery.repositoryKey,
+    after: utcDateTimestamp(delivery.after),
+    before: utcDateTimestamp(delivery.before),
+    cursor,
+    limit: 50,
+  });
+}
+
+export function buildDeliveryTraceRequest(root, cursor = null) {
+  return Object.freeze({
+    format: "threadshare-insights-recipe-request@v1",
+    root: Object.freeze({ kind: root.kind, key: root.key }),
+    window: null,
+    direction: "both",
+    maxDepth: 1,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 100,
+    cursor,
+  });
 }
 
 export function overviewCounts(status) {

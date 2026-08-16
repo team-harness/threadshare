@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-delivery-trace-request.v1.schema.json",
+  "title": "Threadshare Insights Delivery Trace Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "root", "window", "direction", "maxDepth", "includeCandidateEdges", "includeContextualEdges", "limit", "cursor", "evaluatedAt"],
+  "properties": {
+    "format": { "const": "threadshare-insights-delivery-trace-request@v1" },
+    "root": { "$ref": "#/$defs/nodeRef" },
+    "window": { "oneOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
+    "direction": { "enum": ["incoming", "outgoing", "both"] },
+    "maxDepth": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "includeCandidateEdges": { "type": "boolean" },
+    "includeContextualEdges": { "type": "boolean" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+    "cursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[\\x20-\\x7e]+$" }, { "type": "null" }] },
+    "evaluatedAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "nodeKind": { "enum": ["intent", "repository", "session", "turn", "capability-use", "file", "git-commit"] },
+    "nodeRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+      "properties": { "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" } }
+    },
+    "window": {
+      "type": "object", "additionalProperties": false, "required": ["after", "before"],
+      "properties": { "after": { "$ref": "#/$defs/timestamp" }, "before": { "$ref": "#/$defs/timestamp" } }
+    }
+  }
+}

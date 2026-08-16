@@ -1,5 +1,7 @@
 import {
   INITIAL_STATE,
+  buildDeliveryTraceRequest,
+  buildInspectorEdgeRequest,
   buildSearchRequest,
   createDashboardStore,
   errorCode,
@@ -32,6 +34,20 @@ const elements = Object.freeze({
   inspectorTitle: document.querySelector("#inspector-title"),
   inspectorBody: document.querySelector("#inspector-body"),
   evidenceMore: document.querySelector("#evidence-more"),
+  deliveryRepository: document.querySelector("#delivery-repository"),
+  deliveryAfter: document.querySelector("#delivery-after"),
+  deliveryBefore: document.querySelector("#delivery-before"),
+  deliveryStatus: document.querySelector("#delivery-status"),
+  deliveryRailCount: document.querySelector("#delivery-rail-count"),
+  deliveryRailHeading: document.querySelector("#delivery-rail-heading"),
+  deliveryRailList: document.querySelector("#delivery-rail-list"),
+  deliveryMore: document.querySelector("#delivery-more"),
+  promptLane: document.querySelector("#prompt-lane"),
+  activityLane: document.querySelector("#activity-lane"),
+  deliveryLane: document.querySelector("#delivery-lane"),
+  promptLaneCount: document.querySelector("#prompt-lane-count"),
+  activityLaneCount: document.querySelector("#activity-lane-count"),
+  deliveryLaneCount: document.querySelector("#delivery-lane-count"),
   toast: document.querySelector("#toast"),
 });
 
@@ -368,14 +384,306 @@ function detailRow(label, value) {
   return node("div", { className: "detail-row" }, [node("span", { text: label }), node("strong", { text: String(value ?? "-") })]);
 }
 
+function traceIdentity(value) {
+  return `${value.kind}:${value.key}`;
+}
+
+function traceTone(strength) {
+  if (strength === "direct") return "ok";
+  if (strength === "observed") return "neutral";
+  return "pending";
+}
+
+function traceNodeButton(item, delivery) {
+  const identity = traceIdentity(item);
+  const selected = traceIdentity(delivery.selected ?? {}) === identity;
+  const related = delivery.relatedNodeKeys.includes(identity);
+  const button = node("button", {
+    className: `trace-node${selected ? " is-selected" : ""}${related ? " is-related" : ""}`,
+    type: "button",
+  }, [
+    node("span", { className: "trace-node-kind", text: item.kind }),
+    node("strong", { text: item.label || item.attributes?.path || item.key.slice(0, 12) }),
+    node("span", { className: "trace-node-time", text: item.observedAt ?? "Timing unavailable" }),
+  ]);
+  button.addEventListener("click", () => store.dispatch({ type: "delivery/select", node: item }));
+  return button;
+}
+
+function traceEdgeRow(edge, delivery) {
+  const selectedIdentity = traceIdentity(delivery.selected ?? {});
+  const touchesSelection = traceIdentity(edge.from) === selectedIdentity ||
+    traceIdentity(edge.to) === selectedIdentity;
+  return node("div", {
+    className: `trace-edge${touchesSelection ? " is-related" : ""}`,
+  }, [
+    node("span", { className: "trace-edge-title", text: edge.relation }),
+    badge(edge.strength, traceTone(edge.strength)),
+    node("span", { className: "trace-edge-source", text: edge.source }),
+    node("span", {
+      className: "trace-edge-limit",
+      text: (edge.limitations ?? []).join(" / ") || "No recorded limitation",
+    }),
+  ]);
+}
+
+function renderDeliveryRepositories(delivery) {
+  const signature = delivery.repositories.map((item) => `${item.repositoryKey}:${item.label}`).join("|");
+  if (elements.deliveryRepository.dataset.signature === signature) return;
+  clear(elements.deliveryRepository);
+  if (delivery.repositories.length === 0) {
+    elements.deliveryRepository.append(node("option", { value: "", text: "No registered repository" }));
+  } else {
+    for (const item of delivery.repositories) {
+      elements.deliveryRepository.append(node("option", {
+        value: item.repositoryKey,
+        text: item.label,
+      }));
+    }
+  }
+  elements.deliveryRepository.value = delivery.repositoryKey;
+  elements.deliveryRepository.dataset.signature = signature;
+}
+
+function deliveryScopes(edges) {
+  const scopes = new Map();
+  for (const edge of edges) {
+    const identity = `${edge.fromKind}:${edge.fromKey}`;
+    const current = scopes.get(identity) ?? {
+      kind: edge.fromKind,
+      key: edge.fromKey,
+      commitHash: edge.commitHash,
+      observedAt: edge.observedAt,
+      fileCount: 0,
+    };
+    current.fileCount += 1;
+    scopes.set(identity, current);
+  }
+  return [...scopes.values()];
+}
+
+function renderDelivery(state) {
+  const delivery = state.delivery;
+  renderDeliveryRepositories(delivery);
+  elements.deliveryAfter.value = delivery.after;
+  elements.deliveryBefore.value = delivery.before;
+  for (const button of document.querySelectorAll("[data-delivery-mode]")) {
+    const selected = button.dataset.deliveryMode === delivery.mode;
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  }
+  const intentMode = delivery.mode === "intent";
+  elements.deliveryRepository.disabled = delivery.loading;
+  elements.deliveryAfter.disabled = intentMode || delivery.loading;
+  elements.deliveryBefore.disabled = intentMode || delivery.loading;
+  document.querySelector("#delivery-form button").disabled = intentMode || delivery.loading ||
+    delivery.repositoryKey === "";
+  const intentUnavailable = intentMode && delivery.trace?.coverage?.intentState === "unavailable";
+  elements.deliveryStatus.textContent = delivery.error ?? (intentMode
+    ? delivery.traceLoading || delivery.loading
+      ? "Reading committed Intent evidence..."
+      : intentUnavailable
+        ? "No Intent source is configured. Run insights sync with --repository and --intent."
+        : delivery.trace === null
+          ? "Select a registered repository to inspect Intent evidence."
+          : `Snapshot ${delivery.trace.snapshotSeq} / ${delivery.trace.coverage.intentState} Intent coverage`
+    : delivery.traceLoading
+      ? "Reading snapshot-bound trace..."
+      : delivery.loading
+        ? "Reading committed delivery edges..."
+        : delivery.trace === null
+          ? ""
+          : `Snapshot ${delivery.trace.snapshotSeq} / evaluated ${delivery.trace.evaluatedAt}`);
+
+  clear(elements.deliveryRailList);
+  const scopes = intentMode ? delivery.intentRoots : deliveryScopes(delivery.edges);
+  elements.deliveryRailHeading.textContent = intentMode ? "Intent" : "Date";
+  elements.deliveryRailCount.textContent = formatCount(scopes.length);
+  for (const scope of scopes) {
+    const title = intentMode
+      ? scope.label
+      : scope.commitHash === null ? scope.key.slice(0, 12) : scope.commitHash.slice(0, 12);
+    const button = node("button", { className: "delivery-scope", type: "button" }, [
+      node("strong", { text: title }),
+      node("span", { text: intentMode ? scope.attributes.status : scope.observedAt ?? "Timing unavailable" }),
+      node("span", { text: intentMode ? scope.attributes.intentKind : `${formatCount(scope.fileCount)} changed files` }),
+    ]);
+    button.addEventListener("click", () => void loadDeliveryTrace(intentMode
+      ? { kind: scope.kind, key: scope.key }
+      : scope));
+    elements.deliveryRailList.append(button);
+  }
+  if (scopes.length === 0) {
+    elements.deliveryRailList.append(node("p", {
+      className: "empty-copy",
+      text: intentMode
+        ? intentUnavailable
+          ? "Register a repository-relative Markdown Intent source to populate this view."
+          : "No top-level Intent nodes in this repository."
+        : "No committed delivery evidence in this scope.",
+    }));
+  }
+  elements.deliveryMore.hidden = (intentMode ? delivery.intentCursor : delivery.edgeCursor) === null;
+  elements.deliveryMore.disabled = delivery.loading;
+
+  const trace = delivery.trace;
+  const groups = {
+    prompt: [],
+    activity: [],
+    delivery: [],
+  };
+  for (const item of trace?.nodes ?? []) {
+    if (item.kind === "intent" || item.kind === "turn") groups.prompt.push(item);
+    else if (item.kind === "session" || item.kind === "capability-use") groups.activity.push(item);
+    else groups.delivery.push(item);
+  }
+  clear(elements.promptLane);
+  clear(elements.activityLane);
+  clear(elements.deliveryLane);
+  elements.promptLaneCount.textContent = formatCount(groups.prompt.length);
+  elements.activityLaneCount.textContent = formatCount(groups.activity.length + (trace?.edges ?? []).length);
+  elements.deliveryLaneCount.textContent = formatCount(groups.delivery.length);
+  for (const item of groups.prompt) elements.promptLane.append(traceNodeButton(item, delivery));
+  for (const item of groups.activity) elements.activityLane.append(traceNodeButton(item, delivery));
+  for (const edge of trace?.edges ?? []) elements.activityLane.append(traceEdgeRow(edge, delivery));
+  for (const item of groups.delivery) elements.deliveryLane.append(traceNodeButton(item, delivery));
+  if (groups.prompt.length === 0) elements.promptLane.append(node("p", { className: "lane-empty", text: "No linked prompt or intent evidence." }));
+  if (groups.activity.length === 0 && (trace?.edges ?? []).length === 0) elements.activityLane.append(node("p", { className: "lane-empty", text: "No linked activity evidence." }));
+  if (groups.delivery.length === 0) elements.deliveryLane.append(node("p", { className: "lane-empty", text: "Select a dated commit to inspect delivery evidence." }));
+  if (delivery.traceCursor !== null) {
+    const more = node("button", { className: "quiet-button lane-more", type: "button", text: "Load more trace" });
+    more.addEventListener("click", () => void loadDeliveryTrace(delivery.trace.root, true));
+    elements.deliveryLane.append(more);
+  }
+}
+
+function selectedCommit(delivery) {
+  const selected = delivery.selected;
+  if (selected?.kind === "git-commit") return selected;
+  if (selected?.kind !== "file" || delivery.trace === null) return null;
+  const edge = delivery.trace.edges.find((item) => item.relation === "commit-changed-file" &&
+    traceIdentity(item.to) === traceIdentity(selected));
+  if (edge === undefined) return null;
+  return delivery.trace.nodes.find((item) => item.kind === "git-commit" && item.key === edge.from.key) ?? null;
+}
+
+function renderDeliveryDetail(state) {
+  const delivery = state.delivery;
+  const selected = delivery.selected;
+  if (selected === null) return false;
+  elements.inspectorTitle.textContent = selected.label || selected.kind;
+  elements.inspectorBody.append(node("div", { className: "detail-list" }, [
+    detailRow("Kind", selected.kind),
+    detailRow("Observed", selected.observedAt ?? "Timing unavailable"),
+    detailRow("Revision", selected.revision?.slice(0, 16)),
+    detailRow("Related", formatCount(delivery.relatedNodeKeys.length)),
+  ]));
+  const actions = node("div", { className: "detail-actions" });
+  const evidence = node("button", {
+    className: "quiet-button",
+    type: "button",
+    text: delivery.evidenceLoading ? "Loading evidence..." : "Load evidence",
+  });
+  evidence.disabled = delivery.evidenceLoading;
+  evidence.addEventListener("click", () => void loadDeliveryEvidence());
+  actions.append(evidence);
+  if (selected.kind === "session") {
+    const timeline = node("button", {
+      className: "quiet-button",
+      type: "button",
+      text: delivery.timelineLoading ? "Loading timeline..." : "Load session timeline",
+    });
+    timeline.disabled = delivery.timelineLoading;
+    timeline.addEventListener("click", () => void loadSessionTimeline());
+    actions.append(timeline);
+  }
+
+  const commit = selectedCommit(delivery);
+  const commitLink = commit?.attributes?.externalLinks?.commit;
+  if (typeof commitLink === "string") {
+    actions.append(node("a", {
+      className: "quiet-button action-link",
+      href: commitLink,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      text: "Open commit",
+    }));
+  }
+  if (commit !== null) {
+    const parents = commit.attributes.parentObjectIds ?? [];
+    const parent = node("select", { className: "parent-select", "aria-label": "Git diff parent" });
+    if (parents.length === 0) parent.append(node("option", { value: "", text: "Root commit" }));
+    for (const objectId of parents) parent.append(node("option", { value: objectId, text: objectId.slice(0, 12) }));
+    const diff = node("button", {
+      className: "quiet-button",
+      type: "button",
+      text: delivery.diffLoading ? "Loading diff..." : "Load diff",
+    });
+    diff.disabled = delivery.diffLoading;
+    diff.addEventListener("click", () => void loadDeliveryDiff(commit, parent.value || null));
+    actions.append(parent, diff);
+  }
+  const continuation = node("button", { className: "quiet-button", type: "button", text: "Copy continuation" });
+  continuation.addEventListener("click", () => void copyDeliveryContinuation());
+  actions.append(continuation);
+  elements.inspectorBody.append(actions);
+
+  if (delivery.timeline !== null) {
+    const timeline = node("div", { className: "timeline-list" });
+    for (const item of delivery.timeline.items ?? []) {
+      const entry = node("button", { className: "timeline-entry", type: "button" }, [
+        node("span", { className: "trace-node-kind", text: item.eventKind }),
+        node("strong", { text: item.metadata?.role ?? item.eventKind }),
+        node("span", { className: "trace-node-time", text: item.observedAt ?? "Timing unavailable" }),
+      ]);
+      entry.addEventListener("click", () => void loadDeliveryEvidence(false, item.evidence));
+      timeline.append(entry);
+    }
+    if ((delivery.timeline.items ?? []).length === 0) {
+      timeline.append(node("p", { className: "empty-copy", text: "No retained timeline events." }));
+    }
+    elements.inspectorBody.append(
+      node("div", { className: "payload-heading", text: "Session timeline" }),
+      timeline,
+    );
+  }
+
+  if (delivery.evidence !== null) {
+    elements.inspectorBody.append(
+      node("div", { className: "payload-heading", text: `Evidence ${delivery.evidence.range.start}-${delivery.evidence.range.end}` }),
+      node("pre", { className: "payload-view", text: delivery.evidence.content }),
+    );
+    if (delivery.evidence.nextCursor !== null) {
+      const more = node("button", { className: "quiet-button load-more", type: "button", text: "Load more evidence" });
+      more.addEventListener("click", () => void loadDeliveryEvidence(true, delivery.evidenceTarget));
+      elements.inspectorBody.append(more);
+    }
+  }
+  if (delivery.diff !== null) {
+    elements.inspectorBody.append(
+      node("div", { className: "payload-heading", text: `Git diff ${delivery.diff.range.start}-${delivery.diff.range.end}` }),
+      node("pre", { className: "payload-view diff-view", text: delivery.diff.content }),
+    );
+    if (delivery.diff.nextCursor !== null) {
+      const more = node("button", { className: "quiet-button load-more", type: "button", text: "Load more diff" });
+      more.addEventListener("click", () => void loadDeliveryDiff(commit, delivery.diff.parentObjectId, true));
+      elements.inspectorBody.append(more);
+    }
+  }
+  if (delivery.error) elements.inspectorBody.append(node("p", { className: "error-copy", text: delivery.error }));
+  return true;
+}
+
 function renderInspector(state) {
   const inspector = state.inspector;
-  document.querySelector("#app").classList.toggle("inspector-open", inspector.mode !== "closed");
-  elements.inspector.classList.toggle("is-closed", inspector.mode === "closed");
-  elements.inspector.setAttribute("aria-hidden", inspector.mode === "closed" ? "true" : "false");
+  const deliveryOpen = state.activeView === "inspector" && state.delivery.selected !== null;
+  const open = deliveryOpen || inspector.mode !== "closed";
+  document.querySelector("#app").classList.toggle("inspector-open", open);
+  elements.inspector.classList.toggle("is-closed", !open);
+  elements.inspector.setAttribute("aria-hidden", open ? "false" : "true");
   elements.inspectorTitle.textContent = inspector.title;
   clear(elements.inspectorBody);
   elements.evidenceMore.hidden = true;
+  if (deliveryOpen && renderDeliveryDetail(state)) return;
   if (inspector.mode === "family" && inspector.family !== null) {
     const family = inspector.family;
     elements.inspectorBody.append(
@@ -448,6 +756,7 @@ function render(state) {
   renderSearch(state);
   renderCapabilities(state, "tool");
   renderCapabilities(state, "skill");
+  renderDelivery(state);
   renderInspector(state);
 }
 
@@ -510,6 +819,181 @@ async function loadEvidence(turn, cursor = null, append = false) {
   }
 }
 
+async function loadDeliveryRepositories() {
+  const delivery = store.getState().delivery;
+  if (delivery.loading || delivery.repositories.length > 0) return;
+  store.dispatch({ type: "delivery/repositories-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/repositories");
+    store.dispatch({ type: "delivery/repositories-loaded", response });
+    const current = store.getState().delivery;
+    if (current.repositoryKey !== "") {
+      if (current.mode === "intent") await loadDeliveryIntents(false);
+      else await loadDeliveryEdges(false);
+    }
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadDeliveryIntents(append = false) {
+  const delivery = store.getState().delivery;
+  if (delivery.loading || delivery.mode !== "intent" || delivery.repositoryKey === "") return;
+  store.dispatch({ type: "delivery/repositories-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/trace", {
+      method: "POST",
+      body: JSON.stringify(buildDeliveryTraceRequest(
+        { kind: "repository", key: delivery.repositoryKey },
+        append ? delivery.intentCursor : null,
+      )),
+    });
+    store.dispatch({ type: "delivery/intents-loaded", response, append });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadDeliveryEdges(append = false) {
+  const delivery = store.getState().delivery;
+  if (delivery.loading || delivery.mode !== "date" || delivery.repositoryKey === "") return;
+  store.dispatch({ type: "delivery/edges-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/edges", {
+      method: "POST",
+      body: JSON.stringify(buildInspectorEdgeRequest(
+        delivery,
+        append ? delivery.edgeCursor : null,
+      )),
+    });
+    store.dispatch({ type: "delivery/edges-loaded", response, append });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadDeliveryTrace(root, append = false) {
+  const delivery = store.getState().delivery;
+  if (delivery.traceLoading) return;
+  const selectedRoot = root.kind === undefined ? delivery.trace?.root : root;
+  if (selectedRoot === null || selectedRoot === undefined) return;
+  store.dispatch({ type: "delivery/trace-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/trace", {
+      method: "POST",
+      body: JSON.stringify(buildDeliveryTraceRequest(
+        selectedRoot,
+        append ? delivery.traceCursor : null,
+      )),
+    });
+    const selected = append
+      ? delivery.selected
+      : response.nodes.find((item) => traceIdentity(item) === traceIdentity(selectedRoot)) ?? response.root;
+    store.dispatch({ type: "delivery/trace-loaded", response, selected, append });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadDeliveryEvidence(append = false, target = null) {
+  const delivery = store.getState().delivery;
+  const selected = delivery.selected;
+  if (selected === null || delivery.evidenceLoading) return;
+  const requestTarget = target ?? {
+    kind: "delivery-node",
+    nodeKind: selected.kind,
+    nodeKey: selected.key,
+    revision: selected.revision,
+  };
+  store.dispatch({ type: "delivery/evidence-loading", target: requestTarget });
+  try {
+    const response = await requestJson("/api/v1/inspector/evidence", {
+      method: "POST",
+      body: JSON.stringify({
+        format: "threadshare-insights-evidence-request@v2",
+        target: requestTarget,
+        include: ["envelope", "payload"],
+        cursor: append ? delivery.evidence?.nextCursor ?? null : null,
+        maxBytes: 65_536,
+      }),
+    });
+    store.dispatch({ type: "delivery/evidence-loaded", response, append });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadSessionTimeline() {
+  const delivery = store.getState().delivery;
+  const selected = delivery.selected;
+  if (selected?.kind !== "session" || delivery.timelineLoading || delivery.trace === null) return;
+  store.dispatch({ type: "delivery/timeline-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/session-timeline", {
+      method: "POST",
+      body: JSON.stringify({
+        format: "threadshare-insights-recipe-request@v1",
+        window: { after: "1970-01-01T00:00:00.000Z", before: delivery.trace.evaluatedAt },
+        comparisonWindow: null,
+        filters: {
+          providers: [],
+          projectKeys: [],
+          capabilityKeys: [],
+          sessionKeys: [selected.key],
+          eventKinds: [],
+          text: null,
+          bucket: null,
+        },
+        limit: 50,
+        allowDegraded: true,
+      }),
+    });
+    store.dispatch({ type: "delivery/timeline-loaded", response });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function loadDeliveryDiff(commit, parentObjectId, append = false) {
+  const delivery = store.getState().delivery;
+  if (commit === null || delivery.diffLoading) return;
+  store.dispatch({ type: "delivery/diff-loading" });
+  try {
+    const response = await requestJson("/api/v1/inspector/git-diff", {
+      method: "POST",
+      body: JSON.stringify({
+        format: "threadshare-insights-git-diff-evidence-request@v1",
+        repositoryKey: commit.attributes.repositoryKey,
+        commitObjectId: commit.attributes.objectId,
+        parentObjectId,
+        path: delivery.selected?.kind === "file" ? delivery.selected.attributes.path : null,
+        revision: commit.revision,
+        contextLines: 3,
+        maxBytes: 65_536,
+        cursor: append ? delivery.diff?.nextCursor ?? null : null,
+      }),
+    });
+    store.dispatch({ type: "delivery/diff-loaded", response, append });
+  } catch (error) {
+    store.dispatch({ type: "delivery/failed", code: errorCode(error) });
+  }
+}
+
+async function copyDeliveryContinuation() {
+  const trace = store.getState().delivery.trace;
+  if (trace === null) return;
+  try {
+    const response = await requestJson("/api/v1/inspector/continuation", {
+      method: "POST",
+      body: JSON.stringify({ trace, recentPrompts: [], failureChains: [] }),
+    });
+    await navigator.clipboard.writeText(JSON.stringify(response, null, 2));
+    showToast("Continuation context copied");
+  } catch (error) {
+    showToast(errorCode(error));
+  }
+}
+
 store.subscribe(render);
 
 for (const button of document.querySelectorAll("[data-view]")) {
@@ -526,6 +1010,7 @@ for (const button of document.querySelectorAll("[data-view]")) {
         if (page.items.length === 0 && !page.loading) void loadCapabilities(kind);
       }
     }
+    if (view === "inspector") void loadDeliveryRepositories();
     document.querySelector("#workspace").focus({ preventScroll: true });
   });
 }
@@ -553,7 +1038,40 @@ for (const [selector, field] of [
 for (const button of document.querySelectorAll("[data-load-more]")) {
   button.addEventListener("click", () => void loadCapabilities(button.dataset.loadMore, true));
 }
-document.querySelector("#inspector-close").addEventListener("click", () => store.dispatch({ type: "inspector/close" }));
+for (const button of document.querySelectorAll("[data-delivery-mode]")) {
+  button.addEventListener("click", () => {
+    store.dispatch({ type: "delivery/input", field: "mode", value: button.dataset.deliveryMode });
+    if (store.getState().delivery.repositories.length === 0) {
+      void loadDeliveryRepositories();
+    } else if (button.dataset.deliveryMode === "intent") {
+      void loadDeliveryIntents(false);
+    } else {
+      void loadDeliveryEdges(false);
+    }
+  });
+}
+elements.deliveryRepository.addEventListener("input", (event) => {
+  store.dispatch({ type: "delivery/input", field: "repositoryKey", value: event.target.value });
+  if (store.getState().delivery.mode === "intent") void loadDeliveryIntents(false);
+});
+elements.deliveryAfter.addEventListener("input", (event) => {
+  store.dispatch({ type: "delivery/input", field: "after", value: event.target.value });
+});
+elements.deliveryBefore.addEventListener("input", (event) => {
+  store.dispatch({ type: "delivery/input", field: "before", value: event.target.value });
+});
+document.querySelector("#delivery-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void loadDeliveryEdges(false);
+});
+elements.deliveryMore.addEventListener("click", () => {
+  if (store.getState().delivery.mode === "intent") void loadDeliveryIntents(true);
+  else void loadDeliveryEdges(true);
+});
+document.querySelector("#inspector-close").addEventListener("click", () => {
+  store.dispatch({ type: "inspector/close" });
+  store.dispatch({ type: "delivery/close" });
+});
 elements.evidenceMore.addEventListener("click", () => {
   const inspector = store.getState().inspector;
   void loadEvidence(inspector.turn, inspector.cursor, true);

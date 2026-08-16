@@ -7,6 +7,8 @@ use unicode_normalization::UnicodeNormalization;
 pub mod agent_query;
 pub mod analyzer;
 pub mod deep_query;
+pub mod delivery_graph_repository;
+pub mod delivery_trace;
 pub mod engine;
 pub mod engine_status;
 pub mod evidence_path;
@@ -25,6 +27,8 @@ pub mod retry_projection;
 pub mod search_projection;
 pub mod source_state;
 pub mod storage;
+pub mod trace_engine;
+pub mod trace_staging;
 
 pub fn hash_key(domain: &str, parts: &[Vec<u8>]) -> String {
     assert!(

@@ -241,6 +241,48 @@ const SPEC = deepFreeze({
       ],
     },
     {
+      id: "delivery-trace",
+      when: "The user asks how an intent, Agent Session, file, and Git commit are connected in a delivered change.",
+      userQuestions: [
+        "Which Sessions and commits delivered this feature, and what evidence connects them?",
+        "How was this failure resolved, and what code changed in the successful delivery?",
+        "Which requirements still have no recorded commit evidence?",
+        "Which commits have no recorded Agent or intent evidence?",
+        "What should I know before continuing this work?",
+      ],
+      plan: [
+        {
+          action: "recipe",
+          recipe: "delivery-trace@1",
+          purpose: "Traverse the bounded evidence graph from the selected intent, Session, file, repository, or commit root.",
+          requiredInputs: ["direction", "maxDepth"],
+          optionalFilters: [
+            "root (defaults to the registered repository containing the current working directory)",
+            "window", "includeCandidateEdges", "includeContextualEdges", "cursor",
+          ],
+        },
+        {
+          action: "evidence",
+          purpose: "Read revision-bound Trace node or edge evidence before using it in a delivery claim.",
+          requiredInputs: ["target.kind=delivery-node-or-delivery-edge", "revision"],
+          optionalFilters: ["include", "maxBytes", "cursor"],
+        },
+        {
+          action: "evidence",
+          purpose: "Hydrate an authorized immutable Git object diff only after the graph identifies the commit and path.",
+          requiredInputs: ["format=threadshare-insights-git-diff-evidence-request@v1", "repositoryKey", "commitObjectId", "parentObjectId", "revision"],
+          optionalFilters: ["path", "contextLines", "maxBytes", "cursor"],
+        },
+      ],
+      answerRules: [
+        "Call direct edges explicit or recorded; call observed edges observed, never Agent authorship.",
+        "Candidate and contextual edges do not support the default conclusion and must remain separate.",
+        "Disclose truncated, partial, unavailable, or stale evidence next to the affected conclusion.",
+        "A Git diff is complete only after every page is read and the payload digest remains unchanged.",
+        "A continuation context summarizes evidence; it cannot restore a Session, code state, or Git state.",
+      ],
+    },
+    {
       id: "custom-query",
       when: "The question needs fields, filters, grouping, or metrics not covered by a predefined intent.",
       userQuestions: [
@@ -319,12 +361,17 @@ const SPEC = deepFreeze({
   ],
   schemas: [
     "schema/threadshare-insights-agent-spec.v1.schema.json",
+    "schema/threadshare-insights-continuation-context.v1.schema.json",
     "schema/threadshare-insights-search-request.v1.schema.json",
     "schema/threadshare-insights-usage-request.v1.schema.json",
     "schema/threadshare-insights-activity-request.v1.schema.json",
     "schema/threadshare-insights-query-request.v2.schema.json",
     "schema/threadshare-insights-recipe-request.v1.schema.json",
     "schema/threadshare-insights-evidence-request.v2.schema.json",
+    "schema/threadshare-insights-delivery-trace-request.v1.schema.json",
+    "schema/threadshare-insights-delivery-trace.v1.schema.json",
+    "schema/threadshare-insights-git-diff-evidence-request.v1.schema.json",
+    "schema/threadshare-insights-git-diff-evidence.v1.schema.json",
   ],
 });
 

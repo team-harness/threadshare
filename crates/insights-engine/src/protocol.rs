@@ -125,6 +125,14 @@ pub enum MessageKind {
     BatchAccepted,
     CommitSession,
     SessionCommitted,
+    BeginTraceSource,
+    TraceSourceAccepted,
+    TraceSourceBatch,
+    TraceSourceBatchAccepted,
+    CommitTraceSource,
+    TraceSourceCommitted,
+    ReadRepositoryState,
+    RepositoryState,
     ListSourceStates,
     SourceStates,
     ReadSourceCheckpoint,
@@ -157,8 +165,12 @@ pub enum MessageKind {
     InsightsEvidenceV2,
     ReadInsightsRecipe,
     InsightsRecipe,
+    ReadInsightsDeliveryTrace,
+    InsightsDeliveryTrace,
     AbortSession,
     SessionAborted,
+    AbortTraceSource,
+    TraceSourceAborted,
     Error,
 }
 
@@ -174,6 +186,14 @@ impl MessageKind {
             Self::BatchAccepted => "BATCH_ACCEPTED",
             Self::CommitSession => "COMMIT_SESSION",
             Self::SessionCommitted => "SESSION_COMMITTED",
+            Self::BeginTraceSource => "BEGIN_TRACE_SOURCE",
+            Self::TraceSourceAccepted => "TRACE_SOURCE_ACCEPTED",
+            Self::TraceSourceBatch => "TRACE_SOURCE_BATCH",
+            Self::TraceSourceBatchAccepted => "TRACE_SOURCE_BATCH_ACCEPTED",
+            Self::CommitTraceSource => "COMMIT_TRACE_SOURCE",
+            Self::TraceSourceCommitted => "TRACE_SOURCE_COMMITTED",
+            Self::ReadRepositoryState => "READ_REPOSITORY_STATE",
+            Self::RepositoryState => "REPOSITORY_STATE",
             Self::ListSourceStates => "LIST_SOURCE_STATES",
             Self::SourceStates => "SOURCE_STATES",
             Self::ReadSourceCheckpoint => "READ_SOURCE_CHECKPOINT",
@@ -206,8 +226,12 @@ impl MessageKind {
             Self::InsightsEvidenceV2 => "INSIGHTS_EVIDENCE_V2",
             Self::ReadInsightsRecipe => "READ_INSIGHTS_RECIPE",
             Self::InsightsRecipe => "INSIGHTS_RECIPE",
+            Self::ReadInsightsDeliveryTrace => "READ_INSIGHTS_DELIVERY_TRACE",
+            Self::InsightsDeliveryTrace => "INSIGHTS_DELIVERY_TRACE",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
+            Self::AbortTraceSource => "ABORT_TRACE_SOURCE",
+            Self::TraceSourceAborted => "TRACE_SOURCE_ABORTED",
             Self::Error => "ERROR",
         }
     }
@@ -459,6 +483,22 @@ fn hex64<'a>(value: &'a Value, label: &str) -> Result<&'a str, ProtocolError> {
     {
         return Err(invalid_frame(format!(
             "{label} must be 32 lowercase hexadecimal bytes"
+        )));
+    }
+    Ok(value)
+}
+
+fn hex40_or_64<'a>(value: &'a Value, label: &str) -> Result<&'a str, ProtocolError> {
+    let value = value
+        .as_str()
+        .ok_or_else(|| invalid_frame(format!("{label} must be lowercase hexadecimal")))?;
+    if !matches!(value.len(), 40 | 64)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_frame(format!(
+            "{label} must be 40 or 64 lowercase hexadecimal characters"
         )));
     }
     Ok(value)
@@ -3552,6 +3592,14 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "BATCH_ACCEPTED" => MessageKind::BatchAccepted,
         "COMMIT_SESSION" => MessageKind::CommitSession,
         "SESSION_COMMITTED" => MessageKind::SessionCommitted,
+        "BEGIN_TRACE_SOURCE" => MessageKind::BeginTraceSource,
+        "TRACE_SOURCE_ACCEPTED" => MessageKind::TraceSourceAccepted,
+        "TRACE_SOURCE_BATCH" => MessageKind::TraceSourceBatch,
+        "TRACE_SOURCE_BATCH_ACCEPTED" => MessageKind::TraceSourceBatchAccepted,
+        "COMMIT_TRACE_SOURCE" => MessageKind::CommitTraceSource,
+        "TRACE_SOURCE_COMMITTED" => MessageKind::TraceSourceCommitted,
+        "READ_REPOSITORY_STATE" => MessageKind::ReadRepositoryState,
+        "REPOSITORY_STATE" => MessageKind::RepositoryState,
         "LIST_SOURCE_STATES" => MessageKind::ListSourceStates,
         "SOURCE_STATES" => MessageKind::SourceStates,
         "READ_SOURCE_CHECKPOINT" => MessageKind::ReadSourceCheckpoint,
@@ -3584,8 +3632,12 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "INSIGHTS_EVIDENCE_V2" => MessageKind::InsightsEvidenceV2,
         "READ_INSIGHTS_RECIPE" => MessageKind::ReadInsightsRecipe,
         "INSIGHTS_RECIPE" => MessageKind::InsightsRecipe,
+        "READ_INSIGHTS_DELIVERY_TRACE" => MessageKind::ReadInsightsDeliveryTrace,
+        "INSIGHTS_DELIVERY_TRACE" => MessageKind::InsightsDeliveryTrace,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
+        "ABORT_TRACE_SOURCE" => MessageKind::AbortTraceSource,
+        "TRACE_SOURCE_ABORTED" => MessageKind::TraceSourceAborted,
         "ERROR" => MessageKind::Error,
         _ => {
             return Err(ProtocolError::new(
@@ -3844,6 +3896,366 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 return Err(invalid_frame(
                     "SESSION_COMMITTED.idempotent must be boolean",
                 ));
+            }
+        }
+        MessageKind::BeginTraceSource => {
+            validate_envelope(
+                message,
+                kind,
+                &[
+                    "deltaFormat",
+                    "deltaId",
+                    "expectedGeneration",
+                    "targetGeneration",
+                    "repository",
+                    "intent",
+                    "counts",
+                ],
+            )?;
+            if field(message, "deltaFormat", kind.as_str())?.as_str()
+                != Some(crate::delivery_graph_repository::TRACE_SOURCE_DELTA_FORMAT)
+            {
+                return Err(invalid_frame(
+                    "BEGIN_TRACE_SOURCE.deltaFormat is unsupported",
+                ));
+            }
+            hex64(
+                field(message, "deltaId", kind.as_str())?,
+                "BEGIN_TRACE_SOURCE.deltaId",
+            )?;
+            decimal_u64(
+                field(message, "expectedGeneration", kind.as_str())?,
+                "BEGIN_TRACE_SOURCE.expectedGeneration",
+            )?;
+            decimal_u64(
+                field(message, "targetGeneration", kind.as_str())?,
+                "BEGIN_TRACE_SOURCE.targetGeneration",
+            )?;
+            let repository = field(message, "repository", kind.as_str())?;
+            exact_object_keys(
+                repository,
+                "BEGIN_TRACE_SOURCE.repository",
+                &[
+                    "repositoryId",
+                    "repositoryKey",
+                    "available",
+                    "refDigest",
+                    "scmProvider",
+                    "webBaseUrl",
+                    "repositoryPath",
+                    "projectKeys",
+                ],
+            )?;
+            uuid(
+                field(repository, "repositoryId", "BEGIN_TRACE_SOURCE.repository")?,
+                "BEGIN_TRACE_SOURCE.repository.repositoryId",
+            )?;
+            let project_keys = field(repository, "projectKeys", "BEGIN_TRACE_SOURCE.repository")?
+                .as_array()
+                .ok_or_else(|| {
+                    invalid_frame("BEGIN_TRACE_SOURCE.repository.projectKeys must be an array")
+                })?;
+            if project_keys.len() != 2 {
+                return Err(invalid_frame(
+                    "BEGIN_TRACE_SOURCE.repository.projectKeys must contain two keys",
+                ));
+            }
+            for key in project_keys {
+                hex64(key, "BEGIN_TRACE_SOURCE.repository.projectKeys[]")?;
+            }
+            hex64(
+                field(repository, "repositoryKey", "BEGIN_TRACE_SOURCE.repository")?,
+                "BEGIN_TRACE_SOURCE.repository.repositoryKey",
+            )?;
+            hex64(
+                field(repository, "refDigest", "BEGIN_TRACE_SOURCE.repository")?,
+                "BEGIN_TRACE_SOURCE.repository.refDigest",
+            )?;
+            if !field(repository, "available", "BEGIN_TRACE_SOURCE.repository")?.is_boolean() {
+                return Err(invalid_frame(
+                    "BEGIN_TRACE_SOURCE.repository.available must be boolean",
+                ));
+            }
+            let scm = ["scmProvider", "webBaseUrl", "repositoryPath"]
+                .map(|name| field(repository, name, "BEGIN_TRACE_SOURCE.repository"))
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            if !(scm.iter().all(|value| value.is_null())
+                || scm.iter().all(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty() && value.len() <= 12 * 1024)
+                }))
+            {
+                return Err(invalid_frame(
+                    "BEGIN_TRACE_SOURCE.repository SCM metadata is invalid",
+                ));
+            }
+            let intent = field(message, "intent", kind.as_str())?;
+            if !intent.is_null() {
+                exact_object_keys(
+                    intent,
+                    "BEGIN_TRACE_SOURCE.intent",
+                    &[
+                        "sourceKey",
+                        "adapterVersion",
+                        "revision",
+                        "locator",
+                        "coverage",
+                        "diagnostics",
+                    ],
+                )?;
+                hex64(
+                    field(intent, "sourceKey", "BEGIN_TRACE_SOURCE.intent")?,
+                    "BEGIN_TRACE_SOURCE.intent.sourceKey",
+                )?;
+                bounded_string(
+                    field(intent, "adapterVersion", "BEGIN_TRACE_SOURCE.intent")?,
+                    "BEGIN_TRACE_SOURCE.intent.adapterVersion",
+                    128,
+                    false,
+                    true,
+                )?;
+                hex64(
+                    field(intent, "revision", "BEGIN_TRACE_SOURCE.intent")?,
+                    "BEGIN_TRACE_SOURCE.intent.revision",
+                )?;
+                bounded_string(
+                    field(intent, "locator", "BEGIN_TRACE_SOURCE.intent")?,
+                    "BEGIN_TRACE_SOURCE.intent.locator",
+                    4096,
+                    false,
+                    true,
+                )?;
+                if !matches!(
+                    field(intent, "coverage", "BEGIN_TRACE_SOURCE.intent")?.as_str(),
+                    Some("complete" | "partial" | "unavailable")
+                ) {
+                    return Err(invalid_frame(
+                        "BEGIN_TRACE_SOURCE.intent.coverage is invalid",
+                    ));
+                }
+                let diagnostics = field(intent, "diagnostics", "BEGIN_TRACE_SOURCE.intent")?
+                    .as_array()
+                    .ok_or_else(|| {
+                        invalid_frame("BEGIN_TRACE_SOURCE.intent.diagnostics must be an array")
+                    })?;
+                if diagnostics.len() > 4096 {
+                    return Err(invalid_frame(
+                        "BEGIN_TRACE_SOURCE intent diagnostics exceed 4096",
+                    ));
+                }
+                for diagnostic in diagnostics {
+                    exact_object_keys(
+                        diagnostic,
+                        "BEGIN_TRACE_SOURCE.intent.diagnostics[]",
+                        &["line", "code"],
+                    )?;
+                    decimal_u64(
+                        field(
+                            diagnostic,
+                            "line",
+                            "BEGIN_TRACE_SOURCE.intent.diagnostics[]",
+                        )?,
+                        "BEGIN_TRACE_SOURCE.intent.diagnostics[].line",
+                    )?;
+                    bounded_string(
+                        field(
+                            diagnostic,
+                            "code",
+                            "BEGIN_TRACE_SOURCE.intent.diagnostics[]",
+                        )?,
+                        "BEGIN_TRACE_SOURCE.intent.diagnostics[].code",
+                        128,
+                        false,
+                        true,
+                    )?;
+                }
+            }
+            let counts = field(message, "counts", kind.as_str())?;
+            exact_object_keys(
+                counts,
+                "BEGIN_TRACE_SOURCE.counts",
+                &["refs", "commits", "files", "intentNodes", "intentRefs"],
+            )?;
+            for count in ["refs", "commits", "files", "intentNodes", "intentRefs"] {
+                decimal_u64(
+                    field(counts, count, "BEGIN_TRACE_SOURCE.counts")?,
+                    &format!("BEGIN_TRACE_SOURCE.counts.{count}"),
+                )?;
+            }
+        }
+        MessageKind::TraceSourceAccepted | MessageKind::TraceSourceAborted => {
+            validate_envelope(message, kind, &["repositoryKey", "deltaId", "nextSequence"])?;
+            hex64(
+                field(message, "repositoryKey", kind.as_str())?,
+                &format!("{}.repositoryKey", kind.as_str()),
+            )?;
+            hex64(
+                field(message, "deltaId", kind.as_str())?,
+                &format!("{}.deltaId", kind.as_str()),
+            )?;
+            decimal_u64(
+                field(message, "nextSequence", kind.as_str())?,
+                &format!("{}.nextSequence", kind.as_str()),
+            )?;
+        }
+        MessageKind::TraceSourceBatch => {
+            validate_envelope(message, kind, &["sequence", "collection", "items"])?;
+            decimal_u64(
+                field(message, "sequence", kind.as_str())?,
+                "TRACE_SOURCE_BATCH.sequence",
+            )?;
+            if !matches!(
+                field(message, "collection", kind.as_str())?.as_str(),
+                Some("refs" | "commits" | "files" | "intentNodes" | "intentRefs")
+            ) {
+                return Err(invalid_frame("TRACE_SOURCE_BATCH.collection is invalid"));
+            }
+            if field(message, "items", kind.as_str())?
+                .as_array()
+                .is_none_or(Vec::is_empty)
+            {
+                return Err(invalid_frame(
+                    "TRACE_SOURCE_BATCH.items must be a non-empty array",
+                ));
+            }
+        }
+        MessageKind::TraceSourceBatchAccepted => {
+            validate_envelope(message, kind, &["sequence"])?;
+            decimal_u64(
+                field(message, "sequence", kind.as_str())?,
+                "TRACE_SOURCE_BATCH_ACCEPTED.sequence",
+            )?;
+        }
+        MessageKind::CommitTraceSource | MessageKind::AbortTraceSource => {
+            validate_envelope(message, kind, &["nextSequence"])?;
+            decimal_u64(
+                field(message, "nextSequence", kind.as_str())?,
+                &format!("{}.nextSequence", kind.as_str()),
+            )?;
+        }
+        MessageKind::TraceSourceCommitted => {
+            validate_envelope(
+                message,
+                kind,
+                &["repositoryKey", "deltaId", "snapshotSeq", "idempotent"],
+            )?;
+            hex64(
+                field(message, "repositoryKey", kind.as_str())?,
+                "TRACE_SOURCE_COMMITTED.repositoryKey",
+            )?;
+            hex64(
+                field(message, "deltaId", kind.as_str())?,
+                "TRACE_SOURCE_COMMITTED.deltaId",
+            )?;
+            decimal_u64(
+                field(message, "snapshotSeq", kind.as_str())?,
+                "TRACE_SOURCE_COMMITTED.snapshotSeq",
+            )?;
+            if !field(message, "idempotent", kind.as_str())?.is_boolean() {
+                return Err(invalid_frame(
+                    "TRACE_SOURCE_COMMITTED.idempotent must be boolean",
+                ));
+            }
+        }
+        MessageKind::ReadRepositoryState => {
+            validate_envelope(message, kind, &["repositoryId", "cursor", "limit"])?;
+            uuid(
+                field(message, "repositoryId", kind.as_str())?,
+                "READ_REPOSITORY_STATE.repositoryId",
+            )?;
+            let cursor = field(message, "cursor", kind.as_str())?;
+            if !cursor.is_null() {
+                bounded_string(cursor, "READ_REPOSITORY_STATE.cursor", 4096, false, true)?;
+            }
+            let limit = positive_safe_integer(
+                field(message, "limit", kind.as_str())?,
+                "READ_REPOSITORY_STATE.limit",
+            )?;
+            if limit > 256 {
+                return Err(invalid_frame(
+                    "READ_REPOSITORY_STATE.limit must not exceed 256",
+                ));
+            }
+        }
+        MessageKind::RepositoryState => {
+            validate_envelope(
+                message,
+                kind,
+                &[
+                    "repositoryId",
+                    "generation",
+                    "available",
+                    "refDigest",
+                    "intentRevision",
+                    "coverageAfter",
+                    "refs",
+                    "nextCursor",
+                ],
+            )?;
+            uuid(
+                field(message, "repositoryId", kind.as_str())?,
+                "REPOSITORY_STATE.repositoryId",
+            )?;
+            decimal_u64(
+                field(message, "generation", kind.as_str())?,
+                "REPOSITORY_STATE.generation",
+            )?;
+            let available = field(message, "available", kind.as_str())?;
+            if !available.is_null() && !available.is_boolean() {
+                return Err(invalid_frame(
+                    "REPOSITORY_STATE.available must be a boolean or null",
+                ));
+            }
+            let digest = field(message, "refDigest", kind.as_str())?;
+            if !digest.is_null() {
+                hex64(digest, "REPOSITORY_STATE.refDigest")?;
+            }
+            let intent_revision = field(message, "intentRevision", kind.as_str())?;
+            if !intent_revision.is_null() {
+                hex64(intent_revision, "REPOSITORY_STATE.intentRevision")?;
+            }
+            let coverage_after = field(message, "coverageAfter", kind.as_str())?;
+            if !coverage_after.is_null() {
+                canonical_timestamp_millis(coverage_after, "REPOSITORY_STATE.coverageAfter")?;
+            }
+            let refs = field(message, "refs", kind.as_str())?
+                .as_array()
+                .ok_or_else(|| invalid_frame("REPOSITORY_STATE.refs must be an array"))?;
+            if refs.len() > 256 {
+                return Err(invalid_frame("REPOSITORY_STATE.refs exceeds 256 items"));
+            }
+            let mut previous: Option<&str> = None;
+            for reference in refs {
+                exact_object_keys(reference, "REPOSITORY_STATE.refs[]", &["name", "objectId"])?;
+                let name = bounded_string(
+                    field(reference, "name", "REPOSITORY_STATE.refs[]")?,
+                    "REPOSITORY_STATE.refs[].name",
+                    4096,
+                    false,
+                    true,
+                )?;
+                if !name.starts_with("refs/") || previous.is_some_and(|value| value >= name) {
+                    return Err(invalid_frame(
+                        "REPOSITORY_STATE.refs is not strictly sorted",
+                    ));
+                }
+                previous = Some(name);
+                hex40_or_64(
+                    field(reference, "objectId", "REPOSITORY_STATE.refs[]")?,
+                    "REPOSITORY_STATE.refs[].objectId",
+                )?;
+            }
+            let next_cursor = field(message, "nextCursor", kind.as_str())?;
+            if !next_cursor.is_null() {
+                bounded_string(
+                    next_cursor,
+                    "REPOSITORY_STATE.nextCursor",
+                    4096,
+                    false,
+                    true,
+                )?;
             }
         }
         MessageKind::ListSourceStates => {
@@ -4151,6 +4563,31 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
             response
                 .validate()
                 .map_err(|_| invalid_frame("INSIGHTS_RECIPE.response is invalid"))?;
+        }
+        MessageKind::ReadInsightsDeliveryTrace => {
+            validate_envelope(message, kind, &["request"])?;
+            let request: crate::delivery_trace::DeliveryTraceRequest =
+                serde_json::from_value(field(message, "request", kind.as_str())?.clone()).map_err(
+                    |_| invalid_frame("READ_INSIGHTS_DELIVERY_TRACE.request has an invalid shape"),
+                )?;
+            request
+                .validate()
+                .map_err(|_| invalid_frame("READ_INSIGHTS_DELIVERY_TRACE.request is invalid"))?;
+        }
+        MessageKind::InsightsDeliveryTrace => {
+            validate_envelope(message, kind, &["request", "response"])?;
+            let request: crate::delivery_trace::DeliveryTraceRequest = serde_json::from_value(
+                field(message, "request", kind.as_str())?.clone(),
+            )
+            .map_err(|_| invalid_frame("INSIGHTS_DELIVERY_TRACE.request has an invalid shape"))?;
+            let response: crate::delivery_trace::DeliveryTraceResponse =
+                serde_json::from_value(field(message, "response", kind.as_str())?.clone())
+                    .map_err(|_| {
+                        invalid_frame("INSIGHTS_DELIVERY_TRACE.response has an invalid shape")
+                    })?;
+            response
+                .validate_against(&request)
+                .map_err(|_| invalid_frame("INSIGHTS_DELIVERY_TRACE.response is invalid"))?;
         }
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
@@ -4564,6 +5001,66 @@ mod tests {
         assert_eq!(
             validate_protocol_message(&begin).unwrap(),
             MessageKind::BeginSession
+        );
+    }
+
+    #[test]
+    fn validates_trace_source_frames_without_widening_session_batches() {
+        let begin = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "BEGIN_TRACE_SOURCE",
+            "requestId": "41",
+            "deltaFormat": crate::delivery_graph_repository::TRACE_SOURCE_DELTA_FORMAT,
+            "deltaId": "2".repeat(64),
+            "expectedGeneration": "0",
+            "targetGeneration": "1",
+            "repository": {
+                "repositoryId": "11111111-1111-4111-8111-111111111111",
+                "repositoryKey": "1".repeat(64),
+                "available": true,
+                "refDigest": "3".repeat(64),
+                "scmProvider": "github",
+                "webBaseUrl": "https://github.com",
+                "repositoryPath": "team-harness/threadshare",
+                "projectKeys": ["1".repeat(64), "2".repeat(64)]
+            },
+            "intent": null,
+            "counts": {
+                "refs": "1",
+                "commits": "1",
+                "files": "1",
+                "intentNodes": "0",
+                "intentRefs": "0"
+            }
+        });
+        assert_eq!(
+            validate_protocol_message(&begin).unwrap(),
+            MessageKind::BeginTraceSource
+        );
+
+        let batch = json!({
+            "format": PROTOCOL_FORMAT,
+            "type": "TRACE_SOURCE_BATCH",
+            "requestId": "41",
+            "sequence": "0",
+            "collection": "refs",
+            "items": [{ "name": "refs/heads/main", "objectId": "a".repeat(40) }]
+        });
+        assert_eq!(
+            validate_protocol_message(&batch).unwrap(),
+            MessageKind::TraceSourceBatch
+        );
+        let mut invalid = batch.clone();
+        invalid["collection"] = Value::String("turns".to_owned());
+        assert_eq!(
+            validate_protocol_message(&invalid).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+        let mut unknown = begin;
+        unknown["unexpected"] = Value::Bool(true);
+        assert_eq!(
+            validate_protocol_message(&unknown).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
         );
     }
 

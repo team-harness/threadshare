@@ -1,17 +1,24 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { open } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
 import { TextDecoder } from "node:util";
 
 import { canonicalJson } from "./canonical-json.mjs";
 import { cliDiagnostic } from "./cli-contract.mjs";
+import { readExistingInsightsConfig } from "./insights-config.mjs";
 import {
+  assertGitDiffEvidenceRequest,
+  createReadInsightsDeliveryTraceMessage,
   createReadInsightsEvidenceV2Message,
   createReadInsightsQueryV2Message,
   createReadInsightsRecipeMessage,
 } from "./insights-engine-protocol.mjs";
+import { readGitDiffEvidence } from "./insights-git-evidence.mjs";
 import { createInsightsQueryReader } from "./insights-query-reader.mjs";
+import { resolveGitRepository } from "./insights-repository-source.mjs";
 import { openExistingInsightsState } from "./insights-state.mjs";
+import { hashKey } from "./session-facts.mjs";
 
 export const INSIGHTS_QUERY_ACTIONS = new Set([
   "overview",
@@ -61,6 +68,7 @@ const RECIPE_NAMES = new Set([
   "token-hotspots@1",
   "solution-recall@1",
   "session-timeline@1",
+  "delivery-trace@1",
 ]);
 
 function queryError(code, message, cause) {
@@ -71,6 +79,10 @@ function queryError(code, message, cause) {
 
 function requestError(message, cause) {
   return queryError("TS_INSIGHTS_REQUEST_INVALID", message, cause);
+}
+
+function deliveryTraceNotReady(message) {
+  return queryError("TS_INSIGHTS_DELIVERY_TRACE_NOT_READY", message);
 }
 
 function responseError(message) {
@@ -343,6 +355,32 @@ function normalizeRecipeFilters(value = {}) {
 }
 
 export function normalizeInsightsRecipeRequest(input, options = {}) {
+  if (options.name === "delivery-trace@1") {
+    exactKeys(input, [
+      "format", "root", "window", "direction", "maxDepth", "includeCandidateEdges",
+      "includeContextualEdges", "limit", "cursor",
+    ], "Delivery Trace Recipe request");
+    if (input.format !== "threadshare-insights-recipe-request@v1") {
+      throw requestError("Recipe request format is invalid");
+    }
+    const request = {
+      format: "threadshare-insights-delivery-trace-request@v1",
+      root: cloneJson(input.root, "Delivery Trace root"),
+      window: input.window == null ? null : normalizeRecipeWindow(input.window, "Delivery Trace window"),
+      direction: input.direction ?? "both",
+      maxDepth: input.maxDepth ?? 3,
+      includeCandidateEdges: input.includeCandidateEdges ?? false,
+      includeContextualEdges: input.includeContextualEdges ?? false,
+      limit: input.limit ?? 100,
+      cursor: options.engineCursor ?? null,
+      evaluatedAt: canonicalTimestamp(options.evaluatedAt, "evaluatedAt").timestamp,
+    };
+    return validateEngineRequest(
+      createReadInsightsDeliveryTraceMessage,
+      request,
+      "Delivery Trace Recipe request",
+    );
+  }
   exactKeys(input, [
     "format", "window", "comparisonWindow", "filters", "limit", "allowDegraded",
   ], "Recipe request");
@@ -378,6 +416,19 @@ export function normalizeInsightsDeepEvidenceRequest(input, options = {}) {
     maxBytes: input.maxBytes ?? 1_048_576,
   };
   return validateEngineRequest(createReadInsightsEvidenceV2Message, request, "Evidence request");
+}
+
+export function normalizeInsightsGitDiffEvidenceRequest(input) {
+  exactKeys(input, [
+    "format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision",
+    "contextLines", "maxBytes", "cursor",
+  ], "Git diff Evidence request");
+  try {
+    assertGitDiffEvidenceRequest(input);
+  } catch (cause) {
+    throw requestError("Git diff Evidence request is invalid", cause);
+  }
+  return deepFreeze(cloneJson(input, "Git diff Evidence request"));
 }
 
 function canonicalTimestamp(value, label) {
@@ -888,6 +939,30 @@ export function projectInsightsDeepQuery(response, context) {
   });
 }
 
+export async function executeInsightsDeepQueryRequest(input, context) {
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const initialRequest = normalizeInsightsDeepQueryRequest(input, {
+    evaluatedAt: context.evaluatedAt,
+  });
+  const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
+    kind: "query-v2",
+    request: deepQueryCursorRequest(initialRequest),
+  });
+  const evaluatedAt = publicCursor?.closureEvaluatedAt ?? context.evaluatedAt;
+  if (evaluatedAt === null) throw staleCursor();
+  const request = publicCursor === null ? initialRequest : normalizeInsightsDeepQueryRequest(
+    input,
+    { evaluatedAt, engineCursor: publicCursor.engineCursor },
+  );
+  const response = await context.reader.queryV2(request, { signal: context.signal });
+  return projectInsightsDeepQuery(response, {
+    privacyContext: context.privacyContext,
+    request,
+    cursor: publicCursor,
+    evaluatedAt,
+  });
+}
+
 export function projectInsightsRecipe(response, context) {
   if (response.name !== context.request.name || response.evaluatedAt !== context.evaluatedAt ||
       canonicalJson(response.window) !== canonicalJson(context.request.window) ||
@@ -912,6 +987,131 @@ export function projectInsightsRecipe(response, context) {
   });
 }
 
+export async function executeInsightsRecipeRequest(name, input, context) {
+  const request = normalizeInsightsRecipeRequest(input, {
+    name,
+    evaluatedAt: context.evaluatedAt,
+  });
+  const response = await context.reader.recipe(request, { signal: context.signal });
+  return projectInsightsRecipe(response, {
+    privacyContext: context.privacyContext,
+    request,
+    evaluatedAt: context.evaluatedAt,
+  });
+}
+
+function deliveryTraceCursorRequest(request) {
+  return {
+    format: request.format,
+    root: request.root,
+    window: request.window,
+    direction: request.direction,
+    maxDepth: request.maxDepth,
+    includeCandidateEdges: request.includeCandidateEdges,
+    includeContextualEdges: request.includeContextualEdges,
+    limit: request.limit,
+  };
+}
+
+export function projectInsightsDeliveryTrace(response, context) {
+  if (response.evaluatedAt !== context.request.evaluatedAt ||
+      canonicalJson(response.root) !== canonicalJson(context.request.root) ||
+      !Array.isArray(response.nodes) || !Array.isArray(response.edges) ||
+      response.edges.length > context.request.limit ||
+      typeof response.truncated !== "boolean" ||
+      response.truncated !== (response.nextCursor !== null)) {
+    throw responseError("Engine response changed the Delivery Trace request");
+  }
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const snapshot = publicSnapshot(response, context.privacyContext);
+  if (context.cursor !== null) codec.assertSnapshot(context.cursor, snapshot);
+  const nextCursor = response.nextCursor === null ? null : codec.seal({
+    kind: "delivery-trace",
+    snapshot,
+    requestDigest: codec.requestDigest(deliveryTraceCursorRequest(context.request)),
+    engineCursor: response.nextCursor,
+    closureEvaluatedAt: context.request.evaluatedAt,
+    quiescenceSeconds: null,
+    turnKey: null,
+    revision: null,
+  });
+  return deepFreeze({
+    format: "threadshare-insights-delivery-trace@v1",
+    databaseUuid: response.databaseUuid,
+    snapshotSeq: decimal(response.snapshotSeq),
+    evaluatedAt: response.evaluatedAt,
+    root: cloneJson(response.root, "Delivery Trace root"),
+    nodes: cloneJson(response.nodes, "Delivery Trace nodes"),
+    edges: cloneJson(response.edges, "Delivery Trace edges"),
+    nextCursor,
+    truncated: response.truncated,
+    coverage: cloneJson(response.coverage, "Delivery Trace coverage"),
+  });
+}
+
+export async function executeInsightsDeliveryTraceRequest(input, context) {
+  const resolvedInput = await resolveDeliveryTraceRoot(input, context);
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const initialRequest = normalizeInsightsRecipeRequest(resolvedInput, {
+    name: "delivery-trace@1",
+    evaluatedAt: context.evaluatedAt,
+  });
+  const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
+    kind: "delivery-trace",
+    request: deliveryTraceCursorRequest(initialRequest),
+  });
+  const evaluatedAt = publicCursor?.closureEvaluatedAt ?? context.evaluatedAt;
+  if (evaluatedAt === null) throw staleCursor();
+  const request = publicCursor === null ? initialRequest : normalizeInsightsRecipeRequest(resolvedInput, {
+    name: "delivery-trace@1",
+    evaluatedAt,
+    engineCursor: publicCursor.engineCursor,
+  });
+  const response = await context.reader.deliveryTrace(request, { signal: context.signal });
+  return projectInsightsDeliveryTrace(response, {
+    privacyContext: context.privacyContext,
+    request,
+    cursor: publicCursor,
+  });
+}
+
+function pathContains(rootDirectory, currentDirectory) {
+  const relative = path.relative(rootDirectory, currentDirectory);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative));
+}
+
+async function resolveDeliveryTraceRoot(input, context) {
+  if (input.root !== undefined) return input;
+  const config = await context.readConfig({ paths: context.paths });
+  const currentDirectory = path.resolve(context.cwd);
+  const matches = (config.insights.repositories ?? [])
+    .map((repository) => ({
+      repository,
+      rootDirectory: path.resolve(repository.rootDirectory),
+    }))
+    .filter(({ rootDirectory }) => pathContains(rootDirectory, currentDirectory))
+    .sort((left, right) => right.rootDirectory.length - left.rootDirectory.length ||
+      left.repository.repositoryId.localeCompare(right.repository.repositoryId));
+  if (matches.length === 0) {
+    throw deliveryTraceNotReady(
+      "Current directory is not a registered Insights repository; run `threadshare insights sync --repository .` first",
+    );
+  }
+  if (matches.length > 1 && matches[0].rootDirectory === matches[1].rootDirectory) {
+    throw deliveryTraceNotReady(
+      "Current directory matches multiple Insights repositories; register it again with `threadshare insights sync --repository .`",
+    );
+  }
+  return {
+    ...input,
+    root: {
+      kind: "repository",
+      key: context.privacyContext.fingerprint("repository", matches[0].repository.repositoryId),
+    },
+  };
+}
+
 function deepEvidenceCursorRequest(request) {
   return {
     format: request.format,
@@ -919,6 +1119,217 @@ function deepEvidenceCursorRequest(request) {
     include: request.include,
     maxBytes: request.maxBytes,
   };
+}
+
+function gitDiffCursorRequest(request) {
+  return {
+    format: request.format,
+    repositoryKey: request.repositoryKey,
+    commitObjectId: request.commitObjectId,
+    parentObjectId: request.parentObjectId,
+    path: request.path,
+    revision: request.revision,
+    contextLines: request.contextLines,
+    maxBytes: request.maxBytes,
+  };
+}
+
+function encodeGitDiffCursorState(value) {
+  return Buffer.from(canonicalJson({
+    format: "threadshare-insights-git-diff-cursor-state@v1",
+    offset: String(value.offset),
+    payloadSha256: value.payloadSha256,
+    totalBytes: value.totalBytes,
+  })).toString("base64url");
+}
+
+function decodeGitDiffCursorState(value) {
+  try {
+    const state = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    exactKeys(state, ["format", "offset", "payloadSha256", "totalBytes"], "Git diff cursor");
+    if (state.format !== "threadshare-insights-git-diff-cursor-state@v1" ||
+        !DECIMAL.test(state.offset) || !HEX64.test(state.payloadSha256) ||
+        !DECIMAL.test(state.totalBytes) || BigInt(state.offset) > BigInt(state.totalBytes) ||
+        BigInt(state.offset) > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw staleCursor();
+    }
+    return Object.freeze({
+      offset: Number(state.offset),
+      payloadSha256: state.payloadSha256,
+      totalBytes: state.totalBytes,
+    });
+  } catch (error) {
+    if (error?.code === "TS_INSIGHTS_CURSOR_STALE") throw error;
+    throw staleCursor();
+  }
+}
+
+function unavailableGitEvidence(message) {
+  return queryError("TS_INSIGHTS_EVIDENCE_NOT_FOUND", message);
+}
+
+function sameRepositoryIdentity(registration, resolved) {
+  return resolved.commonDirectoryDevice === registration.commonDirectoryDevice &&
+    resolved.commonDirectoryInode === registration.commonDirectoryInode;
+}
+
+function gitCommitKey(request) {
+  return hashKey(
+    "git-commit",
+    Buffer.from(request.repositoryKey, "hex"),
+    request.commitObjectId,
+  );
+}
+
+function gitDiffPathAuthorizationRequest(request, evaluatedAt) {
+  return validateEngineRequest(createReadInsightsQueryV2Message, {
+    format: "threadshare-insights-query-request@v2",
+    resource: "delivery-edge",
+    where: {
+      and: [
+        { field: "repositoryKey", op: "eq", value: request.repositoryKey },
+        { field: "commitHash", op: "eq", value: request.commitObjectId },
+        { field: "normalizedPath", op: "eq", value: request.path },
+        { field: "relation", op: "eq", value: "commit-changed-file" },
+      ],
+    },
+    shape: {
+      kind: "records",
+      select: [
+        "edgeKey", "repositoryKey", "commitHash", "normalizedPath", "oldPath",
+        "relation", "revision",
+      ],
+      payloadMode: "reference",
+    },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "edgeKey", direction: "asc" },
+    ],
+    limit: 2,
+    cursor: null,
+    count: "exact",
+    evaluatedAt,
+  }, "Git diff path authorization request");
+}
+
+export async function authorizeInsightsGitDiffEvidence(request, context) {
+  const config = await context.readConfig({ paths: context.state.paths });
+  const registration = (config.insights.repositories ?? []).find((item) =>
+    context.state.privacyContext.fingerprint("repository", item.repositoryId) ===
+      request.repositoryKey);
+  if (registration === undefined) {
+    throw unavailableGitEvidence("The requested Git repository is not registered");
+  }
+  let resolved;
+  try {
+    resolved = await context.resolveRepository(registration.rootDirectory, {
+      signal: context.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError" || error?.code === "TS_INSIGHTS_ENGINE_ABORTED") throw error;
+    throw unavailableGitEvidence("The registered Git repository is unavailable");
+  }
+  if (!sameRepositoryIdentity(registration, resolved)) {
+    throw unavailableGitEvidence("The registered Git repository identity changed");
+  }
+  const root = { kind: "git-commit", key: gitCommitKey(request) };
+  const traceRequest = validateEngineRequest(createReadInsightsDeliveryTraceMessage, {
+    format: "threadshare-insights-delivery-trace-request@v1",
+    root,
+    window: null,
+    direction: "outgoing",
+    maxDepth: 1,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 1,
+    cursor: null,
+    evaluatedAt: context.evaluatedAt,
+  }, "Git diff commit authorization request");
+  const trace = await context.reader.deliveryTrace(traceRequest, { signal: context.signal });
+  const commit = trace.nodes.find((node) => node.kind === "git-commit" && node.key === root.key);
+  if (commit === undefined || commit.attributes.repositoryKey !== request.repositoryKey ||
+      commit.attributes.objectId !== request.commitObjectId) {
+    throw unavailableGitEvidence("The requested Git commit is not in the committed trace");
+  }
+  if (commit.revision !== request.revision) {
+    throw queryError("TS_INSIGHTS_PAYLOAD_CHANGED", "The requested Git commit revision changed");
+  }
+  const parents = commit.attributes.parentObjectIds;
+  if ((request.parentObjectId === null && parents.length !== 0) ||
+      (request.parentObjectId !== null && !parents.includes(request.parentObjectId))) {
+    throw requestError("Git diff parentObjectId is not a parent of the projected commit");
+  }
+  let oldPath = null;
+  if (request.path !== null) {
+    const edgePage = await context.reader.queryV2(
+      gitDiffPathAuthorizationRequest(request, context.evaluatedAt),
+      { signal: context.signal },
+    );
+    if (edgePage.databaseUuid !== trace.databaseUuid || edgePage.snapshotSeq !== trace.snapshotSeq) {
+      throw staleCursor();
+    }
+    if (edgePage.totalMatchCount !== "1" || !Array.isArray(edgePage.records) ||
+        edgePage.records.length !== 1) {
+      throw unavailableGitEvidence("The requested path is not in the projected commit manifest");
+    }
+    const [record] = edgePage.records;
+    if (record.repositoryKey !== request.repositoryKey ||
+        record.commitHash !== request.commitObjectId ||
+        record.normalizedPath !== request.path ||
+        record.relation !== "commit-changed-file") {
+      throw responseError("Engine response changed the Git diff path authorization");
+    }
+    oldPath = record.oldPath;
+  }
+  return Object.freeze({
+    registration,
+    oldPath,
+    snapshot: createInsightsCursorCodec(context.state.privacyContext)
+      .snapshot(trace.databaseUuid, decimal(trace.snapshotSeq)),
+  });
+}
+
+export async function executeInsightsGitDiffEvidenceRequest(input, context) {
+  const request = normalizeInsightsGitDiffEvidenceRequest(input);
+  const codec = createInsightsCursorCodec(context.state.privacyContext);
+  const cursor = request.cursor === null ? null : codec.open(request.cursor, {
+    kind: "git-diff-evidence",
+    request: gitDiffCursorRequest(request),
+  });
+  const cursorState = cursor === null ? null : decodeGitDiffCursorState(cursor.engineCursor);
+  const authorization = await authorizeInsightsGitDiffEvidence(request, context);
+  if (cursor !== null) codec.assertSnapshot(cursor, authorization.snapshot);
+  try {
+    return await context.readGitDiff(request, {
+      rootDirectory: authorization.registration.rootDirectory,
+      oldPath: authorization.oldPath,
+      offset: cursorState?.offset ?? 0,
+      expectedPayloadSha256: cursorState?.payloadSha256,
+      expectedTotalBytes: cursorState?.totalBytes,
+      signal: context.signal,
+      createCursor(value) {
+        return codec.seal({
+          kind: "git-diff-evidence",
+          snapshot: authorization.snapshot,
+          requestDigest: codec.requestDigest(gitDiffCursorRequest(request)),
+          engineCursor: encodeGitDiffCursorState(value),
+          closureEvaluatedAt: null,
+          quiescenceSeconds: null,
+          turnKey: null,
+          revision: request.revision,
+        });
+      },
+    });
+  } catch (error) {
+    if (error?.code === "TS_INSIGHTS_GIT_OBJECT_UNAVAILABLE" ||
+        error?.code === "TS_INSIGHTS_GIT_DIFF_ENCODING_UNSUPPORTED") {
+      throw unavailableGitEvidence("The projected Git diff is unavailable");
+    }
+    if (error?.code === "TS_INSIGHTS_GIT_DIFF_TOO_LARGE") {
+      throw queryError("TS_QUERY_TOO_BROAD", "The projected Git diff exceeds its bounded limit");
+    }
+    throw error;
+  }
 }
 
 export function projectInsightsDeepEvidence(response, context) {
@@ -950,6 +1361,24 @@ export function projectInsightsDeepEvidence(response, context) {
     content: response.content,
     nextCursor,
     complete: response.complete,
+  });
+}
+
+export async function executeInsightsDeepEvidenceRequest(input, context) {
+  const codec = createInsightsCursorCodec(context.privacyContext);
+  const baseRequest = normalizeInsightsDeepEvidenceRequest(input);
+  const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
+    kind: "evidence-v2",
+    request: deepEvidenceCursorRequest(baseRequest),
+  });
+  const request = normalizeInsightsDeepEvidenceRequest(input, {
+    engineCursor: publicCursor?.engineCursor ?? null,
+  });
+  const response = await context.reader.evidenceV2(request, { signal: context.signal });
+  return projectInsightsDeepEvidence(response, {
+    privacyContext: context.privacyContext,
+    request,
+    cursor: publicCursor,
   });
 }
 
@@ -1652,54 +2081,50 @@ export async function executeInsightsQuery(invocation, options = {}) {
     }
     if (invocation.action === "query") {
       const input = await readInsightsQueryRequest(invocation.requestSource, options);
-      const initialRequest = normalizeInsightsDeepQueryRequest(input, {
-        evaluatedAt: evaluation.closureEvaluatedAt,
-      });
-      const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
-        kind: "query-v2",
-        request: deepQueryCursorRequest(initialRequest),
-      });
-      const evaluatedAt = publicCursor?.closureEvaluatedAt ?? evaluation.closureEvaluatedAt;
-      if (evaluatedAt === null) throw staleCursor();
-      const request = publicCursor === null ? initialRequest : normalizeInsightsDeepQueryRequest(
-        input,
-        { evaluatedAt, engineCursor: publicCursor.engineCursor },
-      );
-      const response = await reader.queryV2(request, { signal: options.signal });
-      return projectInsightsDeepQuery(response, {
+      return await executeInsightsDeepQueryRequest(input, {
         privacyContext: state.privacyContext,
-        request,
-        cursor: publicCursor,
-        evaluatedAt,
+        reader,
+        signal: options.signal,
+        evaluatedAt: evaluation.closureEvaluatedAt,
       });
     }
     if (invocation.action === "recipe") {
-      const request = normalizeInsightsRecipeRequest(
-        await readInsightsQueryRequest(invocation.requestSource, options),
-        { name: invocation.name, evaluatedAt: evaluation.closureEvaluatedAt },
-      );
-      const response = await reader.recipe(request, { signal: options.signal });
-      return projectInsightsRecipe(response, {
+      const input = await readInsightsQueryRequest(invocation.requestSource, options);
+      if (invocation.name === "delivery-trace@1") {
+        return await executeInsightsDeliveryTraceRequest(input, {
+          paths: state.paths,
+          privacyContext: state.privacyContext,
+          reader,
+          signal: options.signal,
+          evaluatedAt: evaluation.closureEvaluatedAt,
+          readConfig: options.readConfig ?? readExistingInsightsConfig,
+          cwd: options.cwd ?? process.cwd(),
+        });
+      }
+      return await executeInsightsRecipeRequest(invocation.name, input, {
         privacyContext: state.privacyContext,
-        request,
+        reader,
+        signal: options.signal,
         evaluatedAt: evaluation.closureEvaluatedAt,
       });
     }
     if (invocation.action === "evidence-v2") {
       const input = await readInsightsQueryRequest(invocation.requestSource, options);
-      const baseRequest = normalizeInsightsDeepEvidenceRequest(input);
-      const publicCursor = input.cursor == null ? null : codec.open(input.cursor, {
-        kind: "evidence-v2",
-        request: deepEvidenceCursorRequest(baseRequest),
-      });
-      const request = normalizeInsightsDeepEvidenceRequest(input, {
-        engineCursor: publicCursor?.engineCursor ?? null,
-      });
-      const response = await reader.evidenceV2(request, { signal: options.signal });
-      return projectInsightsDeepEvidence(response, {
+      if (input?.format === "threadshare-insights-git-diff-evidence-request@v1") {
+        return await executeInsightsGitDiffEvidenceRequest(input, {
+          state,
+          reader,
+          evaluatedAt: evaluation.closureEvaluatedAt,
+          signal: options.signal,
+          readConfig: options.readConfig ?? readExistingInsightsConfig,
+          resolveRepository: options.resolveRepository ?? resolveGitRepository,
+          readGitDiff: options.readGitDiff ?? readGitDiffEvidence,
+        });
+      }
+      return await executeInsightsDeepEvidenceRequest(input, {
         privacyContext: state.privacyContext,
-        request,
-        cursor: publicCursor,
+        reader,
+        signal: options.signal,
       });
     }
     if (invocation.action === "evidence") {

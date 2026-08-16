@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-insights-delivery-trace.v1.schema.json",
+  "title": "Threadshare Insights Delivery Trace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "databaseUuid", "snapshotSeq", "evaluatedAt", "root", "nodes", "edges", "nextCursor", "truncated", "coverage"],
+  "properties": {
+    "format": { "const": "threadshare-insights-delivery-trace@v1" },
+    "databaseUuid": { "type": "string", "format": "uuid" },
+    "snapshotSeq": { "$ref": "#/$defs/decimal" },
+    "evaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "root": { "$ref": "#/$defs/nodeRef" },
+    "nodes": { "type": "array", "maxItems": 401, "items": { "$ref": "#/$defs/node" } },
+    "edges": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/edge" } },
+    "nextCursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[\\x20-\\x7e]+$" }, { "type": "null" }] },
+    "truncated": { "type": "boolean" },
+    "coverage": { "$ref": "#/$defs/coverage" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableKey": { "oneOf": [{ "$ref": "#/$defs/key" }, { "type": "null" }] },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "nullableTimestamp": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nodeKind": { "enum": ["intent", "repository", "session", "turn", "capability-use", "file", "git-commit"] },
+    "nodeRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+      "properties": { "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" } }
+    },
+    "intentAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["intentKind", "status", "parentIntentKey"],
+      "properties": { "intentKind": { "enum": ["feature", "story"] }, "status": { "enum": ["complete", "todo", "unknown"] }, "parentIntentKey": { "$ref": "#/$defs/nullableKey" } }
+    },
+    "repositoryAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["projectKey", "scm"],
+      "properties": {
+        "projectKey": { "$ref": "#/$defs/nullableKey" },
+        "scm": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "webBaseUrl", "repositoryPath", "availability"],
+              "properties": {
+                "kind": { "enum": ["github", "gitlab"] },
+                "webBaseUrl": { "enum": ["https://github.com", "https://gitlab.com"] },
+                "repositoryPath": { "type": "string", "minLength": 3, "maxLength": 4096, "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$" },
+                "availability": { "const": "not-verified" }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "sessionAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["provider", "projectKey"],
+      "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 64 }, "projectKey": { "$ref": "#/$defs/nullableKey" } }
+    },
+    "turnAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["sessionKey"],
+      "properties": { "sessionKey": { "$ref": "#/$defs/key" } }
+    },
+    "capabilityUseAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["turnKey", "capabilityKind", "canonicalName"],
+      "properties": { "turnKey": { "$ref": "#/$defs/key" }, "capabilityKind": { "enum": ["tool", "skill"] }, "canonicalName": { "type": "string", "minLength": 1, "maxLength": 512 } }
+    },
+    "fileAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["repositoryKey", "path"],
+      "properties": { "repositoryKey": { "$ref": "#/$defs/key" }, "path": { "type": "string", "minLength": 1, "maxLength": 12288 } }
+    },
+    "gitCommitAttributes": {
+      "type": "object", "additionalProperties": false, "required": ["repositoryKey", "objectId", "parentObjectIds", "reachable", "externalLinks"],
+      "properties": {
+        "repositoryKey": { "$ref": "#/$defs/key" }, "objectId": { "$ref": "#/$defs/objectId" },
+        "parentObjectIds": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/objectId" } },
+        "reachable": { "type": "boolean" },
+        "externalLinks": {
+          "type": "object", "additionalProperties": false, "required": ["commit"],
+          "properties": { "commit": { "oneOf": [{ "type": "string", "format": "uri", "maxLength": 16384 }, { "type": "null" }] } }
+        }
+      }
+    },
+    "nodeBase": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "key", "revision", "label", "observedAt", "attributes"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 1024 }, "observedAt": { "$ref": "#/$defs/nullableTimestamp" }, "attributes": { "type": "object" }
+      }
+    },
+    "node": {
+      "allOf": [
+        { "$ref": "#/$defs/nodeBase" },
+        { "oneOf": [
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "intent" }, "attributes": { "$ref": "#/$defs/intentAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "repository" }, "attributes": { "$ref": "#/$defs/repositoryAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "session" }, "attributes": { "$ref": "#/$defs/sessionAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "turn" }, "attributes": { "$ref": "#/$defs/turnAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "capability-use" }, "attributes": { "$ref": "#/$defs/capabilityUseAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "file" }, "attributes": { "$ref": "#/$defs/fileAttributes" } } },
+          { "type": "object", "required": ["kind", "attributes"], "properties": { "kind": { "const": "git-commit" }, "attributes": { "$ref": "#/$defs/gitCommitAttributes" } } }
+        ] }
+      ]
+    },
+    "fact": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "count"], "properties": { "kind": { "const": "exact-path-overlap" }, "count": { "$ref": "#/$defs/decimal" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "within-observed-commit-window" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "full-commit-hash" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "explicit-reference" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "count"], "properties": { "kind": { "const": "significant-term-overlap" }, "count": { "$ref": "#/$defs/decimal" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "same-repository" } } }
+      ]
+    },
+    "edge": {
+      "type": "object", "additionalProperties": false, "required": ["relation", "from", "to", "strength", "source", "facts", "limitations", "revision"],
+      "properties": {
+        "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
+        "from": { "$ref": "#/$defs/nodeRef" }, "to": { "$ref": "#/$defs/nodeRef" },
+        "strength": { "enum": ["direct", "observed", "candidate", "contextual"] },
+        "source": { "enum": ["intent-explicit-session-ref", "intent-explicit-commit-ref", "session-membership", "turn-membership", "normalized-file-event", "git-tree-diff", "observed-git-result", "ordered-exact-path-overlap", "unique-text-overlap", "same-file-history"] },
+        "facts": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/fact" } },
+        "limitations": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "enum": ["not-authorship", "not-exclusive-line-attribution", "not-causality", "incomplete-timestamps", "unverified-intent-reference", "unreachable-commit", "path-only-context", "candidate-not-default"] } },
+        "revision": { "$ref": "#/$defs/key" }
+      },
+      "allOf": [{
+        "if": {
+          "required": ["relation"],
+          "properties": { "relation": { "enum": ["session-correlates-commit", "intent-correlates-session", "contextual-same-file"] } }
+        },
+        "then": {
+          "properties": {
+            "facts": { "type": "array", "minItems": 1 },
+            "limitations": { "type": "array", "minItems": 1 }
+          }
+        }
+      }]
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false, "required": ["repositoryState", "intentState", "unresolvedRefCount", "excludedCandidateEdgeCount", "excludedContextualEdgeCount", "unreachableCommitCount"],
+      "properties": {
+        "repositoryState": { "enum": ["complete", "partial", "unavailable"] }, "intentState": { "enum": ["complete", "partial", "unavailable"] },
+        "unresolvedRefCount": { "$ref": "#/$defs/decimal" }, "excludedCandidateEdgeCount": { "$ref": "#/$defs/decimal" },
+        "excludedContextualEdgeCount": { "$ref": "#/$defs/decimal" }, "unreachableCommitCount": { "$ref": "#/$defs/decimal" }
+      }
+    }
+  }
+}

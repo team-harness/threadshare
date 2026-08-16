@@ -9,7 +9,7 @@
     "format": { "const": "threadshare-insights-query@v2" },
     "snapshot": { "$ref": "#/$defs/snapshot" },
     "sourceFreshness": { "$ref": "#/$defs/sourceFreshness" },
-    "resource": { "enum": ["session", "turn", "event", "capability-use", "file-activity", "token-usage", "error-occurrence"] },
+    "resource": { "enum": ["session", "turn", "event", "capability-use", "file-activity", "token-usage", "error-occurrence", "delivery-edge"] },
     "records": { "oneOf": [{ "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/jsonObject" } }, { "type": "null" }] },
     "groups": { "oneOf": [{ "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/jsonObject" } }, { "type": "null" }] },
     "nextCursor": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32768 }, { "type": "null" }] },

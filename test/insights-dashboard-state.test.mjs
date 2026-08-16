@@ -8,6 +8,7 @@ import {
   decimalCount,
   formatAge,
   formatBytes,
+  relatedTraceNodeKeys,
   reduceDashboardState,
 } from "../src/insights-dashboard/state.js";
 
@@ -114,4 +115,28 @@ test("Dashboard scalar formatters tolerate protocol decimal strings", () => {
   assert.equal(formatAge(null), "unknown");
   assert.equal(formatAge(""), "unknown");
   assert.equal(formatAge(90_000), "2 min");
+});
+
+test("Inspector related highlighting is derived only from response edges", () => {
+  const commitKey = "a".repeat(64);
+  const linkedFileKey = "b".repeat(64);
+  const sameNamedFileKey = "c".repeat(64);
+  const trace = {
+    nodes: [
+      { kind: "git-commit", key: commitKey },
+      { kind: "file", key: linkedFileKey, attributes: { path: "src/app.js" } },
+      { kind: "file", key: sameNamedFileKey, attributes: { path: "src/app.js" } },
+    ],
+    edges: [{
+      from: { kind: "git-commit", key: commitKey },
+      to: { kind: "file", key: linkedFileKey },
+      relation: "commit-changed-file",
+    }],
+  };
+  assert.deepEqual(relatedTraceNodeKeys(trace, { kind: "git-commit", key: commitKey }), [
+    `file:${linkedFileKey}`,
+  ]);
+  assert.deepEqual(relatedTraceNodeKeys({ ...trace, edges: [] }, {
+    kind: "git-commit", key: commitKey,
+  }), []);
 });

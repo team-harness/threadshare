@@ -47,6 +47,33 @@ export const INSIGHTS_CONFIG_SCHEMA = {
           maxItems: 100_000,
           items: { type: "string", minLength: 1, maxLength: 512 },
         },
+        repositories: {
+          type: "array",
+          uniqueItems: true,
+          maxItems: 256,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "repositoryId",
+              "commonDirectory",
+              "rootDirectory",
+              "commonDirectoryDevice",
+              "commonDirectoryInode",
+            ],
+            properties: {
+              repositoryId: {
+                type: "string",
+                pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              },
+              commonDirectory: { type: "string", minLength: 1, maxLength: 4096 },
+              rootDirectory: { type: "string", minLength: 1, maxLength: 4096 },
+              commonDirectoryDevice: { type: "string", pattern: "^(0|[1-9][0-9]*)$" },
+              commonDirectoryInode: { type: "string", pattern: "^(0|[1-9][0-9]*)$" },
+              intentPath: { type: "string", minLength: 1, maxLength: 4096, pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$" },
+            },
+          },
+        },
         quiescenceSeconds: { type: "integer", minimum: 60, maximum: 86_400 },
       },
     },
@@ -359,9 +386,9 @@ async function readBoundedFile(handle, maximumBytes) {
   return buffer.subarray(0, offset);
 }
 
-export async function loadInsightsConfig(options = {}) {
+async function readInsightsConfig(options, secure) {
   const paths = options.paths ?? resolveInsightsPaths(options);
-  await secureManagedConfigDirectoryIfPresent(paths, options);
+  if (secure) await secureManagedConfigDirectoryIfPresent(paths, options);
   let handle;
   try {
     handle = await open(
@@ -388,7 +415,7 @@ export async function loadInsightsConfig(options = {}) {
     ) {
       throw configError(`Invalid insights config at ${paths.configFile}`);
     }
-    await secureConfigHandle(handle, paths.configFile, options);
+    if (secure) await secureConfigHandle(handle, paths.configFile, options);
     const raw = await readBoundedFile(handle, MAX_CONFIG_BYTES);
     const after = await handle.stat({ bigint: true });
     if (
@@ -409,6 +436,14 @@ export async function loadInsightsConfig(options = {}) {
   } finally {
     await handle.close();
   }
+}
+
+export async function loadInsightsConfig(options = {}) {
+  return readInsightsConfig(options, true);
+}
+
+export async function readExistingInsightsConfig(options = {}) {
+  return readInsightsConfig(options, false);
 }
 
 async function writeInsightsConfig(value, serialized, paths, options) {
@@ -487,5 +522,52 @@ export async function updateInsightsExclusion(change, options = {}) {
       await writeInsightsConfig(config, serialized, paths, options);
     }
     return { changed, config };
+  });
+}
+
+function normalizedRepositoryRegistration(registration, options) {
+  const repository = {
+    repositoryId: registration?.repositoryId ?? (options.randomUuid ?? randomUUID)(),
+    commonDirectory: registration?.commonDirectory,
+    rootDirectory: registration?.rootDirectory,
+    commonDirectoryDevice: registration?.commonDirectoryDevice,
+    commonDirectoryInode: registration?.commonDirectoryInode,
+    ...(registration?.intentPath === undefined ? {} : { intentPath: registration.intentPath }),
+  };
+  const candidate = defaultConfig();
+  candidate.insights.repositories = [repository];
+  assertValidConfig(candidate, "repository registration");
+  return repository;
+}
+
+export async function updateInsightsRepositoryRegistration(registration, options = {}) {
+  const paths = options.paths ?? resolveInsightsPaths(options);
+  return withConfigLock(paths, options, async () => {
+    const config = await loadInsightsConfig({ ...options, paths });
+    const repositories = [...(config.insights.repositories ?? [])];
+    const identityIndex = repositories.findIndex((item) =>
+      item.commonDirectoryDevice === registration?.commonDirectoryDevice &&
+      item.commonDirectoryInode === registration?.commonDirectoryInode);
+    const repository = normalizedRepositoryRegistration({
+      ...registration,
+      repositoryId: identityIndex < 0 ? undefined : repositories[identityIndex].repositoryId,
+      intentPath: registration?.intentPath === undefined
+        ? repositories[identityIndex]?.intentPath
+        : registration.intentPath,
+    }, options);
+    const previous = identityIndex < 0 ? null : repositories[identityIndex];
+    const changed = previous === null ||
+      previous.commonDirectory !== repository.commonDirectory ||
+      previous.rootDirectory !== repository.rootDirectory;
+    const registrationChanged = changed || previous?.intentPath !== repository.intentPath;
+    if (identityIndex < 0) repositories.push(repository);
+    else repositories[identityIndex] = repository;
+    repositories.sort((left, right) => left.repositoryId.localeCompare(right.repositoryId));
+    config.insights.repositories = repositories;
+    if (registrationChanged) {
+      const serialized = serializedConfig(config, paths.configFile);
+      await writeInsightsConfig(config, serialized, paths, options);
+    }
+    return { changed: registrationChanged, repository: Object.freeze({ ...repository }), config };
   });
 }

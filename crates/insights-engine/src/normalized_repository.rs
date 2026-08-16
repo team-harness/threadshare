@@ -927,6 +927,7 @@ pub(crate) fn apply_session_facts(
         },
     )?;
     crate::insights_overview::refresh_session_overview_rollup(&transaction, session_id)?;
+    crate::delivery_graph_repository::refresh_session_delivery_edges(&transaction, session_id)?;
     // SQLite enforces every touched foreign key inside this transaction. A full
     // foreign_key_check scans the entire repository, so it belongs to explicit
     // integrity maintenance and capacity validation rather than the commit path.
@@ -1104,6 +1105,7 @@ pub(crate) fn apply_staged_session_facts(
         },
     )?;
     crate::insights_overview::refresh_session_overview_rollup(&transaction, session_id)?;
+    crate::delivery_graph_repository::refresh_session_delivery_edges(&transaction, session_id)?;
     transaction.commit()?;
     Ok(CommitOutcome {
         snapshot_seq: snapshot_seq.to_string(),
@@ -1654,6 +1656,7 @@ fn upsert_history_events(
             ],
         )?;
         replace_deep_event_projections(transaction, event)?;
+        crate::delivery_graph_repository::replace_observed_git_commits(transaction, event)?;
     }
     Ok(())
 }

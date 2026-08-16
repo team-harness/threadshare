@@ -28,6 +28,7 @@
         <button type="button" data-view="search">Search</button>
         <button type="button" data-view="skill">Skills</button>
         <button type="button" data-view="tool">Tools</button>
+        <button type="button" data-view="inspector">Insights Inspector</button>
       </nav>
       <div class="index-meta" id="index-meta"></div>
     </aside>
@@ -117,12 +118,53 @@
         </table></div>
         <button class="quiet-button load-more" type="button" data-load-more="tool">Load more</button>
       </section>
+
+      <section class="view inspector-view is-hidden" data-view-panel="inspector" aria-labelledby="delivery-heading">
+        <div class="section-heading inspector-workbench-heading">
+          <div>
+            <p class="eyebrow">Committed delivery evidence</p>
+            <h1 id="delivery-heading">Insights Inspector</h1>
+          </div>
+          <div class="segmented-control" aria-label="Inspector navigation mode">
+            <button type="button" data-delivery-mode="intent">Intent</button>
+            <button type="button" data-delivery-mode="date" aria-pressed="true">Date</button>
+          </div>
+        </div>
+        <form class="delivery-controls" id="delivery-form">
+          <label class="repository-field"><span>Repository</span><select id="delivery-repository"><option value="">No registered repository</option></select></label>
+          <label><span>From UTC date</span><input id="delivery-after" type="date"></label>
+          <label><span>Before UTC date</span><input id="delivery-before" type="date"></label>
+          <button class="primary-button" type="submit">Load delivery</button>
+        </form>
+        <div class="delivery-status" id="delivery-status" aria-live="polite"></div>
+        <div class="delivery-workbench">
+          <aside class="delivery-rail" aria-label="Delivery scopes">
+            <div class="lane-heading"><span id="delivery-rail-heading">Date</span><strong id="delivery-rail-count">0</strong></div>
+            <div class="delivery-rail-list" id="delivery-rail-list"></div>
+            <button class="quiet-button load-more" id="delivery-more" type="button" hidden>Load more</button>
+          </aside>
+          <div class="trace-lanes" id="trace-lanes">
+            <section class="trace-lane" aria-labelledby="prompt-lane-heading">
+              <div class="lane-heading"><span id="prompt-lane-heading">Prompt</span><strong id="prompt-lane-count">0</strong></div>
+              <div class="lane-list" id="prompt-lane"></div>
+            </section>
+            <section class="trace-lane" aria-labelledby="activity-lane-heading">
+              <div class="lane-heading"><span id="activity-lane-heading">Activity</span><strong id="activity-lane-count">0</strong></div>
+              <div class="lane-list" id="activity-lane"></div>
+            </section>
+            <section class="trace-lane" aria-labelledby="delivery-lane-heading">
+              <div class="lane-heading"><span id="delivery-lane-heading">Delivery</span><strong id="delivery-lane-count">0</strong></div>
+              <div class="lane-list" id="delivery-lane"></div>
+            </section>
+          </div>
+        </div>
+      </section>
     </main>
 
-    <aside class="inspector is-closed" id="inspector" aria-label="Evidence inspector" aria-hidden="true">
+    <aside class="inspector is-closed" id="inspector" aria-label="Detail Drawer" aria-hidden="true">
       <div class="inspector-heading">
-        <div><p class="eyebrow">Selected item</p><h2 id="inspector-title">Evidence</h2></div>
-        <button class="icon-button" id="inspector-close" type="button" aria-label="Close inspector" title="Close inspector">&times;</button>
+        <div><p class="eyebrow">Detail Drawer</p><h2 id="inspector-title">Evidence</h2></div>
+        <button class="icon-button" id="inspector-close" type="button" aria-label="Close Detail Drawer" title="Close Detail Drawer">&times;</button>
       </div>
       <div id="inspector-body"></div>
       <button class="quiet-button load-more" id="evidence-more" type="button">Load more evidence</button>

@@ -161,6 +161,179 @@ test("Dashboard serves the committed snapshot before starting background reconci
   assert.ok(order.includes("reader-close"));
 });
 
+test("Dashboard Inspector lists registered repositories and reads committed delivery edges", async () => {
+  const repositoryKey = "a".repeat(64);
+  const edgeKey = "b".repeat(64);
+  const databaseUuid = "11111111-2222-4333-8444-555555555555";
+  let capturedQuery;
+  let capturedTrace;
+  let resolveServerClosed;
+  const serverClosed = new Promise((resolve) => { resolveServerClosed = resolve; });
+  const state = {
+    paths: { configFile: "/private/config.json" },
+    originSecretEpoch: databaseUuid,
+    privacyContext: {
+      fingerprint(namespace) {
+        return namespace === "repository" ? repositoryKey : "f".repeat(64);
+      },
+    },
+  };
+  const coverage = {
+    matching: {
+      fullRecordCount: "1", summaryRecordCount: "0", unloadedRecordCount: "0",
+      truncatedRecordCount: "0", unavailableRecordCount: "0", missingTimestampCount: "0",
+      missingRevisionCount: "0", missingTokenMetricCount: "0", missingPayloadCount: "0",
+    },
+    indexedHistory: {
+      visibleSessionCount: "1", excludedSessionCount: "0", subagentExcludedSessionCount: "0",
+      unknownEligibilitySessionCount: "0", pendingPurgeSessionCount: "0", purgedSessionCount: "0",
+      missingCoverageRollupSessionCount: "0",
+      fts: {
+        searchableEventCount: "1", storedNotSearchableEventCount: "0",
+        searchablePayloadBytes: "1", storedNotSearchablePayloadBytes: "0",
+      },
+    },
+    degraded: false,
+    diagnostics: [],
+  };
+  const reader = {
+    invalidate() {},
+    async queryV2(request) {
+      capturedQuery = request;
+      return {
+        format: "threadshare-insights-query@v2",
+        databaseUuid,
+        snapshotSeq: "9",
+        resource: "delivery-edge",
+        records: [{
+          edgeKey,
+          repositoryKey,
+          fromKind: "git-commit",
+          fromKey: "c".repeat(64),
+          toKind: "file",
+          toKey: "d".repeat(64),
+          relation: "commit-changed-file",
+          strength: "direct",
+          source: "git-tree-diff",
+          commitHash: "e".repeat(40),
+          normalizedPath: "src/insights-dashboard/app.js",
+          oldPath: null,
+          changeKind: "M",
+          additions: "3",
+          deletions: "1",
+          reachable: true,
+          observedAt: "2026-08-16T03:00:00.000Z",
+          revision: "e".repeat(64),
+        }],
+        groups: null,
+        nextCursor: null,
+        totalMatchCount: "1",
+        totalGroupCount: null,
+        truncated: false,
+        coverage,
+        provenance: { default: "recorded", fields: [] },
+        limits: { pageBytes: "3932160", payloadsMayRequireEvidencePaging: true },
+      };
+    },
+    async deliveryTrace(request) {
+      capturedTrace = request;
+      return {
+        format: "threadshare-insights-delivery-trace@v1",
+        databaseUuid,
+        snapshotSeq: "9",
+        evaluatedAt: request.evaluatedAt,
+        root: request.root,
+        nodes: [{
+          kind: "git-commit",
+          key: request.root.key,
+          revision: "e".repeat(64),
+          attributes: {
+            repositoryKey,
+            objectId: "e".repeat(40),
+            parentObjectIds: [],
+            reachable: true,
+          },
+        }],
+        edges: [],
+        nextCursor: null,
+        truncated: false,
+        coverage: { degraded: false, diagnostics: [] },
+      };
+    },
+    async close() {},
+  };
+  const dashboard = await launchInsightsDashboard({
+    paths: {
+      stateDirectory: "/private/insights",
+      tempDirectory: "/private/insights/tmp",
+      databaseFile: "/private/insights/insights.sqlite3",
+    },
+    async openState() { return state; },
+    createReader() { return reader; },
+    async readConfig() {
+      return {
+        insights: {
+          repositories: [{
+            repositoryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            rootDirectory: "/private/work/threadshare",
+          }],
+        },
+      };
+    },
+    async inspectState() {
+      return { state: "ready", bytes: "10", entries: 1, databasePresent: true, diagnostics: [] };
+    },
+    async createServer({ api }) {
+      assert.deepEqual(await api.inspectorRepositories(), {
+        format: "threadshare-insights-dashboard-repositories@v1",
+        items: [{ repositoryKey, label: "threadshare" }],
+      });
+      const edges = await api.inspectorEdges({
+        repositoryKey,
+        after: null,
+        before: null,
+        cursor: null,
+        limit: 25,
+      });
+      assert.equal(edges.format, "threadshare-insights-query@v2");
+      assert.equal(edges.records[0].edgeKey, edgeKey);
+      const trace = await api.inspectorTrace({
+        format: "threadshare-insights-recipe-request@v1",
+        root: { kind: "git-commit", key: "c".repeat(64) },
+        window: null,
+        direction: "both",
+        maxDepth: 2,
+        includeCandidateEdges: false,
+        includeContextualEdges: false,
+        limit: 100,
+        cursor: null,
+      });
+      assert.equal(trace.format, "threadshare-insights-delivery-trace@v1");
+      assert.equal(trace.snapshotSeq, "9");
+      return {
+        url: "http://127.0.0.1:43123/",
+        closed: serverClosed,
+        async close() { resolveServerClosed(); },
+      };
+    },
+    createWorker() {
+      return {
+        start() { return true; },
+        status() { return { started: true, running: false, queued: false, cycleCount: 0 }; },
+        async stop() {},
+      };
+    },
+    now() { return 1_786_464_000_000; },
+  });
+
+  assert.deepEqual(capturedQuery.where, {
+    field: "repositoryKey", op: "eq", value: repositoryKey,
+  });
+  assert.equal(capturedQuery.evaluatedAt, "2026-08-11T16:00:00.000Z");
+  assert.equal(capturedTrace.evaluatedAt, "2026-08-11T16:00:00.000Z");
+  await dashboard.close();
+});
+
 test("Dashboard reports committed Engine read failures instead of presenting stale readiness", async () => {
   let resolveServerClosed;
   const serverClosed = new Promise((resolve) => { resolveServerClosed = resolve; });

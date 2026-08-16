@@ -37,9 +37,14 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "schema/threadshare-insights-activity.v1.schema.json",
   "schema/threadshare-insights-agent-spec.v1.schema.json",
   "schema/threadshare-insights-capabilities.v1.schema.json",
+  "schema/threadshare-insights-continuation-context.v1.schema.json",
+  "schema/threadshare-insights-delivery-trace-request.v1.schema.json",
+  "schema/threadshare-insights-delivery-trace.v1.schema.json",
   "schema/threadshare-insights-evidence-request.v2.schema.json",
   "schema/threadshare-insights-evidence.v1.schema.json",
   "schema/threadshare-insights-evidence.v2.schema.json",
+  "schema/threadshare-insights-git-diff-evidence-request.v1.schema.json",
+  "schema/threadshare-insights-git-diff-evidence.v1.schema.json",
   "schema/threadshare-insights-overview.v1.schema.json",
   "schema/threadshare-insights-query-request.v2.schema.json",
   "schema/threadshare-insights-query.v2.schema.json",
@@ -58,13 +63,16 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/insights-agent-spec.mjs",
   "src/insights-command.mjs",
   "src/insights-config.mjs",
+  "src/insights-continuation-context.mjs",
   "src/insights-dashboard-server.mjs",
   "src/insights-dashboard.mjs",
   "src/insights-engine-client.mjs",
   "src/insights-engine-protocol.mjs",
   "src/insights-engine-runtime.mjs",
   "src/insights-engine-targets.mjs",
+  "src/insights-git-evidence.mjs",
   "src/insights-indexer.mjs",
+  "src/insights-intent-source.mjs",
   "src/insights-lifecycle.mjs",
   "src/insights-mcp.mjs",
   "src/insights-paths.mjs",
@@ -72,6 +80,7 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/insights-query.mjs",
   "src/insights-reference-engine.mjs",
   "src/insights-reindex.mjs",
+  "src/insights-repository-source.mjs",
   "src/insights-state.mjs",
   "src/insights-writer-lock.mjs",
   "src/paseo-session-bridge.mjs",
@@ -202,8 +211,8 @@ export function validatePackOutput(packOutput, metadata) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   if (metadata.kind !== "platform") {
-    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 256 * 1024) {
-      throw new Error("npm root package compressed size must not exceed 256 KiB");
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 272 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 272 KiB");
     }
     if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1280 * 1024) {
       throw new Error("npm root package unpacked size must not exceed 1.25 MiB");

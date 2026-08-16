@@ -227,6 +227,40 @@ function outputByteLength(value) {
   }
 }
 
+const FULL_GIT_OBJECT_ID_PATTERN = /(?<![0-9a-f])([0-9a-f]{40})(?![0-9a-f])/giu;
+
+function toolCommandText(input) {
+  const value = parseJsonInput(input);
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  for (const field of ["cmd", "command", "script", "input"]) {
+    if (typeof value[field] === "string") return value[field];
+    if (Array.isArray(value[field]) && value[field].every((item) => typeof item === "string")) {
+      return value[field].join(" ");
+    }
+  }
+  return "";
+}
+
+function observedGitCommitObjectIds(name, input, output, state) {
+  if (state !== "completed" || !/(?:bash|exec_command|shell|terminal|powershell)/iu.test(name)) {
+    return [];
+  }
+  const command = toolCommandText(input);
+  if (!/(?:^|[;&|\s])git\s+(?:commit|rev-parse|show|log)\b/iu.test(command)) return [];
+  const text = typeof output === "string"
+    ? output
+    : (() => {
+        try {
+          return canonicalJson(output);
+        } catch {
+          return "";
+        }
+      })();
+  return [...new Set([...text.matchAll(FULL_GIT_OBJECT_ID_PATTERN)]
+    .map((match) => match[1].toLowerCase()))].slice(0, 16);
+}
+
 function semanticPayload(value, { parseJsonString = false } = {}) {
   if (value === undefined) return null;
   if (typeof value === "string") {
@@ -1392,6 +1426,7 @@ function processCodexInvocation(builder, record, payload) {
       use,
       invocationEvent: event,
       name,
+      input,
       fileActivities,
       fullReadPathFingerprint: fullReadPath
         ? builder.privacyContext.pathFingerprint("codex", fullReadPath)
@@ -1407,6 +1442,9 @@ function processCodexResult(builder, record, payload) {
   const result = payload.error ?? payload.output;
   const pending = correlation ? builder.pendingUses.get(correlation) : null;
   const signature = state === "failed" ? errorSignature(result) : null;
+  const observedCommitObjectIds = pending
+    ? observedGitCommitObjectIds(pending.name, pending.input, result, state)
+    : [];
   const event = builder.addEvent(
     record,
     -1,
@@ -1432,6 +1470,9 @@ function processCodexResult(builder, record, payload) {
         : {}),
       ...(signature
         ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
+        : {}),
+      ...(observedCommitObjectIds.length > 0
+        ? { observedGitCommitObjectIds: observedCommitObjectIds }
         : {}),
     },
   );
@@ -1693,6 +1734,7 @@ function processClaudeInvocation(builder, record, part, contentIndex, originScop
       use,
       invocationEvent: event,
       name,
+      input,
       fileActivities,
       originScope,
       skillName: name === "Skill" ? claudeSkillName(input) : null,
@@ -1706,6 +1748,9 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
   const state = eventState(part);
   const pending = correlation ? builder.pendingUses.get(correlation) : null;
   const signature = state === "failed" ? errorSignature(part.content) : null;
+  const observedCommitObjectIds = pending
+    ? observedGitCommitObjectIds(pending.name, pending.input, part.content, state)
+    : [];
   const event = builder.addEvent(
     record,
     contentIndex,
@@ -1728,6 +1773,9 @@ function processClaudeResult(builder, record, part, contentIndex, originScope) {
         : {}),
       ...(signature
         ? { errorSignatureVersion: "error-signature@1", errorSignature: signature }
+        : {}),
+      ...(observedCommitObjectIds.length > 0
+        ? { observedGitCommitObjectIds: observedCommitObjectIds }
         : {}),
     },
   );

@@ -1,4 +1,5 @@
 import process from "node:process";
+import path from "node:path";
 
 import {
   createInsightsBackgroundWorker,
@@ -6,12 +7,25 @@ import {
 } from "./insights-command.mjs";
 import { createInsightsDashboardServer } from "./insights-dashboard-server.mjs";
 import { inspectInsightsState } from "./insights-lifecycle.mjs";
+import { readExistingInsightsConfig } from "./insights-config.mjs";
+import { createInsightsContinuationContext } from "./insights-continuation-context.mjs";
+import { readGitDiffEvidence } from "./insights-git-evidence.mjs";
 import { resolveInsightsPaths } from "./insights-paths.mjs";
+import {
+  executeInsightsDeepEvidenceRequest,
+  executeInsightsDeepQueryRequest,
+  executeInsightsDeliveryTraceRequest,
+  executeInsightsGitDiffEvidenceRequest,
+  executeInsightsRecipeRequest,
+} from "./insights-query.mjs";
 import { createInsightsQueryReader } from "./insights-query-reader.mjs";
-import { openInsightsState } from "./insights-state.mjs";
+import { resolveGitRepository } from "./insights-repository-source.mjs";
+import { openExistingInsightsState } from "./insights-state.mjs";
 
 const DEFAULT_QUIESCENCE_SECONDS = 300;
 const ENGINE_STATUS_SKIPPED = "TS_INSIGHTS_ENGINE_STATUS_SKIPPED";
+const CONTRACT_KEY = /^[0-9a-f]{64}$/u;
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 function dashboardError(code, message, cause) {
   const error = cause === undefined ? new Error(message) : new Error(message, { cause });
@@ -50,8 +64,149 @@ export function createCommittedInsightsReader(options) {
     async capabilities(input, options_) {
       return reader.capabilities(input, options_);
     },
+    async queryV2(input, options_) {
+      return reader.queryV2(input, options_);
+    },
+    async evidenceV2(input, options_) {
+      return reader.evidenceV2(input, options_);
+    },
+    async deliveryTrace(input, options_) {
+      return reader.deliveryTrace(input, options_);
+    },
+    async recipe(input, options_) {
+      return reader.recipe(input, options_);
+    },
     async close() {
       await reader.close();
+    },
+  });
+}
+
+function inspectorRequestError() {
+  return dashboardError(
+    "TS_INSIGHTS_DASHBOARD_REQUEST_INVALID",
+    "Insights Inspector request is invalid",
+  );
+}
+
+function exactKeys(value, expected) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
+}
+
+function optionalTimestamp(value) {
+  return value === null || (typeof value === "string" && TIMESTAMP.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value);
+}
+
+function inspectorEdgeQuery(input) {
+  if (!exactKeys(input, ["repositoryKey", "after", "before", "cursor", "limit"]) ||
+      !CONTRACT_KEY.test(input.repositoryKey ?? "") ||
+      !optionalTimestamp(input.after) || !optionalTimestamp(input.before) ||
+      (input.after !== null && input.before !== null && input.after >= input.before) ||
+      (input.cursor !== null && (typeof input.cursor !== "string" || input.cursor.length === 0)) ||
+      !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+    throw inspectorRequestError();
+  }
+  const predicates = [
+    { field: "repositoryKey", op: "eq", value: input.repositoryKey },
+    ...(input.after === null ? [] : [{ field: "observedAt", op: "gte", value: input.after }]),
+    ...(input.before === null ? [] : [{ field: "observedAt", op: "lt", value: input.before }]),
+  ];
+  return {
+    format: "threadshare-insights-query-request@v2",
+    resource: "delivery-edge",
+    where: predicates.length === 1 ? predicates[0] : { and: predicates },
+    shape: {
+      kind: "records",
+      select: [
+        "edgeKey", "repositoryKey", "fromKind", "fromKey", "toKind", "toKey",
+        "relation", "strength", "source", "commitHash", "normalizedPath", "oldPath",
+        "changeKind", "additions", "deletions", "reachable", "observedAt", "revision",
+      ],
+      payloadMode: "reference",
+    },
+    orderBy: [
+      { field: "observedAt", direction: "desc" },
+      { field: "edgeKey", direction: "asc" },
+    ],
+    limit: input.limit,
+    cursor: input.cursor,
+    count: "exact",
+  };
+}
+
+export function createInsightsInspectorApi(options) {
+  const readConfig = options.readConfig ?? readExistingInsightsConfig;
+  const resolveRepository = options.resolveRepository ?? resolveGitRepository;
+  const readGitDiff = options.readGitDiff ?? readGitDiffEvidence;
+  const evaluatedAt = () => new Date(options.now()).toISOString();
+  return Object.freeze({
+    async inspectorRepositories() {
+      const config = await readConfig({ paths: options.state.paths });
+      const items = (config.insights.repositories ?? []).map((repository) => Object.freeze({
+        repositoryKey: options.state.privacyContext.fingerprint(
+          "repository",
+          repository.repositoryId,
+        ),
+        label: path.basename(repository.rootDirectory) || "Local repository",
+      })).sort((left, right) => left.repositoryKey.localeCompare(right.repositoryKey));
+      return Object.freeze({
+        format: "threadshare-insights-dashboard-repositories@v1",
+        items: Object.freeze(items),
+      });
+    },
+    inspectorEdges(input) {
+      return executeInsightsDeepQueryRequest(inspectorEdgeQuery(input), {
+        privacyContext: options.state.privacyContext,
+        reader: options.reader,
+        signal: options.signal,
+        evaluatedAt: evaluatedAt(),
+      });
+    },
+    inspectorTrace(input) {
+      return executeInsightsDeliveryTraceRequest(input, {
+        privacyContext: options.state.privacyContext,
+        reader: options.reader,
+        signal: options.signal,
+        evaluatedAt: evaluatedAt(),
+      });
+    },
+    inspectorEvidence(input) {
+      return executeInsightsDeepEvidenceRequest(input, {
+        privacyContext: options.state.privacyContext,
+        reader: options.reader,
+        signal: options.signal,
+      });
+    },
+    inspectorSessionTimeline(input) {
+      return executeInsightsRecipeRequest("session-timeline@1", input, {
+        privacyContext: options.state.privacyContext,
+        reader: options.reader,
+        signal: options.signal,
+        evaluatedAt: evaluatedAt(),
+      });
+    },
+    inspectorGitDiff(input) {
+      return executeInsightsGitDiffEvidenceRequest(input, {
+        state: options.state,
+        reader: options.reader,
+        evaluatedAt: evaluatedAt(),
+        signal: options.signal,
+        readConfig,
+        resolveRepository,
+        readGitDiff,
+      });
+    },
+    inspectorContinuation(input) {
+      if (!exactKeys(input, ["trace", "recentPrompts", "failureChains"]) ||
+          !Array.isArray(input.recentPrompts) || !Array.isArray(input.failureChains)) {
+        throw inspectorRequestError();
+      }
+      return createInsightsContinuationContext(input.trace, {
+        recentPrompts: input.recentPrompts,
+        failureChains: input.failureChains,
+      });
     },
   });
 }
@@ -118,7 +273,7 @@ function normalizeSearchInput(input, nowUnixMs) {
 
 export async function launchInsightsDashboard(options = {}) {
   const paths = options.paths ?? resolveInsightsPaths(options);
-  const openState = options.openState ?? openInsightsState;
+  const openState = options.openState ?? openExistingInsightsState;
   const inspectState = options.inspectState ?? inspectInsightsState;
   const createReader = options.createReader ?? createCommittedInsightsReader;
   const createServer = options.createServer ?? createInsightsDashboardServer;
@@ -134,6 +289,15 @@ export async function launchInsightsDashboard(options = {}) {
   let latestProgress = null;
   let runtimeError = null;
   const now = options.now ?? Date.now;
+  const inspectorApi = createInsightsInspectorApi({
+    state,
+    reader,
+    now,
+    signal: options.signal,
+    readConfig: options.readConfig,
+    resolveRepository: options.resolveRepository,
+    readGitDiff: options.readGitDiff,
+  });
   const api = Object.freeze({
     async status() {
       const filesystem = await inspectState({
@@ -196,6 +360,7 @@ export async function launchInsightsDashboard(options = {}) {
     capabilities(input) {
       return reader.capabilities(input, { signal: options.signal });
     },
+    ...inspectorApi,
   });
 
   let server;

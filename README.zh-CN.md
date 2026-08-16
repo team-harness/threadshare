@@ -145,6 +145,10 @@ threadshare insights sync
 
 第一次分析前运行一次 `sync`；希望结果包含最新工作时再运行。后续 `sync` 是增量更新。只有明确需要
 完整原子重建或恢复 origin secret 时才使用 `reindex`。
+要分析某个仓库的交付关系，先执行一次 `threadshare insights sync --repository .` 注册该仓库。
+之后从该仓库目录调用 Agent 时无需提供不透明的 repository key；Delivery Trace 会解析包含当前目录的已注册仓库。
+如果仓库中有 Markdown checklist 或计划文件，再加 `--intent <仓库相对路径>`；之后普通 `sync`
+会增量更新这两个已注册 source。
 
 然后直接把这些问题交给 Agent：
 
@@ -155,6 +159,9 @@ threadshare insights sync
 | 哪些 Session 偏研究、偏实现，或者缺少配套文档？ | 在实现快于证据沉淀的环节增加设计或审查检查点。 |
 | Tool 密度、Skill 使用或项目切换在什么时候发生了变化？ | 比较工作流迭代，识别协调成本或自动化开销。 |
 | 这个具体错误以前在哪里出现过，后来哪个有证据的步骤成功了？ | 复用历史上成功的候选方案，同时避免把相关性当成必然因果。 |
+| 这个需求由哪些 Session 和 Commit 交付，依据是什么？ | 审计交付链、下钻 changed files，并把显式/观察到的关系与候选关系分开。 |
+| 哪些计划项还没有 Commit，哪些 Commit 没有已记录的 Agent 上下文？ | 在交接或发布前发现交付缺口，同时避免猜测作者身份。 |
+| 下一个 Agent 继续这项工作前应先知道什么？ | 生成有界的 continuation context，列出相关 Intent、Session、Commit、文件与证据缺口。 |
 
 用户不需要选择命令、resource、schema 或内部分析计划。兼容的 Agent 会读取
 `threadshare insights spec --format json`，选择有边界的查询，并在结论中报告 snapshot、时间窗口、
@@ -175,6 +182,8 @@ coverage、截断状态和证据。
 
 阅读[完整的真实索引 Agent 分析报告](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)，
 可以看到每个问题的证据边界、结论和后续决策。
+[Delivery Trace 参考报告](https://github.com/team-harness/threadshare/blob/main/docs/insights-delivery-trace-example.md)
+则展示 Agent 如何从需求沿 Session、文件和 Commit 下钻，并按需读取真实 Git diff 证据。
 
 Local Insights 查询已提交的本地历史，不会上传数据。Deep Query 可以返回完整消息、analysis、Tool
 输入输出、错误和文件路径。应把输出视为本机敏感数据；除非用户明确要求，否则不要 share 或 publish。

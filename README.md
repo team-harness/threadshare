@@ -147,6 +147,11 @@ threadshare insights sync
 
 Run `sync` once before the first analysis and whenever you want fresher results. Later runs are
 incremental. Use `reindex` only for an explicit complete rebuild or origin-secret recovery.
+For delivery questions about a repository, register that repository once with
+`threadshare insights sync --repository .`. If the repository has a Markdown checklist or plan, add
+`--intent <repository-relative-file>`; later plain `sync` runs update both registered sources.
+From that checkout, the Agent can omit the opaque repository key; Delivery Trace resolves the
+registered repository containing its current working directory.
 
 Then ask your Agent questions like these:
 
@@ -157,6 +162,9 @@ Then ask your Agent questions like these:
 | Which Sessions were research-heavy, implementation-heavy, or missing supporting documentation? | Add design or review checkpoints where implementation is outrunning recorded evidence. |
 | When did Tool density, Skill use, or project switching change? | Compare workflow changes over time and identify coordination or automation overhead. |
 | Where did this exact error happen before, and what evidence-backed step succeeded later? | Reuse a previously successful procedure without treating historical correlation as a guarantee. |
+| Which Sessions and commits delivered this requirement, and what evidence connects them? | Audit the delivery chain, inspect changed files, and separate explicit or observed links from candidates. |
+| Which planned items still have no commit, or which commits have no recorded Agent context? | Find delivery gaps before handoff or release without guessing authorship. |
+| What should the next Agent know before continuing this work? | Produce bounded continuation context with the relevant intent, Sessions, commits, files, and unresolved evidence gaps. |
 
 The user does not choose commands, resource names, schemas, or internal analysis plans. A compatible
 Agent reads `threadshare insights spec --format json`, selects bounded queries, and reports the
@@ -177,6 +185,8 @@ Turns. No Session text, paths, stable keys, or evidence identifiers are included
 
 Read the [complete real-index Agent report](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)
 for the questions, evidence limits, conclusions, and follow-up decisions behind these findings.
+The [Delivery Trace reference](https://github.com/team-harness/threadshare/blob/main/docs/insights-delivery-trace-example.md)
+shows how an Agent follows a requirement through Sessions, files, commits, and on-demand Git diff evidence.
 
 Local Insights queries committed local history without uploading it. Deep Query can return complete
 messages, analysis, Tool input/output, errors, and file paths. Treat its output as sensitive local

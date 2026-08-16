@@ -11,6 +11,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   utimes,
@@ -47,6 +48,7 @@ import {
   createSessionDeltaMessages,
   decodeProtocolFrames,
   encodeProtocolFrame,
+  traceSourceDigestDocument,
 } from "../src/insights-engine-protocol.mjs";
 import {
   assertSessionFactsDeltaV2,
@@ -69,6 +71,7 @@ import {
   discoverProviderEvidenceSources,
   readProviderSessionDelta,
 } from "../src/provider-evidence.mjs";
+import { readGitDiffEvidence } from "../src/insights-git-evidence.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -92,6 +95,8 @@ const CAPACITY_BENCHMARK_FORMAT = "threadshare-insights-capacity-benchmark@v1";
 const RAW_BACKFILL_BENCHMARK_FORMAT = "threadshare-insights-raw-backfill-benchmark@v1";
 const QUERY_BENCHMARK_FORMAT = "threadshare-insights-query-benchmark@v1";
 const DEEP_QUERY_BENCHMARK_FORMAT = "threadshare-insights-deep-query-benchmark@v1";
+const DELIVERY_TRACE_BENCHMARK_FORMAT =
+  "threadshare-insights-delivery-trace-benchmark@v1";
 export const FORMAL_QUERY_BENCHMARK_TURN_COUNTS = Object.freeze([25_000, 250_000]);
 export const FORMAL_QUERY_BENCHMARK_QUERY_COUNT = 1_000;
 export const FORMAL_QUERY_BENCHMARK_WARMUP_COUNT = 100;
@@ -106,6 +111,9 @@ export const FORMAL_DEEP_QUERY_SEEDS = Object.freeze({
   25000: "threadshare-insights-deep-query-25k-v1",
   250000: "threadshare-insights-deep-query-250k-v1",
 });
+export const FORMAL_DELIVERY_TRACE_COUNT = 100;
+export const FORMAL_DELIVERY_TRACE_WARMUP_COUNT = 20;
+export const FORMAL_DELIVERY_TRACE_SEED = "threadshare-insights-delivery-trace-25k-v1";
 const BASE_TIME_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
 const GIB = 1024 ** 3;
 const SQLITE_LOCK_BYTE_OFFSET = 1_073_741_824;
@@ -4649,6 +4657,510 @@ export async function runInsightsRawBackfillBenchmark({
   }
 }
 
+function deliveryObjectId(seed, index, domain = "commit") {
+  return createHash("sha1").update(`${seed}:${domain}:${index}`).digest("hex");
+}
+
+function deliveryCommitFiles(index, turnCount) {
+  const globalIndex = index * 5;
+  const deferredRustPath = index >= 4_903
+    ? `src/module-${index - 4_903}.rs`
+    : `src/generated-${globalIndex % 257}.rs`;
+  return [
+    {
+      path: `docs/topic-${globalIndex % CAPACITY_TOPIC_COUNT}.md`, oldPath: null,
+      status: "M", additions: "3", deletions: "1",
+    },
+    {
+      path: deferredRustPath, oldPath: null,
+      status: "M", additions: "5", deletions: "2",
+    },
+    {
+      path: `src/module-${globalIndex % 97}.mjs`,
+      oldPath: index === 100 ? "src/legacy-module.mjs" : null,
+      status: index === 100 ? "R" : "M", additions: "4", deletions: "2",
+    },
+    {
+      path: `tests/case-${globalIndex % 211}.test.mjs`, oldPath: null,
+      status: "M", additions: "6", deletions: "1",
+    },
+  ].map(Object.freeze);
+}
+
+function deliveryTraceCorpus(plan) {
+  const commitCount = 5_000;
+  const repositoryKey = hashKey("benchmark-delivery-repository", plan.seed);
+  const commits = Array.from({ length: commitCount }, (_, index) => {
+    const timestampIndex = index >= 4_903 ? plan.turnCount + 86_400 + index : index * 5;
+    return Object.freeze({
+      objectId: deliveryObjectId(plan.seed, index),
+      parentObjectIds: index <= 1 ? [] : [deliveryObjectId(plan.seed, index - 1)],
+      authorTimestamp: new Date(BASE_TIME_MS + timestampIndex * 1_000).toISOString(),
+      committerTimestamp: new Date(BASE_TIME_MS + timestampIndex * 1_000).toISOString(),
+      treeObjectId: deliveryObjectId(plan.seed, index, "tree"),
+      summary: `synthetic delivery commit ${index}`,
+      files: deliveryCommitFiles(index, plan.turnCount),
+    });
+  });
+  const intentNodes = Array.from({ length: 100 }, (_, index) => Object.freeze({
+    id: `delivery-${String(index).padStart(3, "0")}`,
+    parentId: null,
+    kind: "feature",
+    title: index === 99
+      ? "uniqueaxa uniqueaxb"
+      : `Synthetic delivery intent ${index}`,
+    status: index % 3 === 0 ? "complete" : "todo",
+    stableId: true,
+  }));
+  const intentRefs = [];
+  for (let index = 0; index < 20; index += 1) {
+    intentRefs.push({
+      nodeId: intentNodes[index].id,
+      kind: "commit",
+      value: commits[index * 7].objectId,
+    });
+  }
+  for (let index = 20; index < 40; index += 1) {
+    intentRefs.push({
+      nodeId: intentNodes[index].id,
+      kind: "session",
+      value: plan.sessionKey(index % 2),
+    });
+  }
+  for (let index = 40; index < 50; index += 1) {
+    intentRefs.push({
+      nodeId: intentNodes[index].id,
+      kind: index % 2 === 0 ? "spec" : "issue",
+      value: index % 2 === 0 ? `docs/spec-${index}.md` : `ISSUE-${index}`,
+    });
+  }
+  return Object.freeze({
+    repositoryId: "44444444-4444-4444-8444-444444444444",
+    repositoryKey,
+    projectKeys: Object.freeze([
+      plan.sessionAt(0).delta.session.projectKey,
+      plan.sessionAt(1).delta.session.projectKey,
+    ]),
+    commits: Object.freeze(commits),
+    intentNodes: Object.freeze(intentNodes),
+    intentRefs: Object.freeze(intentRefs.map(Object.freeze)),
+  });
+}
+
+function deliveryTraceDelta(corpus, { expectedGeneration, targetGeneration, commits }) {
+  const last = commits.at(-1) ?? corpus.commits.at(-1);
+  const value = {
+    format: "threadshare-insights-trace-source-delta@v1",
+    expectedGeneration: String(expectedGeneration),
+    targetGeneration: String(targetGeneration),
+    repository: {
+      repositoryId: corpus.repositoryId,
+      repositoryKey: corpus.repositoryKey,
+      available: true,
+      refDigest: sha256(canonicalJson([{ name: "refs/heads/main", objectId: last.objectId }])),
+      scmProvider: "github",
+      webBaseUrl: "https://github.com",
+      repositoryPath: "team-harness/threadshare-synthetic",
+      projectKeys: [...corpus.projectKeys],
+    },
+    intent: {
+      sourceKey: hashKey("benchmark-intent-source", corpus.repositoryKey),
+      adapterVersion: "markdown-checklist@1",
+      revision: hashKey("benchmark-intent-revision", corpus.repositoryKey, "1"),
+      locator: "docs/intent.md",
+      coverage: "partial",
+      diagnostics: [{ line: "51", code: "TS_INSIGHTS_INTENT_REF_UNRESOLVED" }],
+    },
+    refs: [{ name: "refs/heads/main", objectId: last.objectId }],
+    commits: [...commits],
+    intentNodes: [...corpus.intentNodes],
+    intentRefs: [...corpus.intentRefs],
+  };
+  return Object.freeze({
+    ...value,
+    deltaId: sha256(canonicalJson(traceSourceDigestDocument(value))),
+  });
+}
+
+async function copySqliteSnapshot(source, target) {
+  await rm(target, { force: true });
+  const database = await openNodeDatabase(source);
+  try {
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    database.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
+  } finally {
+    database.close();
+  }
+}
+
+async function deliveryGraphSummary(databasePath, repositoryId) {
+  const database = await openNodeDatabase(databasePath);
+  const digest = createHash("sha256");
+  const statements = [
+    "SELECT repository_id,lower(hex(repository_key)),available FROM repository_sources ORDER BY repository_id",
+    "SELECT repository_id,ref_name,object_id FROM repository_refs ORDER BY repository_id,ref_name",
+    "SELECT repository_id,object_id,lower(hex(commit_key)),parent_object_ids_json,author_timestamp,committer_timestamp,tree_object_id,summary,reachable,lower(hex(revision)) FROM git_commits ORDER BY repository_id,object_id",
+    "SELECT repository_id,object_id,path,old_path,status,lower(hex(additions)),lower(hex(deletions)),lower(hex(file_key)),lower(hex(revision)) FROM git_commit_files ORDER BY repository_id,object_id,path",
+    "SELECT repository_id,object_id,lower(hex(edge_key)),from_kind,lower(hex(from_key)),to_kind,lower(hex(to_key)),relation,strength,source,lower(hex(revision)) FROM delivery_trace_edges ORDER BY repository_id,object_id,edge_key",
+    "SELECT lower(hex(edge_key)),facts_json,limitations_json FROM delivery_trace_edge_evidence ORDER BY edge_key",
+    "SELECT repository_id,lower(hex(intent_key)),node_id,kind,title,status,lower(hex(revision)) FROM intent_nodes ORDER BY repository_id,node_id",
+    "SELECT repository_id,node_id,ref_kind,ref_value,lower(hex(revision)) FROM intent_refs ORDER BY repository_id,node_id,ref_kind,ref_value",
+    "SELECT repository_id,lower(hex(edge_key)),lower(hex(from_key)),to_kind,lower(hex(to_key)),relation,strength,source,facts_json,limitations_json,lower(hex(revision)) FROM intent_trace_edges ORDER BY repository_id,edge_key",
+  ];
+  for (const sql of statements) digest.update(canonicalJson(database.prepare(sql).all()));
+  const scalar = (sql) => Number(database.prepare(sql).get().value);
+  const counts = {
+    commits: scalar("SELECT COUNT(*) value FROM git_commits"),
+    changedFiles: scalar("SELECT COUNT(*) value FROM git_commit_files"),
+    intents: scalar("SELECT COUNT(*) value FROM intent_nodes"),
+    unresolvedRefs: scalar("SELECT COUNT(*) value FROM intent_refs WHERE ref_kind IN ('spec','issue')"),
+    unreachableCommits: scalar("SELECT COUNT(*) value FROM git_commits WHERE reachable=0"),
+    directEdges: scalar("SELECT (SELECT COUNT(*) FROM delivery_trace_edges WHERE strength='direct')+(SELECT COUNT(*) FROM intent_trace_edges WHERE strength='direct') value"),
+    observedEdges: scalar("SELECT COUNT(*) value FROM delivery_trace_edges WHERE strength='observed'"),
+    candidateEdges: scalar("SELECT COUNT(*) value FROM intent_trace_edges WHERE strength='candidate'"),
+    contextualEdges: scalar("SELECT COUNT(*) value FROM delivery_trace_edges WHERE strength='contextual'"),
+  };
+  const one = (sql) => database.prepare(sql).get();
+  const roots = {
+    session: one("SELECT lower(hex(s.session_key)) key FROM sessions s JOIN repository_project_keys p ON p.project_key=s.project_key ORDER BY s.session_key LIMIT 1").key,
+    project: one("SELECT lower(hex(s.project_key)) key FROM sessions s JOIN repository_project_keys p ON p.project_key=s.project_key ORDER BY s.session_key LIMIT 1").key,
+    commit: one("SELECT lower(hex(commit_key)) key FROM git_commits WHERE reachable=1 ORDER BY object_id LIMIT 1").key,
+    intent: one("SELECT lower(hex(n.intent_key)) key FROM intent_nodes n JOIN intent_trace_edges e ON e.repository_id=n.repository_id AND e.from_key=n.intent_key ORDER BY n.intent_key LIMIT 1").key,
+  };
+  const edge = one("SELECT relation,from_kind,lower(hex(from_key)) from_key,to_kind,lower(hex(to_key)) to_key,lower(hex(revision)) revision FROM delivery_trace_edges ORDER BY CASE strength WHEN 'observed' THEN 0 WHEN 'contextual' THEN 1 ELSE 2 END,edge_key LIMIT 1");
+  const explain = {
+    edgeBySource: database.prepare("EXPLAIN QUERY PLAN SELECT edge_key FROM delivery_trace_edges WHERE repository_id=? AND from_kind=? AND from_key=? ORDER BY edge_key LIMIT 201").all(repositoryId, "session", Buffer.from(roots.session, "hex")).map(({ detail }) => detail),
+    changedFileByPath: database.prepare("EXPLAIN QUERY PLAN SELECT object_id FROM git_commit_files WHERE repository_id=? AND path=? ORDER BY object_id").all(repositoryId, "src/module-0.rs").map(({ detail }) => detail),
+    repositoryByProject: database.prepare("EXPLAIN QUERY PLAN SELECT repository_id FROM repository_project_keys WHERE project_key=? ORDER BY repository_id").all(Buffer.from(roots.project, "hex")).map(({ detail }) => detail),
+  };
+  database.close();
+  return { digest: digest.digest("hex"), counts, roots, edge, explain };
+}
+
+function deliveryTraceRequest(root, evaluatedAt, options = {}) {
+  return {
+    format: "threadshare-insights-delivery-trace-request@v1",
+    root,
+    window: null,
+    direction: "both",
+    maxDepth: options.maxDepth ?? 1,
+    includeCandidateEdges: options.includeCandidateEdges ?? false,
+    includeContextualEdges: options.includeContextualEdges ?? false,
+    limit: 50,
+    cursor: null,
+    evaluatedAt,
+  };
+}
+
+async function openDeliveryBenchmarkClient(binaryPath, databasePath, onSpawn) {
+  return createInsightsEngineClient({
+    databasePath,
+    openExisting: true,
+    requiredContract: createInsightsRequiredContract(ORIGIN_SECRET_EPOCH),
+    timeoutMs: 30_000,
+    commitTimeoutMs: 120_000,
+    runtimeOptions: {
+      env: { ...process.env, THREADSHARE_INSIGHTS_ENGINE_PATH: path.resolve(binaryPath) },
+    },
+    onSpawn,
+  });
+}
+
+async function deliveryRepositoryGeneration(databasePath, repositoryId) {
+  const database = await openNodeDatabase(databasePath);
+  try {
+    return Number(database.prepare(
+      "SELECT generation FROM repository_sources WHERE repository_id=?",
+    ).get(repositoryId)?.generation ?? 0);
+  } finally {
+    database.close();
+  }
+}
+
+async function resetDeliveryTraceBenchmarkState(databasePath) {
+  const database = await openNodeDatabase(databasePath);
+  try {
+    database.exec("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE; DELETE FROM repository_sources; COMMIT;");
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+async function applyDeliveryTrace(binaryPath, databasePath, deltas, onSpawn) {
+  const client = await openDeliveryBenchmarkClient(binaryPath, databasePath, onSpawn);
+  try {
+    for (const delta of deltas) await client.commitTraceSourceDelta(delta);
+  } finally {
+    await client.close();
+  }
+}
+
+async function benchmarkGitDiff(directory, queryCount, warmupCount) {
+  const repository = path.join(directory, "git-diff-fixture");
+  await mkdir(repository, { recursive: true });
+  const git = async (...args) => execFileAsync("git", ["-C", repository, ...args], {
+    encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Benchmark", GIT_AUTHOR_EMAIL: "benchmark@example.invalid", GIT_COMMITTER_NAME: "Benchmark", GIT_COMMITTER_EMAIL: "benchmark@example.invalid" },
+  });
+  await git("init", "--quiet");
+  await git("config", "commit.gpgSign", "false");
+  await writeFile(path.join(repository, "probe.txt"), "first\n");
+  await git("add", "probe.txt");
+  await git("commit", "--quiet", "-m", "first");
+  const parent = (await git("rev-parse", "HEAD")).stdout.trim();
+  await writeFile(path.join(repository, "probe.txt"), "first\nsecond\n");
+  await git("add", "probe.txt");
+  await git("commit", "--quiet", "-m", "second");
+  const commit = (await git("rev-parse", "HEAD")).stdout.trim();
+  const values = [];
+  for (let index = 0; index < queryCount + warmupCount; index += 1) {
+    const started = performance.now();
+    const response = await readGitDiffEvidence({
+      format: "threadshare-insights-git-diff-evidence-request@v1",
+      repositoryKey: "1".repeat(64), commitObjectId: commit, parentObjectId: parent,
+      path: "probe.txt", contextLines: 3, maxBytes: 65_536, revision: "2".repeat(64),
+      cursor: null,
+    }, { rootDirectory: repository });
+    if (index >= warmupCount) values.push(performance.now() - started);
+    if (!response.complete || !response.content.includes("second")) {
+      throw new Error("Git diff benchmark returned incomplete evidence");
+    }
+  }
+  return latencySummary(values, "ms");
+}
+
+export async function runInsightsDeliveryTraceBenchmark({
+  turnCount = 25_000,
+  turnsPerSession = 100,
+  queryCount = FORMAL_DELIVERY_TRACE_COUNT,
+  warmupCount = FORMAL_DELIVERY_TRACE_WARMUP_COUNT,
+  seed = FORMAL_DELIVERY_TRACE_SEED,
+  binaryPath = process.env.THREADSHARE_INSIGHTS_ENGINE_PATH || DEFAULT_ENGINE_PATH,
+  workingDirectory,
+  reuseWorkingDirectory = false,
+  onProgress = () => {},
+} = {}) {
+  if (turnCount !== 25_000 || turnsPerSession !== 100) {
+    throw new RangeError("Delivery Trace formal benchmark requires the frozen 25k corpus");
+  }
+  positiveInteger(queryCount, "queryCount");
+  positiveInteger(warmupCount, "warmupCount");
+  const ownsDirectory = workingDirectory === undefined;
+  const requestedDirectory = workingDirectory ??
+    await mkdtemp(path.join(tmpdir(), "threadshare-delivery-trace-"));
+  await mkdir(requestedDirectory, { recursive: true });
+  const directory = await realpath(requestedDirectory);
+  const databasePath = path.join(directory, "capacity.sqlite3");
+  const cleanDatabasePath = path.join(directory, "clean.sqlite3");
+  const hostLoadAtStart = hostLoad();
+  try {
+    let capacity;
+    if (reuseWorkingDirectory) {
+      onProgress("validating reusable frozen 25k capacity corpus");
+      const counts = await productFreshnessFactCounts(databasePath);
+      if (counts.sessions !== 250 || counts.turns !== 25_000 || counts.ftsDocuments !== 25_000) {
+        throw new Error("reusable Delivery Trace workdir does not contain the frozen 25k corpus");
+      }
+      const { stdout } = await execFileAsync(binaryPath, ["--version", "--json"], {
+        encoding: "utf8", maxBuffer: 1024 * 1024,
+      });
+      capacity = {
+        rustSidecar: {
+          engineIdentity: {
+            ...JSON.parse(stdout),
+            binarySha256: sha256(await readFile(binaryPath)),
+          },
+          rss: { sidecarPeakBytes: 0 },
+        },
+      };
+    } else {
+      onProgress("building frozen 25k capacity corpus");
+      capacity = await runInsightsCapacityBenchmark({
+        turnCount, turnsPerSession, queryCount: 5, warmupCount: 1, seed,
+        binaryPath, workingDirectory: directory, mutationTrace: false,
+      });
+    }
+    if (reuseWorkingDirectory) {
+      onProgress("resetting prior Delivery Trace projection in reusable workdir");
+      await resetDeliveryTraceBenchmarkState(databasePath);
+    }
+    onProgress("copying clean comparison database");
+    await copySqliteSnapshot(databasePath, cleanDatabasePath);
+    const plan = createCapacityBenchmarkPlan({ turnCount, turnsPerSession, seed });
+    const corpus = deliveryTraceCorpus(plan);
+    const split = Math.floor(corpus.commits.length / 2);
+    const incrementalGeneration = await deliveryRepositoryGeneration(
+      databasePath,
+      corpus.repositoryId,
+    );
+    const cleanGeneration = await deliveryRepositoryGeneration(
+      cleanDatabasePath,
+      corpus.repositoryId,
+    );
+    const first = deliveryTraceDelta(corpus, {
+      expectedGeneration: incrementalGeneration,
+      targetGeneration: incrementalGeneration + 1,
+      commits: corpus.commits.slice(0, split),
+    });
+    const second = deliveryTraceDelta(corpus, {
+      expectedGeneration: incrementalGeneration + 1,
+      targetGeneration: incrementalGeneration + 2,
+      commits: corpus.commits.slice(split),
+    });
+    const clean = deliveryTraceDelta(corpus, {
+      expectedGeneration: cleanGeneration,
+      targetGeneration: cleanGeneration + 1,
+      commits: corpus.commits,
+    });
+    let child;
+    let stopRss = null;
+    onProgress("applying incremental Delivery Trace generations");
+    await applyDeliveryTrace(binaryPath, databasePath, [first, second], (spawned) => {
+      child = spawned;
+      stopRss = startRssSampler(spawned.pid);
+    });
+    const buildRss = stopRss === null ? null : await stopRss();
+    onProgress("applying clean Delivery Trace generation");
+    await applyDeliveryTrace(binaryPath, cleanDatabasePath, [clean]);
+    onProgress("comparing incremental and clean graph state");
+    const incremental = await deliveryGraphSummary(databasePath, corpus.repositoryId);
+    const cleanSummary = await deliveryGraphSummary(cleanDatabasePath, corpus.repositoryId);
+    const equivalent = incremental.digest === cleanSummary.digest;
+    const evaluatedAt = new Date(BASE_TIME_MS + (turnCount + 172_800) * 1_000).toISOString();
+    const initial = [];
+    const expansion = [];
+    const evidence = [];
+    const responseDigest = createHash("sha256");
+    let maxResponseBytes = 0;
+    let queryStopRss = null;
+    const client = await openDeliveryBenchmarkClient(binaryPath, databasePath, (spawned) => {
+      queryStopRss = startRssSampler(spawned.pid);
+    });
+    try {
+      onProgress("measuring trace, expansion, and evidence queries");
+      const repositoryRoot = { kind: "repository", key: corpus.repositoryKey };
+      const expansionRoots = [
+        { kind: "intent", key: incremental.roots.intent },
+        { kind: "session", key: incremental.roots.session },
+        { kind: "git-commit", key: incremental.roots.commit },
+      ];
+      for (let index = 0; index < queryCount + warmupCount; index += 1) {
+        let started = performance.now();
+        const firstPage = await client.readInsightsDeliveryTrace(
+          deliveryTraceRequest(repositoryRoot, evaluatedAt),
+        );
+        if (index >= warmupCount) initial.push(performance.now() - started);
+        started = performance.now();
+        const expanded = await client.readInsightsDeliveryTrace(deliveryTraceRequest(
+          expansionRoots[index % expansionRoots.length], evaluatedAt,
+          { includeCandidateEdges: true, includeContextualEdges: true },
+        ));
+        if (index >= warmupCount) expansion.push(performance.now() - started);
+        started = performance.now();
+        const evidencePage = await client.readInsightsEvidenceV2({
+          format: "threadshare-insights-evidence-request@v2",
+          target: {
+            kind: "delivery-edge", relation: incremental.edge.relation,
+            from: { kind: incremental.edge.from_kind, key: incremental.edge.from_key },
+            to: { kind: incremental.edge.to_kind, key: incremental.edge.to_key },
+            revision: incremental.edge.revision,
+          },
+          include: ["envelope"], cursor: null, maxBytes: 4096,
+        });
+        if (index >= warmupCount) evidence.push(performance.now() - started);
+        for (const response of [firstPage, expanded, evidencePage]) {
+          const rendered = canonicalJson(response);
+          maxResponseBytes = Math.max(maxResponseBytes, Buffer.byteLength(rendered));
+          if (index >= warmupCount) responseDigest.update(rendered);
+        }
+        if (firstPage.nodes.length < 2 || expanded.edges.length === 0 ||
+            evidencePage.range.end <= evidencePage.range.start) {
+          throw new Error(
+            `Delivery Trace benchmark exercised an empty response path: ` +
+            `initialNodes=${firstPage.nodes.length}, expansionEdges=${expanded.edges.length}, ` +
+            `evidenceBytes=${evidencePage.range.end - evidencePage.range.start}`,
+          );
+        }
+      }
+    } finally {
+      await client.close();
+    }
+    const queryRss = queryStopRss === null ? null : await queryStopRss();
+    onProgress("measuring local Git diff evidence");
+    const diff = await benchmarkGitDiff(directory, queryCount, warmupCount);
+    const initialLatency = latencySummary(initial, "ms");
+    const expansionLatency = latencySummary(expansion, "ms");
+    const evidenceLatency = latencySummary(evidence, "ms");
+    const sidecarPeakBytes = Math.max(
+      capacity.rustSidecar.rss.sidecarPeakBytes,
+      buildRss?.sidecarPeakBytes ?? 0,
+      queryRss?.sidecarPeakBytes ?? 0,
+    );
+    const plans = Object.values(incremental.explain).flat();
+    const indexedPlans = plans.length > 0 && plans.every((detail) => !/SCAN (?:delivery_trace_edges|git_commit_files|history_events)/u.test(detail));
+    const countsComplete = incremental.counts.commits >= 5_000 &&
+      incremental.counts.changedFiles >= 20_000 && incremental.counts.intents >= 100 &&
+      incremental.counts.unresolvedRefs > 0 && incremental.counts.unreachableCommits > 0 &&
+      incremental.counts.directEdges > 0 && incremental.counts.observedEdges > 0 &&
+      incremental.counts.candidateEdges > 0 && incremental.counts.contextualEdges > 0;
+    const gates = {
+      corpusComplete: countsComplete,
+      incrementalEqualsClean: equivalent,
+      traceInitialWithinLimit: initialLatency.p95 < 200 && initialLatency.p99 < 500,
+      traceExpansionWithinLimit: expansionLatency.p95 < 250 && expansionLatency.p99 < 500,
+      evidenceFirstPageWithinLimit: evidenceLatency.p95 < 100,
+      gitDiffFirstPageWithinLimit: diff.p95 < 500,
+      engineRssWithin128MiB: sidecarPeakBytes > 0 && sidecarPeakBytes < 128 * 1024 * 1024,
+      responseWithin4MiB: maxResponseBytes > 0 && maxResponseBytes < 4 * 1024 * 1024,
+      indexedQueryPlans: indexedPlans,
+    };
+    return {
+      format: DELIVERY_TRACE_BENCHMARK_FORMAT,
+      measuredScope: "local-insights-delivery-trace-25k",
+      sourceRevision: await sourceRevision(),
+      sourceWorktreeDirty: await sourceWorktreeDirty(),
+      benchmarkScriptSha256: sha256(await readFile(SCRIPT_PATH)),
+      environment: sanitizedEnvironment(hostLoadAtStart),
+      corpus: {
+        seed, turns: turnCount, sessions: plan.sessionCount,
+        commits: incremental.counts.commits, changedFiles: incremental.counts.changedFiles,
+        intents: incremental.counts.intents,
+      },
+      coverage: incremental.counts,
+      incrementalEquivalence: {
+        incrementalDigest: incremental.digest,
+        cleanDigest: cleanSummary.digest,
+        equal: equivalent,
+      },
+      latency: {
+        measuredRequestCount: queryCount, warmupRequestCount: warmupCount,
+        traceInitial: initialLatency, traceExpansion: expansionLatency,
+        evidenceFirstPage: evidenceLatency, gitDiffFirstPage: diff,
+      },
+      resources: { sidecarPeakBytes, maxResponseBytes },
+      queryPlans: Object.fromEntries(Object.entries(incremental.explain).map(([name, details]) => [
+        name, { detailDigest: sha256(canonicalJson(details)), indexed: details.every((detail) => !detail.startsWith("SCAN ")) },
+      ])),
+      resultDigest: responseDigest.digest("hex"),
+      engineIdentity: capacity.rustSidecar.engineIdentity,
+      gates: {
+        ...gates,
+        allMeasuredDeliveryTraceGatesPassed: Object.values(gates).every(Boolean),
+      },
+      notMeasured: [
+        "250k Delivery Trace capacity is deferred to a later iteration",
+        "network SCM availability and remote issue trackers are outside the local evidence boundary",
+        "cross-repository and global filesystem discovery are intentionally unsupported",
+      ],
+    };
+  } finally {
+    if (ownsDirectory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export function parseBenchmarkArguments(argv) {
   const options = {
     turnCount: 25_000,
@@ -4663,12 +5175,15 @@ export function parseBenchmarkArguments(argv) {
     capacity: false,
     queryBenchmark: false,
     deepQueryBenchmark: false,
+    deliveryTraceBenchmark: false,
     formal: false,
     rawBackfill: false,
     sessionCount: 10_000,
     rawTextCharacters: 262_144,
     mutationTrace: true,
     databasePath: null,
+    workingDirectory: undefined,
+    reuseWorkingDirectory: false,
   };
   let explicitQueryCount = false;
   let explicitWarmupCount = false;
@@ -4680,6 +5195,7 @@ export function parseBenchmarkArguments(argv) {
     else if (argument === "--capacity") options.capacity = true;
     else if (argument === "--query-benchmark") options.queryBenchmark = true;
     else if (argument === "--deep-query-benchmark") options.deepQueryBenchmark = true;
+    else if (argument === "--delivery-trace-benchmark") options.deliveryTraceBenchmark = true;
     else if (argument === "--raw-backfill") options.rawBackfill = true;
     else if (argument === "--skip-mutations") options.mutationTrace = false;
     else if (argument === "--node-reference-worker") options.nodeReferenceWorker = true;
@@ -4703,6 +5219,8 @@ export function parseBenchmarkArguments(argv) {
     else if (argument === "--engine") options.binaryPath = argv[++index];
     else if (argument === "--output") options.outputPath = argv[++index];
     else if (argument === "--db") options.databasePath = argv[++index];
+    else if (argument === "--workdir") options.workingDirectory = path.resolve(argv[++index]);
+    else if (argument === "--reuse-workdir") options.reuseWorkingDirectory = true;
     else throw new Error(`unknown argument: ${argument}`);
   }
   if (options.deepQueryBenchmark) {
@@ -4712,11 +5230,19 @@ export function parseBenchmarkArguments(argv) {
       options.seed = FORMAL_DEEP_QUERY_SEEDS[options.turnCount] ?? `${DEFAULT_SEED}-deep-query`;
     }
   }
+  if (options.deliveryTraceBenchmark) {
+    if (!explicitQueryCount) options.queryCount = FORMAL_DELIVERY_TRACE_COUNT;
+    if (!explicitWarmupCount) options.warmupCount = FORMAL_DELIVERY_TRACE_WARMUP_COUNT;
+    if (!explicitSeed) options.seed = FORMAL_DELIVERY_TRACE_SEED;
+  }
   return options;
 }
 
 async function main() {
   const options = parseBenchmarkArguments(process.argv.slice(2));
+  if (options.deliveryTraceBenchmark) {
+    options.onProgress = (message) => process.stderr.write(`delivery-trace: ${message}\n`);
+  }
   if (options.nodeReferenceWorker) {
     if (!options.databasePath) throw new Error("--db is required for the reference worker");
     const result = await benchmarkNodeSqliteReference({
@@ -4733,6 +5259,8 @@ async function main() {
 
   const result = options.rawBackfill
     ? await runInsightsRawBackfillBenchmark(options)
+    : options.deliveryTraceBenchmark
+      ? await runInsightsDeliveryTraceBenchmark(options)
     : options.deepQueryBenchmark
       ? await runInsightsDeepQueryBenchmark(options)
       : options.queryBenchmark
@@ -4754,6 +5282,12 @@ async function main() {
     !result.gates.allMeasuredDeepQueryEvidenceGatesPassed
   ) {
     throw new Error("Deep Query v2 benchmark gates failed");
+  }
+  if (
+    options.deliveryTraceBenchmark && options.formal &&
+    !result.gates.allMeasuredDeliveryTraceGatesPassed
+  ) {
+    throw new Error("Delivery Trace benchmark gates failed");
   }
 }
 

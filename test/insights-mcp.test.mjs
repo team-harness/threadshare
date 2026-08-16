@@ -55,6 +55,15 @@ test("Insights MCP exposes Agent discovery and three deep read tools over newlin
   ]);
   assert.equal(byId.get(2).result.tools.every((tool) =>
     tool.annotations.readOnlyHint === true && tool.annotations.openWorldHint === false), true);
+  const recipeTool = byId.get(2).result.tools.find(({ name }) =>
+    name === "threadshare_insights_recipe");
+  assert.equal(recipeTool.inputSchema.properties.name.enum.includes("delivery-trace@1"), true);
+  const evidenceTool = byId.get(2).result.tools.find(({ name }) =>
+    name === "threadshare_insights_evidence");
+  assert.deepEqual(evidenceTool.inputSchema.oneOf.map((schema) => schema.properties.format.const), [
+    "threadshare-insights-evidence-request@v2",
+    "threadshare-insights-git-diff-evidence-request@v1",
+  ]);
   assert.equal(byId.get(3).result.isError, false);
   assert.deepEqual(byId.get(3).result.structuredContent, {
     format: "threadshare-insights-query@v2", records: [],

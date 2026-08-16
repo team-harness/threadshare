@@ -19,6 +19,7 @@ import {
   createHelloMessage,
   decodeProtocolFrames,
   encodeProtocolFrame,
+  traceSourceDigestDocument,
 } from "../src/insights-engine-protocol.mjs";
 import {
   assertSessionFactsDelta,
@@ -184,6 +185,39 @@ function sampleDeltaV2() {
   delta.historyPayloads = [];
   delta.historyPayloadChunks = [];
   return finalizeDelta(delta);
+}
+
+function traceSourceDelta() {
+  const value = {
+    format: "threadshare-insights-trace-source-delta@v1",
+    expectedGeneration: "0",
+    targetGeneration: "1",
+    repository: {
+      repositoryId: "11111111-1111-4111-8111-111111111111",
+      repositoryKey: "1".repeat(64),
+      available: true,
+      refDigest: "2".repeat(64),
+      scmProvider: "github",
+      webBaseUrl: "https://github.com",
+      repositoryPath: "team-harness/threadshare",
+      projectKeys: ["3".repeat(64), "4".repeat(64)],
+    },
+    intent: null,
+    refs: [{ name: "refs/heads/main", objectId: "a".repeat(40) }],
+    commits: [{
+      objectId: "a".repeat(40), parentObjectIds: [],
+      authorTimestamp: "2026-08-16T00:00:00.000Z",
+      committerTimestamp: "2026-08-16T00:00:00.000Z",
+      treeObjectId: "b".repeat(40), summary: "initial",
+      files: [{ path: "src/lib.rs", oldPath: null, status: "A", additions: "10", deletions: "0" }],
+    }],
+    intentNodes: [],
+    intentRefs: [],
+  };
+  return {
+    ...value,
+    deltaId: createHash("sha256").update(canonicalJson(traceSourceDigestDocument(value))).digest("hex"),
+  };
 }
 
 async function queryFixtureDelta({ withLifecycle = true } = {}) {
@@ -734,6 +768,54 @@ test("real Rust sidecar commits a delta and replays it idempotently after restar
     sessionKey: SESSION_KEY,
     idempotent: true,
   });
+});
+
+test("real Rust sidecar commits a trace source delta through the Node client", {
+  timeout: 30_000,
+}, async (t) => {
+  await access(ENGINE_PATH);
+  const databasePath = await temporaryDatabase(t);
+  const client = await createInsightsEngineClient(clientOptions(databasePath));
+  t.after(() => client.close());
+  const delta = traceSourceDelta();
+  assert.deepEqual(await client.commitTraceSourceDelta(delta), {
+    snapshotSeq: "1",
+    repositoryKey: delta.repository.repositoryKey,
+    idempotent: false,
+  });
+  assert.deepEqual(await client.commitTraceSourceDelta(delta), {
+    snapshotSeq: "1",
+    repositoryKey: delta.repository.repositoryKey,
+    idempotent: true,
+  });
+  assert.deepEqual(await client.readRepositoryState(delta.repository.repositoryId), {
+    generation: "1",
+    available: true,
+    refDigest: delta.repository.refDigest,
+    intentRevision: null,
+    coverageAfter: null,
+    refs: [{ name: "refs/heads/main", objectId: "a".repeat(40) }],
+  });
+  const commitKey = hashKey(
+    "git-commit",
+    Buffer.from(delta.repository.repositoryKey, "hex"),
+    "a".repeat(40),
+  );
+  const trace = await client.readInsightsDeliveryTrace({
+    format: "threadshare-insights-delivery-trace-request@v1",
+    root: { kind: "git-commit", key: commitKey },
+    window: null,
+    direction: "outgoing",
+    maxDepth: 1,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: 10,
+    cursor: null,
+    evaluatedAt: "2026-08-16T01:00:00.000Z",
+  });
+  assert.equal(trace.root.key, commitKey);
+  assert.equal(trace.nodes.length, 2);
+  assert.equal(trace.edges[0].relation, "commit-changed-file");
 });
 
 test("real Rust sidecar serves a strictly validated deep Query v2 through the Node client", {

@@ -8,6 +8,7 @@ use std::ops::Deref;
 
 use crate::analyzer::{AnalyzerError, analyze_query};
 use crate::canonical_json;
+use crate::delivery_trace::{TraceNodeKind, TraceNodeRef, TraceRelation};
 use crate::fts_projection::HistoryFtsMatchExpression;
 use crate::query::{QueryError, query_failed, valid_stable_key};
 
@@ -37,6 +38,7 @@ pub enum DeepResource {
     FileActivity,
     TokenUsage,
     ErrorOccurrence,
+    DeliveryEdge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +282,17 @@ pub enum DeepEvidenceTarget {
         chain_key: String,
         revision: String,
     },
+    DeliveryNode {
+        node_kind: TraceNodeKind,
+        node_key: String,
+        revision: String,
+    },
+    DeliveryEdge {
+        relation: TraceRelation,
+        from: TraceNodeRef,
+        to: TraceNodeRef,
+        revision: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,7 +490,32 @@ impl DeepQueryRequest {
             let mut stats = PredicateStats::default();
             validate_predicate(self.resource, predicate, 1, &mut stats)?;
         }
+        if self.resource == DeepResource::DeliveryEdge
+            && !self
+                .predicate
+                .as_ref()
+                .is_some_and(predicate_guarantees_repository_scope)
+        {
+            return Err(QueryError::new(
+                "TS_QUERY_TOO_BROAD",
+                "delivery-edge queries require repositoryKey eq/in scope on every branch",
+            ));
+        }
         Ok(())
+    }
+}
+
+fn predicate_guarantees_repository_scope(predicate: &DeepPredicate) -> bool {
+    match predicate {
+        DeepPredicate::Leaf {
+            field, operator, ..
+        } => {
+            field == "repositoryKey"
+                && matches!(operator, PredicateOperator::Eq | PredicateOperator::In)
+        }
+        DeepPredicate::And { and } => and.iter().any(predicate_guarantees_repository_scope),
+        DeepPredicate::Or { or } => or.iter().all(predicate_guarantees_repository_scope),
+        DeepPredicate::Not { .. } => false,
     }
 }
 
@@ -963,7 +1001,9 @@ fn target_revision(target: &DeepEvidenceTarget) -> &str {
         DeepEvidenceTarget::EventPayload { revision, .. }
         | DeepEvidenceTarget::Turn { revision, .. }
         | DeepEvidenceTarget::Session { revision, .. }
-        | DeepEvidenceTarget::AttemptChain { revision, .. } => revision,
+        | DeepEvidenceTarget::AttemptChain { revision, .. }
+        | DeepEvidenceTarget::DeliveryNode { revision, .. }
+        | DeepEvidenceTarget::DeliveryEdge { revision, .. } => revision,
     }
 }
 
@@ -1003,6 +1043,17 @@ fn composite_target_revision(
         DeepEvidenceTarget::AttemptChain { chain_key, .. } => {
             Some(read_attempt_chain_revision(connection, chain_key)?)
         }
+        DeepEvidenceTarget::DeliveryNode {
+            node_kind,
+            node_key,
+            revision,
+        } => delivery_node_revision(connection, *node_kind, node_key, revision)?,
+        DeepEvidenceTarget::DeliveryEdge {
+            relation,
+            from,
+            to,
+            revision,
+        } => delivery_edge_revision(connection, *relation, from, to, revision)?,
         DeepEvidenceTarget::EventPayload { event_key, .. } => connection
             .query_row(
                 &format!(
@@ -1032,6 +1083,168 @@ fn evidence_target_digest(
     Ok(hex::encode(Sha256::digest(
         canonical_json(&value).as_bytes(),
     )))
+}
+
+fn delivery_node_revision(
+    connection: &Connection,
+    node_kind: TraceNodeKind,
+    node_key: &str,
+    expected_revision: &str,
+) -> Result<Option<String>, QueryError> {
+    let key = decode_key(node_key, "nodeKey")?;
+    decode_key(expected_revision, "revision")?;
+    match node_kind {
+        TraceNodeKind::Repository => connection
+            .query_row(
+                "SELECT lower(hex(delta_id)) FROM repository_sources WHERE repository_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_failed),
+        TraceNodeKind::GitCommit => connection
+            .query_row(
+                "SELECT lower(hex(revision)) FROM git_commits WHERE commit_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_failed),
+        TraceNodeKind::File => {
+            let exact = connection
+                .query_row(
+                    "SELECT lower(hex(revision)) FROM git_commit_files
+                     WHERE file_key=?1 AND revision=?2 LIMIT 1",
+                    params![key, decode_key(expected_revision, "revision")?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(query_failed)?;
+            if exact.is_some() {
+                return Ok(exact);
+            }
+            connection
+                .query_row(
+                    "SELECT lower(hex(file.revision)) FROM git_commit_files file
+                     JOIN git_commits commit_row USING(repository_id,object_id)
+                     WHERE file.file_key=?1
+                     ORDER BY commit_row.committer_timestamp DESC,commit_row.object_id DESC LIMIT 1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(query_failed)
+        }
+        TraceNodeKind::Session => composite_target_revision(
+            connection,
+            &DeepEvidenceTarget::Session {
+                session_key: node_key.to_owned(),
+                revision: expected_revision.to_owned(),
+            },
+        )
+        .map(Some),
+        TraceNodeKind::Turn => composite_target_revision(
+            connection,
+            &DeepEvidenceTarget::Turn {
+                turn_key: node_key.to_owned(),
+                revision: expected_revision.to_owned(),
+            },
+        )
+        .map(Some),
+        TraceNodeKind::Intent => connection
+            .query_row(
+                "SELECT lower(hex(revision)) FROM intent_nodes WHERE intent_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_failed),
+        TraceNodeKind::CapabilityUse => Ok(None),
+    }
+}
+
+fn delivery_edge_revision(
+    connection: &Connection,
+    relation: TraceRelation,
+    from: &TraceNodeRef,
+    to: &TraceNodeRef,
+    expected_revision: &str,
+) -> Result<Option<String>, QueryError> {
+    let from_key = decode_key(&from.key, "from.key")?;
+    let to_key = decode_key(&to.key, "to.key")?;
+    let expected = decode_key(expected_revision, "revision")?;
+    if matches!(
+        relation,
+        TraceRelation::IntentDeclaresSession
+            | TraceRelation::IntentDeclaresCommit
+            | TraceRelation::IntentCorrelatesSession
+    ) {
+        let exact = connection
+            .query_row(
+                "SELECT lower(hex(revision)) FROM intent_trace_edges
+                 WHERE from_key=?1 AND to_kind=?2 AND to_key=?3
+                   AND relation=?4 AND revision=?5 LIMIT 1",
+                params![
+                    from_key,
+                    to.kind.as_str(),
+                    to_key,
+                    relation.as_str(),
+                    expected
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_failed)?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+        return connection
+            .query_row(
+                "SELECT lower(hex(revision)) FROM intent_trace_edges
+                 WHERE from_key=?1 AND to_kind=?2 AND to_key=?3 AND relation=?4
+                 ORDER BY edge_key LIMIT 1",
+                params![from_key, to.kind.as_str(), to_key, relation.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_failed);
+    }
+    let exact = connection
+        .query_row(
+            "SELECT lower(hex(revision)) FROM delivery_trace_edges
+             WHERE from_kind=?1 AND from_key=?2 AND to_kind=?3 AND to_key=?4
+               AND relation=?5 AND revision=?6 LIMIT 1",
+            params![
+                from.kind.as_str(),
+                from_key,
+                to.kind.as_str(),
+                to_key,
+                relation.as_str(),
+                expected
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(query_failed)?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+    connection
+        .query_row(
+            "SELECT lower(hex(revision)) FROM delivery_trace_edges
+             WHERE from_kind=?1 AND from_key=?2 AND to_kind=?3 AND to_key=?4 AND relation=?5
+             ORDER BY edge_key LIMIT 1",
+            params![
+                from.kind.as_str(),
+                from_key,
+                to.kind.as_str(),
+                to_key,
+                relation.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(query_failed)
 }
 
 fn ensure_composite_evidence_cache(
@@ -1130,6 +1343,36 @@ fn for_each_composite_evidence_line(
     include: &[String],
     mut apply: impl FnMut(String) -> Result<(), QueryError>,
 ) -> Result<(), QueryError> {
+    for_each_composite_evidence_line_inner(connection, target, include, &mut apply)
+}
+
+fn for_each_composite_evidence_line_inner(
+    connection: &Connection,
+    target: &DeepEvidenceTarget,
+    include: &[String],
+    apply: &mut dyn FnMut(String) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    if let DeepEvidenceTarget::DeliveryNode {
+        node_kind,
+        node_key,
+        revision,
+    } = target
+    {
+        return for_each_delivery_node_evidence_line(
+            connection, *node_kind, node_key, revision, include, apply,
+        );
+    }
+    if let DeepEvidenceTarget::DeliveryEdge {
+        relation,
+        from,
+        to,
+        revision,
+    } = target
+    {
+        return for_each_delivery_edge_evidence_line(
+            connection, *relation, from, to, revision, include, apply,
+        );
+    }
     let (from_sql, predicate_sql, key, active_turn) = match target {
         DeepEvidenceTarget::Turn { turn_key, .. } => (
             "FROM history_events he
@@ -1164,6 +1407,9 @@ fn for_each_composite_evidence_line(
             decode_key(event_key, "eventKey")?,
             false,
         ),
+        DeepEvidenceTarget::DeliveryNode { .. } | DeepEvidenceTarget::DeliveryEdge { .. } => {
+            unreachable!("Delivery evidence is handled before history evidence")
+        }
     };
     let active_turn_sql = if active_turn {
         "AND t.effective_provider_visibility='active'"
@@ -1209,16 +1455,439 @@ fn for_each_composite_evidence_line(
             })))?;
         }
         if payload {
-            for_each_event_payload_line(connection, &event.event_key, &mut apply)?;
+            for_each_event_payload_line(connection, &event.event_key, apply)?;
         }
     }
+    Ok(())
+}
+
+fn for_each_delivery_node_evidence_line(
+    connection: &Connection,
+    node_kind: TraceNodeKind,
+    node_key: &str,
+    revision: &str,
+    include: &[String],
+    apply: &mut dyn FnMut(String) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    if node_kind == TraceNodeKind::Session {
+        return for_each_composite_evidence_line_inner(
+            connection,
+            &DeepEvidenceTarget::Session {
+                session_key: node_key.to_owned(),
+                revision: revision.to_owned(),
+            },
+            include,
+            apply,
+        );
+    }
+    if node_kind == TraceNodeKind::Turn {
+        return for_each_composite_evidence_line_inner(
+            connection,
+            &DeepEvidenceTarget::Turn {
+                turn_key: node_key.to_owned(),
+                revision: revision.to_owned(),
+            },
+            include,
+            apply,
+        );
+    }
+    let envelope = include.iter().any(|value| value == "envelope");
+    let payload = include.iter().any(|value| value == "payload");
+    let key = decode_key(node_key, "nodeKey")?;
+    let revision_bytes = decode_key(revision, "revision")?;
+    match node_kind {
+        TraceNodeKind::Repository => {
+            let row = connection
+                .query_row(
+                    "SELECT lower(hex(repository_key)),available,lower(hex(ref_digest)),scm_provider,
+                            web_base_url,repository_path,lower(hex(delta_id))
+                     FROM repository_sources WHERE repository_key=?1 AND delta_id=?2",
+                    params![key, revision_bytes],
+                    |row| {
+                        Ok(json!({
+                            "kind": "repository",
+                            "key": row.get::<_, String>(0)?,
+                            "available": row.get::<_, bool>(1)?,
+                            "refDigest": row.get::<_, String>(2)?,
+                            "scmProvider": row.get::<_, Option<String>>(3)?,
+                            "webBaseUrl": row.get::<_, Option<String>>(4)?,
+                            "repositoryPath": row.get::<_, Option<String>>(5)?,
+                            "revision": row.get::<_, String>(6)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(query_failed)?
+                .ok_or_else(|| QueryError::new("TS_INSIGHTS_EVIDENCE_NOT_FOUND", "evidence target was not found"))?;
+            if envelope {
+                apply(evidence_line(json!({
+                    "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                    "node": row,
+                })))?;
+            }
+            if payload {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT ref_name,object_id FROM repository_refs refs
+                         JOIN repository_sources source USING(repository_id)
+                         WHERE source.repository_key=?1 ORDER BY ref_name",
+                    )
+                    .map_err(query_failed)?;
+                let mut rows = statement
+                    .query([decode_key(node_key, "nodeKey")?])
+                    .map_err(query_failed)?;
+                while let Some(row) = rows.next().map_err(query_failed)? {
+                    apply(evidence_line(json!({
+                        "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                        "repositoryRef": {
+                            "name": row.get::<_, String>(0).map_err(query_failed)?,
+                            "objectId": row.get::<_, String>(1).map_err(query_failed)?,
+                        }
+                    })))?;
+                }
+            }
+        }
+        TraceNodeKind::GitCommit => {
+            let row = connection
+                .query_row(
+                    "SELECT lower(hex(commit_row.commit_key)),lower(hex(source.repository_key)),
+                            commit_row.object_id,commit_row.parent_object_ids_json,
+                            commit_row.author_timestamp,commit_row.committer_timestamp,
+                            commit_row.tree_object_id,commit_row.summary,commit_row.reachable,
+                            lower(hex(commit_row.revision))
+                     FROM git_commits commit_row JOIN repository_sources source USING(repository_id)
+                     WHERE commit_row.commit_key=?1 AND commit_row.revision=?2",
+                    params![key, revision_bytes],
+                    |row| {
+                        let parents_json: String = row.get(3)?;
+                        let parents: Value =
+                            serde_json::from_str(&parents_json).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                        Ok(json!({
+                            "kind": "git-commit",
+                            "key": row.get::<_, String>(0)?,
+                            "repositoryKey": row.get::<_, String>(1)?,
+                            "objectId": row.get::<_, String>(2)?,
+                            "parentObjectIds": parents,
+                            "authorTimestamp": row.get::<_, String>(4)?,
+                            "committerTimestamp": row.get::<_, String>(5)?,
+                            "treeObjectId": row.get::<_, String>(6)?,
+                            "summary": row.get::<_, String>(7)?,
+                            "reachable": row.get::<_, bool>(8)?,
+                            "revision": row.get::<_, String>(9)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(query_failed)?
+                .ok_or_else(|| {
+                    QueryError::new(
+                        "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+                        "evidence target was not found",
+                    )
+                })?;
+            if envelope {
+                apply(evidence_line(json!({
+                    "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                    "node": row,
+                })))?;
+            }
+            if payload {
+                for_each_commit_file_evidence_line(connection, node_key, apply)?;
+            }
+        }
+        TraceNodeKind::File => {
+            if envelope {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT lower(hex(file.file_key)),lower(hex(source.repository_key)),
+                                file.object_id,file.path,file.old_path,file.status,file.additions,
+                                file.deletions,lower(hex(file.revision))
+                         FROM git_commit_files file JOIN repository_sources source USING(repository_id)
+                         WHERE file.file_key=?1 AND file.revision=?2
+                         ORDER BY file.object_id",
+                    )
+                    .map_err(query_failed)?;
+                let mut rows = statement
+                    .query(params![key, revision_bytes])
+                    .map_err(query_failed)?;
+                while let Some(row) = rows.next().map_err(query_failed)? {
+                    apply(evidence_line(json!({
+                        "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                        "node": {
+                            "kind": "file",
+                            "key": row.get::<_, String>(0).map_err(query_failed)?,
+                            "repositoryKey": row.get::<_, String>(1).map_err(query_failed)?,
+                            "commitObjectId": row.get::<_, String>(2).map_err(query_failed)?,
+                            "path": row.get::<_, String>(3).map_err(query_failed)?,
+                            "oldPath": row.get::<_, Option<String>>(4).map_err(query_failed)?,
+                            "status": row.get::<_, String>(5).map_err(query_failed)?,
+                            "additions": optional_blob_value_decimal(row.get(6).map_err(query_failed)?)?,
+                            "deletions": optional_blob_value_decimal(row.get(7).map_err(query_failed)?)?,
+                            "revision": row.get::<_, String>(8).map_err(query_failed)?,
+                        }
+                    })))?;
+                }
+            }
+        }
+        TraceNodeKind::Intent => {
+            let node = connection
+                .query_row(
+                    "SELECT lower(hex(n.intent_key)),n.node_id,
+                            CASE WHEN n.parent_intent_key IS NULL THEN NULL ELSE lower(hex(n.parent_intent_key)) END,
+                            n.kind,n.title,n.status,n.stable_id,lower(hex(n.revision)),
+                            source.adapter_version,lower(hex(source.revision)),source.coverage
+                     FROM intent_nodes n JOIN intent_sources source USING(repository_id)
+                     WHERE n.intent_key=?1 AND n.revision=?2",
+                    params![key, revision_bytes],
+                    |row| Ok(json!({
+                        "kind": "intent",
+                        "key": row.get::<_, String>(0)?,
+                        "id": row.get::<_, String>(1)?,
+                        "parentIntentKey": row.get::<_, Option<String>>(2)?,
+                        "intentKind": row.get::<_, String>(3)?,
+                        "title": row.get::<_, String>(4)?,
+                        "status": row.get::<_, String>(5)?,
+                        "stableId": row.get::<_, bool>(6)?,
+                        "revision": row.get::<_, String>(7)?,
+                        "source": {
+                            "adapterVersion": row.get::<_, String>(8)?,
+                            "revision": row.get::<_, String>(9)?,
+                            "coverage": row.get::<_, String>(10)?,
+                        }
+                    })),
+                )
+                .optional()
+                .map_err(query_failed)?
+                .ok_or_else(|| {
+                    QueryError::new(
+                        "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+                        "evidence target was not found",
+                    )
+                })?;
+            if envelope {
+                apply(evidence_line(json!({
+                    "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                    "node": node,
+                })))?;
+            }
+            if payload {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT ref_kind,ref_value,lower(hex(revision)) FROM intent_refs
+                         WHERE repository_id=(SELECT repository_id FROM intent_nodes WHERE intent_key=?1)
+                           AND node_id=(SELECT node_id FROM intent_nodes WHERE intent_key=?1)
+                         ORDER BY ref_kind,ref_value",
+                    )
+                    .map_err(query_failed)?;
+                let mut rows = statement.query([key]).map_err(query_failed)?;
+                while let Some(row) = rows.next().map_err(query_failed)? {
+                    apply(evidence_line(json!({
+                        "format": "threadshare-insights-delivery-node-evidence-line@v1",
+                        "intentRef": {
+                            "kind": row.get::<_, String>(0).map_err(query_failed)?,
+                            "value": row.get::<_, String>(1).map_err(query_failed)?,
+                            "revision": row.get::<_, String>(2).map_err(query_failed)?,
+                        }
+                    })))?;
+                }
+            }
+        }
+        TraceNodeKind::CapabilityUse => {
+            return Err(QueryError::new(
+                "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+                "evidence target was not found",
+            ));
+        }
+        TraceNodeKind::Session | TraceNodeKind::Turn => unreachable!(),
+    }
+    Ok(())
+}
+
+fn optional_blob_value_decimal(value: Option<Vec<u8>>) -> Result<Option<String>, QueryError> {
+    value
+        .map(|value| {
+            blob_u64(value)
+                .map(|value| value.to_string())
+                .map_err(query_failed)
+        })
+        .transpose()
+}
+
+fn for_each_commit_file_evidence_line(
+    connection: &Connection,
+    commit_key: &str,
+    apply: &mut dyn FnMut(String) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT file.path,file.old_path,file.status,file.additions,file.deletions,
+                    lower(hex(file.revision))
+             FROM git_commit_files file
+             JOIN git_commits commit_row USING(repository_id,object_id)
+             WHERE commit_row.commit_key=?1 ORDER BY file.path",
+        )
+        .map_err(query_failed)?;
+    let mut rows = statement
+        .query([decode_key(commit_key, "nodeKey")?])
+        .map_err(query_failed)?;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        apply(evidence_line(json!({
+            "format": "threadshare-insights-delivery-node-evidence-line@v1",
+            "commitFile": {
+                "path": row.get::<_, String>(0).map_err(query_failed)?,
+                "oldPath": row.get::<_, Option<String>>(1).map_err(query_failed)?,
+                "status": row.get::<_, String>(2).map_err(query_failed)?,
+                "additions": optional_blob_value_decimal(row.get(3).map_err(query_failed)?)?,
+                "deletions": optional_blob_value_decimal(row.get(4).map_err(query_failed)?)?,
+                "revision": row.get::<_, String>(5).map_err(query_failed)?,
+            }
+        })))?;
+    }
+    Ok(())
+}
+
+fn for_each_delivery_edge_evidence_line(
+    connection: &Connection,
+    relation: TraceRelation,
+    from: &TraceNodeRef,
+    to: &TraceNodeRef,
+    revision: &str,
+    include: &[String],
+    apply: &mut dyn FnMut(String) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    if !include.iter().any(|value| value == "envelope") {
+        return Ok(());
+    }
+    let from_key = decode_key(&from.key, "from.key")?;
+    let to_key = decode_key(&to.key, "to.key")?;
+    let revision_bytes = decode_key(revision, "revision")?;
+    let intent_relation = matches!(
+        relation,
+        TraceRelation::IntentDeclaresSession
+            | TraceRelation::IntentDeclaresCommit
+            | TraceRelation::IntentCorrelatesSession
+    );
+    let row = if intent_relation {
+        connection
+            .query_row(
+                "SELECT strength,source,lower(hex(revision)),facts_json,limitations_json
+                 FROM intent_trace_edges
+                 WHERE from_key=?1 AND to_kind=?2 AND to_key=?3 AND relation=?4 AND revision=?5",
+                params![
+                    from_key,
+                    to.kind.as_str(),
+                    to_key,
+                    relation.as_str(),
+                    revision_bytes
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(query_failed)?
+            .map(|row| {
+                let facts: serde_json::Value = serde_json::from_str(&row.3).map_err(|_| {
+                    QueryError::new(
+                        "TS_INSIGHTS_STORAGE_CORRUPT",
+                        "delivery edge facts are invalid",
+                    )
+                })?;
+                let limitations: serde_json::Value =
+                    serde_json::from_str(&row.4).map_err(|_| {
+                        QueryError::new(
+                            "TS_INSIGHTS_STORAGE_CORRUPT",
+                            "delivery edge limitations are invalid",
+                        )
+                    })?;
+                Ok((row.0, row.1, row.2, facts, limitations))
+            })
+            .transpose()?
+    } else {
+        connection
+            .query_row(
+                "SELECT edge.strength,edge.source,lower(hex(edge.revision)),
+                        evidence.facts_json,evidence.limitations_json
+                 FROM delivery_trace_edges edge
+                 JOIN delivery_trace_edge_evidence evidence USING(edge_key)
+                 WHERE edge.from_kind=?1 AND edge.from_key=?2 AND edge.to_kind=?3
+                   AND edge.to_key=?4 AND edge.relation=?5 AND edge.revision=?6",
+                params![
+                    from.kind.as_str(),
+                    from_key,
+                    to.kind.as_str(),
+                    to_key,
+                    relation.as_str(),
+                    revision_bytes
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(query_failed)?
+            .map(|row| {
+                let facts: serde_json::Value = serde_json::from_str(&row.3).map_err(|_| {
+                    QueryError::new(
+                        "TS_INSIGHTS_STORAGE_CORRUPT",
+                        "delivery edge facts are invalid",
+                    )
+                })?;
+                let limitations: serde_json::Value =
+                    serde_json::from_str(&row.4).map_err(|_| {
+                        QueryError::new(
+                            "TS_INSIGHTS_STORAGE_CORRUPT",
+                            "delivery edge limitations are invalid",
+                        )
+                    })?;
+                Ok((row.0, row.1, row.2, facts, limitations))
+            })
+            .transpose()?
+    }
+    .ok_or_else(|| {
+        QueryError::new(
+            "TS_INSIGHTS_EVIDENCE_NOT_FOUND",
+            "evidence target was not found",
+        )
+    })?;
+    apply(evidence_line(json!({
+        "format": "threadshare-insights-delivery-edge-evidence-line@v1",
+        "edge": {
+            "relation": relation,
+            "from": from,
+            "to": to,
+            "strength": row.0,
+            "source": row.1,
+            "facts": row.3,
+            "limitations": row.4,
+            "revision": row.2,
+        }
+    })))?;
     Ok(())
 }
 
 fn for_each_event_payload_line(
     connection: &Connection,
     event_key: &str,
-    apply: &mut impl FnMut(String) -> Result<(), QueryError>,
+    apply: &mut (impl FnMut(String) -> Result<(), QueryError> + ?Sized),
 ) -> Result<(), QueryError> {
     let event_key_bytes = decode_key(event_key, "eventKey")?;
     let mut payload_statement = connection
@@ -1404,6 +2073,15 @@ fn resource_from_sql(resource: DeepResource) -> &'static str {
              LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
              LEFT JOIN capabilities c ON c.capability_key=eo.capability_key"
         }
+        DeepResource::DeliveryEdge => {
+            "FROM delivery_trace_edges dte
+             JOIN repository_sources rs ON rs.repository_id=dte.repository_id
+             JOIN git_commits gc ON gc.repository_id=dte.repository_id AND gc.object_id=dte.object_id
+             LEFT JOIN git_commit_files gcf ON gcf.repository_id=dte.repository_id
+                                           AND gcf.object_id=dte.object_id
+                                           AND dte.to_kind='file'
+                                           AND gcf.file_key=dte.to_key"
+        }
         DeepResource::Event => unreachable!("event has its own query path"),
     }
 }
@@ -1465,6 +2143,13 @@ fn resource_select_sql(resource: DeepResource) -> &'static str {
                     CASE WHEN eo.capability_key IS NULL THEN NULL ELSE lower(hex(eo.capability_key)) END,
                     c.canonical_name,eo.provider_state,eo.exit_code,lower(hex(he.revision))"
         }
+        DeepResource::DeliveryEdge => {
+            "SELECT gc.committer_timestamp,lower(hex(dte.edge_key)),0,
+                    lower(hex(rs.repository_key)),dte.from_kind,lower(hex(dte.from_key)),
+                    dte.to_kind,lower(hex(dte.to_key)),dte.relation,dte.strength,dte.source,
+                    dte.object_id,gcf.path,gcf.old_path,gcf.status,gcf.additions,gcf.deletions,
+                    gc.reachable,lower(hex(dte.revision))"
+        }
         DeepResource::Event => unreachable!("event has its own query path"),
     }
 }
@@ -1477,6 +2162,7 @@ fn resource_stable_column(resource: DeepResource) -> &'static str {
         DeepResource::FileActivity => "fa.event_key",
         DeepResource::TokenUsage => "tu.event_key",
         DeepResource::ErrorOccurrence => "eo.event_key",
+        DeepResource::DeliveryEdge => "dte.edge_key",
         DeepResource::Event => "he.event_key",
     }
 }
@@ -1491,6 +2177,7 @@ fn resource_ordinal_column(resource: DeepResource) -> &'static str {
 
 fn resource_visibility_sql(resource: DeepResource) -> &'static str {
     match resource {
+        DeepResource::DeliveryEdge => "1=1",
         DeepResource::Turn | DeepResource::CapabilityUse => {
             "s.eligibility='eligible' AND s.session_scope='main'
              AND t.effective_provider_visibility='active'
@@ -1522,16 +2209,41 @@ fn aggregate_field(
     let text = AggregateFieldKind::Text;
     let decimal = AggregateFieldKind::DecimalBlob;
     let value = match field {
-        "provider" => ("s.provider", text),
-        "projectKey" => (
+        "repositoryKey" if resource == DeepResource::DeliveryEdge => {
+            ("lower(hex(rs.repository_key))", text)
+        }
+        "fromKind" if resource == DeepResource::DeliveryEdge => ("dte.from_kind", text),
+        "fromKey" if resource == DeepResource::DeliveryEdge => ("lower(hex(dte.from_key))", text),
+        "toKind" if resource == DeepResource::DeliveryEdge => ("dte.to_kind", text),
+        "toKey" if resource == DeepResource::DeliveryEdge => ("lower(hex(dte.to_key))", text),
+        "commitHash" if resource == DeepResource::DeliveryEdge => ("dte.object_id", text),
+        "normalizedPath" if resource == DeepResource::DeliveryEdge => ("gcf.path", text),
+        "relation" if resource == DeepResource::DeliveryEdge => ("dte.relation", text),
+        "strength" if resource == DeepResource::DeliveryEdge => ("dte.strength", text),
+        "source" if resource == DeepResource::DeliveryEdge => ("dte.source", text),
+        "reachable" if resource == DeepResource::DeliveryEdge => (
+            "CASE gc.reachable WHEN 1 THEN 'true' ELSE 'false' END",
+            text,
+        ),
+        "additions" if resource == DeepResource::DeliveryEdge => ("gcf.additions", decimal),
+        "deletions" if resource == DeepResource::DeliveryEdge => ("gcf.deletions", decimal),
+        "revision" if resource == DeepResource::DeliveryEdge => ("lower(hex(dte.revision))", text),
+        "provider" if resource != DeepResource::DeliveryEdge => ("s.provider", text),
+        "projectKey" if resource != DeepResource::DeliveryEdge => (
             "CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END",
             text,
         ),
-        "sessionKey" => ("lower(hex(s.session_key))", text),
-        "turnKey" if resource != DeepResource::Session => (
-            "CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END",
-            text,
-        ),
+        "sessionKey" if resource != DeepResource::DeliveryEdge => {
+            ("lower(hex(s.session_key))", text)
+        }
+        "turnKey"
+            if resource != DeepResource::Session && resource != DeepResource::DeliveryEdge =>
+        {
+            (
+                "CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END",
+                text,
+            )
+        }
         "observedAt" => (resource_observed_column(resource), text),
         "originScope" if resource == DeepResource::Event => ("he.origin_scope", text),
         "originScope" if resource == DeepResource::CapabilityUse => ("cu.origin_scope", text),
@@ -2698,6 +3410,36 @@ fn typed_resource_row(
             );
             Some(row.get(13)?)
         }
+        DeepResource::DeliveryEdge => {
+            record.insert("edgeKey".to_owned(), json!(stable_key));
+            record.insert("repositoryKey".to_owned(), json!(row.get::<_, String>(3)?));
+            record.insert("fromKind".to_owned(), json!(row.get::<_, String>(4)?));
+            record.insert("fromKey".to_owned(), json!(row.get::<_, String>(5)?));
+            record.insert("toKind".to_owned(), json!(row.get::<_, String>(6)?));
+            record.insert("toKey".to_owned(), json!(row.get::<_, String>(7)?));
+            record.insert("relation".to_owned(), json!(row.get::<_, String>(8)?));
+            record.insert("strength".to_owned(), json!(row.get::<_, String>(9)?));
+            record.insert("source".to_owned(), json!(row.get::<_, String>(10)?));
+            record.insert("commitHash".to_owned(), json!(row.get::<_, String>(11)?));
+            record.insert(
+                "normalizedPath".to_owned(),
+                json!(row.get::<_, Option<String>>(12)?),
+            );
+            record.insert(
+                "oldPath".to_owned(),
+                json!(row.get::<_, Option<String>>(13)?),
+            );
+            record.insert(
+                "changeKind".to_owned(),
+                json!(row.get::<_, Option<String>>(14)?),
+            );
+            record.insert("additions".to_owned(), optional_blob_decimal(row, 15)?);
+            record.insert("deletions".to_owned(), optional_blob_decimal(row, 16)?);
+            record.insert("reachable".to_owned(), json!(row.get::<_, bool>(17)?));
+            record.insert("observedAt".to_owned(), json!(observed_at));
+            record.insert("revision".to_owned(), json!(row.get::<_, String>(18)?));
+            None
+        }
         DeepResource::Event => unreachable!("event has its own query path"),
     };
     Ok(TypedResourceRow {
@@ -3068,6 +3810,32 @@ fn validate_evidence_request(request: &DeepEvidenceRequest) -> Result<(), QueryE
                 }
             }
         }
+        DeepEvidenceTarget::DeliveryNode {
+            node_key, revision, ..
+        } => {
+            for (name, value) in [("nodeKey", node_key), ("revision", revision)] {
+                if !valid_stable_key(value) {
+                    return Err(invalid(format!(
+                        "{name} must be a lowercase 32-byte hex key"
+                    )));
+                }
+            }
+        }
+        DeepEvidenceTarget::DeliveryEdge {
+            from, to, revision, ..
+        } => {
+            for (name, value) in [
+                ("from.key", &from.key),
+                ("to.key", &to.key),
+                ("revision", revision),
+            ] {
+                if !valid_stable_key(value) {
+                    return Err(invalid(format!(
+                        "{name} must be a lowercase 32-byte hex key"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -3175,6 +3943,9 @@ fn expected_resource_order(resource: DeepResource) -> &'static [(&'static str, D
             ("eventKey", Direction::Asc),
             ("activityOrdinal", Direction::Asc),
         ],
+        DeepResource::DeliveryEdge => {
+            &[("observedAt", Direction::Desc), ("edgeKey", Direction::Asc)]
+        }
     }
 }
 
@@ -3417,6 +4188,27 @@ fn resource_select_field(resource: DeepResource, field: &str) -> Result<(), Quer
                 | "capability.key"
                 | "capability.canonicalName"
         ),
+        DeepResource::DeliveryEdge => matches!(
+            field,
+            "edgeKey"
+                | "repositoryKey"
+                | "fromKind"
+                | "fromKey"
+                | "toKind"
+                | "toKey"
+                | "relation"
+                | "strength"
+                | "source"
+                | "commitHash"
+                | "normalizedPath"
+                | "oldPath"
+                | "changeKind"
+                | "additions"
+                | "deletions"
+                | "reachable"
+                | "observedAt"
+                | "revision"
+        ),
         DeepResource::Event => unreachable!(),
     };
     valid
@@ -3429,12 +4221,31 @@ fn resource_filter_field(resource: DeepResource, field: &str) -> Result<&'static
         return event_filter_field(field);
     }
     let column = match field {
-        "provider" => "s.provider",
-        "projectKey" => {
+        "repositoryKey" if resource == DeepResource::DeliveryEdge => {
+            "lower(hex(rs.repository_key))"
+        }
+        "fromKind" if resource == DeepResource::DeliveryEdge => "dte.from_kind",
+        "fromKey" if resource == DeepResource::DeliveryEdge => "lower(hex(dte.from_key))",
+        "toKind" if resource == DeepResource::DeliveryEdge => "dte.to_kind",
+        "toKey" if resource == DeepResource::DeliveryEdge => "lower(hex(dte.to_key))",
+        "commitHash" if resource == DeepResource::DeliveryEdge => "dte.object_id",
+        "normalizedPath" if resource == DeepResource::DeliveryEdge => "gcf.path",
+        "relation" if resource == DeepResource::DeliveryEdge => "dte.relation",
+        "strength" if resource == DeepResource::DeliveryEdge => "dte.strength",
+        "source" if resource == DeepResource::DeliveryEdge => "dte.source",
+        "reachable" if resource == DeepResource::DeliveryEdge => {
+            "CASE gc.reachable WHEN 1 THEN 'true' ELSE 'false' END"
+        }
+        "revision" if resource == DeepResource::DeliveryEdge => "lower(hex(dte.revision))",
+        "edgeKey" if resource == DeepResource::DeliveryEdge => "lower(hex(dte.edge_key))",
+        "provider" if resource != DeepResource::DeliveryEdge => "s.provider",
+        "projectKey" if resource != DeepResource::DeliveryEdge => {
             "CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END"
         }
-        "sessionKey" => "lower(hex(s.session_key))",
-        "turnKey" => "CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END",
+        "sessionKey" if resource != DeepResource::DeliveryEdge => "lower(hex(s.session_key))",
+        "turnKey" if resource != DeepResource::DeliveryEdge => {
+            "CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END"
+        }
         "originScope" if resource == DeepResource::CapabilityUse => "cu.origin_scope",
         "observedAt" => resource_observed_column(resource),
         "capability.key"
@@ -3490,6 +4301,7 @@ fn resource_observed_column(resource: DeepResource) -> &'static str {
         DeepResource::FileActivity => "fa.observed_timestamp",
         DeepResource::TokenUsage => "tu.observed_timestamp",
         DeepResource::ErrorOccurrence => "eo.observed_timestamp",
+        DeepResource::DeliveryEdge => "gc.committer_timestamp",
     }
 }
 

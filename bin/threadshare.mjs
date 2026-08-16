@@ -771,6 +771,12 @@ function insightsFailure(error, action) {
       next: "Wait for the active Insights command to finish, then retry; do not start concurrent writers.",
     });
   }
+  if (error?.code === "TS_INSIGHTS_REPOSITORY_INVALID") {
+    return cliDiagnostic(error.code, "The selected path is not a readable local Git repository.", {
+      command: "insights",
+      next: "Choose a local Git worktree and retry `threadshare insights sync --repository <path>`.",
+    });
+  }
   if (error?.code === "TS_INSIGHTS_ORIGIN_SECRET_MISSING" ||
       error?.code === "TS_INSIGHTS_ORIGIN_SECRET_INVALID") {
     return cliDiagnostic(
@@ -988,14 +994,14 @@ async function main() {
         },
       );
     }
-    const queryOnlyOptions = {
+      const queryOnlyOptions = {
       cursor: options.cursor,
       limit: options.limit,
       query: options.query,
       request: options.request,
       revision: options.revision,
       stdio: options.stdio,
-    };
+      };
     if (positionals[1] === "mcp") {
       if (positionals.length !== 2) {
         throw cliDiagnostic("TS_USAGE_UNEXPECTED_ARGUMENT", "insights mcp takes no positional argument.", {
@@ -1069,6 +1075,8 @@ async function main() {
       invocation = parseInsightsInvocation(positionals, {
         ...options,
         "regenerate-secret": options["regenerate-secret"],
+        intent: options.intent,
+        repository: options.repository,
         verify: options.verify,
       });
       if (invocation.action === "dashboard") {

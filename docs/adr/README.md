@@ -6,5 +6,6 @@
 |---|---|---|
 | [0001](0001-local-insights-persistent-projection-architecture.md) | Accepted | Local Insights 使用持久化、事务化投影，不退化为查询时扫描 Provider 文件 |
 | [0002](0002-evidence-gated-insights-performance-evolution.md) | Accepted | 性能优化必须由分段测量触发，并保持流式、内存有界与 fail-closed |
+| [0003](0003-insights-delivery-trace-evidence-graph.md) | Accepted | Delivery Trace 使用 Agent 与 Dashboard 共享的 snapshot-bound evidence graph，不在前端推断交付关系 |
 
 变更已经接受的决策时，新增 ADR 并将旧 ADR 标为 `Superseded`，不要直接改写历史理由。设计文档不能静默覆盖 ADR。

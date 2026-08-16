@@ -172,6 +172,9 @@ export function createInsightsQueryReader(options) {
     recipe(input, requestOptions) {
       return invoke("readInsightsRecipe", input, requestOptions);
     },
+    deliveryTrace(input, requestOptions) {
+      return invoke("readInsightsDeliveryTrace", input, requestOptions);
+    },
     async close() {
       if (closed) return;
       closed = true;

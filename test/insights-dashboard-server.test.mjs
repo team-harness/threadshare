@@ -50,6 +50,20 @@ async function dashboardFixture(t, options = {}) {
     capabilities: async (input) => ({ snapshotSeq: "1", input, items: [], nextCursor: null }),
     search: async (input) => ({ query: input.query, results: [] }),
     evidence: async (input) => ({ turnKey: input.turnKey, entries: [] }),
+    inspectorRepositories: async () => ({
+      format: "threadshare-insights-dashboard-repositories@v1",
+      items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
+    }),
+    inspectorEdges: async (input) => ({
+      format: "threadshare-insights-query@v2",
+      repositoryKey: input.repositoryKey,
+      records: [],
+    }),
+    inspectorTrace: async (input) => ({ format: "trace@v1", root: input.root }),
+    inspectorEvidence: async (input) => ({ format: "evidence@v2", target: input.target }),
+    inspectorSessionTimeline: async (input) => ({ format: "timeline@v1", window: input.window }),
+    inspectorGitDiff: async (input) => ({ format: "diff@v1", path: input.path }),
+    inspectorContinuation: async (input) => ({ format: "continuation@v1", focus: input.trace.root }),
   };
   const server = await createInsightsDashboardServer({
     ...options,
@@ -164,6 +178,52 @@ test("Dashboard session enforces CSP, same-origin writes, and no CORS", async (t
     headers: { Cookie: cookie },
   });
   assert.deepEqual(await status.json(), { format: "status@v1", state: "ready" });
+
+  const repositories = await fetch(new URL("/api/v1/inspector/repositories", server.url), {
+    headers: { Cookie: cookie },
+  });
+  assert.deepEqual(await repositories.json(), {
+    format: "threadshare-insights-dashboard-repositories@v1",
+    items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
+  });
+
+  const edgeRequest = {
+    repositoryKey: "a".repeat(64), after: null, before: null, cursor: null, limit: 25,
+  };
+  const edgeResponse = await fetch(new URL("/api/v1/inspector/edges", server.url), {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      "Content-Type": "application/json",
+      Origin: server.url.slice(0, -1),
+    },
+    body: JSON.stringify(edgeRequest),
+  });
+  assert.deepEqual(await edgeResponse.json(), {
+    format: "threadshare-insights-query@v2",
+    repositoryKey: edgeRequest.repositoryKey,
+    records: [],
+  });
+
+  const inspectorRequests = [
+    ["trace", { root: { kind: "git-commit", key: "b".repeat(64) } }, { format: "trace@v1", root: { kind: "git-commit", key: "b".repeat(64) } }],
+    ["evidence", { target: { kind: "turn", key: "c".repeat(64) } }, { format: "evidence@v2", target: { kind: "turn", key: "c".repeat(64) } }],
+    ["session-timeline", { window: { after: "2026-08-01T00:00:00.000Z" } }, { format: "timeline@v1", window: { after: "2026-08-01T00:00:00.000Z" } }],
+    ["git-diff", { path: "src/app.js" }, { format: "diff@v1", path: "src/app.js" }],
+    ["continuation", { trace: { root: { kind: "intent", key: "d".repeat(64) } } }, { format: "continuation@v1", focus: { kind: "intent", key: "d".repeat(64) } }],
+  ];
+  for (const [route, body, expected] of inspectorRequests) {
+    const result = await fetch(new URL(`/api/v1/inspector/${route}`, server.url), {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "application/json",
+        Origin: server.url.slice(0, -1),
+      },
+      body: JSON.stringify(body),
+    });
+    assert.deepEqual(await result.json(), expected);
+  }
 
   const rejected = await fetch(new URL("/api/v1/search", server.url), {
     method: "POST",

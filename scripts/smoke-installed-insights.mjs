@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
+import { PassThrough, Readable } from "node:stream";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
@@ -24,10 +25,21 @@ const AGENT_QUERY_FORMATS = Object.freeze([
   "threadshare-insights-activity-request@v1",
   "threadshare-insights-activity@v1",
   "threadshare-insights-evidence@v1",
+  "threadshare-insights-query-request@v2",
+  "threadshare-insights-query@v2",
+  "threadshare-insights-recipe-request@v1",
+  "threadshare-insights-recipe@v1",
+  "threadshare-insights-evidence-request@v2",
+  "threadshare-insights-evidence@v2",
+  "threadshare-insights-delivery-trace-request@v1",
+  "threadshare-insights-delivery-trace@v1",
+  "threadshare-insights-git-diff-evidence-request@v1",
+  "threadshare-insights-git-diff-evidence@v1",
+  "threadshare-insights-continuation-context@v1",
 ]);
 
 function schemaFilename(format) {
-  return `${format.replace("@v1", ".v1")}.schema.json`;
+  return `${format.replace(/@v([0-9]+)$/u, ".v$1")}.schema.json`;
 }
 
 async function loadInstalledSchemaValidators(rootDirectory) {
@@ -38,13 +50,69 @@ async function loadInstalledSchemaValidators(rootDirectory) {
   ]);
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
-  return new Map(await Promise.all(AGENT_QUERY_FORMATS.map(async (format) => {
-    const document = JSON.parse(await readFile(
+  const documents = await Promise.all(AGENT_QUERY_FORMATS.map(async (format) => ({
+    format,
+    document: JSON.parse(await readFile(
       path.join(rootDirectory, "schema", schemaFilename(format)),
       "utf8",
-    ));
-    return [format, ajv.compile(document)];
+    )),
   })));
+  for (const { document } of documents) ajv.addSchema(document);
+  return new Map(documents.map(({ format, document }) => [format, ajv.getSchema(document.$id)]));
+}
+
+function traceSourceDelta({ canonicalJson, protocol }) {
+  const value = {
+    format: "threadshare-insights-trace-source-delta@v1",
+    expectedGeneration: "0",
+    targetGeneration: "1",
+    repository: {
+      repositoryId: "11111111-1111-4111-8111-111111111111",
+      repositoryKey: "1".repeat(64),
+      available: true,
+      refDigest: "2".repeat(64),
+      scmProvider: "github",
+      webBaseUrl: "https://github.com",
+      repositoryPath: "team-harness/threadshare",
+    },
+    refs: [{ name: "refs/heads/main", objectId: "a".repeat(40) }],
+    commits: [{
+      objectId: "a".repeat(40),
+      parentObjectIds: [],
+      authorTimestamp: "2026-08-16T00:00:00.000Z",
+      committerTimestamp: "2026-08-16T00:00:00.000Z",
+      treeObjectId: "b".repeat(40),
+      summary: "installed Delivery Trace smoke",
+      files: [{
+        path: "src/insights-query.mjs",
+        oldPath: null,
+        status: "A",
+        additions: "1",
+        deletions: "0",
+      }],
+    }],
+  };
+  return {
+    ...value,
+    deltaId: createHash("sha256")
+      .update(canonicalJson(protocol.traceSourceDigestDocument(value)))
+      .digest("hex"),
+  };
+}
+
+async function runInstalledMcp(rootDirectory, messages, queryOptions) {
+  const { createInsightsMcpServer } = await import(
+    pathToFileURL(path.join(rootDirectory, "src", "insights-mcp.mjs")).href
+  );
+  const output = new PassThrough();
+  let text = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk) => { text += chunk; });
+  await createInsightsMcpServer({ queryOptions }).run({
+    input: Readable.from(messages.map((message) => `${JSON.stringify(message)}\n`)),
+    output,
+  });
+  return text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
 async function runInstalledQuery(rootDirectory, stateDirectory, arguments_) {
@@ -125,6 +193,7 @@ export async function smokeInstalledAgentQueries({
     });
     try {
       await client.applySessionFacts(assertSessionFactsDeltaV2(delta));
+      await client.commitTraceSourceDelta(traceSourceDelta({ canonicalJson, protocol }));
     } finally {
       await client.close();
     }
@@ -175,7 +244,115 @@ export async function smokeInstalledAgentQueries({
       "--limit", "5", "--format", "json",
     ]));
     for (const output of outputs) validateInstalledQuery(validators, output);
-    return { queryCount: outputs.length, schemaCount: validators.size };
+
+    const commitKey = hashKey(
+      "git-commit",
+      Buffer.from("1".repeat(64), "hex"),
+      "a".repeat(40),
+    );
+    const queryRequest = {
+      format: "threadshare-insights-query-request@v2",
+      resource: "event",
+      where: null,
+      shape: { kind: "records", select: ["eventKey"], payloadMode: "reference" },
+      orderBy: [
+        { field: "observedAt", direction: "desc" },
+        { field: "eventKey", direction: "asc" },
+      ],
+      limit: 1,
+      cursor: null,
+      count: "exact",
+    };
+    const recipeRequest = {
+      format: "threadshare-insights-recipe-request@v1",
+      window: null,
+      root: { kind: "git-commit", key: commitKey },
+      direction: "outgoing",
+      maxDepth: 1,
+      includeCandidateEdges: false,
+      includeContextualEdges: false,
+      limit: 10,
+      cursor: null,
+    };
+    validateInstalledQuery(validators, queryRequest);
+    validateInstalledQuery(validators, recipeRequest);
+    const { resolveInsightsPaths } = await import(
+      pathToFileURL(path.join(rootDirectory, "src", "insights-paths.mjs")).href
+    );
+    const queryOptions = {
+      runtimeOptions,
+      stateOptions: {
+        paths: resolveInsightsPaths({
+          environment: { ...process.env, THREADSHARE_INSIGHTS_HOME: stateDirectory },
+        }),
+      },
+    };
+    const firstMcp = await runInstalledMcp(rootDirectory, [
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      {
+        jsonrpc: "2.0", id: 2, method: "tools/call",
+        params: { name: "threadshare_insights_spec", arguments: {} },
+      },
+      {
+        jsonrpc: "2.0", id: 3, method: "tools/call",
+        params: { name: "threadshare_insights_query", arguments: queryRequest },
+      },
+      {
+        jsonrpc: "2.0", id: 4, method: "tools/call",
+        params: {
+          name: "threadshare_insights_recipe",
+          arguments: { name: "delivery-trace@1", request: recipeRequest },
+        },
+      },
+    ], queryOptions);
+    const byId = new Map(firstMcp.map((message) => [message.id, message]));
+    const toolNames = byId.get(1)?.result?.tools?.map(({ name }) => name);
+    if (JSON.stringify(toolNames) !== JSON.stringify([
+      "threadshare_insights_spec",
+      "threadshare_insights_query",
+      "threadshare_insights_recipe",
+      "threadshare_insights_evidence",
+    ])) {
+      throw new Error("installed Insights MCP tool catalog is incomplete");
+    }
+    const mcpOutputs = [2, 3, 4].map((id) => {
+      const result = byId.get(id)?.result;
+      if (result?.isError !== false) {
+        throw new Error(
+          `installed Insights MCP tool ${id} failed: ${result?.structuredContent?.code ?? "missing response"}`,
+        );
+      }
+      validateInstalledQuery(validators, result.structuredContent);
+      return result.structuredContent;
+    });
+    const trace = mcpOutputs[2];
+    const commit = trace.nodes.find((node) => node.kind === "git-commit" && node.key === commitKey);
+    if (!commit) throw new Error("installed Delivery Trace recipe did not return its root commit");
+    const evidenceRequest = {
+      format: "threadshare-insights-evidence-request@v2",
+      target: {
+        kind: "delivery-node",
+        nodeKind: commit.kind,
+        nodeKey: commit.key,
+        revision: commit.revision,
+      },
+      include: ["envelope"],
+      cursor: null,
+      maxBytes: 4096,
+    };
+    validateInstalledQuery(validators, evidenceRequest);
+    const evidenceMcp = await runInstalledMcp(rootDirectory, [{
+      jsonrpc: "2.0", id: 5, method: "tools/call",
+      params: { name: "threadshare_insights_evidence", arguments: evidenceRequest },
+    }], queryOptions);
+    const evidence = evidenceMcp[0]?.result;
+    if (evidence?.isError !== false) throw new Error("installed Insights MCP evidence tool failed");
+    validateInstalledQuery(validators, evidence.structuredContent);
+    return {
+      queryCount: outputs.length,
+      schemaCount: validators.size,
+      mcpToolCount: toolNames.length,
+    };
   } finally {
     await rm(stateDirectory, { recursive: true, force: true });
   }

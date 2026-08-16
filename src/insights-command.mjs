@@ -13,6 +13,12 @@ import {
   recoverInsightsReindexSwap,
   reindexInsightsState,
 } from "./insights-reindex.mjs";
+import {
+  createTraceSourceDelta,
+  registerRequestedInsightsRepository,
+  scanGitRepository,
+} from "./insights-repository-source.mjs";
+import { readMarkdownIntentSource } from "./insights-intent-source.mjs";
 import { openInsightsState } from "./insights-state.mjs";
 import { withInsightsWriterLock } from "./insights-writer-lock.mjs";
 import { discoverProviderEvidenceSources } from "./provider-evidence.mjs";
@@ -25,6 +31,7 @@ const EXCLUSION_OPERATIONS = new Set(["add", "remove", "list"]);
 const EXCLUSION_KINDS = new Set(["provider", "project", "session"]);
 const MAX_REINDEX_SOURCE_CHANGED_RETRIES = 3;
 const REINDEX_SOURCE_CHANGED_RETRY_DELAY_MS = 100;
+const MAX_REPOSITORY_CHANGED_RETRIES = 3;
 
 function commandError(code, message) {
   const error = new Error(message);
@@ -188,15 +195,52 @@ export function parseInsightsInvocation(positionals, options = {}) {
       "--verify is only valid for insights status",
     );
   }
+  if (options.repository !== undefined && action !== "sync") {
+    throw commandError(
+      "TS_USAGE_OPTION_NOT_ALLOWED",
+      "--repository is only valid for insights sync",
+    );
+  }
+  if (options.intent !== undefined && action !== "sync") {
+    throw commandError(
+      "TS_USAGE_OPTION_NOT_ALLOWED",
+      "--intent is only valid for insights sync",
+    );
+  }
   if (action !== "exclude") {
     if (operation !== undefined || kind !== undefined || value !== undefined) {
       throw commandError("TS_USAGE_UNEXPECTED_ARGUMENT", `Unexpected argument for insights ${action}`);
+    }
+    const repository = options.repository;
+    const intent = options.intent;
+    if (
+      action === "sync" &&
+      repository !== undefined &&
+      (typeof repository !== "string" || repository.trim() === "")
+    ) {
+      throw commandError(
+        "TS_USAGE_INVALID_VALUE",
+        "--repository must be a non-empty repository path",
+      );
+    }
+    if (intent !== undefined && repository === undefined) {
+      throw commandError(
+        "TS_USAGE_OPTION_DEPENDENCY",
+        "--intent requires --repository",
+      );
+    }
+    if (intent !== undefined && (typeof intent !== "string" || intent.trim() === "")) {
+      throw commandError("TS_USAGE_INVALID_VALUE", "--intent must be a non-empty relative path");
     }
     return Object.freeze({
       action,
       format,
       regenerateSecret: options["regenerate-secret"] === true,
       ...(action === "status" ? { verify: options.verify === true } : {}),
+      ...(action === "sync" ? {
+        repository: repository?.trim() ?? null,
+        intent: intent?.trim() ?? null,
+      } : {}),
     });
   }
   if (!EXCLUSION_OPERATIONS.has(operation)) {
@@ -262,6 +306,99 @@ async function finishPurgeMaintenance(engine, options) {
     batches += 1;
   }
   return Object.freeze({ ...status, batches });
+}
+
+export async function syncRegisteredRepositories(config, engine, privacyContext, options) {
+  const repositories = config.insights.repositories ?? [];
+  const reports = [];
+  for (const registration of repositories) {
+    options.signal?.throwIfAborted();
+    notifyProgress(options, "repository-scanning");
+    const state = await engine.readRepositoryState(registration.repositoryId, {
+      signal: options.signal,
+    });
+    const priorState = state.refDigest === null
+      ? undefined
+      : { refDigest: state.refDigest, refs: state.refs };
+    let scan;
+    for (let attempt = 0; attempt <= MAX_REPOSITORY_CHANGED_RETRIES; attempt += 1) {
+      try {
+        scan = await (options.scanRepository ?? scanGitRepository)(registration, {
+          ...options.repositoryOptions,
+          signal: options.signal,
+          priorState,
+          coverageAfter: state.coverageAfter,
+        });
+        break;
+      } catch (error) {
+        if (error?.code === "TS_INSIGHTS_REPOSITORY_INVALID" && priorState !== undefined) {
+          scan = Object.freeze({
+            mode: "unavailable",
+            available: false,
+            refDigest: state.refDigest,
+            refs: Object.freeze(state.refs),
+            commits: Object.freeze([]),
+            scm: null,
+          });
+          break;
+        }
+        if (error?.code !== "TS_INSIGHTS_REPOSITORY_CHANGED" ||
+            attempt === MAX_REPOSITORY_CHANGED_RETRIES) throw error;
+        await new Promise((resolve) => setTimeout(
+          resolve,
+          options.repositoryRetryDelayMs ?? REINDEX_SOURCE_CHANGED_RETRY_DELAY_MS,
+        ));
+        options.signal?.throwIfAborted();
+      }
+    }
+    const hasIntentSource = registration.intentPath !== undefined;
+    const intentSource = !hasIntentSource
+      ? null
+      : await (options.readIntentSource ?? readMarkdownIntentSource)(registration, {
+          ...options.intentOptions,
+          privacyContext,
+          signal: options.signal,
+        });
+    if (scan.mode === "unchanged") {
+      if (hasIntentSource && intentSource.revision !== state.intentRevision) {
+        scan = Object.freeze({ ...scan, mode: "intent" });
+      } else {
+        reports.push(Object.freeze({
+          repositoryId: registration.repositoryId,
+          status: "unchanged",
+          refs: scan.refs.length,
+          commits: 0,
+        }));
+        continue;
+      }
+    }
+    if (scan.mode === "unavailable" && state.available === false &&
+        (!hasIntentSource || intentSource.revision === state.intentRevision)) {
+      reports.push(Object.freeze({
+        repositoryId: registration.repositoryId,
+        status: "unavailable",
+        refs: scan.refs.length,
+        commits: 0,
+      }));
+      continue;
+    }
+    const delta = (options.createTraceSourceDelta ?? createTraceSourceDelta)(registration, scan, {
+      expectedGeneration: state.generation,
+      privacyContext,
+      intentSource,
+    });
+    const outcome = await engine.commitTraceSourceDelta(delta, { signal: options.signal });
+    notifyProgress(options, "repository-committed");
+    reports.push(Object.freeze({
+      repositoryId: registration.repositoryId,
+      status: scan.mode === "unavailable"
+        ? "unavailable"
+        : outcome.idempotent ? "unchanged" : "committed",
+      refs: scan.refs.length,
+      commits: scan.commits.length,
+    }));
+  }
+  return Object.freeze(reports);
 }
 
 export function insightsChildEnv(paths, options) {
@@ -401,6 +538,12 @@ export async function reconcileInsights(options = {}) {
           await waitForSourceChangedRetry(signal);
         }
         index = mergeReindexRetryReport(index, committedSourceKeys);
+        const repositories = await syncRegisteredRepositories(
+          config,
+          engine,
+          privacyContext,
+          { ...options, signal },
+        );
         notifyProgress(options, "finalizing", index);
         const purge = await finishPurgeMaintenance(engine, { ...options, signal });
         if (insightsPurgeWorkPending(purge)) {
@@ -415,6 +558,7 @@ export async function reconcileInsights(options = {}) {
             diagnostics: Object.freeze([...discovery.diagnostics, ...index.diagnostics]),
           }),
           purge,
+          repositories,
         });
       } finally {
         await engine.close();
@@ -426,6 +570,7 @@ export async function reconcileInsights(options = {}) {
     originSecretPreserved: !regeneratedSecret,
     report: swapped.report.index,
     purge: swapped.report.purge,
+    repositories: swapped.report.repositories,
   });
 }
 
@@ -497,6 +642,12 @@ export async function reconcileActiveInsights(options = {}) {
         readDelta: options.readDelta,
         onProgress: options.onProgress,
       });
+      const repositories = await syncRegisteredRepositories(
+        config,
+        engine,
+        state.privacyContext,
+        options,
+      );
       notifyProgress(options, "finalizing", index);
       const purge = await finishPurgeMaintenance(engine, { ...options, signal: options.signal });
       notifyProgress(options, "ready", index);
@@ -507,6 +658,7 @@ export async function reconcileActiveInsights(options = {}) {
           diagnostics: Object.freeze([...discovery.diagnostics, ...index.diagnostics]),
         }),
         purge,
+        repositories,
       });
     } finally {
       await engine.close();
@@ -565,7 +717,14 @@ function defaultServices(options) {
       paths,
       includeEngineStatus: false,
     })).databasePresent,
-    sync: () => reconcileActiveInsights({ ...options, paths }),
+    sync: async ({ repository, intent }) => {
+      await registerRequestedInsightsRepository(repository, {
+        ...options.repositoryOptions,
+        intentPath: intent,
+        configOptions: { ...options.configOptions, paths },
+      });
+      return reconcileActiveInsights({ ...options, paths });
+    },
     reindex: (input) => reconcileInsights({
       ...options,
       ...input,
@@ -590,7 +749,10 @@ export async function executeInsightsCommand(invocation, options = {}) {
     return services.reset();
   }
   if (invocation.action === "sync") {
-    const result = await services.sync();
+    const result = await services.sync({
+      repository: invocation.repository,
+      intent: invocation.intent,
+    });
     const mode = result.format === "threadshare-insights-reindex@v1"
       ? "initialized"
       : result.format === "threadshare-insights-reconciliation@v1"
@@ -602,6 +764,7 @@ export async function executeInsightsCommand(invocation, options = {}) {
       mode,
       report: result.report,
       purge: result.purge,
+      repositories: result.repositories ?? Object.freeze([]),
     });
   }
   if (invocation.action === "reindex") {
@@ -734,23 +897,31 @@ export function formatInsightsCommandResult(result, format = "text") {
   }
   if (result.format === "threadshare-insights-sync@v1") {
     const { report, purge } = result;
+    const repositorySummary = result.repositories.length === 0
+      ? null
+      : `Repositories: ${result.repositories.length}; committed commits: ${result.repositories.reduce((total, item) => total + item.commits, 0)}; unchanged: ${result.repositories.filter((item) => item.status === "unchanged").length}; unavailable: ${result.repositories.filter((item) => item.status === "unavailable").length}`;
     return [
       "Insights sync complete.",
       `Mode: ${result.mode}`,
       `Committed: ${report.committed}; unchanged: ${report.unchanged}; excluded: ${report.excluded}; missing: ${report.missing}; failed: ${report.failed}`,
       `Purge: ${purge.state}; maintenance batches: ${purge.batches}`,
+      repositorySummary,
       "",
-    ].join("\n");
+    ].filter((line) => line !== null).join("\n");
   }
   if (result.format === "threadshare-insights-reindex@v1") {
     const { report, purge } = result;
+    const repositorySummary = (result.repositories?.length ?? 0) === 0
+      ? null
+      : `Repositories: ${result.repositories.length}; committed commits: ${result.repositories.reduce((total, item) => total + item.commits, 0)}; unavailable: ${result.repositories.filter((item) => item.status === "unavailable").length}`;
     return [
       "Insights reindex complete.",
       `Committed: ${report.committed}; unchanged: ${report.unchanged}; excluded: ${report.excluded}; missing: ${report.missing}; failed: ${report.failed}`,
       `Purge: ${purge.state}; maintenance batches: ${purge.batches}`,
       `Origin secret: ${result.originSecretPreserved ? "preserved" : "changed"}`,
+      repositorySummary,
       "",
-    ].join("\n");
+    ].filter((line) => line !== null).join("\n");
   }
   throw new TypeError("Unknown Insights command result format");
 }

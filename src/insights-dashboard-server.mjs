@@ -307,6 +307,35 @@ export async function createInsightsDashboardServer(options = {}) {
         sendJson(response, 200, await options.api.capabilities({ kind, cursor, limit }));
         return;
       }
+      if (url.pathname === "/api/v1/inspector/repositories" && request.method === "GET") {
+        sendJson(response, 200, await options.api.inspectorRepositories());
+        return;
+      }
+      if (url.pathname === "/api/v1/inspector/edges" && request.method === "POST") {
+        assertOrigin(request, `http://${authority}`);
+        if (request.headers["content-type"]?.split(";", 1)[0] !== "application/json") {
+          throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Inspector edge body must be JSON");
+        }
+        sendJson(response, 200, await options.api.inspectorEdges(JSON.parse(await readBody(request, MAX_JSON_BYTES))));
+        return;
+      }
+      const inspectorAction = new Map([
+        ["/api/v1/inspector/trace", "inspectorTrace"],
+        ["/api/v1/inspector/evidence", "inspectorEvidence"],
+        ["/api/v1/inspector/session-timeline", "inspectorSessionTimeline"],
+        ["/api/v1/inspector/git-diff", "inspectorGitDiff"],
+        ["/api/v1/inspector/continuation", "inspectorContinuation"],
+      ]).get(url.pathname);
+      if (inspectorAction !== undefined && request.method === "POST") {
+        assertOrigin(request, `http://${authority}`);
+        if (request.headers["content-type"]?.split(";", 1)[0] !== "application/json") {
+          throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Inspector body must be JSON");
+        }
+        sendJson(response, 200, await options.api[inspectorAction](
+          JSON.parse(await readBody(request, MAX_JSON_BYTES)),
+        ));
+        return;
+      }
       if (url.pathname === "/api/v1/search" && request.method === "POST") {
         assertOrigin(request, `http://${authority}`);
         if (request.headers["content-type"]?.split(";", 1)[0] !== "application/json") {

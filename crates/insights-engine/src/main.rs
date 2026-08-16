@@ -10,6 +10,7 @@ use threadshare_insights_engine::agent_query::{
 };
 use threadshare_insights_engine::canonical_json;
 use threadshare_insights_engine::deep_query::{DeepEvidenceRequest, DeepQueryRequest};
+use threadshare_insights_engine::delivery_trace::{DeliveryTraceError, DeliveryTraceRequest};
 use threadshare_insights_engine::engine::{EngineError, SessionAccumulator};
 use threadshare_insights_engine::evidence_path::{
     EvidencePathReport, SafeEvidenceEvent, SafeEvidenceFact, TurnEvidencePage,
@@ -27,6 +28,7 @@ use threadshare_insights_engine::query::{
 };
 use threadshare_insights_engine::recipe::RecipeRequest;
 use threadshare_insights_engine::storage::{EngineStorage, StorageError};
+use threadshare_insights_engine::trace_engine::TraceSourceAccumulator;
 
 const ENGINE_VERSION: &str = match option_env!("THREADSHARE_RELEASE_VERSION") {
     Some(version) => version,
@@ -46,6 +48,10 @@ enum State {
     InSession {
         accepted_contract: Value,
         accumulator: SessionAccumulator,
+    },
+    InTraceSource {
+        accepted_contract: Value,
+        accumulator: Box<TraceSourceAccumulator>,
     },
 }
 
@@ -243,6 +249,15 @@ fn deep_query_engine_error(error: QueryError) -> EngineError {
         _ => ("validation", "Local Insights query could not be completed"),
     };
     EngineError::new(error.code, category, message)
+}
+
+fn delivery_trace_engine_error(error: DeliveryTraceError) -> EngineError {
+    let category = match error.code {
+        "TS_INSIGHTS_DELIVERY_TRACE_NOT_READY" | "TS_INSIGHTS_CURSOR_STALE" => "conflict",
+        "TS_INSIGHTS_STORAGE_FAILED" | "TS_INSIGHTS_STORAGE_CORRUPT" => "storage",
+        _ => "validation",
+    };
+    EngineError::new(error.code, category, error.message)
 }
 
 fn search_request(message: &Value) -> SearchRequest {
@@ -656,6 +671,54 @@ impl EngineServer {
                                     "sessionKey": session_key,
                                     "deltaId": delta_id,
                                     "nextSequence": "0",
+                                }),
+                            ))
+                        }
+                        MessageKind::BeginTraceSource => {
+                            let repository_key = message["repository"]["repositoryKey"].clone();
+                            let delta_id = message["deltaId"].clone();
+                            let accumulator = Box::new(TraceSourceAccumulator::begin(message)?);
+                            self.storage.clear_trace_source_staging()?;
+                            Ok((
+                                State::InTraceSource {
+                                    accepted_contract: accepted_contract.clone(),
+                                    accumulator,
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "TRACE_SOURCE_ACCEPTED",
+                                    "requestId": request_id,
+                                    "repositoryKey": repository_key,
+                                    "deltaId": delta_id,
+                                    "nextSequence": "0",
+                                }),
+                            ))
+                        }
+                        MessageKind::ReadRepositoryState => {
+                            let repository_id = message["repositoryId"]
+                                .as_str()
+                                .expect("validated repositoryId");
+                            let page = self.storage.repository_state_page(
+                                repository_id,
+                                message["cursor"].as_str(),
+                                message["limit"].as_u64().expect("validated limit") as usize,
+                            )?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "REPOSITORY_STATE",
+                                    "requestId": request_id,
+                                    "repositoryId": repository_id,
+                                    "generation": page.generation,
+                                    "available": page.available,
+                                    "refDigest": page.ref_digest,
+                                    "intentRevision": page.intent_revision,
+                                    "coverageAfter": page.coverage_after,
+                                    "refs": page.refs,
+                                    "nextCursor": page.next_cursor,
                                 }),
                             ))
                         }
@@ -1074,6 +1137,34 @@ impl EngineServer {
                                 }),
                             ))
                         }
+                        MessageKind::ReadInsightsDeliveryTrace => {
+                            let request: DeliveryTraceRequest = serde_json::from_value(
+                                message["request"].clone(),
+                            )
+                            .map_err(|_| {
+                                EngineError::new(
+                                    "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+                                    "protocol",
+                                    "READ_INSIGHTS_DELIVERY_TRACE request is invalid",
+                                )
+                            })?;
+                            let response = self
+                                .storage
+                                .read_delivery_trace(&self.database_uuid, &request)
+                                .map_err(delivery_trace_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "INSIGHTS_DELIVERY_TRACE",
+                                    "requestId": request_id,
+                                    "request": request,
+                                    "response": response,
+                                }),
+                            ))
+                        }
                         _ => Err(EngineError::new(
                             "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
                             "protocol",
@@ -1198,6 +1289,96 @@ impl EngineServer {
                     }
                     Err(error) => {
                         let _ = self.storage.clear_session_fact_staging();
+                        self.state = State::Ready { accepted_contract };
+                        Err(error)
+                    }
+                }
+            }
+            State::InTraceSource {
+                accepted_contract,
+                mut accumulator,
+            } => {
+                let result = (|| {
+                    let message_request_id = request_id(&message)?;
+                    if message_request_id != accumulator.request_id() {
+                        return Err(EngineError::new(
+                            "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
+                            "protocol",
+                            "trace source requestId does not match BEGIN_TRACE_SOURCE",
+                        ));
+                    }
+                    match kind {
+                        MessageKind::TraceSourceBatch => {
+                            accumulator.apply_batch(&message, &mut self.storage)?;
+                            let sequence = message["sequence"].clone();
+                            Ok((
+                                State::InTraceSource {
+                                    accepted_contract: accepted_contract.clone(),
+                                    accumulator,
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "TRACE_SOURCE_BATCH_ACCEPTED",
+                                    "requestId": message_request_id,
+                                    "sequence": sequence,
+                                }),
+                            ))
+                        }
+                        MessageKind::CommitTraceSource => {
+                            let outcome = accumulator.finish(&message, &mut self.storage)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "TRACE_SOURCE_COMMITTED",
+                                    "requestId": message_request_id,
+                                    "repositoryKey": outcome.session_key,
+                                    "deltaId": outcome.delta_id,
+                                    "snapshotSeq": outcome.snapshot_seq,
+                                    "idempotent": outcome.idempotent,
+                                }),
+                            ))
+                        }
+                        MessageKind::AbortTraceSource => {
+                            let next_sequence = accumulator.next_sequence();
+                            if message["nextSequence"].as_str() != Some(next_sequence.as_str()) {
+                                return Err(EngineError::new(
+                                    "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
+                                    "protocol",
+                                    "ABORT_TRACE_SOURCE nextSequence does not match received batches",
+                                ));
+                            }
+                            self.storage.clear_trace_source_staging()?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "TRACE_SOURCE_ABORTED",
+                                    "requestId": message_request_id,
+                                    "repositoryKey": accumulator.repository_key(),
+                                    "deltaId": accumulator.delta_id(),
+                                    "nextSequence": next_sequence,
+                                }),
+                            ))
+                        }
+                        _ => Err(EngineError::new(
+                            "TS_INSIGHTS_PROTOCOL_UNEXPECTED_FRAME",
+                            "protocol",
+                            "unexpected frame during trace source ingestion",
+                        )),
+                    }
+                })();
+                match result {
+                    Ok((state, response)) => {
+                        self.state = state;
+                        Ok(response)
+                    }
+                    Err(error) => {
+                        let _ = self.storage.clear_trace_source_staging();
                         self.state = State::Ready { accepted_contract };
                         Err(error)
                     }
@@ -1348,6 +1529,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use threadshare_insights_engine::agent_query::UsageOrderBy;
+    use threadshare_insights_engine::delivery_graph_repository::RepositoryDelta;
     use threadshare_insights_engine::evidence_path::{
         DedupeConfidence, EvidenceLink, EvidencePathFamily, EvidencePathReport, PathNode,
         RepeatBucket, SafeEventPayload, SafeEvidenceEvent, ToolStateCounts,
@@ -1358,6 +1540,7 @@ mod tests {
         SearchOrderBy, SearchResponse, SearchResult, SearchTrace,
     };
     use threadshare_insights_engine::storage::EngineStorage;
+    use threadshare_insights_engine::trace_staging::{TraceSourceCounts, TraceSourceMetadata};
     use threadshare_insights_engine::{canonical_json, hash_key};
 
     #[derive(Deserialize)]
@@ -1801,6 +1984,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_delivery_trace_root_is_structured_and_keeps_the_server_usable() {
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../test/fixtures/insights-delivery-trace-golden.v1.json"
+        ))
+        .unwrap();
+        let error = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_INSIGHTS_DELIVERY_TRACE",
+                "requestId": "72",
+                "request": fixture["request"].clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, "TS_INSIGHTS_TRACE_NOT_FOUND");
+        assert_eq!(error.category, "validation");
+        assert!(matches!(server.state, State::Ready { .. }));
+
+        let status = server
+            .handle_message(json!({
+                "format": threadshare_insights_engine::protocol::PROTOCOL_FORMAT,
+                "type": "READ_PURGE_STATUS",
+                "requestId": "73",
+                "sessionKey": null
+            }))
+            .unwrap();
+        assert_eq!(status["type"], "PURGE_STATUS");
+    }
+
+    #[test]
     fn search_and_evidence_requests_use_ready_state_with_content_free_errors() {
         let mut server = server();
         server.handle_message(message("hello")).unwrap();
@@ -2073,6 +2287,121 @@ mod tests {
         assert_eq!(response["type"], "SESSION_COMMITTED");
         assert_eq!(response["idempotent"], false);
         assert_eq!(server.storage.committed_session_count().unwrap(), 1);
+        assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn commits_a_trace_source_through_the_independent_protocol_state() {
+        let repository = RepositoryDelta {
+            repository_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            repository_key: "1".repeat(64),
+            available: true,
+            ref_digest: "2".repeat(64),
+            scm_provider: Some("github".to_owned()),
+            web_base_url: Some("https://github.com".to_owned()),
+            repository_path: Some("team-harness/threadshare".to_owned()),
+            project_keys: vec!["3".repeat(64), "4".repeat(64)],
+        };
+        let refs = vec![json!({
+            "name": "refs/heads/main",
+            "objectId": "a".repeat(40)
+        })];
+        let commits = vec![json!({
+            "objectId": "a".repeat(40),
+            "parentObjectIds": [],
+            "authorTimestamp": "2026-08-16T00:00:00.000Z",
+            "committerTimestamp": "2026-08-16T00:00:00.000Z",
+            "treeObjectId": "b".repeat(40),
+            "summary": "initial"
+        })];
+        let files = vec![json!({
+            "objectId": "a".repeat(40),
+            "path": "src/lib.rs",
+            "oldPath": null,
+            "status": "A",
+            "additions": "10",
+            "deletions": "0"
+        })];
+        let counts = TraceSourceCounts {
+            refs: "1".to_owned(),
+            commits: "1".to_owned(),
+            files: "1".to_owned(),
+            intent_nodes: "0".to_owned(),
+            intent_refs: "0".to_owned(),
+        };
+        let mut digest_storage = EngineStorage::open_in_memory().unwrap();
+        digest_storage
+            .stage_trace_source_batch("refs", 0, &refs)
+            .unwrap();
+        digest_storage
+            .stage_trace_source_batch("commits", 0, &commits)
+            .unwrap();
+        digest_storage
+            .stage_trace_source_batch("files", 0, &files)
+            .unwrap();
+        let mut metadata = TraceSourceMetadata {
+            delta_id: "0".repeat(64),
+            expected_generation: "0".to_owned(),
+            target_generation: "1".to_owned(),
+            repository: repository.clone(),
+            intent: None,
+            counts: counts.clone(),
+        };
+        metadata.delta_id = digest_storage
+            .staged_trace_source_digest(&metadata)
+            .unwrap();
+
+        let mut server = server();
+        server.handle_message(message("hello")).unwrap();
+        let accepted = server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "BEGIN_TRACE_SOURCE",
+                "requestId": "81",
+                "deltaFormat": "threadshare-insights-trace-source-delta@v1",
+                "deltaId": metadata.delta_id,
+                "expectedGeneration": "0",
+                "targetGeneration": "1",
+                "repository": repository,
+                "intent": null,
+                "counts": counts,
+            }))
+            .unwrap();
+        assert_eq!(accepted["type"], "TRACE_SOURCE_ACCEPTED");
+        for (sequence, collection, items) in [
+            ("0", "refs", refs),
+            ("1", "commits", commits),
+            ("2", "files", files),
+        ] {
+            let response = server
+                .handle_message(json!({
+                    "format": "threadshare-insights-protocol@v1",
+                    "type": "TRACE_SOURCE_BATCH",
+                    "requestId": "81",
+                    "sequence": sequence,
+                    "collection": collection,
+                    "items": items,
+                }))
+                .unwrap();
+            assert_eq!(response["type"], "TRACE_SOURCE_BATCH_ACCEPTED");
+        }
+        let response = server
+            .handle_message(json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "COMMIT_TRACE_SOURCE",
+                "requestId": "81",
+                "nextSequence": "3",
+            }))
+            .unwrap();
+        assert_eq!(response["type"], "TRACE_SOURCE_COMMITTED");
+        assert_eq!(response["snapshotSeq"], "1");
+        assert_eq!(
+            server
+                .storage
+                .repository_commit_counts("11111111-1111-4111-8111-111111111111")
+                .unwrap(),
+            (1, 1)
+        );
         assert!(matches!(server.state, State::Ready { .. }));
     }
 }

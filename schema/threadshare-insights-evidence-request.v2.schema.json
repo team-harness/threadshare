@@ -19,8 +19,16 @@
         { "type": "object", "additionalProperties": false, "required": ["kind", "eventKey", "revision"], "properties": { "kind": { "const": "event" }, "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "payloadKey": { "$ref": "#/$defs/key" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "turnKey", "revision"], "properties": { "kind": { "const": "turn" }, "turnKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "sessionKey", "revision"], "properties": { "kind": { "const": "session" }, "sessionKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "chainKey", "revision"], "properties": { "kind": { "const": "attempt-chain" }, "chainKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } }
+        { "type": "object", "additionalProperties": false, "required": ["kind", "chainKey", "revision"], "properties": { "kind": { "const": "attempt-chain" }, "chainKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "nodeKind", "nodeKey", "revision"], "properties": { "kind": { "const": "delivery-node" }, "nodeKind": { "$ref": "#/$defs/nodeKind" }, "nodeKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "relation", "from", "to", "revision"], "properties": { "kind": { "const": "delivery-edge" }, "relation": { "$ref": "#/$defs/relation" }, "from": { "$ref": "#/$defs/nodeRef" }, "to": { "$ref": "#/$defs/nodeRef" }, "revision": { "$ref": "#/$defs/key" } } }
       ]
+    },
+    "nodeKind": { "enum": ["intent", "repository", "session", "turn", "capability-use", "file", "git-commit"] },
+    "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
+    "nodeRef": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+      "properties": { "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" } }
     }
   }
 }

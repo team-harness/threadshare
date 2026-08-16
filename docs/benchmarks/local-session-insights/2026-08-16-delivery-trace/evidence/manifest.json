@@ -1,0 +1,59 @@
+{
+  "format": "threadshare-insights-delivery-trace-evidence-manifest@v1",
+  "sourceRevision": "3f9edb28e6a22506571c9ccf1832069af549e376",
+  "sourceWorktreeDirty": true,
+  "design": {
+    "file": "docs/insights-delivery-trace-design.md",
+    "source": "packaging-worktree",
+    "bytes": 30699,
+    "sha256": "9a2276c0f1cccef025fbb76a095756164f1a40fb4bfe75626ae41723a30db9dc"
+  },
+  "scripts": {
+    "scripts/benchmark-insights-engine.mjs": {
+      "source": "packaging-worktree",
+      "bytes": 194771,
+      "sha256": "e7418a5e6b6178dbb2410bff07a4b7123e847e302791beeef43c19a2cf1cd345"
+    },
+    "scripts/package-insights-delivery-trace-evidence.mjs": {
+      "source": "packaging-worktree",
+      "bytes": 13674,
+      "sha256": "f6a2898287c39feb782eb866ebc27dcc0a8b652cfeead532dbbaa8362a9f5cba"
+    }
+  },
+  "sourceReport": {
+    "bytes": 4425,
+    "sha256": "0bf5b381de1a11731ca0b40186583dd1f6ebe0d8f63d5083f49dce7b63e5beda"
+  },
+  "artifacts": {
+    "delivery-trace-25k.acceptance.json": {
+      "bytes": 4425,
+      "sha256": "0bf5b381de1a11731ca0b40186583dd1f6ebe0d8f63d5083f49dce7b63e5beda"
+    }
+  },
+  "formalConfiguration": {
+    "measuredTurns": [
+      25000
+    ],
+    "deferredTurns": [
+      250000
+    ],
+    "measuredRuns": 100,
+    "warmupRuns": 20,
+    "traceInitialP95LimitMs": 200,
+    "traceInitialP99LimitMs": 500,
+    "traceExpansionP95LimitMs": 250,
+    "traceExpansionP99LimitMs": 500,
+    "evidenceP95LimitMs": 100,
+    "gitDiffP95LimitMs": 500,
+    "sidecarRssLimitBytes": 134217728,
+    "responseLimitBytes": 4194304
+  },
+  "privacy": {
+    "aggregateOnly": true,
+    "rawSessionsIncluded": false,
+    "repositoryIncluded": false,
+    "databaseIncluded": false,
+    "sourcePathsIncluded": false,
+    "stableKeysIncluded": false
+  }
+}

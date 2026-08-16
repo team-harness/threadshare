@@ -11,6 +11,7 @@ const FORMATS = Object.freeze([
   "threadshare-insights-search-request@v1",
   "threadshare-insights-search@v1",
   "threadshare-insights-capabilities@v1",
+  "threadshare-insights-continuation-context@v1",
   "threadshare-insights-usage-request@v1",
   "threadshare-insights-usage@v1",
   "threadshare-insights-activity-request@v1",
@@ -22,8 +23,16 @@ const FORMATS = Object.freeze([
   "threadshare-insights-recipe@v1",
   "threadshare-insights-evidence-request@v2",
   "threadshare-insights-evidence@v2",
+  "threadshare-insights-delivery-trace-request@v1",
+  "threadshare-insights-delivery-trace@v1",
+  "threadshare-insights-git-diff-evidence-request@v1",
+  "threadshare-insights-git-diff-evidence@v1",
 ]);
 const RECIPE_ITEMS_URL = new URL("./fixtures/insights-recipe-items.v1.json", import.meta.url);
+const DELIVERY_TRACE_URL = new URL(
+  "./fixtures/insights-delivery-trace-golden.v1.json",
+  import.meta.url,
+);
 
 function completeCoverage() {
   return {
@@ -71,8 +80,74 @@ async function compiledSchemas() {
   return result;
 }
 
-test("ships sixteen strict Agent Insights JSON schemas", async () => {
-  assert.equal((await compiledSchemas()).size, 16);
+test("ships twenty-one strict Agent Insights JSON schemas", async () => {
+  assert.equal((await compiledSchemas()).size, 21);
+});
+
+test("Delivery Trace and Git diff schemas accept the shared fixture", async () => {
+  const schemas = await compiledSchemas();
+  const fixture = JSON.parse(await readFile(DELIVERY_TRACE_URL, "utf8"));
+  for (const [format, value] of [
+    [fixture.request.format, fixture.request],
+    [fixture.response.format, fixture.response],
+    [fixture.gitDiff.request.format, fixture.gitDiff.request],
+    [fixture.gitDiff.response.format, fixture.gitDiff.response],
+  ]) {
+    const validate = schemas.get(format);
+    assert.equal(validate(value), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...value, unknown: true }), false, format);
+  }
+
+  const invalidDerivedEdge = structuredClone(fixture.response);
+  invalidDerivedEdge.edges[2].facts = [];
+  const validateTrace = schemas.get(fixture.response.format);
+  assert.equal(validateTrace(invalidDerivedEdge), false, "derived edges require auditable facts");
+
+  const validateRecipeRequest = schemas.get("threadshare-insights-recipe-request@v1");
+  const traceRecipeRequest = {
+    format: "threadshare-insights-recipe-request@v1",
+    root: fixture.request.root,
+    window: fixture.request.window,
+    direction: fixture.request.direction,
+    maxDepth: fixture.request.maxDepth,
+    includeCandidateEdges: false,
+    includeContextualEdges: false,
+    limit: fixture.request.limit,
+    cursor: null,
+  };
+  assert.equal(validateRecipeRequest(traceRecipeRequest), true, JSON.stringify(validateRecipeRequest.errors));
+  const implicitRepositoryTrace = { ...traceRecipeRequest };
+  delete implicitRepositoryTrace.root;
+  assert.equal(validateRecipeRequest(implicitRepositoryTrace), true,
+    JSON.stringify(validateRecipeRequest.errors));
+  assert.equal(validateRecipeRequest({ ...traceRecipeRequest, maxDepth: 4 }), false);
+
+  const validateGitRequest = schemas.get("threadshare-insights-git-diff-evidence-request@v1");
+  const rootGitRequest = { ...fixture.gitDiff.request, parentObjectId: null };
+  assert.equal(validateGitRequest(rootGitRequest), true, JSON.stringify(validateGitRequest.errors));
+
+  const validateEvidence = schemas.get("threadshare-insights-evidence-request@v2");
+  const commitNode = fixture.response.nodes.find(({ kind }) => kind === "git-commit");
+  const commitEdge = fixture.response.edges[0];
+  for (const target of [
+    {
+      kind: "delivery-node", nodeKind: commitNode.kind,
+      nodeKey: commitNode.key, revision: commitNode.revision,
+    },
+    {
+      kind: "delivery-edge", relation: commitEdge.relation,
+      from: commitEdge.from, to: commitEdge.to, revision: commitEdge.revision,
+    },
+  ]) {
+    const request = {
+      format: "threadshare-insights-evidence-request@v2",
+      target,
+      include: ["envelope"],
+      cursor: null,
+      maxBytes: 4096,
+    };
+    assert.equal(validateEvidence(request), true, JSON.stringify(validateEvidence.errors));
+  }
 });
 
 test("usage and activity schemas lock the non-causal aggregate axes", async () => {

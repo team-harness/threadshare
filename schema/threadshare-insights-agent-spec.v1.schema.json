@@ -69,7 +69,8 @@
             "activity-shifts@1",
             "token-hotspots@1",
             "solution-recall@1",
-            "session-timeline@1"
+            "session-timeline@1",
+            "delivery-trace@1"
           ]
         },
         "purpose": { "type": "string", "minLength": 1, "maxLength": 512 },

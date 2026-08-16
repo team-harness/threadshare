@@ -29,11 +29,12 @@ async function readSchema(name) {
 }
 
 async function toolCatalog() {
-  const [spec, query, recipe, evidence] = await Promise.all([
+  const [spec, query, recipe, evidence, gitDiffEvidence] = await Promise.all([
     readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
     readSchema("threadshare-insights-recipe-request.v1.schema.json"),
     readSchema("threadshare-insights-evidence-request.v2.schema.json"),
+    readSchema("threadshare-insights-git-diff-evidence-request.v1.schema.json"),
   ]);
   const annotations = {
     readOnlyHint: true,
@@ -76,7 +77,7 @@ async function toolCatalog() {
             enum: [
               "capability-contexts@1", "failure-chains@1", "file-workflow-signals@1",
               "activity-shifts@1", "token-hotspots@1", "solution-recall@1",
-              "session-timeline@1",
+              "session-timeline@1", "delivery-trace@1",
             ],
           },
           request: recipe,
@@ -88,7 +89,10 @@ async function toolCatalog() {
       name: TOOL_NAMES[3],
       title: "Read local Threadshare Insights evidence",
       description: "Read revision-bound unredacted local evidence using a bounded byte page.",
-      inputSchema: evidence,
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        oneOf: [evidence, gitDiffEvidence],
+      },
       annotations,
     },
   ]);

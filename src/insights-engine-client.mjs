@@ -6,17 +6,20 @@ import {
   assertBeginSessionCompatible,
   assertHandshakeCompatible,
   createAbortSessionMessage,
+  createAbortTraceSourceMessage,
   createExcludeSourceMessage,
   createHelloMessage,
   createListCapabilitiesMessage,
   createListSourceStatesMessage,
   createReadEngineStatusMessage,
+  createReadRepositoryStateMessage,
   createReadCapabilityUsageMessage,
   createReadInsightsActivityMessage,
   createReadInsightsEvidenceV2Message,
   createReadInsightsOverviewMessage,
   createReadInsightsQueryV2Message,
   createReadInsightsRecipeMessage,
+  createReadInsightsDeliveryTraceMessage,
   createReadPurgeStatusMessage,
   createReadTurnEvidenceMessage,
   createReadSourceCheckpointMessage,
@@ -24,6 +27,7 @@ import {
   createRunPurgeMaintenanceMessage,
   createSearchTurnsMessage,
   createSessionDeltaMessages,
+  createTraceSourceDeltaMessages,
   decodeSourceStateFromProtocol,
   encodeProtocolFrame,
 } from "./insights-engine-protocol.mjs";
@@ -468,6 +472,25 @@ class InsightsEngineClient {
     return operation;
   }
 
+  commitTraceSourceDelta(delta, options = {}) {
+    if (!delta || typeof delta !== "object") {
+      return Promise.reject(new TypeError("commitTraceSourceDelta requires a delta"));
+    }
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() => this.#applyTraceSourceDelta(delta, signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
   databaseIdentity() {
     if (!this.#ready || this.#requiredContract.factSchemaVersion !== 2) return null;
     return Object.freeze({
@@ -489,6 +512,23 @@ class InsightsEngineClient {
     }
     const operation = this.#tail.then(() =>
       this.#runRead(() => this.#readSourceStates(signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
+  readRepositoryState(repositoryId, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readRepositoryState(repositoryId, signal), signal));
     this.#tail = operation.catch(() => {});
     return operation;
   }
@@ -741,6 +781,23 @@ class InsightsEngineClient {
     return operation;
   }
 
+  readInsightsDeliveryTrace(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#readInsightsDeliveryTrace(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
   runPurgeMaintenance(input = {}, options = {}) {
     const limit = input.limit ?? 64;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
@@ -888,6 +945,93 @@ class InsightsEngineClient {
     }
   }
 
+  async #applyTraceSourceDelta(delta, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
+    const requestId = this.#nextRequestId();
+    let began = false;
+    let committed = false;
+    let nextSequence = "0";
+    try {
+      for await (const message of createTraceSourceDeltaMessages(delta, { requestId })) {
+        if (message.type === "BEGIN_TRACE_SOURCE") {
+          throwIfAborted(signal, this.#transport.stderr);
+          began = true;
+          await this.#transport.write(message, "sending BEGIN_TRACE_SOURCE", this.#sessionTimeoutMs);
+          await this.#expect(
+            "TRACE_SOURCE_ACCEPTED",
+            requestId,
+            { repositoryKey: delta.repository.repositoryKey, deltaId: delta.deltaId, nextSequence: "0" },
+            "waiting for TRACE_SOURCE_ACCEPTED",
+            this.#sessionTimeoutMs,
+          );
+          continue;
+        }
+        if (message.type === "TRACE_SOURCE_BATCH") {
+          throwIfAborted(signal, this.#transport.stderr);
+          await this.#transport.write(message, "sending TRACE_SOURCE_BATCH", this.#sessionTimeoutMs);
+          nextSequence = (BigInt(message.sequence) + 1n).toString();
+          await this.#expect(
+            "TRACE_SOURCE_BATCH_ACCEPTED",
+            requestId,
+            { sequence: message.sequence },
+            "waiting for TRACE_SOURCE_BATCH_ACCEPTED",
+            this.#sessionTimeoutMs,
+          );
+          continue;
+        }
+        if (message.type !== "COMMIT_TRACE_SOURCE") {
+          throw unexpectedResponse("COMMIT_TRACE_SOURCE", message, this.#transport.stderr);
+        }
+        throwIfAborted(signal, this.#transport.stderr);
+        await this.#transport.write(message, "sending COMMIT_TRACE_SOURCE", this.#sessionTimeoutMs);
+        const response = await this.#expect(
+          "TRACE_SOURCE_COMMITTED",
+          requestId,
+          { repositoryKey: delta.repository.repositoryKey, deltaId: delta.deltaId },
+          "waiting for TRACE_SOURCE_COMMITTED",
+          this.#commitTimeoutMs,
+        );
+        committed = true;
+        return Object.freeze({
+          snapshotSeq: response.snapshotSeq,
+          repositoryKey: response.repositoryKey,
+          idempotent: response.idempotent,
+        });
+      }
+      throw protocolClientError(
+        "Trace source delta stream ended before COMMIT_TRACE_SOURCE",
+        undefined,
+        this.#transport.stderr,
+        { fatal: false },
+      );
+    } catch (cause) {
+      const error = cause instanceof InsightsEngineClientError
+        ? cause
+        : protocolClientError(cause.message, cause, this.#transport.stderr, { fatal: false });
+      if (began && !committed && error.remote !== true) {
+        const aborted = await this.#bestEffortTraceAbort(
+          requestId,
+          nextSequence,
+          delta.repository.repositoryKey,
+          delta.deltaId,
+        );
+        if (!aborted) this.#broken = true;
+      }
+      if (error.fatal || error.code === "TS_INSIGHTS_ENGINE_TIMEOUT" ||
+          error.code === "TS_INSIGHTS_ENGINE_DISCONNECTED") {
+        this.#broken = true;
+      }
+      if (this.#broken) {
+        error.fatal = true;
+        await this.#transport.close({ force: true });
+      }
+      throw error;
+    }
+  }
+
   async #runRead(read, signal) {
     let abortHandler;
     try {
@@ -943,6 +1087,62 @@ class InsightsEngineClient {
       if (response.nextCursor === null) return states;
       if (seenCursors.has(response.nextCursor)) {
         throw unexpectedResponse("SOURCE_STATES", response, this.#transport.stderr);
+      }
+      seenCursors.add(response.nextCursor);
+      cursor = response.nextCursor;
+    }
+  }
+
+  async #readRepositoryState(repositoryId, signal) {
+    const refs = [];
+    const seenCursors = new Set();
+    let cursor = null;
+    let generation = null;
+    let available = null;
+    let refDigest = null;
+    let intentRevision = null;
+    let coverageAfter = null;
+    for (;;) {
+      throwIfAborted(signal, this.#transport.stderr);
+      const requestId = this.#nextRequestId();
+      const request = createReadRepositoryStateMessage({
+        requestId,
+        repositoryId,
+        cursor,
+        limit: 256,
+      });
+      await this.#transport.write(request, "sending READ_REPOSITORY_STATE", this.#timeoutMs);
+      const response = await this.#expect(
+        "REPOSITORY_STATE",
+        requestId,
+        { repositoryId },
+        "waiting for REPOSITORY_STATE",
+        this.#timeoutMs,
+      );
+      if (generation === null) {
+        generation = response.generation;
+        available = response.available;
+        refDigest = response.refDigest;
+        intentRevision = response.intentRevision;
+        coverageAfter = response.coverageAfter;
+      } else if (generation !== response.generation || available !== response.available ||
+          refDigest !== response.refDigest || intentRevision !== response.intentRevision ||
+          coverageAfter !== response.coverageAfter) {
+        throw unexpectedResponse("REPOSITORY_STATE", response, this.#transport.stderr);
+      }
+      refs.push(...response.refs.map((reference) => Object.freeze({ ...reference })));
+      if (response.nextCursor === null) {
+        return Object.freeze({
+          generation,
+          available,
+          refDigest,
+          intentRevision,
+          coverageAfter,
+          refs: Object.freeze(refs),
+        });
+      }
+      if (seenCursors.has(response.nextCursor)) {
+        throw unexpectedResponse("REPOSITORY_STATE", response, this.#transport.stderr);
       }
       seenCursors.add(response.nextCursor);
       cursor = response.nextCursor;
@@ -1253,6 +1453,28 @@ class InsightsEngineClient {
     return freezeProtocolValue(response.response);
   }
 
+  async #readInsightsDeliveryTrace(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("readInsightsDeliveryTrace input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createReadInsightsDeliveryTraceMessage({ requestId, request: input });
+    await this.#transport.write(request, "sending READ_INSIGHTS_DELIVERY_TRACE", this.#timeoutMs);
+    const response = await this.#expect(
+      "INSIGHTS_DELIVERY_TRACE",
+      requestId,
+      {},
+      "waiting for INSIGHTS_DELIVERY_TRACE",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response.response);
+  }
+
   async #runPurgeMaintenance(limit, signal) {
     throwIfAborted(signal, this.#transport.stderr);
     if (this.#broken || this.#transport.failed) {
@@ -1323,6 +1545,25 @@ class InsightsEngineClient {
     }
   }
 
+  async #bestEffortTraceAbort(requestId, nextSequence, repositoryKey, deltaId) {
+    if (this.#transport.failed) return false;
+    const timeoutMs = Math.min(this.#timeoutMs, 250);
+    try {
+      const abort = createAbortTraceSourceMessage({ requestId, nextSequence });
+      await this.#transport.write(abort, "sending ABORT_TRACE_SOURCE", timeoutMs);
+      await this.#expect(
+        "TRACE_SOURCE_ABORTED",
+        requestId,
+        { repositoryKey, deltaId, nextSequence },
+        "waiting for TRACE_SOURCE_ABORTED",
+        timeoutMs,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   #nextRequestId() {
     if (this.#requestId > 0xffff_ffff_ffff_ffffn) {
       throw clientError(
@@ -1374,6 +1615,9 @@ export async function createInsightsEngineClient(options = {}) {
   if (options.requiredContract === undefined) {
     throw new TypeError("requiredContract is required");
   }
+  if (options.onSpawn !== undefined && typeof options.onSpawn !== "function") {
+    throw new TypeError("onSpawn must be a function");
+  }
 
   const resolved = await resolveInsightsEngine(options.runtimeOptions);
   const arguments_ = options.databasePath === undefined ? [] : ["--db", options.databasePath];
@@ -1383,6 +1627,7 @@ export async function createInsightsEngineClient(options = {}) {
     windowsHide: true,
     env: options.childEnv ?? process.env,
   });
+  options.onSpawn?.(child);
   const transport = new FrameTransport(child, {
     timeoutMs,
     closeTimeoutMs,

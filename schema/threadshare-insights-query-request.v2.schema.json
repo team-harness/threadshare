@@ -7,7 +7,7 @@
   "required": ["format", "resource", "shape", "orderBy", "limit"],
   "properties": {
     "format": { "const": "threadshare-insights-query-request@v2" },
-    "resource": { "enum": ["session", "turn", "event", "capability-use", "file-activity", "token-usage", "error-occurrence"] },
+    "resource": { "enum": ["session", "turn", "event", "capability-use", "file-activity", "token-usage", "error-occurrence", "delivery-edge"] },
     "where": { "oneOf": [{ "$ref": "#/$defs/predicate" }, { "type": "null" }] },
     "shape": { "$ref": "#/$defs/shape" },
     "orderBy": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/order" } },
