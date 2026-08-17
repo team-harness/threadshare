@@ -465,6 +465,10 @@ context switch 是事件顺序的 derived count，不等价于注意力损耗或
 
 按原始顺序返回消息、Tool、token、file、compaction、rollback、resume/fork 和 lifecycle 事件。生命周期事件即使没有可见消息也必须保留；compaction summary 作为独立事件，不能并入用户或助手正文。
 
+每个 item 带 `sequenceOrdinal`：Engine 赋予的 0 基观察顺序，读者据此复述顺序，无需从 offset 自行推导；序号与响应中的位置不一致时响应被拒绝。
+
+每个 item 带 `repeatGroup`，用于把同一次重复尝试折叠显示。它只在事件经 `capability_use_evidence` 链到一次带 `input_fingerprint` 的 capability use 时给出，`groupKey` 由 (Turn, capability, input fingerprint) 域分隔哈希得到，`bucket` 与路径家族共用 `1`/`2-3`/`4+` 同一套分桶边界。两点约束：组不跨 Turn，因为折叠的自然作用域是单个 Turn；计数按 use 而非事件，一次 use 会产生 invocation 与 result 两个事件，按事件计数会把一条命令报成两次尝试。缺少 fingerprint 或未链到 use 时返回 `null`，不猜测。
+
 ## 11. MCP 适配器
 
 `threadshare insights mcp --stdio` 只公开三个深工具：

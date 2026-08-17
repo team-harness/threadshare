@@ -285,6 +285,44 @@ fn read_session_node(
         })
 }
 
+fn read_turn_node(
+    connection: &Connection,
+    turn_key: &[u8],
+) -> Result<Option<TraceNode>, DeliveryTraceError> {
+    connection
+        .query_row(
+            "SELECT lower(hex(t.turn_key)),lower(hex(s.session_key)),s.provider,
+                    t.observed_timestamp,lower(hex(t.revision))
+             FROM turns t JOIN sessions s USING(session_id)
+             WHERE t.turn_key=?1 AND t.revision IS NOT NULL
+               AND t.effective_provider_visibility='active'
+               AND s.eligibility='eligible' AND s.session_scope='main'
+               AND NOT EXISTS (SELECT 1 FROM source_purge_states p WHERE p.session_key=s.session_key)",
+            [turn_key],
+            |row| {
+                let key: String = row.get(0)?;
+                let provider: String = row.get(2)?;
+                Ok(TraceNode {
+                    kind: TraceNodeKind::Turn,
+                    key: key.clone(),
+                    revision: row.get(4)?,
+                    label: bounded_label(format!("{provider} turn {}", &key[..12])),
+                    observed_at: row.get(3)?,
+                    attributes: TraceNodeAttributes::Turn(TurnAttributes {
+                        session_key: row.get(1)?,
+                    }),
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| {
+            DeliveryTraceError::query(
+                "TS_INSIGHTS_STORAGE_FAILED",
+                "Delivery graph Turn query failed",
+            )
+        })
+}
+
 fn read_commit_node(
     connection: &Connection,
     commit_key: &[u8],
@@ -630,6 +668,7 @@ fn read_delivery_edge_page(
         })?;
         let node = match other.kind {
             TraceNodeKind::Session => read_session_node(connection, &key)?,
+            TraceNodeKind::Turn => read_turn_node(connection, &key)?,
             TraceNodeKind::GitCommit => read_commit_node(connection, &key)?,
             TraceNodeKind::File => read_file_node(connection, repository_id, &object_id, &key)?,
             _ => None,
@@ -659,6 +698,7 @@ fn read_delivery_edge_page(
 fn coverage(
     connection: &Connection,
     repository_id: &str,
+    unselected_repository_count: i64,
     include_candidate_edges: bool,
     include_contextual_edges: bool,
 ) -> Result<TraceCoverage, DeliveryTraceError> {
@@ -708,6 +748,7 @@ fn coverage(
         }
         .to_string(),
         unreachable_commit_count: unreachable.to_string(),
+        unselected_repository_count: unselected_repository_count.to_string(),
     })
 }
 
@@ -735,6 +776,9 @@ pub fn read_delivery_trace(
     let mut edges = Vec::new();
     let mut next_after = None;
     let repository_id;
+    // A root that names a repository, or reaches one through a Commit, leaves nothing out. Only the
+    // roots resolved through a project key can have other repositories claiming them.
+    let mut unselected_repository_count = 0;
 
     match request.root.kind {
         TraceNodeKind::Repository => {
@@ -939,13 +983,20 @@ pub fn read_delivery_trace(
                     "Delivery Trace root was not found",
                 )
             })?;
-            repository_id = connection
+            // The subquery counts the repositories that claim this Session's project key. Each of
+            // them contributes exactly one row -- `repository_project_keys` is keyed on
+            // (repository_id, project_key) -- so the count needs no DISTINCT, and everything past
+            // the one repository this Trace reads becomes `unselectedRepositoryCount`.
+            let (selected, claiming_repository_count) = connection
                 .query_row(
-                    "SELECT p.repository_id FROM sessions s
+                    "SELECT p.repository_id,
+                            (SELECT COUNT(*) FROM repository_project_keys claim
+                             WHERE claim.project_key=s.project_key)
+                     FROM sessions s
                      JOIN repository_project_keys p ON p.project_key=s.project_key
                      WHERE s.session_key=?1 ORDER BY p.repository_id LIMIT 1",
                     [&key],
-                    |row| row.get(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()
                 .map_err(|_| {
@@ -960,6 +1011,53 @@ pub fn read_delivery_trace(
                         "No registered repository matches this Session",
                     )
                 })?;
+            repository_id = selected;
+            unselected_repository_count = claiming_repository_count - 1;
+            nodes.push(root);
+            let (page_nodes, page_edges, page_after) =
+                read_delivery_edge_page(connection, &repository_id, request, after.as_deref())?;
+            nodes.extend(page_nodes);
+            edges.extend(page_edges);
+            next_after = page_after;
+        }
+        TraceNodeKind::Turn => {
+            let key = hex::decode(&request.root.key)
+                .map_err(|_| DeliveryTraceError::invalid("root.key is invalid"))?;
+            let root = read_turn_node(connection, &key)?.ok_or_else(|| {
+                DeliveryTraceError::query(
+                    "TS_INSIGHTS_TRACE_NOT_FOUND",
+                    "Delivery Trace root was not found",
+                )
+            })?;
+            // Counted the same way as the Session root: one row per claiming repository, so the
+            // repositories this Trace does not read stay visible in coverage.
+            let (selected, claiming_repository_count) = connection
+                .query_row(
+                    "SELECT p.repository_id,
+                            (SELECT COUNT(*) FROM repository_project_keys claim
+                             WHERE claim.project_key=s.project_key)
+                     FROM turns t
+                     JOIN sessions s USING(session_id)
+                     JOIN repository_project_keys p ON p.project_key=s.project_key
+                     WHERE t.turn_key=?1 ORDER BY p.repository_id LIMIT 1",
+                    [&key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(|_| {
+                    DeliveryTraceError::query(
+                        "TS_INSIGHTS_STORAGE_FAILED",
+                        "Delivery graph query failed",
+                    )
+                })?
+                .ok_or_else(|| {
+                    DeliveryTraceError::query(
+                        "TS_INSIGHTS_DELIVERY_TRACE_NOT_READY",
+                        "No registered repository matches this Turn",
+                    )
+                })?;
+            repository_id = selected;
+            unselected_repository_count = claiming_repository_count - 1;
             nodes.push(root);
             let (page_nodes, page_edges, page_after) =
                 read_delivery_edge_page(connection, &repository_id, request, after.as_deref())?;
@@ -1022,6 +1120,7 @@ pub fn read_delivery_trace(
         coverage: coverage(
             connection,
             &repository_id,
+            unselected_repository_count,
             request.include_candidate_edges,
             request.include_contextual_edges,
         )?,
@@ -1269,6 +1368,8 @@ pub enum TraceRelation {
     CommitChangedFile,
     SessionObservedCommit,
     SessionCorrelatesCommit,
+    TurnObservedCommit,
+    TurnCorrelatesCommit,
     IntentCorrelatesSession,
     ContextualSameFile,
 }
@@ -1284,6 +1385,8 @@ impl TraceRelation {
             Self::CommitChangedFile => "commit-changed-file",
             Self::SessionObservedCommit => "session-observed-commit",
             Self::SessionCorrelatesCommit => "session-correlates-commit",
+            Self::TurnObservedCommit => "turn-observed-commit",
+            Self::TurnCorrelatesCommit => "turn-correlates-commit",
             Self::IntentCorrelatesSession => "intent-correlates-session",
             Self::ContextualSameFile => "contextual-same-file",
         }
@@ -1397,6 +1500,12 @@ pub struct TraceCoverage {
     pub excluded_candidate_edge_count: String,
     pub excluded_contextual_edge_count: String,
     pub unreachable_commit_count: String,
+    /// How many other registered repositories claim this root's project key and were left out of
+    /// this Trace. A Trace reads one repository's edges, so a root that several repositories claim
+    /// -- the same working path re-initialized as a new Git directory, for instance -- shows only
+    /// one of them. Reporting the remainder keeps the omission visible instead of silent; `"0"`
+    /// means the Trace covers every repository that claims the root.
+    pub unselected_repository_count: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1622,6 +1731,7 @@ impl TraceEdge {
         if matches!(
             self.relation,
             TraceRelation::SessionCorrelatesCommit
+                | TraceRelation::TurnCorrelatesCommit
                 | TraceRelation::IntentCorrelatesSession
                 | TraceRelation::ContextualSameFile
         ) && (self.facts.is_empty() || self.limitations.is_empty())
@@ -1637,8 +1747,10 @@ impl TraceEdge {
                 "shared-file context cannot be upgraded",
             ));
         }
-        if self.relation == TraceRelation::SessionCorrelatesCommit
-            && self.strength == TraceStrength::Direct
+        if matches!(
+            self.relation,
+            TraceRelation::SessionCorrelatesCommit | TraceRelation::TurnCorrelatesCommit
+        ) && self.strength == TraceStrength::Direct
         {
             return Err(DeliveryTraceError::invalid(
                 "derived commit correlation cannot be direct",
@@ -1661,6 +1773,10 @@ impl TraceCoverage {
                 &self.excluded_contextual_edge_count,
             ),
             ("unreachableCommitCount", &self.unreachable_commit_count),
+            (
+                "unselectedRepositoryCount",
+                &self.unselected_repository_count,
+            ),
         ] {
             validate_decimal(value, label)?;
         }

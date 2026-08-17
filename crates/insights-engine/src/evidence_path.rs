@@ -32,6 +32,18 @@ pub struct ToolPathUse {
     pub terminal_state: CapabilityTerminalState,
 }
 
+/// How the delivery graph attributes one Turn to a Git commit. `Uncovered` is
+/// deliberately distinct from `None`: a Turn whose project has no registered
+/// repository has unknown delivery, not absent delivery, and reporting the two
+/// as one number would let a reader conclude a path never ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDeliveryAttribution {
+    Direct,
+    Observed,
+    None,
+    Uncovered,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidencePathTurn {
     pub turn_key: String,
@@ -45,6 +57,7 @@ pub struct EvidencePathTurn {
     pub duplicate_group_key: Option<String>,
     pub dedupe_confidence: Option<DedupeConfidence>,
     pub observed_eof_provisional: bool,
+    pub delivery_attribution: TurnDeliveryAttribution,
     pub tools: Vec<ToolPathUse>,
 }
 
@@ -65,7 +78,10 @@ impl RepeatBucket {
         }
     }
 
-    fn from_count(count: usize) -> Self {
+    /// Public so the Session Timeline recipe buckets repeated capability uses with
+    /// the same boundaries a path family does. Two definitions of "2-3" would let the
+    /// two views disagree about the same Turn.
+    pub const fn from_count(count: usize) -> Self {
         match count {
             0 | 1 => Self::One,
             2 | 3 => Self::TwoToThree,
@@ -92,6 +108,18 @@ pub struct ToolStateCounts {
     pub unknown: u32,
 }
 
+/// Partitions a family's Turns by delivery attribution. The four counts sum to
+/// `turn_count`, so a reader can tell "this path ships" from "we cannot see
+/// whether this path ships" without inferring either.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FamilyDeliveryOutcome {
+    pub direct_commit_turn_count: u16,
+    pub observed_commit_turn_count: u16,
+    pub no_delivery_turn_count: u16,
+    pub uncovered_turn_count: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidencePathFamily {
@@ -108,6 +136,7 @@ pub struct EvidencePathFamily {
     pub unknown_dedupe_session_count: u16,
     pub latest_unix_ms: u64,
     pub tool_state_counts: ToolStateCounts,
+    pub delivery_outcome: FamilyDeliveryOutcome,
     pub evidence_turn_keys: Vec<String>,
 }
 
@@ -495,6 +524,16 @@ fn materialize_family(family: &Family, groups: &[ExactGroup<'_>]) -> EvidencePat
         };
         *count = count.saturating_add(1);
     }
+    let mut delivery = FamilyDeliveryOutcome::default();
+    for turn in &turns {
+        let count = match turn.delivery_attribution {
+            TurnDeliveryAttribution::Direct => &mut delivery.direct_commit_turn_count,
+            TurnDeliveryAttribution::Observed => &mut delivery.observed_commit_turn_count,
+            TurnDeliveryAttribution::None => &mut delivery.no_delivery_turn_count,
+            TurnDeliveryAttribution::Uncovered => &mut delivery.uncovered_turn_count,
+        };
+        *count = count.saturating_add(1);
+    }
     let mut evidence_turn_keys = turns
         .iter()
         .map(|turn| turn.turn_key.clone())
@@ -536,6 +575,7 @@ fn materialize_family(family: &Family, groups: &[ExactGroup<'_>]) -> EvidencePat
             .max()
             .unwrap_or(0),
         tool_state_counts: states,
+        delivery_outcome: delivery,
         evidence_turn_keys,
     }
 }

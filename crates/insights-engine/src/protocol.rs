@@ -1791,6 +1791,39 @@ fn validate_tool_state_counts(value: &Value, label: &str) -> Result<(), Protocol
     Ok(())
 }
 
+/// The four counts partition the family's Turns, so their sum is checked against
+/// `turn_count` here rather than left to the reader. A sum that drifts would let a
+/// caller read "this path ships nothing" off a family whose delivery was merely
+/// unobservable, which is the one confusion the counts exist to prevent.
+fn validate_path_delivery_outcome(
+    value: &Value,
+    label: &str,
+    turn_count: u64,
+) -> Result<(), ProtocolError> {
+    const FIELDS: [&str; 4] = [
+        "directCommitTurnCount",
+        "observedCommitTurnCount",
+        "noDeliveryTurnCount",
+        "uncoveredTurnCount",
+    ];
+    exact_object_keys(value, label, &FIELDS)?;
+    let mut total: u64 = 0;
+    for name in FIELDS {
+        total += safe_integer_range(
+            field(value, name, label)?,
+            &format!("{label}.{name}"),
+            0,
+            MAX_SEARCH_RESULTS,
+        )?;
+    }
+    if total != turn_count {
+        return Err(invalid_frame(format!(
+            "{label} counts must partition the family turnCount"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_path_family(value: &Value, index: usize) -> Result<(), ProtocolError> {
     let label = format!("TURN_SEARCH_RESULTS.evidencePaths.families[{index}]");
     exact_object_keys(
@@ -1810,6 +1843,7 @@ fn validate_path_family(value: &Value, index: usize) -> Result<(), ProtocolError
             "unknownDedupeSessionCount",
             "latestUnixMs",
             "toolStateCounts",
+            "deliveryOutcome",
             "evidenceTurnKeys",
         ],
     )?;
@@ -1895,6 +1929,11 @@ fn validate_path_family(value: &Value, index: usize) -> Result<(), ProtocolError
     validate_tool_state_counts(
         field(value, "toolStateCounts", &label)?,
         &format!("{label}.toolStateCounts"),
+    )?;
+    validate_path_delivery_outcome(
+        field(value, "deliveryOutcome", &label)?,
+        &format!("{label}.deliveryOutcome"),
+        *turns,
     )?;
     let keys = field(value, "evidenceTurnKeys", &label)?
         .as_array()
@@ -5104,6 +5143,12 @@ mod tests {
                     "cancelled": 0,
                     "unknown": 0
                 },
+                "deliveryOutcome": {
+                    "directCommitTurnCount": 3,
+                    "observedCommitTurnCount": 1,
+                    "noDeliveryTurnCount": 1,
+                    "uncoveredTurnCount": 0
+                },
                 "evidenceTurnKeys": [
                     "1".repeat(64), "2".repeat(64), "3".repeat(64),
                     "4".repeat(64), "5".repeat(64)
@@ -5115,6 +5160,17 @@ mod tests {
             validate_protocol_message(&message).unwrap(),
             MessageKind::TurnSearchResults
         );
+        // The four delivery counts partition the family's Turns. A Turn whose delivery could
+        // not be observed belongs in `uncoveredTurnCount`; dropping it from every bucket would
+        // read as "this path ships less than it does", so a sum that misses turnCount is
+        // rejected rather than passed on to the reader.
+        message["evidencePaths"]["families"][0]["deliveryOutcome"]["uncoveredTurnCount"] = json!(1);
+        assert_eq!(
+            validate_protocol_message(&message).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+        message["evidencePaths"]["families"][0]["deliveryOutcome"]["uncoveredTurnCount"] = json!(0);
+
         message["evidencePaths"]["families"][0]["weakGroupCount"] = json!(2);
         assert_eq!(
             validate_protocol_message(&message).unwrap_err().code,

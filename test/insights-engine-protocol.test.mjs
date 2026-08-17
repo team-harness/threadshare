@@ -910,6 +910,12 @@ test("turn search responses bound excerpts, scores, terms, and path evidence", (
         unknownDedupeSessionCount: 0,
         latestUnixMs: 1_786_323_723_000,
         toolStateCounts: { pending: 0, completed: 4, failed: 1, cancelled: 0, unknown: 0 },
+        deliveryOutcome: {
+          directCommitTurnCount: 2,
+          observedCommitTurnCount: 1,
+          noDeliveryTurnCount: 1,
+          uncoveredTurnCount: 1,
+        },
         evidenceTurnKeys: [TURN_KEY],
       }],
     },
@@ -977,6 +983,26 @@ test("turn search responses bound excerpts, scores, terms, and path evidence", (
           independentGroupCount: 2,
           strongGroupCount: 1,
           weakGroupCount: 1,
+        }],
+      },
+    }),
+    { code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" },
+  );
+
+  assert.throws(
+    () => createTurnSearchResultsMessage({
+      ...structuredClone(response),
+      requestId: "10",
+      evidencePaths: {
+        ...structuredClone(response.evidencePaths),
+        families: [{
+          ...structuredClone(response.evidencePaths.families[0]),
+          deliveryOutcome: {
+            directCommitTurnCount: 2,
+            observedCommitTurnCount: 1,
+            noDeliveryTurnCount: 1,
+            uncoveredTurnCount: 0,
+          },
         }],
       },
     }),

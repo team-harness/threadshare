@@ -148,6 +148,53 @@ test("Delivery Trace and Git diff schemas accept the shared fixture", async () =
     };
     assert.equal(validateEvidence(request), true, JSON.stringify(validateEvidence.errors));
   }
+
+  // Turn-level commit attribution reaches the reader through the same response and the same
+  // Evidence request, so both schemas have to accept the relation the Engine now projects.
+  const sessionNode = fixture.response.nodes.find(({ kind }) => kind === "session");
+  const turnKey = "1".repeat(64);
+  const turnTrace = structuredClone(fixture.response);
+  turnTrace.nodes.push({
+    kind: "turn", key: turnKey, revision: sessionNode.revision,
+    label: "Commit the delivery trace", observedAt: sessionNode.observedAt,
+    attributes: { sessionKey: sessionNode.key },
+  });
+  const turnCommitEdge = {
+    relation: "turn-observed-commit",
+    from: { kind: "turn", key: turnKey },
+    to: { kind: "git-commit", key: commitNode.key },
+    strength: "direct", source: "observed-git-result",
+    facts: [{ kind: "full-commit-hash" }],
+    limitations: ["not-authorship", "not-exclusive-line-attribution"],
+    revision: sessionNode.revision,
+  };
+  turnTrace.edges.push(turnCommitEdge);
+  assert.equal(validateTrace(turnTrace), true, JSON.stringify(validateTrace.errors));
+  assert.equal(validateEvidence({
+    format: "threadshare-insights-evidence-request@v2",
+    target: {
+      kind: "delivery-edge", relation: turnCommitEdge.relation,
+      from: turnCommitEdge.from, to: turnCommitEdge.to, revision: turnCommitEdge.revision,
+    },
+    include: ["envelope"],
+    cursor: null,
+    maxBytes: 4096,
+  }), true, JSON.stringify(validateEvidence.errors));
+
+  // A prefix match is Derived: it resolves to one commit today and can resolve to a different
+  // one once more commits land. So the schema has to demand the recomputable facts and the
+  // limitations that say so, the same way it does for the Session-level correlation.
+  const correlated = structuredClone(turnTrace);
+  const correlatedEdge = correlated.edges.at(-1);
+  correlatedEdge.relation = "turn-correlates-commit";
+  correlatedEdge.strength = "observed";
+  correlatedEdge.facts = [{ kind: "unique-abbreviated-commit-hash" }];
+  assert.equal(validateTrace(correlated), true, JSON.stringify(validateTrace.errors));
+  for (const field of ["facts", "limitations"]) {
+    const bare = structuredClone(correlated);
+    bare.edges.at(-1)[field] = [];
+    assert.equal(validateTrace(bare), false, field);
+  }
 });
 
 test("usage and activity schemas lock the non-causal aggregate axes", async () => {

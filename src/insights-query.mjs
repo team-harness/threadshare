@@ -1441,6 +1441,13 @@ function publicEvidencePaths(value) {
       toolStateCounts: decimalObject(family.toolStateCounts, [
         "pending", "completed", "failed", "cancelled", "unknown",
       ]),
+      // The four counts partition the family's Turns, so a reader can tell a path that
+      // reached a commit from one that only ran inside an indexed repository without
+      // re-deriving attribution from the Turn list.
+      deliveryOutcome: decimalObject(family.deliveryOutcome, [
+        "directCommitTurnCount", "observedCommitTurnCount",
+        "noDeliveryTurnCount", "uncoveredTurnCount",
+      ]),
       evidenceTurnKeys: [...family.evidenceTurnKeys],
     })),
   };

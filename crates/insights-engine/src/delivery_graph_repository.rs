@@ -9,6 +9,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const TRACE_SOURCE_DELTA_FORMAT: &str = "threadshare-insights-trace-source-delta@v1";
 const DELIVERY_GRAPH_PROJECTION_VERSION: &str = "delivery-graph@1";
+const DELIVERY_GRAPH_EDGE_GENERATION: &str = "delivery-graph-edges@2";
 const MAX_COMMITS: usize = 50_000;
 const MAX_FILES: usize = 2_000_000;
 
@@ -572,6 +573,45 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), StorageEr
         "INSERT OR IGNORE INTO engine_metadata(key,value) VALUES ('delivery_graph_projection',?1)",
         [DELIVERY_GRAPH_PROJECTION_VERSION],
     )?;
+    reproject_edges_if_stale(connection)?;
+    Ok(())
+}
+
+/// Edge projection semantics are versioned separately from the projection stage
+/// gate so an index written by an earlier generation is rebuilt rather than left
+/// mixing eras. A mixed graph would let one query see turn attribution for some
+/// Sessions and not others.
+///
+/// A missing marker is the era that predates edge generations, not a fresh index, so it is
+/// reprojected like any other stale generation. On a genuinely fresh index the loop below finds
+/// no repository and costs nothing; skipping it there would instead stamp the current generation
+/// over an index that still holds pre-generation edges, and the marker would keep it from ever
+/// being rebuilt.
+fn reproject_edges_if_stale(connection: &Connection) -> Result<(), StorageError> {
+    let recorded: Option<String> = connection
+        .query_row(
+            "SELECT value FROM engine_metadata WHERE key='delivery_graph_edges'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if recorded.as_deref() == Some(DELIVERY_GRAPH_EDGE_GENERATION) {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare("SELECT repository_id FROM repository_sources ORDER BY repository_id")?;
+    let repositories = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for repository_id in repositories {
+        refresh_repository_delivery_edges(connection, &repository_id)?;
+    }
+    connection.execute(
+        "INSERT INTO engine_metadata(key,value) VALUES ('delivery_graph_edges',?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [DELIVERY_GRAPH_EDGE_GENERATION],
+    )?;
     Ok(())
 }
 
@@ -1012,9 +1052,10 @@ pub(crate) fn replace_observed_git_commits(
     Ok(())
 }
 
-struct SessionEdgeSpec<'a> {
+struct DeliveryEdgeSpec<'a> {
     repository_id: &'a str,
     object_id: &'a str,
+    from_kind: &'a str,
     from_key: &'a [u8],
     to_kind: &'a str,
     to_key: &'a [u8],
@@ -1025,13 +1066,14 @@ struct SessionEdgeSpec<'a> {
     limitations: &'a serde_json::Value,
 }
 
-fn insert_session_edge(
+fn insert_delivery_edge(
     connection: &Connection,
-    spec: SessionEdgeSpec<'_>,
+    spec: DeliveryEdgeSpec<'_>,
 ) -> Result<(), StorageError> {
-    let SessionEdgeSpec {
+    let DeliveryEdgeSpec {
         repository_id,
         object_id,
+        from_kind,
         from_key,
         to_kind,
         to_key,
@@ -1065,11 +1107,12 @@ fn insert_session_edge(
         "INSERT OR REPLACE INTO delivery_trace_edges(
            repository_id,object_id,edge_key,from_kind,from_key,to_kind,to_key,
            relation,strength,source,revision
-         ) VALUES (?1,?2,?3,'session',?4,?5,?6,?7,?8,?9,?10)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             repository_id,
             object_id,
             edge_key,
+            from_kind,
             from_key,
             to_kind,
             to_key,
@@ -1104,6 +1147,13 @@ fn refresh_session_repository_edges(
          WHERE repository_id=?1 AND from_kind='session' AND from_key=?2",
         params![repository_id, &session_key],
     )?;
+    connection.execute(
+        "DELETE FROM delivery_trace_edges
+         WHERE repository_id=?1 AND from_kind='turn' AND from_key IN (
+           SELECT turn_key FROM turns WHERE session_id=?2
+         )",
+        params![repository_id, session_id],
+    )?;
 
     let mut direct_statement = connection.prepare(
         "SELECT c.object_id,c.commit_key FROM observed_git_commits observed
@@ -1121,11 +1171,12 @@ fn refresh_session_repository_edges(
         .map(|(object_id, _)| object_id.clone())
         .collect::<BTreeSet<_>>();
     for (object_id, commit_key) in direct {
-        insert_session_edge(
+        insert_delivery_edge(
             connection,
-            SessionEdgeSpec {
+            DeliveryEdgeSpec {
                 repository_id,
                 object_id: &object_id,
+                from_kind: "session",
                 from_key: &session_key,
                 to_kind: "git-commit",
                 to_key: &commit_key,
@@ -1179,15 +1230,125 @@ fn refresh_session_repository_edges(
         }
     }
     for (object_id, (commit_key, _prefix)) in &observed_prefixes {
-        insert_session_edge(
+        insert_delivery_edge(
             connection,
-            SessionEdgeSpec {
+            DeliveryEdgeSpec {
                 repository_id,
                 object_id,
+                from_kind: "session",
                 from_key: &session_key,
                 to_kind: "git-commit",
                 to_key: commit_key,
                 relation: "session-correlates-commit",
+                strength: "observed",
+                source: "observed-git-result",
+                facts: &serde_json::json!([{ "kind": "unique-abbreviated-commit-hash" }]),
+                limitations: &serde_json::json!([
+                    "not-authorship",
+                    "not-exclusive-line-attribution"
+                ]),
+            },
+        )?;
+    }
+
+    let mut turn_direct_statement = connection.prepare(
+        "SELECT c.object_id,c.commit_key,t.turn_key FROM observed_git_commits observed
+         JOIN history_events he ON he.event_key=observed.event_key
+         JOIN turns t ON t.turn_id=he.occurred_turn_id
+         JOIN git_commits c ON c.repository_id=?1 AND c.object_id=observed.object_id
+         WHERE observed.session_id=?2 AND t.revision IS NOT NULL
+           AND t.effective_provider_visibility='active'
+         GROUP BY c.object_id,c.commit_key,t.turn_key
+         ORDER BY c.object_id,t.turn_key",
+    )?;
+    let turn_direct = turn_direct_statement
+        .query_map(params![repository_id, session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(turn_direct_statement);
+    let turn_direct_pairs = turn_direct
+        .iter()
+        .map(|(object_id, _, turn_key)| (turn_key.clone(), object_id.clone()))
+        .collect::<BTreeSet<_>>();
+    for (object_id, commit_key, turn_key) in &turn_direct {
+        insert_delivery_edge(
+            connection,
+            DeliveryEdgeSpec {
+                repository_id,
+                object_id,
+                from_kind: "turn",
+                from_key: turn_key,
+                to_kind: "git-commit",
+                to_key: commit_key,
+                relation: "turn-observed-commit",
+                strength: "direct",
+                source: "observed-git-result",
+                facts: &serde_json::json!([{ "kind": "full-commit-hash" }]),
+                limitations: &serde_json::json!([
+                    "not-authorship",
+                    "not-exclusive-line-attribution"
+                ]),
+            },
+        )?;
+    }
+
+    let mut turn_prefix_statement = connection.prepare(
+        "WITH matches AS (
+           SELECT observed.object_id_prefix,c.object_id,c.commit_key,t.turn_key,
+                  COUNT(*) OVER (
+                    PARTITION BY observed.event_key,observed.object_id_prefix
+                  ) AS match_count
+           FROM observed_git_commit_prefixes observed
+           JOIN history_events he ON he.event_key=observed.event_key
+           JOIN turns t ON t.turn_id=he.occurred_turn_id
+           JOIN git_commits c
+             ON c.repository_id=?1 AND c.reachable=1
+            AND substr(c.object_id,1,length(observed.object_id_prefix))=observed.object_id_prefix
+           WHERE observed.session_id=?2 AND t.revision IS NOT NULL
+             AND t.effective_provider_visibility='active'
+         )
+         SELECT object_id,commit_key,turn_key,object_id_prefix FROM matches
+         WHERE match_count=1 ORDER BY object_id,turn_key,object_id_prefix",
+    )?;
+    let turn_prefix_matches = turn_prefix_statement
+        .query_map(params![repository_id, session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(turn_prefix_statement);
+    let mut turn_observed_prefixes = BTreeMap::new();
+    for (object_id, commit_key, turn_key, prefix) in turn_prefix_matches {
+        if turn_direct_pairs.contains(&(turn_key.clone(), object_id.clone())) {
+            continue;
+        }
+        let entry = turn_observed_prefixes
+            .entry((turn_key, object_id))
+            .or_insert((commit_key, prefix.clone()));
+        if prefix.len() > entry.1.len() {
+            entry.1 = prefix;
+        }
+    }
+    for ((turn_key, object_id), (commit_key, _prefix)) in &turn_observed_prefixes {
+        insert_delivery_edge(
+            connection,
+            DeliveryEdgeSpec {
+                repository_id,
+                object_id,
+                from_kind: "turn",
+                from_key: turn_key,
+                to_kind: "git-commit",
+                to_key: commit_key,
+                relation: "turn-correlates-commit",
                 strength: "observed",
                 source: "observed-git-result",
                 facts: &serde_json::json!([{ "kind": "unique-abbreviated-commit-hash" }]),
@@ -1242,11 +1403,12 @@ fn refresh_session_repository_edges(
     drop(statement);
     let mut commit_matches: BTreeMap<String, (Vec<u8>, u64, bool)> = BTreeMap::new();
     for (object_id, commit_key, file_key, _path, count, in_window) in matches {
-        insert_session_edge(
+        insert_delivery_edge(
             connection,
-            SessionEdgeSpec {
+            DeliveryEdgeSpec {
                 repository_id,
                 object_id: &object_id,
+                from_kind: "session",
                 from_key: &session_key,
                 to_kind: "file",
                 to_key: &file_key,
@@ -1289,11 +1451,12 @@ fn refresh_session_repository_edges(
                 serde_json::json!(["not-authorship", "not-causality", "path-only-context"]),
             )
         };
-        insert_session_edge(
+        insert_delivery_edge(
             connection,
-            SessionEdgeSpec {
+            DeliveryEdgeSpec {
                 repository_id,
                 object_id: &object_id,
+                from_kind: "session",
                 from_key: &session_key,
                 to_kind: "git-commit",
                 to_key: &commit_key,

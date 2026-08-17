@@ -1068,13 +1068,22 @@ test("Search and Evidence projection are exact privacy whitelists", () => {
         pending: 0, completed: 1, failed: 0, cancelled: 0, unknown: 0,
         privateMetric: 7,
       },
+      deliveryOutcome: {
+        directCommitTurnCount: 1, observedCommitTurnCount: 0,
+        noDeliveryTurnCount: 0, uncoveredTurnCount: 0, privateMetric: 7,
+      },
       evidenceTurnKeys: [TURN_KEY],
     }],
   };
+  const projectedFamily = projectInsightsSearch(withPath, context).evidencePaths.families[0];
   assert.deepEqual(
-    projectInsightsSearch(withPath, context).evidencePaths.families[0].toolStateCounts,
+    projectedFamily.toolStateCounts,
     { pending: "0", completed: "1", failed: "0", cancelled: "0", unknown: "0" },
   );
+  assert.deepEqual(projectedFamily.deliveryOutcome, {
+    directCommitTurnCount: "1", observedCommitTurnCount: "0",
+    noDeliveryTurnCount: "0", uncoveredTurnCount: "0",
+  });
   assert.throws(
     () => projectInsightsSearch({
       ...searchResponse,

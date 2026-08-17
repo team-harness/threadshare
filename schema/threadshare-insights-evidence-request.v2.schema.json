@@ -25,7 +25,7 @@
       ]
     },
     "nodeKind": { "enum": ["intent", "repository", "session", "turn", "capability-use", "file", "git-commit"] },
-    "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
+    "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "turn-observed-commit", "turn-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
     "nodeRef": {
       "type": "object", "additionalProperties": false, "required": ["kind", "key"],
       "properties": { "kind": { "$ref": "#/$defs/nodeKind" }, "key": { "$ref": "#/$defs/key" } }

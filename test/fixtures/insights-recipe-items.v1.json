@@ -280,6 +280,11 @@
       "metadata": { "role": "user" },
       "turnKey": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "turnRevision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "repeatGroup": {
+        "groupKey": "7777777777777777777777777777777777777777777777777777777777777777",
+        "bucket": "2-3"
+      },
+      "sequenceOrdinal": 0,
       "evidence": {
         "kind": "event",
         "eventKey": "2222222222222222222222222222222222222222222222222222222222222222",

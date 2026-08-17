@@ -156,8 +156,8 @@ Canonical contract 存 typed fact 和 limitation code，不把英文解释字符
 
 v1 关系分两类：
 
-- Recorded：`intent-declares-session`、`intent-declares-commit`、`session-contains-turn`、`turn-contains-capability-use`、`session-touched-file`、`commit-changed-file`、`session-observed-commit`。
-- Derived：`session-correlates-commit`、`intent-correlates-session`、`contextual-same-file`。
+- Recorded：`intent-declares-session`、`intent-declares-commit`、`session-contains-turn`、`turn-contains-capability-use`、`session-touched-file`、`commit-changed-file`、`session-observed-commit`、`turn-observed-commit`。
+- Derived：`session-correlates-commit`、`turn-correlates-commit`、`intent-correlates-session`、`contextual-same-file`。
 
 Recorded relation 仍需说明来源；Derived relation 必须包含可复算 facts 与 limitation。`contextual-same-file` 永远不能作为 Agent 的默认结论依据。
 
@@ -174,11 +174,12 @@ Recorded relation 仍需说明来源；Derived relation 必须包含可复算 fa
 
 ### 6.2 Session-to-Commit
 
-1. Tool result 中记录完整 Commit hash时，生成 `session-observed-commit/direct`；普通成功 `git commit` result 中的短 hash 只有在当前注册仓库唯一解析且 Commit reachable 时，才生成 `session-correlates-commit/observed`。Agent 不需要采用指定的 commit 命令。
+1. Tool result 中记录完整 Commit hash时，生成 `session-observed-commit/direct`；普通成功 `git commit` result 中的短 hash 只有在当前注册仓库唯一解析且 Commit reachable 时，才生成 `session-correlates-commit/observed`。Agent 不需要采用指定的 commit 命令。同一个观察结果同时按记录该结果的 Turn 生成 `turn-observed-commit/direct` 与 `turn-correlates-commit/observed`：Session 级归属只回答“哪一段工作产出了这个 Commit”，Turn 级归属才能区分落地的那次尝试与它之前的失败尝试。两级边共用同一份 observed Git 结果，不新增 Git 读取，也不改变 strength 规则。
 2. 对已直接观察的相邻 Commit，只有发生在“上一直接 Commit 之后、当前 Commit 之前”的文件写操作才能贡献当前关联。
 3. 文件必须使用同 repository identity 下的 lexical relative path 精确相等；basename、suffix 或 absolute-path 字符串相似不算 exact。
 4. invocation 只代表 attempted action；只有 result 或 Git object 提供的事实才能提升完成状态。
 5. 路径重合、时间重合和 cwd 位于仓库内不能单独证明 authoring。
+6. Turn 级交付归属按该 Turn 自己的边分四类读：有 `turn-observed-commit` 为 `direct`；只有 `turn-correlates-commit` 为 `observed`；被一个**当前可读**的注册仓库覆盖却没有任何交付边为 `noDelivery`；其余为 `uncovered`。"当前可读"取 repository source 最近一次扫描的 `available`：降级快照保留旧 refs 却不带 commit，其下的 Turn 不可能获得交付边，把它们读成 `noDelivery` 等于对没人能看的仓库断言"这条路径不交付东西"。因此 `available` 描述的是最近一次扫描而不是 Turn 发生的时刻，仓库恢复可读后这些计数会从 `uncovered` 移回 `noDelivery` 或交付类 —— 这正是 Derived 关系可复算的含义，读计数的人必须知道它随扫描状态变化。已经观察到的交付边不受影响：那次观察发生过，之后失去读取权限并不能取消它。
 
 ### 6.3 Intent-to-Delivery
 
@@ -384,10 +385,13 @@ Response：
     "unresolvedRefCount": "0",
     "excludedCandidateEdgeCount": "3",
     "excludedContextualEdgeCount": "8",
-    "unreachableCommitCount": "0"
+    "unreachableCommitCount": "0",
+    "unselectedRepositoryCount": "0"
   }
 }
 ```
+
+一次 Trace 只读一个 repository 的边。Session 与 Turn root 是按 project key 解析仓库的，同一个 project key 可能被多个已注册 repository 声明（同一工作路径被重新 `git init` 成新的 Git directory 时，旧注册项按设计保留），此时 Trace 取排序后的第一个，其余数量记在 `unselectedRepositoryCount`，让遗漏可见而不是静默。`"0"` 表示本次 Trace 覆盖了声明该 root 的全部仓库。按 repository 或 commit 进入的 root 不存在这个问题，恒为 `"0"`。
 
 Cursor 绑定 database UUID、snapshotSeq、去掉 cursor 后的 canonical request、evaluatedAt 和 graph frontier。分页可以重复 boundary node，但每页 edge 的两端必须都在本页 `nodes` 中；客户端按 `(kind,key,revision)` 去重。
 

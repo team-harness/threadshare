@@ -283,13 +283,21 @@
     },
     "sessionTimelineItem": {
       "type": "object", "additionalProperties": false,
-      "required": ["eventKey", "revision", "observedAt", "eventKind", "originScope", "completeness", "metadata", "turnKey", "turnRevision", "evidence"],
+      "required": ["eventKey", "revision", "observedAt", "eventKind", "originScope", "completeness", "metadata", "turnKey", "turnRevision", "repeatGroup", "sequenceOrdinal", "evidence"],
       "properties": {
         "eventKey": { "$ref": "#/$defs/key" }, "revision": { "$ref": "#/$defs/key" }, "observedAt": { "$ref": "#/$defs/nullableTimestamp" },
         "eventKind": { "type": "string", "minLength": 1, "maxLength": 128 }, "originScope": { "enum": ["main", "subagent", "unknown"] },
         "completeness": { "enum": ["full", "summary", "unloaded", "truncated", "unavailable"] },
         "metadata": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/jsonObject" }, "turnKey": { "$ref": "#/$defs/nullableKey" },
-        "turnRevision": { "$ref": "#/$defs/nullableKey" }, "evidence": { "$ref": "#/$defs/evidence" }
+        "turnRevision": { "$ref": "#/$defs/nullableKey" },
+        "repeatGroup": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["groupKey", "bucket"], "properties": { "groupKey": { "$ref": "#/$defs/key" }, "bucket": { "enum": ["1", "2-3", "4+"] } } },
+            { "type": "null" }
+          ]
+        },
+        "sequenceOrdinal": { "type": "integer", "minimum": 0 },
+        "evidence": { "$ref": "#/$defs/evidence" }
       }
     }
   }
