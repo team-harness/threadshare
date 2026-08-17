@@ -74,6 +74,7 @@ test("Dashboard source exposes every supported search dimension without unsuppor
   }
   assert.doesNotMatch(app, /coverage\.slice\(/u);
   assert.doesNotMatch(app, /diagnostics\.slice\(/u);
+  assert.match(app, /text: dashboardDiagnosticMessage\(delivery\.error\)/u);
   assert.match(app, /projectFilterState\.hidden = !projectPage\.truncated/u);
   assert.match(
     styles,

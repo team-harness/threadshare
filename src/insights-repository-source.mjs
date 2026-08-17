@@ -452,9 +452,11 @@ export async function registerInsightsRepository(repositoryPath, options = {}) {
   const registration = await resolveRepository(repositoryPath, options);
   return updateRegistration({
     ...registration,
-    ...(options.intentPath === undefined || options.intentPath === null
-      ? {}
-      : { intentPath: options.intentPath }),
+    ...(options.clearIntent === true
+      ? { clearIntent: true }
+      : options.intentPath === undefined || options.intentPath === null
+        ? {}
+        : { intentPath: options.intentPath }),
   });
 }
 

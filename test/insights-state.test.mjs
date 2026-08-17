@@ -302,6 +302,48 @@ test("registers repositories by Git common-directory identity without colliding 
   }
 });
 
+test("clears an optional repository Intent registration without removing the repository", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-clear-intent-"));
+  const options = {
+    platform: "linux",
+    environment: { THREADSHARE_CONFIG: path.join(directory, "config.json") },
+    randomUuid: () => "11111111-1111-4111-8111-111111111111",
+  };
+  try {
+    const registered = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "20",
+      intentPath: "docs/requirements.md",
+    }, options);
+    assert.equal(registered.repository.intentPath, "docs/requirements.md");
+
+    const retained = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "20",
+    }, options);
+    assert.equal(retained.changed, false);
+    assert.equal(retained.repository.intentPath, "docs/requirements.md");
+
+    const cleared = await updateInsightsRepositoryRegistration({
+      commonDirectory: "/work/project/.git",
+      rootDirectory: "/work/project",
+      commonDirectoryDevice: "10",
+      commonDirectoryInode: "20",
+      clearIntent: true,
+    }, options);
+    assert.equal(cleared.changed, true);
+    assert.equal(cleared.repository.repositoryId, registered.repository.repositoryId);
+    assert.equal(Object.hasOwn(cleared.repository, "intentPath"), false);
+    assert.equal(Object.hasOwn(cleared.config.insights.repositories[0], "intentPath"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("persists normalized provider, project, and session exclusions", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-insights-exclude-"));
   const configFile = path.join(directory, "config.json");

@@ -148,8 +148,11 @@ threadshare insights sync
 Run `sync` once before the first analysis and whenever you want fresher results. Later runs are
 incremental. Use `reindex` only for an explicit complete rebuild or origin-secret recovery.
 For delivery questions about a repository, register that repository once with
-`threadshare insights sync --repository .`. If the repository has a Markdown checklist or plan, add
-`--intent <repository-relative-file>`; later plain `sync` runs update both registered sources.
+`threadshare insights sync --repository .`. Delivery Trace works from Git and Agent evidence without
+any requirements system. If you explicitly want to connect a repository-owned Markdown checklist or
+plan, add `--intent <repository-relative-file>`; Threadshare never discovers one automatically. Remove
+that optional source with `threadshare insights sync --repository . --clear-intent`. Later plain `sync`
+runs update the remaining registered sources.
 From that checkout, the Agent can omit the opaque repository key; Delivery Trace resolves the
 registered repository containing its current working directory.
 
@@ -162,9 +165,27 @@ Then ask your Agent questions like these:
 | Which Sessions were research-heavy, implementation-heavy, or missing supporting documentation? | Add design or review checkpoints where implementation is outrunning recorded evidence. |
 | When did Tool density, Skill use, or project switching change? | Compare workflow changes over time and identify coordination or automation overhead. |
 | Where did this exact error happen before, and what evidence-backed step succeeded later? | Reuse a previously successful procedure without treating historical correlation as a guarantee. |
-| Which Sessions and commits delivered this requirement, and what evidence connects them? | Audit the delivery chain, inspect changed files, and separate explicit or observed links from candidates. |
-| Which planned items still have no commit, or which commits have no recorded Agent context? | Find delivery gaps before handoff or release without guessing authorship. |
-| What should the next Agent know before continuing this work? | Produce bounded continuation context with the relevant intent, Sessions, commits, files, and unresolved evidence gaps. |
+
+#### Trace delivery with an Agent
+
+After repository sync, ordinary successful `git commit` output can connect an Agent Session to a
+reachable commit.
+
+Full hashes form direct evidence. A short hash forms observed evidence only when it resolves uniquely
+inside the registered repository. No special commit wrapper is required.
+
+| Ask your Agent | What Insights Trace connects | What the answer can guide |
+|---|---|---|
+| Which Agent Sessions are related to this commit, and what does the evidence actually prove? | Session, observed Git result, commit identity, reachability, and the GitHub or GitLab link. | Review the originating context without claiming authorship or exclusive line attribution. |
+| How did this requirement move from plan to delivery? | Intent or checklist item, Sessions, changed files, commits, and on-demand Git diff evidence. | Confirm that implemented work matches the recorded requirement and find missing delivery steps. |
+| Which attempts and file changes preceded the commit that fixed this bug? | Relevant Turns, Tool uses, files, successful commit evidence, and unresolved gaps. | Reuse the successful path and distinguish it from failed or merely correlated attempts. |
+| Why did this commit change these files? | Commit diff, related Session context, implementation decisions, and review evidence. | Check whether the diff follows the stated design and whether review covered the risky paths. |
+| What remains before another Agent continues or the release ships? | Completed and unresolved intents, Sessions with no commit, commits with no recorded Agent context, and affected files. | Build a bounded handoff and surface delivery gaps before release. |
+
+Each edge is evidence, not a claim of authorship or causation.
+
+The Agent should report its relation, strength, source, facts, and limitations. Candidate and
+contextual edges are investigation leads; they must not be presented as confirmed delivery.
 
 The user does not choose commands, resource names, schemas, or internal analysis plans. A compatible
 Agent reads `threadshare insights spec --format json`, selects bounded queries, and reports the

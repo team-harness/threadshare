@@ -5,9 +5,13 @@ import {
   INITIAL_STATE,
   buildSearchRequest,
   createDashboardStore,
+  dashboardDiagnosticMessage,
   decimalCount,
+  deliveryKindLabel,
+  deliveryTraceViewModel,
   formatAge,
   formatBytes,
+  humanizeDeliveryEdge,
   relatedTraceNodeKeys,
   reduceDashboardState,
 } from "../src/insights-dashboard/state.js";
@@ -59,6 +63,7 @@ test("Dashboard reducer exposes loading, error, and empty states without mutatio
   const failed = reduceDashboardState(loading, { type: "status/failed", code: "TS_TEST" });
   const loaded = reduceDashboardState(failed, { type: "status/loaded", status: { state: "ready" } });
   assert.equal(INITIAL_STATE.statusState, "loading");
+  assert.equal(INITIAL_STATE.delivery.mode, "date");
   assert.equal(failed.statusError, "TS_TEST");
   assert.equal(loaded.status.state, "ready");
   assert.equal(loaded.statusError, null);
@@ -139,4 +144,52 @@ test("Inspector related highlighting is derived only from response edges", () =>
   assert.deepEqual(relatedTraceNodeKeys({ ...trace, edges: [] }, {
     kind: "git-commit", key: commitKey,
   }), []);
+});
+
+test("Delivery Trace view model leads with a readable outcome and evidence boundary", () => {
+  const commit = { kind: "git-commit", key: "a".repeat(64), label: "feat: ship trace" };
+  const session = { kind: "session", key: "b".repeat(64), label: "Codex session" };
+  const file = { kind: "file", key: "c".repeat(64), attributes: { path: "src/app.js" } };
+  const trace = {
+    root: { kind: commit.kind, key: commit.key },
+    nodes: [commit, session, file],
+    edges: [{
+      relation: "session-correlates-commit",
+      from: { kind: session.kind, key: session.key },
+      to: { kind: commit.kind, key: commit.key },
+      strength: "observed",
+      source: "ordered-exact-path-overlap",
+      limitations: ["not-authorship", "not-exclusive-line-attribution"],
+    }],
+  };
+  const view = deliveryTraceViewModel(trace);
+  assert.equal(view.title, "feat: ship trace");
+  assert.equal(view.summary, "1 Agent session and 1 changed file are linked to this commit.");
+  assert.equal(view.evidence, "Observed evidence links these items.");
+  assert.equal(view.edgeCount, 1);
+  assert.deepEqual(view.limitations, [
+    "This link does not prove who authored the commit.",
+    "This link does not prove that every changed line came from this Agent session.",
+  ]);
+  assert.equal(deliveryKindLabel("session"), "Agent session");
+  assert.equal(deliveryTraceViewModel({ root: commit, nodes: [commit], edges: [] }).evidence,
+    "No delivery evidence is linked yet.");
+});
+
+test("Delivery evidence and diagnostics never expose internal enum names as primary copy", () => {
+  assert.deepEqual(humanizeDeliveryEdge({
+    relation: "session-observed-commit",
+    strength: "direct",
+    source: "observed-git-result",
+    limitations: ["not-authorship"],
+  }), {
+    relation: "Agent observed this commit result",
+    strength: "Direct evidence",
+    source: "Successful git commit output observed in the Agent session",
+    limitations: ["This link does not prove who authored the commit."],
+  });
+  assert.equal(
+    dashboardDiagnosticMessage("TS_INSIGHTS_STORAGE_FAILED"),
+    "Some delivery details could not be read. Refresh this view, or run `threadshare insights sync --repository .`.",
+  );
 });

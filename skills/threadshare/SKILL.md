@@ -77,7 +77,9 @@ v2 `evidence --request` form when the answer needs the complete recorded content
 
 For delivery questions, let `threadshare_insights_spec` select `delivery-trace@1`; do not ask the user
 to remember that Recipe name or a repository key. When root is omitted, the Recipe uses the registered
-repository containing the current working directory. Keep `direct`, `observed`, `candidate`, and
+repository containing the current working directory. Delivery Trace does not require an Intent source;
+an explicitly registered repository-relative Markdown checklist is optional and can be removed with
+`threadshare insights sync --repository . --clear-intent`. Keep `direct`, `observed`, `candidate`, and
 `contextual` edges separate.
 An observed Session/Commit correlation is not proof that the Agent authored the Commit, and candidate
 or contextual edges cannot support the default conclusion. Read Git diff Evidence only for a projected

@@ -130,6 +130,39 @@ fn replacing_refs_recomputes_unreachable_commits_without_deleting_history() {
 }
 
 #[test]
+fn removing_an_intent_source_clears_its_nodes_refs_and_edges() {
+    let repository_id = "11111111-1111-4111-8111-111111111111";
+    let mut incremental = EngineStorage::open_in_memory().unwrap();
+    incremental
+        .apply_trace_source_delta(delta('2', "0", "1"))
+        .unwrap();
+
+    let mut cleared = delta('3', "1", "2");
+    cleared.intent = None;
+    cleared.intent_nodes.clear();
+    cleared.intent_refs.clear();
+    incremental
+        .apply_trace_source_delta(cleared.clone())
+        .unwrap();
+    assert_eq!(
+        incremental
+            .repository_state_page(repository_id, None, 256)
+            .unwrap()
+            .intent_revision,
+        None
+    );
+
+    let mut clean = EngineStorage::open_in_memory().unwrap();
+    cleared.expected_generation = "0".to_owned();
+    cleared.target_generation = "1".to_owned();
+    clean.apply_trace_source_delta(cleared).unwrap();
+    assert_eq!(
+        incremental.delivery_graph_digest().unwrap(),
+        clean.delivery_graph_digest().unwrap()
+    );
+}
+
+#[test]
 fn incremental_and_clean_trace_source_commits_have_equal_digests() {
     let mut incremental = EngineStorage::open_in_memory().unwrap();
     incremental

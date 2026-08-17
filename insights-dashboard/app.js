@@ -4,10 +4,14 @@ import {
   buildInspectorEdgeRequest,
   buildSearchRequest,
   createDashboardStore,
+  dashboardDiagnosticMessage,
+  deliveryKindLabel,
+  deliveryTraceViewModel,
   errorCode,
   formatAge,
   formatBytes,
   formatCount,
+  humanizeDeliveryEdge,
   overviewCounts,
 } from "/state.js";
 
@@ -38,6 +42,7 @@ const elements = Object.freeze({
   deliveryAfter: document.querySelector("#delivery-after"),
   deliveryBefore: document.querySelector("#delivery-before"),
   deliveryStatus: document.querySelector("#delivery-status"),
+  deliverySummary: document.querySelector("#delivery-summary"),
   deliveryRailCount: document.querySelector("#delivery-rail-count"),
   deliveryRailHeading: document.querySelector("#delivery-rail-heading"),
   deliveryRailList: document.querySelector("#delivery-rail-list"),
@@ -132,6 +137,29 @@ function renderStatus(state) {
   if (status === null) return;
   const worker = status.worker;
   const engineAvailable = status.engine !== null;
+  const indexPresent = Number(status.index?.bytes ?? 0) > 0;
+  if (!engineAvailable) {
+    elements.statusStrip.append(
+      badge(indexPresent ? "Index on disk" : "Not indexed", indexPresent ? "neutral" : "pending"),
+      badge("Live status unavailable", "pending"),
+    );
+    elements.snapshotLabel.textContent = indexPresent
+      ? "Saved index found; live health details were not checked"
+      : "Run Insights sync to create the first index";
+    clear(elements.indexMeta);
+    elements.indexMeta.append(
+      node("span", { className: "meta-label", text: "Index" }),
+      node("strong", { text: formatBytes(status.index?.bytes) }),
+      node("span", { className: "path-value", text: status.index?.location ?? "Not created", title: status.index?.location ?? "" }),
+      node("span", { className: "meta-label", text: "Progress" }),
+      node("span", { text: worker?.progress === null || worker?.progress === undefined
+        ? "Idle"
+        : `${formatCount(worker.progress.committed)} / ${formatCount(worker.progress.planned)} sessions` }),
+      node("span", { className: "meta-label", text: "Health" }),
+      node("span", { text: "Live check skipped" }),
+    );
+    return;
+  }
   const purge = status.engine?.purge?.state ?? "idle";
   const pending = status.engine?.snapshotPending || worker?.running || worker?.queued;
   elements.statusStrip.append(
@@ -394,6 +422,24 @@ function traceTone(strength) {
   return "pending";
 }
 
+function readableSlug(value) {
+  return String(value ?? "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function readableTimestamp(value) {
+  const parsed = Date.parse(value ?? "");
+  if (!Number.isFinite(parsed)) return "Time not recorded";
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "UTC",
+  }).format(parsed);
+}
+
 function traceNodeButton(item, delivery) {
   const identity = traceIdentity(item);
   const selected = traceIdentity(delivery.selected ?? {}) === identity;
@@ -402,29 +448,12 @@ function traceNodeButton(item, delivery) {
     className: `trace-node${selected ? " is-selected" : ""}${related ? " is-related" : ""}`,
     type: "button",
   }, [
-    node("span", { className: "trace-node-kind", text: item.kind }),
+    node("span", { className: "trace-node-kind", text: deliveryKindLabel(item.kind) }),
     node("strong", { text: item.label || item.attributes?.path || item.key.slice(0, 12) }),
-    node("span", { className: "trace-node-time", text: item.observedAt ?? "Timing unavailable" }),
+    node("span", { className: "trace-node-time", text: readableTimestamp(item.observedAt) }),
   ]);
   button.addEventListener("click", () => store.dispatch({ type: "delivery/select", node: item }));
   return button;
-}
-
-function traceEdgeRow(edge, delivery) {
-  const selectedIdentity = traceIdentity(delivery.selected ?? {});
-  const touchesSelection = traceIdentity(edge.from) === selectedIdentity ||
-    traceIdentity(edge.to) === selectedIdentity;
-  return node("div", {
-    className: `trace-edge${touchesSelection ? " is-related" : ""}`,
-  }, [
-    node("span", { className: "trace-edge-title", text: edge.relation }),
-    badge(edge.strength, traceTone(edge.strength)),
-    node("span", { className: "trace-edge-source", text: edge.source }),
-    node("span", {
-      className: "trace-edge-limit",
-      text: (edge.limitations ?? []).join(" / ") || "No recorded limitation",
-    }),
-  ]);
 }
 
 function renderDeliveryRepositories(delivery) {
@@ -478,34 +507,37 @@ function renderDelivery(state) {
   document.querySelector("#delivery-form button").disabled = intentMode || delivery.loading ||
     delivery.repositoryKey === "";
   const intentUnavailable = intentMode && delivery.trace?.coverage?.intentState === "unavailable";
-  elements.deliveryStatus.textContent = delivery.error ?? (intentMode
+  const deliveryError = delivery.error === null ? null : dashboardDiagnosticMessage(delivery.error);
+  elements.deliveryStatus.classList.toggle("is-error", deliveryError !== null);
+  elements.deliveryStatus.title = delivery.error ?? "";
+  elements.deliveryStatus.textContent = deliveryError ?? (intentMode
     ? delivery.traceLoading || delivery.loading
       ? "Reading committed Intent evidence..."
       : intentUnavailable
         ? "No Intent source is configured. Run insights sync with --repository and --intent."
         : delivery.trace === null
           ? "Select a registered repository to inspect Intent evidence."
-          : `Snapshot ${delivery.trace.snapshotSeq} / ${delivery.trace.coverage.intentState} Intent coverage`
+          : `${delivery.trace.coverage.intentState === "complete" ? "Complete" : "Partial"} requirement coverage`
     : delivery.traceLoading
       ? "Reading snapshot-bound trace..."
       : delivery.loading
         ? "Reading committed delivery edges..."
         : delivery.trace === null
           ? ""
-          : `Snapshot ${delivery.trace.snapshotSeq} / evaluated ${delivery.trace.evaluatedAt}`);
+          : "Delivery evidence loaded");
 
   clear(elements.deliveryRailList);
   const scopes = intentMode ? delivery.intentRoots : deliveryScopes(delivery.edges);
-  elements.deliveryRailHeading.textContent = intentMode ? "Intent" : "Date";
+  elements.deliveryRailHeading.textContent = intentMode ? "Requirements" : "Commits";
   elements.deliveryRailCount.textContent = formatCount(scopes.length);
   for (const scope of scopes) {
     const title = intentMode
       ? scope.label
-      : scope.commitHash === null ? scope.key.slice(0, 12) : scope.commitHash.slice(0, 12);
+      : `Commit ${scope.commitHash === null ? scope.key.slice(0, 8) : scope.commitHash.slice(0, 8)}`;
     const button = node("button", { className: "delivery-scope", type: "button" }, [
       node("strong", { text: title }),
-      node("span", { text: intentMode ? scope.attributes.status : scope.observedAt ?? "Timing unavailable" }),
-      node("span", { text: intentMode ? scope.attributes.intentKind : `${formatCount(scope.fileCount)} changed files` }),
+      node("span", { text: intentMode ? readableSlug(scope.attributes.status) : readableTimestamp(scope.observedAt) }),
+      node("span", { text: intentMode ? readableSlug(scope.attributes.intentKind) : `${formatCount(scope.fileCount)} changed files` }),
     ]);
     button.addEventListener("click", () => void loadDeliveryTrace(intentMode
       ? { kind: scope.kind, key: scope.key }
@@ -517,15 +549,34 @@ function renderDelivery(state) {
       className: "empty-copy",
       text: intentMode
         ? intentUnavailable
-          ? "Register a repository-relative Markdown Intent source to populate this view."
-          : "No top-level Intent nodes in this repository."
-        : "No committed delivery evidence in this scope.",
+          ? "Add a repository Intent file during Insights sync to connect requirements to delivery."
+          : "No requirements are linked in this repository yet."
+        : "No commits were recorded in this date range.",
     }));
   }
   elements.deliveryMore.hidden = (intentMode ? delivery.intentCursor : delivery.edgeCursor) === null;
   elements.deliveryMore.disabled = delivery.loading;
 
   const trace = delivery.trace;
+  clear(elements.deliverySummary);
+  elements.deliverySummary.hidden = trace === null;
+  if (trace !== null) {
+    const view = deliveryTraceViewModel(trace);
+    const summaryMeta = node("div", { className: "delivery-summary-meta" }, [
+      badge(view.evidence, view.evidence.startsWith("Direct") ? "ok" : view.evidence.startsWith("Observed") ? "neutral" : "pending"),
+      node("span", { text: `${formatCount(view.edgeCount)} evidence links` }),
+    ]);
+    const limitations = view.limitations.length === 0
+      ? []
+      : [node("p", { className: "delivery-boundary", text: view.limitations.join(" ") })];
+    elements.deliverySummary.append(
+      node("p", { className: "eyebrow", text: "Delivery summary" }),
+      node("h2", { text: view.title }),
+      node("p", { className: "delivery-summary-copy", text: view.summary }),
+      summaryMeta,
+      ...limitations,
+    );
+  }
   const groups = {
     prompt: [],
     activity: [],
@@ -540,15 +591,14 @@ function renderDelivery(state) {
   clear(elements.activityLane);
   clear(elements.deliveryLane);
   elements.promptLaneCount.textContent = formatCount(groups.prompt.length);
-  elements.activityLaneCount.textContent = formatCount(groups.activity.length + (trace?.edges ?? []).length);
+  elements.activityLaneCount.textContent = formatCount(groups.activity.length);
   elements.deliveryLaneCount.textContent = formatCount(groups.delivery.length);
   for (const item of groups.prompt) elements.promptLane.append(traceNodeButton(item, delivery));
   for (const item of groups.activity) elements.activityLane.append(traceNodeButton(item, delivery));
-  for (const edge of trace?.edges ?? []) elements.activityLane.append(traceEdgeRow(edge, delivery));
   for (const item of groups.delivery) elements.deliveryLane.append(traceNodeButton(item, delivery));
-  if (groups.prompt.length === 0) elements.promptLane.append(node("p", { className: "lane-empty", text: "No linked prompt or intent evidence." }));
-  if (groups.activity.length === 0 && (trace?.edges ?? []).length === 0) elements.activityLane.append(node("p", { className: "lane-empty", text: "No linked activity evidence." }));
-  if (groups.delivery.length === 0) elements.deliveryLane.append(node("p", { className: "lane-empty", text: "Select a dated commit to inspect delivery evidence." }));
+  if (groups.prompt.length === 0) elements.promptLane.append(node("p", { className: "lane-empty", text: "No requirement or Agent turn is linked yet." }));
+  if (groups.activity.length === 0) elements.activityLane.append(node("p", { className: "lane-empty", text: "No Agent session or Tool use is linked yet." }));
+  if (groups.delivery.length === 0) elements.deliveryLane.append(node("p", { className: "lane-empty", text: "Choose a commit to see delivered files." }));
   if (delivery.traceCursor !== null) {
     const more = node("button", { className: "quiet-button lane-more", type: "button", text: "Load more trace" });
     more.addEventListener("click", () => void loadDeliveryTrace(delivery.trace.root, true));
@@ -570,18 +620,40 @@ function renderDeliveryDetail(state) {
   const delivery = state.delivery;
   const selected = delivery.selected;
   if (selected === null) return false;
-  elements.inspectorTitle.textContent = selected.label || selected.kind;
+  elements.inspectorTitle.textContent = selected.label || selected.attributes?.path || deliveryKindLabel(selected.kind);
   elements.inspectorBody.append(node("div", { className: "detail-list" }, [
-    detailRow("Kind", selected.kind),
-    detailRow("Observed", selected.observedAt ?? "Timing unavailable"),
-    detailRow("Revision", selected.revision?.slice(0, 16)),
-    detailRow("Related", formatCount(delivery.relatedNodeKeys.length)),
+    detailRow("Type", deliveryKindLabel(selected.kind)),
+    detailRow("Recorded", readableTimestamp(selected.observedAt)),
+    detailRow("Connections", formatCount(delivery.relatedNodeKeys.length)),
   ]));
+  const selectedIdentity = traceIdentity(selected);
+  const relatedEdges = (delivery.trace?.edges ?? []).filter((edge) =>
+    traceIdentity(edge.from) === selectedIdentity || traceIdentity(edge.to) === selectedIdentity);
+  if (relatedEdges.length > 0) {
+    const evidenceList = node("div", { className: "connection-list" });
+    for (const edge of relatedEdges) {
+      const readable = humanizeDeliveryEdge(edge);
+      evidenceList.append(node("div", { className: "connection-item" }, [
+        node("div", { className: "connection-heading" }, [
+          node("strong", { text: readable.relation }),
+          badge(readable.strength, traceTone(edge.strength)),
+        ]),
+        node("span", { text: readable.source }),
+        ...(readable.limitations.length === 0
+          ? []
+          : [node("p", { className: "connection-limit", text: readable.limitations.join(" ") })]),
+      ]));
+    }
+    elements.inspectorBody.append(
+      node("div", { className: "payload-heading", text: "Why this is linked" }),
+      evidenceList,
+    );
+  }
   const actions = node("div", { className: "detail-actions" });
   const evidence = node("button", {
     className: "quiet-button",
     type: "button",
-    text: delivery.evidenceLoading ? "Loading evidence..." : "Load evidence",
+    text: delivery.evidenceLoading ? "Loading evidence..." : "View source evidence",
   });
   evidence.disabled = delivery.evidenceLoading;
   evidence.addEventListener("click", () => void loadDeliveryEvidence());
@@ -590,7 +662,7 @@ function renderDeliveryDetail(state) {
     const timeline = node("button", {
       className: "quiet-button",
       type: "button",
-      text: delivery.timelineLoading ? "Loading timeline..." : "Load session timeline",
+      text: delivery.timelineLoading ? "Loading history..." : "View session history",
     });
     timeline.disabled = delivery.timelineLoading;
     timeline.addEventListener("click", () => void loadSessionTimeline());
@@ -605,7 +677,7 @@ function renderDeliveryDetail(state) {
       href: commitLink,
       target: "_blank",
       rel: "noopener noreferrer",
-      text: "Open commit",
+      text: "Open on GitHub / GitLab",
     }));
   }
   if (commit !== null) {
@@ -616,24 +688,33 @@ function renderDeliveryDetail(state) {
     const diff = node("button", {
       className: "quiet-button",
       type: "button",
-      text: delivery.diffLoading ? "Loading diff..." : "Load diff",
+      text: delivery.diffLoading ? "Loading changes..." : "View code changes",
     });
     diff.disabled = delivery.diffLoading;
     diff.addEventListener("click", () => void loadDeliveryDiff(commit, parent.value || null));
     actions.append(parent, diff);
   }
-  const continuation = node("button", { className: "quiet-button", type: "button", text: "Copy continuation" });
+  const continuation = node("button", { className: "quiet-button", type: "button", text: "Copy Agent handoff" });
   continuation.addEventListener("click", () => void copyDeliveryContinuation());
   actions.append(continuation);
   elements.inspectorBody.append(actions);
+  const technical = node("details", { className: "technical-details" }, [
+    node("summary", { text: "Technical evidence" }),
+    node("div", { className: "detail-list" }, [
+      detailRow("Kind", selected.kind),
+      detailRow("Key", selected.key),
+      detailRow("Revision", selected.revision ?? "Not recorded"),
+    ]),
+  ]);
+  elements.inspectorBody.append(technical);
 
   if (delivery.timeline !== null) {
     const timeline = node("div", { className: "timeline-list" });
     for (const item of delivery.timeline.items ?? []) {
       const entry = node("button", { className: "timeline-entry", type: "button" }, [
-        node("span", { className: "trace-node-kind", text: item.eventKind }),
-        node("strong", { text: item.metadata?.role ?? item.eventKind }),
-        node("span", { className: "trace-node-time", text: item.observedAt ?? "Timing unavailable" }),
+        node("span", { className: "trace-node-kind", text: readableSlug(item.eventKind) }),
+        node("strong", { text: item.metadata?.role ? readableSlug(item.metadata.role) : readableSlug(item.eventKind) }),
+        node("span", { className: "trace-node-time", text: readableTimestamp(item.observedAt) }),
       ]);
       entry.addEventListener("click", () => void loadDeliveryEvidence(false, item.evidence));
       timeline.append(entry);
@@ -669,7 +750,12 @@ function renderDeliveryDetail(state) {
       elements.inspectorBody.append(more);
     }
   }
-  if (delivery.error) elements.inspectorBody.append(node("p", { className: "error-copy", text: delivery.error }));
+  if (delivery.error) {
+    elements.inspectorBody.append(node("p", {
+      className: "error-copy",
+      text: dashboardDiagnosticMessage(delivery.error),
+    }));
+  }
   return true;
 }
 

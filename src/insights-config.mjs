@@ -548,12 +548,15 @@ export async function updateInsightsRepositoryRegistration(registration, options
     const identityIndex = repositories.findIndex((item) =>
       item.commonDirectoryDevice === registration?.commonDirectoryDevice &&
       item.commonDirectoryInode === registration?.commonDirectoryInode);
+    const intentPath = registration?.clearIntent === true
+      ? undefined
+      : registration?.intentPath === undefined
+        ? repositories[identityIndex]?.intentPath
+        : registration.intentPath;
     const repository = normalizedRepositoryRegistration({
       ...registration,
       repositoryId: identityIndex < 0 ? undefined : repositories[identityIndex].repositoryId,
-      intentPath: registration?.intentPath === undefined
-        ? repositories[identityIndex]?.intentPath
-        : registration.intentPath,
+      intentPath,
     }, options);
     const previous = identityIndex < 0 ? null : repositories[identityIndex];
     const changed = previous === null ||

@@ -1074,6 +1074,7 @@ async function main() {
       } = await import("../src/insights-command.mjs");
       invocation = parseInsightsInvocation(positionals, {
         ...options,
+        "clear-intent": options["clear-intent"],
         "regenerate-secret": options["regenerate-secret"],
         intent: options.intent,
         repository: options.repository,

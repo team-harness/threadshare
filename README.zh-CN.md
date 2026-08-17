@@ -147,8 +147,10 @@ threadshare insights sync
 完整原子重建或恢复 origin secret 时才使用 `reindex`。
 要分析某个仓库的交付关系，先执行一次 `threadshare insights sync --repository .` 注册该仓库。
 之后从该仓库目录调用 Agent 时无需提供不透明的 repository key；Delivery Trace 会解析包含当前目录的已注册仓库。
-如果仓库中有 Markdown checklist 或计划文件，再加 `--intent <仓库相对路径>`；之后普通 `sync`
-会增量更新这两个已注册 source。
+Delivery Trace 默认只使用 Git 与 Agent 证据，不依赖任何需求管理系统。只有明确希望连接仓库自己的
+Markdown checklist 或计划文件时，才加 `--intent <仓库相对路径>`；Threadshare 不会自动发现它。
+使用 `threadshare insights sync --repository . --clear-intent` 可以解除这个可选 source，之后普通
+`sync` 只增量更新仍然注册的来源。
 
 然后直接把这些问题交给 Agent：
 
@@ -159,9 +161,26 @@ threadshare insights sync
 | 哪些 Session 偏研究、偏实现，或者缺少配套文档？ | 在实现快于证据沉淀的环节增加设计或审查检查点。 |
 | Tool 密度、Skill 使用或项目切换在什么时候发生了变化？ | 比较工作流迭代，识别协调成本或自动化开销。 |
 | 这个具体错误以前在哪里出现过，后来哪个有证据的步骤成功了？ | 复用历史上成功的候选方案，同时避免把相关性当成必然因果。 |
-| 这个需求由哪些 Session 和 Commit 交付，依据是什么？ | 审计交付链、下钻 changed files，并把显式/观察到的关系与候选关系分开。 |
-| 哪些计划项还没有 Commit，哪些 Commit 没有已记录的 Agent 上下文？ | 在交接或发布前发现交付缺口，同时避免猜测作者身份。 |
-| 下一个 Agent 继续这项工作前应先知道什么？ | 生成有界的 continuation context，列出相关 Intent、Session、Commit、文件与证据缺口。 |
+
+#### 让 Agent 追踪交付
+
+仓库完成 sync 后，普通 `git commit` 的成功输出就能把 Agent Session 与可达 Commit 关联起来。
+
+完整 hash 形成 direct evidence。短 hash 只有在已注册仓库内唯一解析时才形成 observed evidence；
+不需要改用特殊的提交命令。
+
+| 发给 Agent 的问题 | Insights Trace 会连接什么 | 回答可以指导什么决策 |
+|---|---|---|
+| 哪些 Agent Session 与这个 Commit 有关，证据实际能证明什么？ | Session、观察到的 Git 结果、Commit 身份、可达状态以及 GitHub 或 GitLab 链接。 | 查看产生提交结果时的上下文，但不猜测作者身份或声称每一行都由该 Session 产生。 |
+| 这个需求如何从计划走到交付？ | Intent 或 checklist 项、Session、changed files、Commit，以及按需加载的 Git diff evidence。 | 确认实现符合原始需求，并发现缺失的交付步骤。 |
+| 修复这个 Bug 的 Commit 之前有哪些尝试和文件修改？ | 相关 Turn、Tool use、文件、成功 Commit 证据和仍未解决的缺口。 | 复用成功路径，并把它与失败尝试或仅有相关性的线索区分开。 |
+| 这个 Commit 为什么修改这些文件？ | Commit diff、相关 Session 上下文、实现决策与审查证据。 | 判断 diff 是否遵循设计，以及审查是否覆盖了高风险路径。 |
+| 下一个 Agent 继续或发布前还缺什么？ | 已完成和未解决的 Intent、没有 Commit 的 Session、没有 Agent 上下文的 Commit，以及受影响文件。 | 生成有边界的交接信息，并在发布前暴露交付缺口。 |
+
+每条 edge 都是证据，不是作者身份或因果声明。
+
+Agent 应报告 relation、strength、source、facts 和 limitations。candidate 与 contextual edge
+只能作为调查线索，不能表述成已确认的交付关系。
 
 用户不需要选择命令、resource、schema 或内部分析计划。兼容的 Agent 会读取
 `threadshare insights spec --format json`，选择有边界的查询，并在结论中报告 snapshot、时间窗口、

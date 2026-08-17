@@ -596,13 +596,13 @@ pub(crate) fn replace_intent_source(
     repository: &RepositoryDelta,
     intent: Option<&IntentSourceDelta>,
 ) -> Result<(), StorageError> {
-    let Some(intent) = intent else {
-        return Ok(());
-    };
     connection.execute(
         "DELETE FROM intent_sources WHERE repository_id=?1",
         [&repository.repository_id],
     )?;
+    let Some(intent) = intent else {
+        return Ok(());
+    };
     connection.execute(
         "INSERT INTO intent_sources(repository_id,source_key,adapter_version,revision,locator,coverage,diagnostics_json)
          VALUES (?1,?2,?3,?4,?5,?6,?7)",

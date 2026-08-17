@@ -109,6 +109,7 @@ test("renders a self-describing root and command help contract", () => {
     sessions: ["format", "limit", "offset"],
     analyze: ["format"],
     insights: [
+      "clear-intent",
       "cursor",
       "format",
       "intent",

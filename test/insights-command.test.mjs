@@ -183,9 +183,10 @@ test("repository sync commits an Intent-only revision without rescanning Git his
   assert.equal(committedDelta.mode, "intent");
   assert.equal(committedDelta.intent.revision, newRevision);
   assert.equal(repositories[0].status, "committed");
+  assert.equal(repositories[0].intent, "updated");
 });
 
-test("repository sync does not recommit retained Intent when no source is configured", async () => {
+test("repository sync clears retained Intent without reading an unconfigured source", async () => {
   let commits = 0;
   const repositories = await syncRegisteredRepositories({
     insights: {
@@ -204,6 +205,7 @@ test("repository sync does not recommit retained Intent when no source is config
     },
     async commitTraceSourceDelta() {
       commits += 1;
+      return { idempotent: false };
     },
   }, {}, {
     async scanRepository() {
@@ -212,10 +214,22 @@ test("repository sync does not recommit retained Intent when no source is config
     async readIntentSource() {
       throw new Error("unconfigured Intent source must not be read");
     },
+    createTraceSourceDelta(_registration, scan, { intentSource }) {
+      assert.equal(intentSource, null);
+      return { mode: scan.mode, intent: null, intentNodes: [], intentRefs: [] };
+    },
   });
 
-  assert.equal(commits, 0);
-  assert.equal(repositories[0].status, "unchanged");
+  assert.equal(commits, 1);
+  assert.equal(repositories[0].status, "committed");
+  assert.equal(repositories[0].intent, "cleared");
+  assert.match(formatInsightsCommandResult({
+    format: "threadshare-insights-sync@v1",
+    mode: "incremental",
+    report: { committed: 0, unchanged: 0, excluded: 0, missing: 0, failed: 0 },
+    purge: { state: "idle", batches: 0 },
+    repositories,
+  }), /Intent: cleared 1; updated 0; unchanged 0/u);
 });
 
 test("parses the bounded insights subcommand grammar", () => {
@@ -247,11 +261,17 @@ test("parses the bounded insights subcommand grammar", () => {
   );
   assert.deepEqual(
     parseInsightsInvocation(["insights", "sync"]),
-    { action: "sync", format: "text", regenerateSecret: false, repository: null, intent: null },
+    {
+      action: "sync", format: "text", regenerateSecret: false,
+      repository: null, intent: null, clearIntent: false,
+    },
   );
   assert.deepEqual(
     parseInsightsInvocation(["insights", "sync"], { repository: "./repo" }),
-    { action: "sync", format: "text", regenerateSecret: false, repository: "./repo", intent: null },
+    {
+      action: "sync", format: "text", regenerateSecret: false,
+      repository: "./repo", intent: null, clearIntent: false,
+    },
   );
   assert.deepEqual(
     parseInsightsInvocation(["insights", "sync"], {
@@ -264,6 +284,21 @@ test("parses the bounded insights subcommand grammar", () => {
       regenerateSecret: false,
       repository: "./repo",
       intent: "docs/intent.md",
+      clearIntent: false,
+    },
+  );
+  assert.deepEqual(
+    parseInsightsInvocation(["insights", "sync"], {
+      repository: "./repo",
+      "clear-intent": true,
+    }),
+    {
+      action: "sync",
+      format: "text",
+      regenerateSecret: false,
+      repository: "./repo",
+      intent: null,
+      clearIntent: true,
     },
   );
   for (const [positionals, options, code] of [
@@ -279,9 +314,57 @@ test("parses the bounded insights subcommand grammar", () => {
     [["insights", "sync"], { repository: "   " }, "TS_USAGE_INVALID_VALUE"],
     [["insights", "sync"], { intent: "intent.md" }, "TS_USAGE_OPTION_DEPENDENCY"],
     [["insights", "status"], { intent: "intent.md" }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "sync"], { "clear-intent": true }, "TS_USAGE_OPTION_DEPENDENCY"],
+    [["insights", "status"], { "clear-intent": true }, "TS_USAGE_OPTION_NOT_ALLOWED"],
+    [["insights", "sync"], {
+      repository: ".", intent: "intent.md", "clear-intent": true,
+    }, "TS_USAGE_OPTION_NOT_ALLOWED"],
   ]) {
     assert.throws(() => parseInsightsInvocation(positionals, options), { code });
   }
+});
+
+test("repository sync commits removal of a previously indexed Intent source", async () => {
+  let commits = 0;
+  const repositories = await syncRegisteredRepositories({
+    insights: {
+      repositories: [{ repositoryId: "11111111-1111-4111-8111-111111111111" }],
+    },
+  }, {
+    async readRepositoryState() {
+      return {
+        generation: "1",
+        refDigest: "a".repeat(64),
+        intentRevision: "b".repeat(64),
+        coverageAfter: null,
+        refs: [],
+      };
+    },
+    async commitTraceSourceDelta(delta) {
+      commits += 1;
+      assert.equal(delta.intent, null);
+      assert.deepEqual(delta.intentNodes, []);
+      assert.deepEqual(delta.intentRefs, []);
+      return { idempotent: false };
+    },
+  }, {}, {
+    async scanRepository() {
+      return { mode: "unchanged", available: true, refs: [], commits: [] };
+    },
+    createTraceSourceDelta(registration, scan, { intentSource }) {
+      assert.equal(intentSource, null);
+      return {
+        repositoryId: registration.repositoryId,
+        available: scan.available,
+        intent: null,
+        intentNodes: [],
+        intentRefs: [],
+      };
+    },
+  });
+  assert.equal(commits, 1);
+  assert.equal(repositories[0].status, "committed");
+  assert.equal(repositories[0].intent, "cleared");
 });
 
 test("executes status, exclusions, reset, sync, and reindex through injectable services", async () => {
@@ -814,6 +897,7 @@ test("real sidecar sync registers and incrementally commits an explicit reposito
   assert.equal(second.repositories.length, 1);
   assert.equal(second.repositories[0].status, "unchanged");
   assert.equal(second.repositories[0].commits, 0);
+  assert.equal(second.repositories[0].intent, "unchanged");
 });
 
 test("sync shadow-rebuilds a populated Fact V1 database into complete Fact V2", {

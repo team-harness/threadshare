@@ -172,6 +172,12 @@ export function parseInsightsInvocation(positionals, options = {}) {
         "--format is only valid for Insights maintenance actions",
       );
     }
+    if (options["clear-intent"] === true) {
+      throw commandError(
+        "TS_USAGE_OPTION_NOT_ALLOWED",
+        "--clear-intent is only valid for insights sync",
+      );
+    }
     return Object.freeze({ action: "dashboard", format, regenerateSecret: false });
   }
   if (!ACTIONS.has(action)) {
@@ -207,12 +213,19 @@ export function parseInsightsInvocation(positionals, options = {}) {
       "--intent is only valid for insights sync",
     );
   }
+  if (options["clear-intent"] === true && action !== "sync") {
+    throw commandError(
+      "TS_USAGE_OPTION_NOT_ALLOWED",
+      "--clear-intent is only valid for insights sync",
+    );
+  }
   if (action !== "exclude") {
     if (operation !== undefined || kind !== undefined || value !== undefined) {
       throw commandError("TS_USAGE_UNEXPECTED_ARGUMENT", `Unexpected argument for insights ${action}`);
     }
     const repository = options.repository;
     const intent = options.intent;
+    const clearIntent = options["clear-intent"] === true;
     if (
       action === "sync" &&
       repository !== undefined &&
@@ -229,6 +242,18 @@ export function parseInsightsInvocation(positionals, options = {}) {
         "--intent requires --repository",
       );
     }
+    if (clearIntent && repository === undefined) {
+      throw commandError(
+        "TS_USAGE_OPTION_DEPENDENCY",
+        "--clear-intent requires --repository",
+      );
+    }
+    if (clearIntent && intent !== undefined) {
+      throw commandError(
+        "TS_USAGE_OPTION_NOT_ALLOWED",
+        "--intent and --clear-intent cannot be used together",
+      );
+    }
     if (intent !== undefined && (typeof intent !== "string" || intent.trim() === "")) {
       throw commandError("TS_USAGE_INVALID_VALUE", "--intent must be a non-empty relative path");
     }
@@ -240,6 +265,7 @@ export function parseInsightsInvocation(positionals, options = {}) {
       ...(action === "sync" ? {
         repository: repository?.trim() ?? null,
         intent: intent?.trim() ?? null,
+        clearIntent,
       } : {}),
     });
   }
@@ -359,8 +385,14 @@ export async function syncRegisteredRepositories(config, engine, privacyContext,
           privacyContext,
           signal: options.signal,
         });
+    const intentChanged = hasIntentSource
+      ? intentSource.revision !== state.intentRevision
+      : typeof state.intentRevision === "string";
+    const intentStatus = intentChanged
+      ? hasIntentSource ? "updated" : "cleared"
+      : "unchanged";
     if (scan.mode === "unchanged") {
-      if (hasIntentSource && intentSource.revision !== state.intentRevision) {
+      if (intentChanged) {
         scan = Object.freeze({ ...scan, mode: "intent" });
       } else {
         reports.push(Object.freeze({
@@ -368,17 +400,18 @@ export async function syncRegisteredRepositories(config, engine, privacyContext,
           status: "unchanged",
           refs: scan.refs.length,
           commits: 0,
+          intent: intentStatus,
         }));
         continue;
       }
     }
-    if (scan.mode === "unavailable" && state.available === false &&
-        (!hasIntentSource || intentSource.revision === state.intentRevision)) {
+    if (scan.mode === "unavailable" && state.available === false && !intentChanged) {
       reports.push(Object.freeze({
         repositoryId: registration.repositoryId,
         status: "unavailable",
         refs: scan.refs.length,
         commits: 0,
+        intent: intentStatus,
       }));
       continue;
     }
@@ -396,6 +429,7 @@ export async function syncRegisteredRepositories(config, engine, privacyContext,
         : outcome.idempotent ? "unchanged" : "committed",
       refs: scan.refs.length,
       commits: scan.commits.length,
+      intent: intentStatus,
     }));
   }
   return Object.freeze(reports);
@@ -717,10 +751,11 @@ function defaultServices(options) {
       paths,
       includeEngineStatus: false,
     })).databasePresent,
-    sync: async ({ repository, intent }) => {
+    sync: async ({ repository, intent, clearIntent }) => {
       await registerRequestedInsightsRepository(repository, {
         ...options.repositoryOptions,
         intentPath: intent,
+        clearIntent,
         configOptions: { ...options.configOptions, paths },
       });
       return reconcileActiveInsights({ ...options, paths });
@@ -752,6 +787,7 @@ export async function executeInsightsCommand(invocation, options = {}) {
     const result = await services.sync({
       repository: invocation.repository,
       intent: invocation.intent,
+      clearIntent: invocation.clearIntent,
     });
     const mode = result.format === "threadshare-insights-reindex@v1"
       ? "initialized"
@@ -900,12 +936,16 @@ export function formatInsightsCommandResult(result, format = "text") {
     const repositorySummary = result.repositories.length === 0
       ? null
       : `Repositories: ${result.repositories.length}; committed commits: ${result.repositories.reduce((total, item) => total + item.commits, 0)}; unchanged: ${result.repositories.filter((item) => item.status === "unchanged").length}; unavailable: ${result.repositories.filter((item) => item.status === "unavailable").length}`;
+    const intentSummary = result.repositories.length === 0
+      ? null
+      : `Intent: cleared ${result.repositories.filter((item) => item.intent === "cleared").length}; updated ${result.repositories.filter((item) => item.intent === "updated").length}; unchanged ${result.repositories.filter((item) => item.intent === "unchanged").length}`;
     return [
       "Insights sync complete.",
       `Mode: ${result.mode}`,
       `Committed: ${report.committed}; unchanged: ${report.unchanged}; excluded: ${report.excluded}; missing: ${report.missing}; failed: ${report.failed}`,
       `Purge: ${purge.state}; maintenance batches: ${purge.batches}`,
       repositorySummary,
+      intentSummary,
       "",
     ].filter((line) => line !== null).join("\n");
   }

@@ -68,6 +68,27 @@ test("repository registration separates Git discovery from config persistence", 
   assert.deepEqual(calls, ["resolve:./repo", "persist:9:docs/intent.md"]);
 });
 
+test("repository registration explicitly forwards Intent removal", async () => {
+  let persisted;
+  await registerInsightsRepository("./repo", {
+    clearIntent: true,
+    async resolveRepository() {
+      return {
+        commonDirectory: "/work/repo/.git",
+        rootDirectory: "/work/repo",
+        commonDirectoryDevice: "7",
+        commonDirectoryInode: "9",
+      };
+    },
+    async updateRegistration(registration) {
+      persisted = registration;
+      return { changed: true, repository: { repositoryId: "opaque-id", ...registration } };
+    },
+  });
+  assert.equal(persisted.clearIntent, true);
+  assert.equal(Object.hasOwn(persisted, "intentPath"), false);
+});
+
 test("sync without an explicit repository performs zero Git discovery", async () => {
   let resolutions = 0;
   const result = await registerRequestedInsightsRepository(null, {

@@ -74,6 +74,134 @@ function nodeIdentity(value) {
     : null;
 }
 
+const DELIVERY_KIND_LABELS = Object.freeze({
+  intent: "Requirement",
+  repository: "Repository",
+  session: "Agent session",
+  turn: "Agent turn",
+  "capability-use": "Tool or Skill use",
+  file: "Changed file",
+  "git-commit": "Commit",
+});
+
+const DELIVERY_RELATION_LABELS = Object.freeze({
+  "intent-declares-session": "Requirement names this Agent session",
+  "intent-declares-commit": "Requirement names this commit",
+  "session-contains-turn": "Turn belongs to this Agent session",
+  "turn-contains-capability-use": "Tool or Skill was used in this turn",
+  "session-touched-file": "Agent session touched this file",
+  "commit-changed-file": "Commit changed this file",
+  "session-observed-commit": "Agent observed this commit result",
+  "session-correlates-commit": "Agent session is linked to this commit",
+  "intent-correlates-session": "Requirement is linked to this Agent session",
+  "contextual-same-file": "Items touched the same file",
+});
+
+const DELIVERY_SOURCE_LABELS = Object.freeze({
+  "intent-explicit-session-ref": "Explicit session reference in the requirement",
+  "intent-explicit-commit-ref": "Explicit commit reference in the requirement",
+  "session-membership": "Recorded Agent session membership",
+  "turn-membership": "Recorded Agent turn membership",
+  "normalized-file-event": "Recorded file activity",
+  "git-tree-diff": "Git commit tree",
+  "observed-git-result": "Successful git commit output observed in the Agent session",
+  "ordered-exact-path-overlap": "Matching file paths in the same delivery window",
+  "unique-text-overlap": "Unique text overlap",
+  "same-file-history": "Shared file history",
+});
+
+const DELIVERY_LIMITATION_LABELS = Object.freeze({
+  "not-authorship": "This link does not prove who authored the commit.",
+  "not-exclusive-line-attribution": "This link does not prove that every changed line came from this Agent session.",
+  "not-causality": "This link shows association, not causation.",
+  "incomplete-timestamps": "Some timestamps were unavailable.",
+  "unverified-intent-reference": "The requirement reference could not be independently verified.",
+  "unreachable-commit": "The commit is not reachable from the current repository state.",
+  "path-only-context": "This link is based only on shared file paths.",
+  "candidate-not-default": "This possible link is hidden unless candidate evidence is requested.",
+});
+
+export function deliveryKindLabel(kind) {
+  return DELIVERY_KIND_LABELS[kind] ?? "Evidence item";
+}
+
+export function humanizeDeliveryEdge(edge) {
+  const limitations = Array.isArray(edge?.limitations)
+    ? edge.limitations.map((value) => DELIVERY_LIMITATION_LABELS[value] ?? "This evidence has an unspecified limitation.")
+    : [];
+  return Object.freeze({
+    relation: DELIVERY_RELATION_LABELS[edge?.relation] ?? "These items are linked",
+    source: DELIVERY_SOURCE_LABELS[edge?.source] ?? "Recorded delivery evidence",
+    strength: edge?.strength === "direct"
+      ? "Direct evidence"
+      : edge?.strength === "observed"
+        ? "Observed evidence"
+        : edge?.strength === "candidate"
+          ? "Possible link"
+          : "Context only",
+    limitations: Object.freeze(limitations),
+  });
+}
+
+export function deliveryTraceViewModel(trace) {
+  const counts = {
+    intent: 0,
+    repository: 0,
+    session: 0,
+    turn: 0,
+    "capability-use": 0,
+    file: 0,
+    "git-commit": 0,
+  };
+  for (const item of trace?.nodes ?? []) {
+    if (Object.hasOwn(counts, item.kind)) counts[item.kind] += 1;
+  }
+  const rootIdentity = nodeIdentity(trace?.root);
+  const root = (trace?.nodes ?? []).find((item) => nodeIdentity(item) === rootIdentity) ?? trace?.root ?? null;
+  const title = root?.label || root?.attributes?.path || (root?.kind === "git-commit"
+    ? root?.attributes?.shortHash
+    : null) || (typeof root?.key === "string" ? root.key.slice(0, 12) : "Select delivery evidence");
+  let summary;
+  if (root?.kind === "git-commit") {
+    summary = `${counts.session} Agent session${counts.session === 1 ? "" : "s"} and ${counts.file} changed file${counts.file === 1 ? "" : "s"} are linked to this commit.`;
+  } else if (root?.kind === "intent") {
+    summary = `${counts.session} Agent session${counts.session === 1 ? "" : "s"} and ${counts["git-commit"]} commit${counts["git-commit"] === 1 ? "" : "s"} are linked to this requirement.`;
+  } else if (root?.kind === "session") {
+    summary = `This Agent session is linked to ${counts["git-commit"]} commit${counts["git-commit"] === 1 ? "" : "s"} and ${counts.file} changed file${counts.file === 1 ? "" : "s"}.`;
+  } else {
+    summary = `${counts.intent} requirement${counts.intent === 1 ? "" : "s"}, ${counts.session} Agent session${counts.session === 1 ? "" : "s"}, and ${counts["git-commit"]} commit${counts["git-commit"] === 1 ? "" : "s"} are linked in this delivery trace.`;
+  }
+  const strengths = new Set((trace?.edges ?? []).map((edge) => edge.strength));
+  const evidence = strengths.has("direct")
+    ? "Direct evidence is available."
+    : strengths.has("observed")
+      ? "Observed evidence links these items."
+      : strengths.has("candidate")
+        ? "Only possible links are available."
+        : strengths.has("contextual")
+          ? "Only contextual links are available."
+          : "No delivery evidence is linked yet.";
+  const limitations = [...new Set((trace?.edges ?? [])
+    .flatMap((edge) => humanizeDeliveryEdge(edge).limitations))];
+  return Object.freeze({
+    title,
+    summary,
+    evidence,
+    counts: Object.freeze(counts),
+    edgeCount: (trace?.edges ?? []).length,
+    limitations: Object.freeze(limitations),
+  });
+}
+
+export function dashboardDiagnosticMessage(code) {
+  const messages = {
+    TS_INSIGHTS_STORAGE_FAILED: "Some delivery details could not be read. Refresh this view, or run `threadshare insights sync --repository .`.",
+    TS_INSIGHTS_ENGINE_UNAVAILABLE: "The saved index was found, but live Insights queries are unavailable.",
+    TS_OPERATION_FAILED: "The request did not complete. Refresh this view and try again.",
+  };
+  return messages[code] ?? "The request did not complete. Refresh this view and try again.";
+}
+
 export function relatedTraceNodeKeys(trace, selected) {
   const selectedIdentity = nodeIdentity(selected);
   if (selectedIdentity === null || !Array.isArray(trace?.edges)) return [];
