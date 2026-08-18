@@ -1,12 +1,45 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde_json::Value;
+use rusqlite::Connection;
+use serde_json::{Value, json};
+use threadshare_insights_engine::delivery_graph_repository::{
+    GitCommitDelta, RepositoryDelta, RepositoryRefDelta, TraceSourceDeltaV1,
+};
+use threadshare_insights_engine::evidence_path::EvidencePathFamily;
 use threadshare_insights_engine::fact_model::{
-    CapabilityTerminalState, DedupeClosure, DuplicateConfidence, DuplicateMethod,
-    SessionFactsDeltaV1,
+    CapabilityTerminalState, Completeness, DedupeClosure, DuplicateConfidence, DuplicateMethod,
+    HistoryEventFact, SessionFactsDeltaV1, StableKey, expected_history_event_revision,
 };
 use threadshare_insights_engine::query::{QueryError, SearchOrderBy, SearchRequest};
 use threadshare_insights_engine::storage::EngineStorage;
+
+static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+struct TemporaryDatabase {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl TemporaryDatabase {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "threadshare-query-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("engine.sqlite3");
+        Self { directory, path }
+    }
+}
+
+impl Drop for TemporaryDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
 
 fn fixture_delta() -> SessionFactsDeltaV1 {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -567,4 +600,270 @@ fn observed_timestamp_filters_use_a_half_open_canonical_range() {
     assert_eq!(matches(1_786_323_600_000, 1_786_323_600_001), 1);
     assert_eq!(matches(1_786_323_600_001, 1_786_323_700_000), 0);
     assert_eq!(matches(1_786_323_500_000, 1_786_323_600_000), 0);
+}
+
+fn key(byte: u8) -> StableKey {
+    StableKey::from_bytes([byte; 32])
+}
+
+/// Registers the same repository the delivery-trace tests use, whose project keys are
+/// `"3"*64` and `"4"*64`. Neither appears in the fixture remap table, so a session can
+/// opt into repository coverage by claiming `"3"*64` and opt out by claiming anything else.
+fn delivery_trace_source(object_ids: &[String]) -> TraceSourceDeltaV1 {
+    TraceSourceDeltaV1 {
+        format: "threadshare-insights-trace-source-delta@v1".to_owned(),
+        delta_id: "0".repeat(64),
+        expected_generation: "0".to_owned(),
+        target_generation: "1".to_owned(),
+        repository: RepositoryDelta {
+            repository_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            repository_key: "1".repeat(64),
+            available: true,
+            ref_digest: "2".repeat(64),
+            scm_provider: Some("github".to_owned()),
+            web_base_url: Some("https://github.com".to_owned()),
+            repository_path: Some("team-harness/threadshare".to_owned()),
+            project_keys: vec!["3".repeat(64), "4".repeat(64)],
+        },
+        intent: None,
+        refs: object_ids
+            .iter()
+            .enumerate()
+            .map(|(index, object_id)| RepositoryRefDelta {
+                name: format!("refs/heads/test-{index}"),
+                object_id: object_id.clone(),
+            })
+            .collect(),
+        commits: object_ids
+            .iter()
+            .map(|object_id| GitCommitDelta {
+                object_id: object_id.clone(),
+                parent_object_ids: vec![],
+                author_timestamp: "2026-08-16T12:51:32.000Z".to_owned(),
+                committer_timestamp: "2026-08-16T12:51:32.000Z".to_owned(),
+                tree_object_id: "b".repeat(40),
+                summary: "feat(insights): add delivery trace".to_owned(),
+                files: vec![],
+            })
+            .collect(),
+        intent_nodes: vec![],
+        intent_refs: vec![],
+    }
+}
+
+/// Rewrites every stable key in the fixture to a variant-specific value so each call
+/// produces an independent session, then gives it its own dedupe fingerprint.
+fn delivery_variant_delta(
+    variant: u8,
+    project_key: Option<StableKey>,
+    commit_metadata: Option<serde_json::Value>,
+) -> SessionFactsDeltaV1 {
+    let mut delta = remapped_fixture_delta(
+        ['9', 'a', 'b', 'c', '1', 'd', 'f', '2', '5', '6']
+            .into_iter()
+            .enumerate()
+            .map(|(slot, source)| {
+                (
+                    source.to_string().repeat(64),
+                    format!("1{variant}{slot:02}").repeat(16),
+                )
+            })
+            .collect(),
+    );
+    delta.format = "session-facts-delta@v2".to_owned();
+    delta.fact_schema_version = 2;
+    delta.privacy_policy_version = 2;
+    delta.provider_adapter_version = "codex@3".to_owned();
+    delta.session.project_key = project_key;
+    delta.session.dedupe_fingerprint = Some(format!("2{variant}").repeat(32).parse().unwrap());
+    delta.session.duplicate_method = Some(DuplicateMethod::ExplicitLineage);
+    delta.session.duplicate_confidence = Some(DuplicateConfidence::Strong);
+    delta.session.dedupe_closure = Some(DedupeClosure::HardSealed);
+    // The fixture pins `sourceMtimeNs` at u64::MAX, which no wall clock can ever exceed,
+    // so the closure classifier would call every session open and the path builder would
+    // reject all of them. Move the checkpoint into the past instead of moving the clock.
+    delta.checkpoint.source_mtime_ns = "1700000000000000000".parse().unwrap();
+    if let Some(metadata) = commit_metadata {
+        let first = delta.evidence_events[0].common();
+        let mut event = HistoryEventFact {
+            event_key: format!("3{variant}").repeat(32).parse().unwrap(),
+            owner_session_key: first.owner_session_key,
+            occurred_turn_key: first.occurred_turn_key,
+            source_record_key: first.source_record_key,
+            source_order: threadshare_insights_engine::fact_model::SourceOrder {
+                event_ordinal: 22,
+                ..first.source_order.clone()
+            },
+            origin_scope: first.origin_scope,
+            observed_timestamp: Some("2026-08-16T12:51:32.694Z".to_owned()),
+            kind: "capability-result".to_owned(),
+            completeness: Completeness::Full,
+            revision: key(0),
+            metadata,
+            payload_keys: Vec::new(),
+        };
+        event.revision = expected_history_event_revision(&event, &[]).unwrap();
+        delta.history_events.push(event);
+    }
+    delta
+}
+
+/// Seeds the five Turns the delivery outcome counts are read from, one per outcome the
+/// classifier can reach, so a caller can assert the whole partition instead of a single bucket.
+fn seed_delivery_outcome_fixture(storage: &mut EngineStorage) {
+    let full_hash = "a".repeat(40);
+    let abbreviated = format!("5184a5c{}", "0".repeat(33));
+    let covered = Some(key(0x33));
+    let variants = vec![
+        // Two Turns whose result carried a full commit hash: `turn-observed-commit`, direct.
+        delivery_variant_delta(
+            0,
+            covered,
+            Some(json!({
+                "providerState": "completed",
+                "observedGitCommitObjectIds": [full_hash.clone()]
+            })),
+        ),
+        delivery_variant_delta(
+            1,
+            covered,
+            Some(json!({
+                "providerState": "completed",
+                "observedGitCommitObjectIds": [full_hash.clone()]
+            })),
+        ),
+        // A unique abbreviated prefix only ever correlates: `turn-correlates-commit`, observed.
+        delivery_variant_delta(
+            2,
+            covered,
+            Some(json!({
+                "providerState": "completed",
+                "observedGitCommitPrefixes": ["5184a5c"]
+            })),
+        ),
+        // Covered by the repository but observed no commit at all.
+        delivery_variant_delta(3, covered, None),
+        // Outside every registered repository: delivery is unknown, not absent.
+        delivery_variant_delta(4, Some(key(0x77)), None),
+    ];
+
+    for delta in variants {
+        storage.apply_session_facts(delta).unwrap();
+    }
+    storage
+        .apply_trace_source_delta(delivery_trace_source(&[full_hash, abbreviated]))
+        .unwrap();
+}
+
+/// Reads the single path family the seeded fixture produces, so a caller can assert the whole
+/// delivery partition rather than one bucket.
+fn seeded_delivery_family(storage: &mut EngineStorage) -> EvidencePathFamily {
+    let response = storage
+        .search(SearchRequest {
+            providers: vec!["codex".to_owned()],
+            path_limit: 20,
+            // A day past the fixture's last observation, so the closure classifier can
+            // call these sessions quiescent and the path builder accepts them.
+            now_unix_ms: 1_786_410_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+
+    assert!(!response.evidence_paths.insufficient_sample);
+    assert_eq!(response.evidence_paths.eligible_turn_count, 5);
+    response.evidence_paths.families[0].clone()
+}
+
+/// Asserts the family reports each Turn under the outcome its own evidence supports, and that the
+/// four counts still partition the family. A Turn that fell out of every bucket, or into two,
+/// would leave the counts unreadable.
+fn assert_delivery_partition(family: &EvidencePathFamily, expected: [u16; 4]) {
+    let outcome = &family.delivery_outcome;
+    assert_eq!(
+        [
+            outcome.direct_commit_turn_count,
+            outcome.observed_commit_turn_count,
+            outcome.no_delivery_turn_count,
+            outcome.uncovered_turn_count,
+        ],
+        expected,
+        "each Turn belongs to the outcome its own evidence supports"
+    );
+    assert_eq!(
+        expected.iter().sum::<u16>(),
+        family.turn_count,
+        "the four counts must partition the family"
+    );
+}
+
+/// Asserts the seeded fixture's outcome. A Turn whose delivery could not be observed at all must
+/// land in `uncoveredTurnCount`; counting it as `noDelivery` would read as "this path ships
+/// nothing".
+fn assert_seeded_delivery_outcome(storage: &mut EngineStorage) {
+    assert_delivery_partition(&seeded_delivery_family(storage), [2, 1, 1, 1]);
+}
+
+#[test]
+fn path_family_delivery_outcome_is_read_from_the_projected_delivery_graph() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    seed_delivery_outcome_fixture(&mut storage);
+    assert_seeded_delivery_outcome(&mut storage);
+}
+
+/// A repository the last scan could not read reports no commits, so no Turn under it can gain a
+/// delivery edge. Calling those Turns `noDelivery` would state that the path ships nothing about a
+/// repository nobody could look at, so they move to `uncovered` instead.
+///
+/// The Turns whose commits were already observed keep their attribution: that observation happened,
+/// and losing read access afterwards does not unmake it. So the degraded scan moves exactly the one
+/// Turn that had nothing to show for itself.
+#[test]
+fn a_repository_the_last_scan_could_not_read_moves_undelivered_turns_to_uncovered() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    seed_delivery_outcome_fixture(&mut storage);
+    assert_seeded_delivery_outcome(&mut storage);
+
+    // A degraded scan keeps the refs and commits it last saw and reports no new commits, so the
+    // only thing this delta changes is whether the repository could be read.
+    let mut degraded =
+        delivery_trace_source(&["a".repeat(40), format!("5184a5c{}", "0".repeat(33))]);
+    degraded.delta_id = "1".repeat(64);
+    degraded.expected_generation = "1".to_owned();
+    degraded.target_generation = "2".to_owned();
+    degraded.repository.available = false;
+    degraded.commits.clear();
+    storage.apply_trace_source_delta(degraded).unwrap();
+
+    assert_delivery_partition(&seeded_delivery_family(&mut storage), [2, 1, 0, 2]);
+}
+
+/// An index written before edge generations existed carries Session-level edges and no
+/// Turn-level ones. Opening it must reproject rather than stamp the current generation over the
+/// older edges: without the Turn edges every historical Turn reads as `noDelivery`, and a marker
+/// written without reprojecting would keep that reading frozen for the life of the index.
+#[test]
+fn opening_a_pre_generation_database_reprojects_turn_level_delivery_edges() {
+    let database = TemporaryDatabase::new();
+    let mut storage = EngineStorage::open(&database.path).unwrap();
+    seed_delivery_outcome_fixture(&mut storage);
+    assert_seeded_delivery_outcome(&mut storage);
+    drop(storage);
+
+    let connection = Connection::open(&database.path).unwrap();
+    connection
+        .execute(
+            "DELETE FROM delivery_trace_edges WHERE from_kind='turn'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM engine_metadata WHERE key='delivery_graph_edges'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut reopened = EngineStorage::open(&database.path).unwrap();
+    assert_seeded_delivery_outcome(&mut reopened);
 }

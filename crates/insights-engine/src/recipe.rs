@@ -14,7 +14,9 @@ use crate::analyzer::{AnalyzerError, analyze_query};
 use crate::deep_query::{
     DeepCoverage, DeepMatchingCoverage, DeepProvenance, DeepProvenanceField, assemble_coverage,
 };
+use crate::evidence_path::RepeatBucket;
 use crate::fts_projection::HistoryFtsMatchExpression;
+use crate::hash_key;
 use crate::query::{QueryError, query_failed};
 
 pub const RECIPE_REQUEST_FORMAT: &str = "threadshare-insights-recipe-request@v1";
@@ -123,14 +125,14 @@ impl RecipeResponse {
         if total < self.items.len() || self.truncated != (total > self.items.len()) {
             return Err(invalid("recipe response counts are inconsistent"));
         }
-        for item in &self.items {
-            validate_recipe_item(self.name, item)?;
+        for (index, item) in self.items.iter().enumerate() {
+            validate_recipe_item(self.name, item, index)?;
         }
         Ok(())
     }
 }
 
-fn validate_recipe_item(name: RecipeName, item: &Value) -> Result<(), QueryError> {
+fn validate_recipe_item(name: RecipeName, item: &Value, index: usize) -> Result<(), QueryError> {
     match name {
         RecipeName::CapabilityContexts => {
             let item = exact_object(
@@ -364,11 +366,26 @@ fn validate_recipe_item(name: RecipeName, item: &Value) -> Result<(), QueryError
                     "metadata",
                     "turnKey",
                     "turnRevision",
+                    "repeatGroup",
+                    "sequenceOrdinal",
                     "evidence",
                 ],
             )?;
             if !item["metadata"].is_object() {
                 return Err(invalid("recipe timeline metadata must be an object"));
+            }
+            // The ordinal is only useful as an ordering key if it matches the position the
+            // reader receives, so a mismatch is a rejected response rather than a hint.
+            if item["sequenceOrdinal"] != json!(index) {
+                return Err(invalid(
+                    "recipe timeline sequenceOrdinal does not match the item position",
+                ));
+            }
+            if !item["repeatGroup"].is_null() {
+                let group = exact_object(&item["repeatGroup"], &["groupKey", "bucket"])?;
+                if !matches!(group["bucket"].as_str(), Some("1" | "2-3" | "4+")) {
+                    return Err(invalid("recipe timeline repeat bucket is unrecognized"));
+                }
             }
             validate_evidence_target(&item["evidence"])?;
         }
@@ -3119,24 +3136,86 @@ fn session_timeline(
     request: &RecipeRequest,
 ) -> Result<Vec<Value>, QueryError> {
     let (scope, values) = event_scope(request, None)?;
+    // `event_use` bridges a history event to the capability uses it belongs to through the
+    // recorded `capability_use_evidence` links, so the recipe never has to guess which
+    // invocation a result answers. `use_group` keys a repeat group on
+    // (Turn, capability, input fingerprint) and `group_size` counts distinct uses rather
+    // than events: one use contributes both an invocation and a result event, so counting
+    // events would report a single command as two attempts.
+    //
+    // `event_group` then requires every use linked to an event to land in one and the same
+    // group before the event carries a `repeatGroup`. An event that a provider linked to two
+    // uses in different groups has no recorded answer to "which attempt is this", and
+    // ADR-0003 says a null belongs there rather than whichever use happened to sort first.
+    //
+    // Every bridge CTE is confined to the Sessions the request already selects. Scoping them
+    // does not move `group_size`: a group key contains a Turn key, a Turn belongs to exactly
+    // one Session, so an in-scope group has all of its uses in scope too.
     let sql = format!(
-        "SELECT lower(hex(he.event_key)),lower(hex(he.revision)),he.observed_timestamp,
+        "WITH scoped_sessions(session_id) AS MATERIALIZED (
+           SELECT DISTINCT he.session_id
+           FROM history_events he
+           JOIN sessions s ON s.session_id=he.session_id
+           WHERE {scope}
+         ),
+         event_use AS (
+           SELECT ee.event_key AS event_key,cue.use_id AS use_id
+           FROM capability_use_evidence cue
+           JOIN scoped_sessions scoped ON scoped.session_id=cue.session_id
+           JOIN evidence_events ee ON ee.event_id=cue.event_id
+           GROUP BY ee.event_key,cue.use_id
+         ),
+         use_group AS (
+           SELECT cu.use_id AS use_id,t.turn_key AS turn_key,
+                  c.capability_key AS capability_key,cu.input_fingerprint AS input_fingerprint
+           FROM capability_uses cu
+           JOIN turns t ON t.turn_id=cu.turn_id
+           JOIN scoped_sessions scoped ON scoped.session_id=t.session_id
+           JOIN capabilities c ON c.capability_id=cu.capability_id
+           WHERE cu.input_fingerprint IS NOT NULL
+         ),
+         group_size AS (
+           SELECT turn_key,capability_key,input_fingerprint,COUNT(*) AS use_count
+           FROM use_group GROUP BY turn_key,capability_key,input_fingerprint
+         ),
+         event_group AS (
+           SELECT eu.event_key AS event_key,COUNT(*) AS linked_use_count,
+                  COUNT(ug.use_id) AS grouped_use_count,
+                  COUNT(DISTINCT hex(ug.turn_key)||':'||hex(ug.capability_key)
+                                 ||':'||hex(ug.input_fingerprint)) AS distinct_group_count,
+                  MIN(ug.turn_key) AS turn_key,MIN(ug.capability_key) AS capability_key,
+                  MIN(ug.input_fingerprint) AS input_fingerprint
+           FROM event_use eu
+           LEFT JOIN use_group ug ON ug.use_id=eu.use_id
+           GROUP BY eu.event_key
+         )
+         SELECT lower(hex(he.event_key)),lower(hex(he.revision)),he.observed_timestamp,
                 he.event_kind,he.origin_scope,he.completeness,he.metadata_json,
                 CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END,
                 CASE WHEN t.revision IS NULL THEN NULL ELSE lower(hex(t.revision)) END,
                 (SELECT lower(hex(event_payload.payload_key))
                  FROM history_payloads event_payload
                  WHERE event_payload.event_key=he.event_key
-                 ORDER BY event_payload.payload_key LIMIT 1)
+                 ORDER BY event_payload.payload_key LIMIT 1),
+                eg.turn_key,eg.capability_key,eg.input_fingerprint,gs.use_count
          FROM history_events he
          JOIN sessions s ON s.session_id=he.session_id
          LEFT JOIN turns t ON t.turn_id=he.occurred_turn_id
+         LEFT JOIN event_group eg ON eg.event_key=he.event_key
+          AND eg.linked_use_count=eg.grouped_use_count AND eg.distinct_group_count=1
+         LEFT JOIN group_size gs ON gs.turn_key=eg.turn_key
+          AND gs.capability_key=eg.capability_key
+          AND gs.input_fingerprint=eg.input_fingerprint
          WHERE {scope}
          ORDER BY he.record_start_offset,he.content_index,he.event_ordinal,he.event_key"
     );
+    // The scope predicate is bound twice: once for the Session subset the bridge CTEs read
+    // and once for the events the timeline returns.
+    let mut bound = values.clone();
+    bound.extend(values);
     let mut statement = connection.prepare(&sql).map_err(query_failed)?;
     statement
-        .query_map(params_from_iter(values), |row| {
+        .query_map(params_from_iter(bound), |row| {
             let event_key: String = row.get(0)?;
             let revision: String = row.get(1)?;
             let payload_key: Option<String> = row.get(9)?;
@@ -3150,12 +3229,40 @@ fn session_timeline(
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 "turnKey":row.get::<_, Option<String>>(7)?,
                 "turnRevision":row.get::<_, Option<String>>(8)?,
+                "repeatGroup":timeline_repeat_group(row)?,
                 "evidence":evidence,
             }))
         })
         .map_err(query_failed)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(query_failed)
+        .enumerate()
+        .map(|(ordinal, item)| {
+            let mut item = item.map_err(query_failed)?;
+            item["sequenceOrdinal"] = json!(ordinal);
+            Ok(item)
+        })
+        .collect()
+}
+
+/// Reads the repeat-group columns for one timeline row. Returns `Value::Null` unless the
+/// event is linked to a capability use that carries an input fingerprint: without a
+/// recorded fingerprint there is no evidence that two events are the same attempt, and
+/// ADR-0003 forbids the browser from inferring one. The key is domain-separated and
+/// includes the Turn so a group never spans Turns, which is the scope a reader collapses.
+fn timeline_repeat_group(row: &rusqlite::Row<'_>) -> Result<Value, rusqlite::Error> {
+    let (Some(turn_key), Some(capability_key), Some(input_fingerprint), Some(use_count)) = (
+        row.get::<_, Option<Vec<u8>>>(10)?,
+        row.get::<_, Option<Vec<u8>>>(11)?,
+        row.get::<_, Option<Vec<u8>>>(12)?,
+        row.get::<_, Option<i64>>(13)?,
+    ) else {
+        return Ok(Value::Null);
+    };
+    let group_key = hash_key(
+        "timeline-repeat-group",
+        &[turn_key, capability_key, input_fingerprint],
+    );
+    let bucket = RepeatBucket::from_count(usize::try_from(use_count).unwrap_or(usize::MAX));
+    Ok(json!({"groupKey":group_key,"bucket":bucket.as_str()}))
 }
 
 fn read_recipe_coverage(

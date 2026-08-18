@@ -1,5 +1,5 @@
 use threadshare_insights_engine::evidence_path::{
-    DedupeConfidence, EvidencePathTurn, ToolPathUse, build_evidence_paths,
+    DedupeConfidence, EvidencePathTurn, ToolPathUse, TurnDeliveryAttribution, build_evidence_paths,
 };
 use threadshare_insights_engine::fact_model::{
     CapabilityTerminalState, OriginScope, ProviderVisibility, SessionScope,
@@ -7,7 +7,16 @@ use threadshare_insights_engine::fact_model::{
 use threadshare_insights_engine::query::ClosureFilter;
 
 fn turn(index: u8, group: u8) -> EvidencePathTurn {
+    turn_delivering(index, group, TurnDeliveryAttribution::Uncovered)
+}
+
+fn turn_delivering(
+    index: u8,
+    group: u8,
+    delivery_attribution: TurnDeliveryAttribution,
+) -> EvidencePathTurn {
     EvidencePathTurn {
+        delivery_attribution,
         turn_key: format!("turn-{index}"),
         session_key: format!("session-{index}"),
         provider: "codex".to_owned(),
@@ -176,4 +185,53 @@ fn support_threshold_is_applied_to_each_family() {
     let report = build_evidence_paths(&candidates, 20);
     assert!(report.insufficient_sample);
     assert!(report.families.is_empty());
+}
+
+#[test]
+fn delivery_outcome_partitions_a_family_and_separates_uncovered_from_undelivered() {
+    let attributions = [
+        TurnDeliveryAttribution::Direct,
+        TurnDeliveryAttribution::Direct,
+        TurnDeliveryAttribution::Observed,
+        TurnDeliveryAttribution::None,
+        TurnDeliveryAttribution::Uncovered,
+    ];
+    let candidates = attributions
+        .iter()
+        .enumerate()
+        .map(|(index, attribution)| turn_delivering(index as u8, (index % 3) as u8, *attribution))
+        .collect::<Vec<_>>();
+
+    let report = build_evidence_paths(&candidates, 20);
+    assert_eq!(report.families.len(), 1);
+    let outcome = &report.families[0].delivery_outcome;
+    assert_eq!(outcome.direct_commit_turn_count, 2);
+    assert_eq!(outcome.observed_commit_turn_count, 1);
+    assert_eq!(outcome.no_delivery_turn_count, 1);
+    assert_eq!(outcome.uncovered_turn_count, 1);
+    assert_eq!(
+        outcome.direct_commit_turn_count
+            + outcome.observed_commit_turn_count
+            + outcome.no_delivery_turn_count
+            + outcome.uncovered_turn_count,
+        report.families[0].turn_count
+    );
+}
+
+#[test]
+fn delivery_outcome_does_not_change_the_path_family_shape() {
+    let delivered = (0..5)
+        .map(|index| turn_delivering(index, index % 3, TurnDeliveryAttribution::Direct))
+        .collect::<Vec<_>>();
+    let uncovered = (0..5)
+        .map(|index| turn(index, index % 3))
+        .collect::<Vec<_>>();
+
+    let delivered = build_evidence_paths(&delivered, 20);
+    let uncovered = build_evidence_paths(&uncovered, 20);
+    assert_eq!(
+        delivered.families[0].fingerprint,
+        uncovered.families[0].fingerprint
+    );
+    assert_eq!(delivered.families[0].nodes, uncovered.families[0].nodes);
 }

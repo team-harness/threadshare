@@ -11,7 +11,8 @@ use crate::analyzer::{
     SEARCH_PROJECTION_VERSION, analyze_document, analyze_query,
 };
 use crate::evidence_path::{
-    DedupeConfidence, EvidencePathReport, EvidencePathTurn, ToolPathUse, build_evidence_paths,
+    DedupeConfidence, EvidencePathReport, EvidencePathTurn, ToolPathUse, TurnDeliveryAttribution,
+    build_evidence_paths,
 };
 use crate::fact_model::{CapabilityTerminalState, OriginScope, ProviderVisibility, SessionScope};
 use crate::fts_projection::{FtsField, FtsMatchExpression, lookup_field_document_frequencies};
@@ -1247,6 +1248,7 @@ fn read_path_turn(
         .collect::<Result<Vec<_>, _>>()
         .map_err(query_failed)?;
     Ok(EvidencePathTurn {
+        delivery_attribution: read_turn_delivery_attribution(connection, candidate.turn_id)?,
         turn_key: result.turn_key.clone(),
         session_key: candidate.session_key.clone(),
         provider: result.provider.clone(),
@@ -1264,6 +1266,47 @@ fn read_path_turn(
         }),
         observed_eof_provisional: observed_eof_provisional(candidate),
         tools,
+    })
+}
+
+/// Reads one Turn's delivery attribution from the projected delivery graph rather than
+/// re-deriving it: the commit-correlation algorithm lives in the delivery projection alone.
+/// A project with no registered repository yields `Uncovered`, never `None`, so an
+/// unindexed workspace cannot read as a path that ships nothing.
+///
+/// A registered repository that the last scan could not read counts as no coverage for the
+/// same reason. Such a scan carries no commits, so no Turn under it can gain a delivery edge;
+/// calling those Turns `None` would report "this path ships nothing" about a repository nobody
+/// could look at. `available` describes the most recent scan rather than the moment the Turn
+/// happened, so these counts move back once the repository can be read again -- which is what a
+/// Derived reading is for, and what a reader of the counts has to know.
+fn read_turn_delivery_attribution(
+    connection: &Connection,
+    turn_id: i64,
+) -> Result<TurnDeliveryAttribution, QueryError> {
+    let row = connection
+        .query_row(
+            "SELECT
+               EXISTS (SELECT 1 FROM repository_project_keys p
+                       JOIN repository_sources source ON source.repository_id=p.repository_id
+                       WHERE p.project_key=s.project_key AND source.available=1),
+               (SELECT MIN(CASE edge.relation WHEN 'turn-observed-commit' THEN 0 ELSE 1 END)
+                FROM repository_project_keys p
+                JOIN delivery_trace_edges edge ON edge.repository_id=p.repository_id
+                 AND edge.from_kind='turn' AND edge.from_key=t.turn_key
+                 AND edge.relation IN ('turn-observed-commit','turn-correlates-commit')
+                WHERE p.project_key=s.project_key)
+             FROM turns t JOIN sessions s ON s.session_id=t.session_id
+             WHERE t.turn_id=?1",
+            [turn_id],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .map_err(query_failed)?;
+    Ok(match row {
+        (_, Some(0)) => TurnDeliveryAttribution::Direct,
+        (_, Some(_)) => TurnDeliveryAttribution::Observed,
+        (true, None) => TurnDeliveryAttribution::None,
+        (false, None) => TurnDeliveryAttribution::Uncovered,
     })
 }
 

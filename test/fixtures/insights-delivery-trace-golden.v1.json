@@ -137,7 +137,8 @@
       "unresolvedRefCount": "0",
       "excludedCandidateEdgeCount": "1",
       "excludedContextualEdgeCount": "1",
-      "unreachableCommitCount": "0"
+      "unreachableCommitCount": "0",
+      "unselectedRepositoryCount": "0"
     }
   },
   "classifierCases": [

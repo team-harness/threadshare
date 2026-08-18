@@ -89,9 +89,17 @@
         "repeatBucket": { "enum": ["1", "2-3", "4+"] }
       }
     },
+    "deliveryOutcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["directCommitTurnCount", "observedCommitTurnCount", "noDeliveryTurnCount", "uncoveredTurnCount"],
+      "properties": {
+        "directCommitTurnCount": { "$ref": "#/$defs/decimal" }, "observedCommitTurnCount": { "$ref": "#/$defs/decimal" },
+        "noDeliveryTurnCount": { "$ref": "#/$defs/decimal" }, "uncoveredTurnCount": { "$ref": "#/$defs/decimal" }
+      }
+    },
     "pathFamily": {
       "type": "object", "additionalProperties": false,
-      "required": ["nodes", "truncated", "bestRelevancePpm", "turnCount", "rawSessionCount", "independentGroupCount", "strongGroupCount", "weakGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount", "latestAt", "toolStateCounts", "evidenceTurnKeys"],
+      "required": ["nodes", "truncated", "bestRelevancePpm", "turnCount", "rawSessionCount", "independentGroupCount", "strongGroupCount", "weakGroupCount", "observedEofProvisionalGroupCount", "unknownDedupeSessionCount", "latestAt", "toolStateCounts", "deliveryOutcome", "evidenceTurnKeys"],
       "properties": {
         "nodes": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/pathNode" } },
         "truncated": { "type": "boolean" },
@@ -105,6 +113,7 @@
         "unknownDedupeSessionCount": { "$ref": "#/$defs/decimal" },
         "latestAt": { "$ref": "#/$defs/nullableTimestamp" },
         "toolStateCounts": { "$ref": "#/$defs/stateCounts" },
+        "deliveryOutcome": { "$ref": "#/$defs/deliveryOutcome" },
         "evidenceTurnKeys": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/hex64" } }
       }
     },

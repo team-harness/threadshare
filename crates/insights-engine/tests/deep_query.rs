@@ -12,9 +12,11 @@ use threadshare_insights_engine::delivery_trace::{
     DeliveryTraceRequest, TraceDirection, TraceNodeKind, TraceNodeRef,
 };
 use threadshare_insights_engine::fact_model::{
-    Completeness, HistoryEventFact, HistoryPayloadChunkFact, HistoryPayloadFact,
-    HistoryPayloadKind, PayloadEncoding, SessionFactsDeltaV1, StableKey, WireU64,
-    expected_history_event_revision,
+    CapabilityInvocationEvent, CapabilityResultEvent, CapabilityUseEvidenceFact,
+    CapabilityUseEvidenceRole, CapabilityUseFact, Completeness, EventCommon, EvidenceEvent,
+    EvidencePointer, HistoryEventFact, HistoryPayloadChunkFact, HistoryPayloadFact,
+    HistoryPayloadKind, PayloadEncoding, ResultProviderState, SessionFactsDeltaV1, SourceOrder,
+    StableKey, WireU64, expected_history_event_revision,
 };
 use threadshare_insights_engine::hash_key;
 use threadshare_insights_engine::recipe::{
@@ -274,6 +276,112 @@ fn fixture_delta_v2_with_typed_resources() -> SessionFactsDeltaV1 {
             "providerState": "completed"
         }),
     );
+    delta
+}
+
+fn capability_event_common(
+    template: &EventCommon,
+    event_key: StableKey,
+    event_ordinal: u16,
+) -> EventCommon {
+    EventCommon {
+        event_key,
+        source_order: SourceOrder {
+            event_ordinal,
+            ..template.source_order.clone()
+        },
+        pointer: EvidencePointer {
+            event_ordinal,
+            ..template.pointer.clone()
+        },
+        ..template.clone()
+    }
+}
+
+/// Gives the fixture a second capability use that repeats the first one's input fingerprint
+/// inside the same Turn, and one extra recorded event per use. Two uses across four events
+/// is the shape that separates counting uses from counting events: an event count would
+/// bucket this repeat group as `4+` instead of `2-3`.
+fn fixture_delta_v2_with_repeated_capability_uses() -> SessionFactsDeltaV1 {
+    let mut delta = fixture_delta_v2_with_typed_resources();
+    let EvidenceEvent::CapabilityInvocation(first) = delta.evidence_events[1].clone() else {
+        panic!("fixture evidence event 1 is not a capability invocation");
+    };
+    let first_use = delta.capability_uses[0].clone();
+    let second_use_key = key(0x92);
+
+    for (event_key, ordinal) in [(key(0x91), 2), (key(0x94), 4)] {
+        delta
+            .evidence_events
+            .push(EvidenceEvent::CapabilityResult(CapabilityResultEvent {
+                common: capability_event_common(&first.common, event_key, ordinal),
+                correlation_digest: first.correlation_digest,
+                provider_state: ResultProviderState::Pending,
+                exit_code: None,
+                output_bytes: None,
+                duration_ms: None,
+            }));
+    }
+    delta
+        .evidence_events
+        .push(EvidenceEvent::CapabilityInvocation(
+            CapabilityInvocationEvent {
+                common: capability_event_common(&first.common, key(0x93), 3),
+                ..first.clone()
+            },
+        ));
+    delta.capability_uses.push(CapabilityUseFact {
+        use_key: second_use_key,
+        turn_ordinal: first_use.turn_ordinal + 1,
+        ..first_use.clone()
+    });
+    for (use_key, event_key, role) in [
+        (
+            first_use.use_key,
+            key(0x91),
+            CapabilityUseEvidenceRole::Result,
+        ),
+        (
+            second_use_key,
+            key(0x93),
+            CapabilityUseEvidenceRole::Invocation,
+        ),
+        (second_use_key, key(0x94), CapabilityUseEvidenceRole::Result),
+    ] {
+        delta
+            .capability_use_evidence
+            .push(CapabilityUseEvidenceFact {
+                owner_session_key: delta.session.session_key,
+                use_key,
+                event_key,
+                role,
+            });
+    }
+    for (ordinal, (event_key, kind)) in [
+        (first.common.event_key, "capability-invocation"),
+        (key(0x91), "capability-result"),
+        (key(0x93), "capability-invocation"),
+        (key(0x94), "capability-result"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut metadata = json!({
+            "capabilityKey": first.capability_key,
+            "correlationDigest": key(0x55)
+        });
+        if kind == "capability-result" {
+            metadata["providerState"] = json!("pending");
+        }
+        push_history_event(
+            &mut delta,
+            event_key,
+            20 + u16::try_from(ordinal).unwrap(),
+            kind,
+            "2026-08-10T01:00:06.000Z",
+            metadata,
+        );
+    }
     delta
 }
 
@@ -1914,4 +2022,375 @@ fn ambiguous_abbreviated_commit_result_does_not_create_a_session_edge() {
         format!("5184a5c{}", "1".repeat(33)),
     ]);
     assert!(trace["edges"].as_array().unwrap().is_empty());
+}
+
+fn trace_for_commit_observation(
+    root: TraceNodeRef,
+    direction: TraceDirection,
+    metadata: serde_json::Value,
+    object_ids: &[String],
+) -> serde_json::Value {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut session_delta = fixture_delta_v2();
+    session_delta.session.project_key = Some(key(0x33));
+    push_history_event(
+        &mut session_delta,
+        key(0x93),
+        22,
+        "capability-result",
+        "2026-08-16T12:51:32.694Z",
+        metadata,
+    );
+    storage.apply_session_facts(session_delta).unwrap();
+    storage
+        .apply_trace_source_delta(abbreviated_commit_trace_source(object_ids))
+        .unwrap();
+    serde_json::to_value(
+        storage
+            .read_delivery_trace(
+                "22222222-2222-4222-8222-222222222222",
+                &DeliveryTraceRequest {
+                    format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                    root,
+                    window: None,
+                    direction,
+                    max_depth: 1,
+                    include_candidate_edges: false,
+                    include_contextual_edges: false,
+                    limit: 10,
+                    cursor: None,
+                    evaluated_at: "2026-08-16T13:00:00.000Z".to_owned(),
+                },
+            )
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn turn_root() -> TraceNodeRef {
+    TraceNodeRef {
+        kind: TraceNodeKind::Turn,
+        key: key(0xbb).to_string(),
+    }
+}
+
+#[test]
+fn a_full_commit_hash_result_attributes_delivery_to_the_observing_turn() {
+    let object_id = "a".repeat(40);
+    let trace = trace_for_commit_observation(
+        turn_root(),
+        TraceDirection::Outgoing,
+        json!({
+            "providerState": "completed",
+            "observedGitCommitObjectIds": [object_id.clone()]
+        }),
+        &[object_id],
+    );
+    assert_eq!(trace["root"]["kind"], "turn");
+    let edge = trace["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["relation"] == "turn-observed-commit")
+        .unwrap();
+    assert_eq!(edge["strength"], "direct");
+    assert_eq!(edge["source"], "observed-git-result");
+    assert_eq!(edge["from"]["kind"], "turn");
+    assert_eq!(edge["facts"], json!([{"kind":"full-commit-hash"}]));
+    assert_eq!(
+        edge["limitations"],
+        json!(["not-authorship", "not-exclusive-line-attribution"])
+    );
+}
+
+#[test]
+fn a_unique_abbreviated_commit_result_correlates_the_observing_turn() {
+    let trace = trace_for_commit_observation(
+        turn_root(),
+        TraceDirection::Outgoing,
+        json!({
+            "providerState": "completed",
+            "observedGitCommitPrefixes": ["5184a5c"]
+        }),
+        &[format!("5184a5c{}", "0".repeat(33))],
+    );
+    let edge = trace["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["relation"] == "turn-correlates-commit")
+        .unwrap();
+    assert_eq!(edge["strength"], "observed");
+    assert_eq!(
+        edge["facts"],
+        json!([{"kind":"unique-abbreviated-commit-hash"}])
+    );
+}
+
+#[test]
+fn an_ambiguous_abbreviated_commit_result_does_not_attribute_a_turn() {
+    let trace = trace_for_commit_observation(
+        turn_root(),
+        TraceDirection::Outgoing,
+        json!({
+            "providerState": "completed",
+            "observedGitCommitPrefixes": ["5184a5c"]
+        }),
+        &[
+            format!("5184a5c{}", "0".repeat(33)),
+            format!("5184a5c{}", "1".repeat(33)),
+        ],
+    );
+    assert!(trace["edges"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_commit_root_resolves_the_turn_that_observed_it() {
+    let object_id = "a".repeat(40);
+    let commit_key = hash_key(
+        "git-commit",
+        &[vec![0x11u8; 32], object_id.as_bytes().to_vec()],
+    );
+    let trace = trace_for_commit_observation(
+        TraceNodeRef {
+            kind: TraceNodeKind::GitCommit,
+            key: commit_key,
+        },
+        TraceDirection::Both,
+        json!({
+            "providerState": "completed",
+            "observedGitCommitObjectIds": [object_id.clone()]
+        }),
+        &[object_id],
+    );
+    let turn = trace["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["kind"] == "turn")
+        .expect("commit root should resolve the observing turn node");
+    assert_eq!(turn["key"], key(0xbb).to_string());
+    assert_eq!(turn["attributes"]["sessionKey"], key(0xaa).to_string());
+    assert!(turn["revision"].is_string());
+}
+
+/// A Trace answers from one repository's edges. Several registered repositories can claim the same
+/// project key -- re-initializing a working path as a fresh Git directory leaves the previous
+/// registration in place by design -- and the Trace still reads only the first of them. Saying how
+/// many it left out is the difference between a partial answer and a partial answer that looks
+/// complete.
+#[test]
+fn a_turn_root_claimed_by_two_repositories_reports_the_one_it_left_out() {
+    let object_id = "a".repeat(40);
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut session_delta = fixture_delta_v2();
+    session_delta.session.project_key = Some(key(0x33));
+    push_history_event(
+        &mut session_delta,
+        key(0x93),
+        22,
+        "capability-result",
+        "2026-08-16T12:51:32.694Z",
+        json!({
+            "providerState": "completed",
+            "observedGitCommitObjectIds": [object_id.clone()]
+        }),
+    );
+    storage.apply_session_facts(session_delta).unwrap();
+    storage
+        .apply_trace_source_delta(abbreviated_commit_trace_source(&[object_id]))
+        .unwrap();
+
+    // A second registration claiming the same project key: its own generation starts at zero, and
+    // its id sorts after the first, so the Trace keeps reading the repository it already read.
+    let mut second = abbreviated_commit_trace_source(&["c".repeat(40)]);
+    second.delta_id = "5".repeat(64);
+    second.repository.repository_id = "33333333-3333-4333-8333-333333333333".to_owned();
+    second.repository.repository_key = "7".repeat(64);
+    second.repository.project_keys = vec!["3".repeat(64), "8".repeat(64)];
+    storage.apply_trace_source_delta(second).unwrap();
+
+    let trace = storage
+        .read_delivery_trace(
+            "22222222-2222-4222-8222-222222222222",
+            &DeliveryTraceRequest {
+                format: "threadshare-insights-delivery-trace-request@v1".to_owned(),
+                root: turn_root(),
+                window: None,
+                direction: TraceDirection::Outgoing,
+                max_depth: 1,
+                include_candidate_edges: false,
+                include_contextual_edges: false,
+                limit: 10,
+                cursor: None,
+                evaluated_at: "2026-08-16T13:00:00.000Z".to_owned(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        trace.coverage.unselected_repository_count, "1",
+        "the second repository claiming this Turn must be reported, not dropped"
+    );
+    // Visibility only: the Trace still reads the same repository and returns the same edge.
+    assert!(
+        trace
+            .edges
+            .iter()
+            .any(|edge| edge.relation.as_str() == "turn-observed-commit"),
+        "reporting the omission must not change which repository the Trace reads"
+    );
+}
+
+#[test]
+fn session_timeline_orders_items_and_marks_repeated_capability_uses() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let delta = fixture_delta_v2_with_repeated_capability_uses();
+    let session_key = delta.session.session_key;
+    storage.apply_session_facts(delta).unwrap();
+
+    let response = storage
+        .read_recipe(&recipe_request(RecipeName::SessionTimeline, session_key))
+        .unwrap();
+    response.validate().unwrap();
+
+    for (ordinal, item) in response.items.iter().enumerate() {
+        assert_eq!(
+            item["sequenceOrdinal"],
+            json!(ordinal),
+            "item {ordinal} must restate its observed position"
+        );
+    }
+
+    let grouped = response
+        .items
+        .iter()
+        .filter(|item| !item["repeatGroup"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        grouped.len(),
+        4,
+        "each of the four events linked to a fingerprinted use must carry a repeat group"
+    );
+    let group_key = grouped[0]["repeatGroup"]["groupKey"].clone();
+    assert!(group_key.as_str().is_some_and(|key| key.len() == 64));
+    for item in &grouped {
+        assert_eq!(item["repeatGroup"]["groupKey"], group_key);
+        assert_eq!(
+            item["repeatGroup"]["bucket"], "2-3",
+            "two uses across four events is two attempts, not four"
+        );
+        assert!(!item["turnKey"].is_null());
+    }
+
+    let ungrouped = response
+        .items
+        .iter()
+        .filter(|item| item["repeatGroup"].is_null())
+        .count();
+    assert!(
+        ungrouped > 0,
+        "events with no recorded fingerprinted use must stay unmarked rather than be guessed"
+    );
+}
+
+#[test]
+fn session_timeline_repeat_groups_do_not_span_turns() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let mut delta = fixture_delta_v2_with_repeated_capability_uses();
+    let session_key = delta.session.session_key;
+    let baseline = {
+        let mut storage = EngineStorage::open_in_memory().unwrap();
+        storage.apply_session_facts(delta.clone()).unwrap();
+        storage
+            .read_recipe(&recipe_request(RecipeName::SessionTimeline, session_key))
+            .unwrap()
+    };
+
+    // Move the repeating use onto a second Turn. The capability and the input fingerprint
+    // are unchanged, so a Turn-blind group key would keep both uses in one group.
+    let mut second_turn = delta.turns[0].clone();
+    second_turn.turn_key = key(0x95);
+    second_turn.turn_start_offset = wire(u64::MAX - 1);
+    delta.turns.push(second_turn);
+    delta.capability_uses[1].turn_key = key(0x95);
+    storage.apply_session_facts(delta).unwrap();
+    let response = storage
+        .read_recipe(&recipe_request(RecipeName::SessionTimeline, session_key))
+        .unwrap();
+
+    let group_keys = |response: &threadshare_insights_engine::recipe::RecipeResponse| {
+        response
+            .items
+            .iter()
+            .filter_map(|item| item["repeatGroup"]["groupKey"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(group_keys(&baseline).len(), 1);
+    assert_eq!(
+        group_keys(&response).len(),
+        2,
+        "splitting the uses across Turns must split the repeat group"
+    );
+    for item in &response.items {
+        if item["repeatGroup"].is_null() {
+            continue;
+        }
+        assert_eq!(
+            item["repeatGroup"]["bucket"], "1",
+            "one use per Turn is a single attempt"
+        );
+    }
+}
+
+/// A provider can link one event to two capability uses: a shared result line, a corroborating
+/// record. When those uses sit in different repeat groups the event carries no recorded answer to
+/// "which attempt is this", so the timeline reports no group at all rather than whichever use
+/// happens to sort first.
+#[test]
+fn session_timeline_leaves_an_event_spanning_two_repeat_groups_unmarked() {
+    let mut delta = fixture_delta_v2_with_repeated_capability_uses();
+    let session_key = delta.session.session_key;
+
+    // Split the two uses across Turns so they fall into different groups, then link the final
+    // result event to both of them.
+    let mut second_turn = delta.turns[0].clone();
+    second_turn.turn_key = key(0x95);
+    second_turn.turn_start_offset = wire(u64::MAX - 1);
+    delta.turns.push(second_turn);
+    delta.capability_uses[1].turn_key = key(0x95);
+    delta
+        .capability_use_evidence
+        .push(CapabilityUseEvidenceFact {
+            owner_session_key: session_key,
+            use_key: delta.capability_uses[0].use_key,
+            event_key: key(0x94),
+            role: CapabilityUseEvidenceRole::Corroboration,
+        });
+
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(delta).unwrap();
+    let response = storage
+        .read_recipe(&recipe_request(RecipeName::SessionTimeline, session_key))
+        .unwrap();
+    response.validate().unwrap();
+
+    let shared = response
+        .items
+        .iter()
+        .find(|item| item["eventKey"] == key(0x94).to_string())
+        .expect("the shared result event must still appear on the timeline");
+    assert!(
+        shared["repeatGroup"].is_null(),
+        "an event linked to two repeat groups has no single attempt to report"
+    );
+    // The null belongs to the ambiguous event alone; the events with one resolvable use keep
+    // their groups.
+    assert!(
+        response
+            .items
+            .iter()
+            .any(|item| !item["repeatGroup"].is_null()),
+        "unambiguous events must keep the group their own evidence supports"
+    );
 }

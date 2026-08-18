@@ -447,6 +447,7 @@ fn evidence_paths_wire(report: EvidencePathReport) -> Value {
             "unknownDedupeSessionCount": family.unknown_dedupe_session_count,
             "latestUnixMs": family.latest_unix_ms,
             "toolStateCounts": family.tool_state_counts,
+            "deliveryOutcome": family.delivery_outcome,
             "evidenceTurnKeys": family.evidence_turn_keys,
         })).collect::<Vec<_>>(),
     })
@@ -1531,8 +1532,9 @@ mod tests {
     use threadshare_insights_engine::agent_query::UsageOrderBy;
     use threadshare_insights_engine::delivery_graph_repository::RepositoryDelta;
     use threadshare_insights_engine::evidence_path::{
-        DedupeConfidence, EvidenceLink, EvidencePathFamily, EvidencePathReport, PathNode,
-        RepeatBucket, SafeEventPayload, SafeEvidenceEvent, ToolStateCounts,
+        DedupeConfidence, EvidenceLink, EvidencePathFamily, EvidencePathReport,
+        FamilyDeliveryOutcome, PathNode, RepeatBucket, SafeEventPayload, SafeEvidenceEvent,
+        ToolStateCounts,
     };
     use threadshare_insights_engine::fact_model::CapabilityTerminalState;
     use threadshare_insights_engine::query::{
@@ -2069,7 +2071,12 @@ mod tests {
 
     #[test]
     fn query_wire_mapping_excludes_internal_identity_and_error_content() {
-        let path = evidence_paths_wire(EvidencePathReport {
+        // The same report travels through `evidence_paths_wire` and out through
+        // `validate_protocol_message` below. Two copies of the family shape -- one written by
+        // hand in the validator's own tests, one produced here -- drifted apart once already
+        // and left the Engine unable to emit any frame carrying a family, so the wire mapping
+        // and the frame validator are held to the same value from here on.
+        let report = EvidencePathReport {
             insufficient_sample: false,
             paths_truncated: true,
             raw_match_count: 5,
@@ -2099,9 +2106,16 @@ mod tests {
                 unknown_dedupe_session_count: 0,
                 latest_unix_ms: 1_786_320_000_000,
                 tool_state_counts: ToolStateCounts::default(),
+                delivery_outcome: FamilyDeliveryOutcome {
+                    direct_commit_turn_count: 2,
+                    observed_commit_turn_count: 1,
+                    no_delivery_turn_count: 1,
+                    uncovered_turn_count: 1,
+                },
                 evidence_turn_keys: vec!["3".repeat(64)],
             }],
-        });
+        };
+        let path = evidence_paths_wire(report.clone());
         assert_eq!(path["pathsTruncated"], true);
         assert!(
             path["families"][0]["nodes"][0]
@@ -2151,20 +2165,7 @@ mod tests {
                     exact: true,
                     relevance_ppm: 950_000,
                 }],
-                evidence_paths: EvidencePathReport {
-                    insufficient_sample: true,
-                    paths_truncated: false,
-                    raw_match_count: 1,
-                    eligible_turn_count: 1,
-                    raw_session_count: 1,
-                    independent_group_count: 1,
-                    strong_group_count: 1,
-                    weak_group_count: 0,
-                    observed_eof_provisional_group_count: 1,
-                    unknown_dedupe_count: 0,
-                    unknown_dedupe_session_count: 0,
-                    families: Vec::new(),
-                },
+                evidence_paths: report,
                 diagnostic: QueryDiagnostic::default(),
             },
             SearchTrace {

@@ -170,11 +170,12 @@ const TRACE_STRENGTHS = new Set(["direct", "observed", "candidate", "contextual"
 const TRACE_RELATIONS = new Set([
   "intent-declares-session", "intent-declares-commit", "session-contains-turn",
   "turn-contains-capability-use", "session-touched-file", "commit-changed-file",
-  "session-observed-commit", "session-correlates-commit", "intent-correlates-session",
-  "contextual-same-file",
+  "session-observed-commit", "session-correlates-commit", "turn-observed-commit",
+  "turn-correlates-commit", "intent-correlates-session", "contextual-same-file",
 ]);
 const TRACE_DERIVED_RELATIONS = new Set([
-  "session-correlates-commit", "intent-correlates-session", "contextual-same-file",
+  "session-correlates-commit", "turn-correlates-commit", "intent-correlates-session",
+  "contextual-same-file",
 ]);
 const TRACE_SOURCES = new Set([
   "intent-explicit-session-ref", "intent-explicit-commit-ref", "session-membership",
@@ -1633,6 +1634,26 @@ function assertToolStateCounts(counts, label) {
   }
 }
 
+const PATH_DELIVERY_OUTCOME_FIELDS = [
+  "directCommitTurnCount",
+  "observedCommitTurnCount",
+  "noDeliveryTurnCount",
+  "uncoveredTurnCount",
+];
+
+/** Counts must exhaust the family's Turns, so an unattributed Turn cannot pass as unclassified. */
+function assertPathDeliveryOutcome(outcome, label, turnCount) {
+  assertExactKeys(outcome, label, PATH_DELIVERY_OUTCOME_FIELDS);
+  let total = 0;
+  for (const field of PATH_DELIVERY_OUTCOME_FIELDS) {
+    assertSafeInteger(outcome[field], `${label}.${field}`, { min: 0, max: MAX_SEARCH_RESULTS });
+    total += outcome[field];
+  }
+  if (total !== turnCount) {
+    throw invalidFrame(`${label} counts do not partition the family turn count`);
+  }
+}
+
 function assertPathFamily(family, label) {
   assertExactKeys(family, label, [
     "fingerprint",
@@ -1648,6 +1669,7 @@ function assertPathFamily(family, label) {
     "unknownDedupeSessionCount",
     "latestUnixMs",
     "toolStateCounts",
+    "deliveryOutcome",
     "evidenceTurnKeys",
   ]);
   assertHex64(family.fingerprint, `${label}.fingerprint`);
@@ -1690,6 +1712,11 @@ function assertPathFamily(family, label) {
     max: Number.MAX_SAFE_INTEGER,
   });
   assertToolStateCounts(family.toolStateCounts, `${label}.toolStateCounts`);
+  assertPathDeliveryOutcome(
+    family.deliveryOutcome,
+    `${label}.deliveryOutcome`,
+    family.turnCount,
+  );
   assertBoundedSortedArray(
     family.evidenceTurnKeys,
     `${label}.evidenceTurnKeys`,
@@ -2701,11 +2728,29 @@ function assertSolutionRecallItem(item, label) {
   assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
 }
 
-function assertSessionTimelineItem(item, label) {
+/**
+ * Timeline items carry an Engine-assigned ordinal so a reader can restate the observed
+ * order without re-deriving it from offsets, and a repeat group so repeated attempts can
+ * be collapsed. `expectedOrdinal` is the item's position in this response: the two must
+ * agree, otherwise the ordinal is not a usable ordering key.
+ */
+function assertSessionTimelineItem(item, label, expectedOrdinal) {
   assertExactKeys(item, label, [
     "eventKey", "revision", "observedAt", "eventKind", "originScope", "completeness",
-    "metadata", "turnKey", "turnRevision", "evidence",
+    "metadata", "turnKey", "turnRevision", "repeatGroup", "sequenceOrdinal", "evidence",
   ]);
+  if (item.sequenceOrdinal !== expectedOrdinal) {
+    throw invalidFrame(`${label}.sequenceOrdinal does not match the item position`);
+  }
+  if (item.repeatGroup !== null) {
+    assertExactKeys(item.repeatGroup, `${label}.repeatGroup`, ["groupKey", "bucket"]);
+    assertHex64(item.repeatGroup.groupKey, `${label}.repeatGroup.groupKey`);
+    assertEnum(item.repeatGroup.bucket, `${label}.repeatGroup.bucket`,
+      new Set(["1", "2-3", "4+"]));
+    if (item.turnKey === null) {
+      throw invalidFrame(`${label}.repeatGroup requires a Turn`);
+    }
+  }
   assertHex64(item.eventKey, `${label}.eventKey`);
   assertHex64(item.revision, `${label}.revision`);
   if (item.observedAt !== null) requiredTimestamp(item.observedAt, `${label}.observedAt`);
@@ -2724,14 +2769,14 @@ function assertSessionTimelineItem(item, label) {
   assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
 }
 
-function assertRecipeItem(name, item, label) {
+function assertRecipeItem(name, item, label, index) {
   if (name === "capability-contexts@1") return assertCapabilityContextItem(item, label);
   if (name === "failure-chains@1") return assertFailureChainItem(item, label);
   if (name === "file-workflow-signals@1") return assertFileWorkflowItem(item, label);
   if (name === "activity-shifts@1") return assertActivityShiftItem(item, label);
   if (name === "token-hotspots@1") return assertTokenHotspotItem(item, label);
   if (name === "solution-recall@1") return assertSolutionRecallItem(item, label);
-  return assertSessionTimelineItem(item, label);
+  return assertSessionTimelineItem(item, label, index);
 }
 
 function assertRecipeResponse(response, label) {
@@ -2754,7 +2799,7 @@ function assertRecipeResponse(response, label) {
     throw invalidFrame(`${label}.items exceeds 50 items`);
   }
   for (let index = 0; index < response.items.length; index += 1) {
-    assertRecipeItem(response.name, response.items[index], `${label}.items[${index}]`);
+    assertRecipeItem(response.name, response.items[index], `${label}.items[${index}]`, index);
   }
   assertDecimal(response.totalItemCount, `${label}.totalItemCount`);
   if (BigInt(response.totalItemCount) < BigInt(response.items.length)) {
@@ -2922,7 +2967,8 @@ function assertTraceEdge(value, label) {
   if (value.relation === "contextual-same-file" && value.strength !== "contextual") {
     throw invalidFrame(`${label} shared-file context cannot be upgraded`);
   }
-  if (value.relation === "session-correlates-commit" && value.strength === "direct") {
+  if ((value.relation === "session-correlates-commit" ||
+       value.relation === "turn-correlates-commit") && value.strength === "direct") {
     throw invalidFrame(`${label} derived commit correlation cannot be direct`);
   }
 }
@@ -3003,14 +3049,14 @@ function assertDeliveryTraceResponse(response, label) {
   }
   assertExactKeys(response.coverage, `${label}.coverage`, [
     "repositoryState", "intentState", "unresolvedRefCount", "excludedCandidateEdgeCount",
-    "excludedContextualEdgeCount", "unreachableCommitCount",
+    "excludedContextualEdgeCount", "unreachableCommitCount", "unselectedRepositoryCount",
   ]);
   assertEnum(response.coverage.repositoryState, `${label}.coverage.repositoryState`,
     TRACE_COVERAGE_STATES);
   assertEnum(response.coverage.intentState, `${label}.coverage.intentState`, TRACE_COVERAGE_STATES);
   for (const field of [
     "unresolvedRefCount", "excludedCandidateEdgeCount", "excludedContextualEdgeCount",
-    "unreachableCommitCount",
+    "unreachableCommitCount", "unselectedRepositoryCount",
   ]) assertDecimal(response.coverage[field], `${label}.coverage.${field}`);
   assertMessagePayloadBound({ response }, label);
 }

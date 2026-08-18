@@ -47,6 +47,84 @@ test("Delivery Trace accepts a uniquely resolved abbreviated commit result", asy
   assert.equal(assertProtocolMessage(message), message);
 });
 
+/**
+ * Adds the Turn that the fixture's Session already owns, plus the two Turn-level commit
+ * attributions the Engine now projects. A commit attributed to a Session says which day of
+ * work produced it; the same commit attributed to a Turn says which attempt produced it, which
+ * is the granularity a reader needs to separate the attempt that landed from the ones before it.
+ */
+function withTurnLevelCommitEdges(response) {
+  const clone = structuredClone(response);
+  const session = clone.nodes.find((node) => node.kind === "session");
+  const commit = clone.nodes.find((node) => node.kind === "git-commit");
+  const turnKey = "1".repeat(64);
+  clone.nodes.push({
+    kind: "turn",
+    key: turnKey,
+    revision: session.revision,
+    label: "Commit the delivery trace",
+    observedAt: session.observedAt,
+    attributes: { sessionKey: session.key },
+  });
+  clone.edges.push({
+    relation: "session-contains-turn",
+    from: { kind: "session", key: session.key },
+    to: { kind: "turn", key: turnKey },
+    strength: "direct",
+    source: "session-membership",
+    facts: [],
+    limitations: [],
+    revision: session.revision,
+  });
+  clone.edges.push({
+    relation: "turn-observed-commit",
+    from: { kind: "turn", key: turnKey },
+    to: { kind: "git-commit", key: commit.key },
+    strength: "direct",
+    source: "observed-git-result",
+    facts: [{ kind: "full-commit-hash" }],
+    limitations: ["not-authorship", "not-exclusive-line-attribution"],
+    revision: session.revision,
+  });
+  return clone;
+}
+
+test("Delivery Trace accepts Turn-level commit attribution and keeps correlation weak", async () => {
+  const value = await fixture();
+  const response = withTurnLevelCommitEdges(value.response);
+  const message = createInsightsDeliveryTraceMessage({
+    requestId: "96",
+    request: value.request,
+    response,
+  });
+  assert.equal(assertProtocolMessage(message), message);
+
+  const abbreviated = structuredClone(response);
+  const turnEdge = abbreviated.edges.at(-1);
+  turnEdge.relation = "turn-correlates-commit";
+  turnEdge.strength = "observed";
+  turnEdge.facts = [{ kind: "unique-abbreviated-commit-hash" }];
+  const correlated = createInsightsDeliveryTraceMessage({
+    requestId: "97",
+    request: value.request,
+    response: abbreviated,
+  });
+  assert.equal(assertProtocolMessage(correlated), correlated);
+
+  // A prefix match resolves to one commit today and can resolve to another after more
+  // commits land, so the edge it produces must never claim the strength of a full hash.
+  const upgraded = structuredClone(abbreviated);
+  upgraded.edges.at(-1).strength = "direct";
+  assert.throws(
+    () => createInsightsDeliveryTraceMessage({
+      requestId: "98",
+      request: value.request,
+      response: upgraded,
+    }),
+    (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+  );
+});
+
 test("Delivery Trace rejects missing endpoints and hidden weak edges", async () => {
   const value = await fixture();
   const missingEndpoint = structuredClone(value.response);

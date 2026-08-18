@@ -117,7 +117,7 @@
     "edge": {
       "type": "object", "additionalProperties": false, "required": ["relation", "from", "to", "strength", "source", "facts", "limitations", "revision"],
       "properties": {
-        "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
+        "relation": { "enum": ["intent-declares-session", "intent-declares-commit", "session-contains-turn", "turn-contains-capability-use", "session-touched-file", "commit-changed-file", "session-observed-commit", "session-correlates-commit", "turn-observed-commit", "turn-correlates-commit", "intent-correlates-session", "contextual-same-file"] },
         "from": { "$ref": "#/$defs/nodeRef" }, "to": { "$ref": "#/$defs/nodeRef" },
         "strength": { "enum": ["direct", "observed", "candidate", "contextual"] },
         "source": { "enum": ["intent-explicit-session-ref", "intent-explicit-commit-ref", "session-membership", "turn-membership", "normalized-file-event", "git-tree-diff", "observed-git-result", "ordered-exact-path-overlap", "unique-text-overlap", "same-file-history"] },
@@ -128,7 +128,7 @@
       "allOf": [{
         "if": {
           "required": ["relation"],
-          "properties": { "relation": { "enum": ["session-correlates-commit", "intent-correlates-session", "contextual-same-file"] } }
+          "properties": { "relation": { "enum": ["session-correlates-commit", "turn-correlates-commit", "intent-correlates-session", "contextual-same-file"] } }
         },
         "then": {
           "properties": {
@@ -139,11 +139,12 @@
       }]
     },
     "coverage": {
-      "type": "object", "additionalProperties": false, "required": ["repositoryState", "intentState", "unresolvedRefCount", "excludedCandidateEdgeCount", "excludedContextualEdgeCount", "unreachableCommitCount"],
+      "type": "object", "additionalProperties": false, "required": ["repositoryState", "intentState", "unresolvedRefCount", "excludedCandidateEdgeCount", "excludedContextualEdgeCount", "unreachableCommitCount", "unselectedRepositoryCount"],
       "properties": {
         "repositoryState": { "enum": ["complete", "partial", "unavailable"] }, "intentState": { "enum": ["complete", "partial", "unavailable"] },
         "unresolvedRefCount": { "$ref": "#/$defs/decimal" }, "excludedCandidateEdgeCount": { "$ref": "#/$defs/decimal" },
-        "excludedContextualEdgeCount": { "$ref": "#/$defs/decimal" }, "unreachableCommitCount": { "$ref": "#/$defs/decimal" }
+        "excludedContextualEdgeCount": { "$ref": "#/$defs/decimal" }, "unreachableCommitCount": { "$ref": "#/$defs/decimal" },
+        "unselectedRepositoryCount": { "$ref": "#/$defs/decimal" }
       }
     }
   }
