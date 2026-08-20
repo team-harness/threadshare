@@ -114,12 +114,34 @@ const MESSAGE_TYPES = new Set([
   "INSIGHTS_RECIPE",
   "READ_INSIGHTS_DELIVERY_TRACE",
   "INSIGHTS_DELIVERY_TRACE",
+  "MEMORY_COMMAND",
+  "MEMORY_RESULT",
   "ABORT_SESSION",
   "SESSION_ABORTED",
   "ABORT_TRACE_SOURCE",
   "TRACE_SOURCE_ABORTED",
   "ERROR",
 ]);
+
+/**
+ * Stage 4a Team Memory op names (`MEMORY_COMMAND.op` / `MEMORY_RESULT.op`),
+ * lowercase kebab-case, mirroring `MEMORY_OPS` in
+ * `crates/insights-engine/src/memory_protocol.rs`.
+ */
+export const MEMORY_OPS = Object.freeze([
+  "open",
+  "bind-repository",
+  "plan-tasks",
+  "claim-task",
+  "submit-extraction",
+  "recall",
+  "submit-adjudication",
+  "sync-approved",
+  "search",
+  "review-queue",
+  "status",
+]);
+const MEMORY_OP_SET = new Set(MEMORY_OPS);
 
 const COMMON_FIELDS = ["format", "type", "requestId"];
 const HEX_64 = /^[0-9a-f]{64}$/u;
@@ -3088,6 +3110,30 @@ function assertInsightsDeliveryTrace(message) {
   assertDeliveryTracePair(message.request, message.response, "INSIGHTS_DELIVERY_TRACE");
 }
 
+/**
+ * Envelope-level validation for the Team Memory `MEMORY_COMMAND`/`MEMORY_RESULT`
+ * pair (design doc §3 DEV-4): the op must be one of the Stage 4a kebab-case ops
+ * and the payload must be a plain object. Op-level deep validation lives in
+ * `memory-state-client.mjs` (zod), matching the Rust side where `MEMORY_RESULT`
+ * is only envelope-validated (crates/insights-engine/src/protocol.rs).
+ */
+function assertMemoryEnvelope(message, type) {
+  assertEnvelope(message, type, ["op", "payload"]);
+  if (typeof message.op !== "string" || !MEMORY_OP_SET.has(message.op)) {
+    throw invalidFrame(`${type}.op ${String(message.op)} is not supported`);
+  }
+  assertPlainObject(message.payload, `${type}.payload`);
+  assertMessagePayloadBound(message, type);
+}
+
+function assertMemoryCommand(message) {
+  assertMemoryEnvelope(message, "MEMORY_COMMAND");
+}
+
+function assertMemoryResult(message) {
+  assertMemoryEnvelope(message, "MEMORY_RESULT");
+}
+
 export function assertGitDiffEvidenceRequest(request, label = "Git diff request") {
   assertExactKeys(request, label, [
     "format", "repositoryKey", "commitObjectId", "parentObjectId", "path", "revision",
@@ -3883,6 +3929,8 @@ function validateProtocolMessage(message, validatedPayloadByteLength = null) {
   else if (message.type === "INSIGHTS_RECIPE") assertInsightsRecipe(message);
   else if (message.type === "READ_INSIGHTS_DELIVERY_TRACE") assertReadInsightsDeliveryTrace(message);
   else if (message.type === "INSIGHTS_DELIVERY_TRACE") assertInsightsDeliveryTrace(message);
+  else if (message.type === "MEMORY_COMMAND") assertMemoryCommand(message);
+  else if (message.type === "MEMORY_RESULT") assertMemoryResult(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
   else if (message.type === "ABORT_TRACE_SOURCE") {
@@ -4636,6 +4684,14 @@ export function createReadInsightsDeliveryTraceMessage({ requestId, request }) {
 
 export function createInsightsDeliveryTraceMessage({ requestId, request, response }) {
   return assertProtocolMessage(envelope("INSIGHTS_DELIVERY_TRACE", requestId, { request, response }));
+}
+
+export function createMemoryCommandMessage({ requestId, op, payload }) {
+  return assertProtocolMessage(envelope("MEMORY_COMMAND", requestId, { op, payload }));
+}
+
+export function createMemoryResultMessage({ requestId, op, payload }) {
+  return assertProtocolMessage(envelope("MEMORY_RESULT", requestId, { op, payload }));
 }
 
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {

@@ -52,9 +52,9 @@ test("resolves a binding with HMAC keys bound to the git identity", async (t) =>
   assert.equal(binding.worktreeKey, hmacHex(SECRET, "memory-worktree", rootRealpath));
   assert.match(binding.rootRealpathDigest, /^[0-9a-f]{64}$/);
   assert.equal(binding.publicRepositoryIdentity, null);
-  assert.ok(Number.isSafeInteger(binding.commonDirectoryIdentity.device));
-  assert.ok(Number.isSafeInteger(binding.commonDirectoryIdentity.inode));
-  assert.ok(binding.commonDirectoryIdentity.inode > 0);
+  assert.match(binding.commonDirectoryIdentity.device, /^(0|[1-9][0-9]*)$/);
+  assert.match(binding.commonDirectoryIdentity.inode, /^(0|[1-9][0-9]*)$/);
+  assert.ok(BigInt(binding.commonDirectoryIdentity.inode) > 0n);
 
   // Determinism and secret separation.
   const again = await resolveRepositoryBinding({ cwd: repository, originSecret: SECRET });

@@ -8,6 +8,7 @@ import {
   INSIGHTS_PROTOCOL_FORMAT,
   INSIGHTS_PROTOCOL_VERSION,
   MAX_PROTOCOL_PAYLOAD_BYTES,
+  MEMORY_OPS,
   RETRACTION_COLLECTION_ORDER,
   UPSERT_COLLECTION_ORDER,
   V2_UPSERT_COLLECTION_ORDER,
@@ -27,6 +28,8 @@ import {
   createInsightsOverviewMessage,
   createListCapabilitiesMessage,
   createListSourceStatesMessage,
+  createMemoryCommandMessage,
+  createMemoryResultMessage,
   createProtocolErrorMessage,
   createPurgeMaintenanceStatusMessage,
   createPurgeStatusMessage,
@@ -596,6 +599,63 @@ test("protocol constants and shared frame vectors stay byte-for-byte stable", as
       vector.name,
     );
   }
+});
+
+test("memory envelope pins the op enum and requires plain-object payloads", () => {
+  assert.deepEqual(MEMORY_OPS, [
+    "open",
+    "bind-repository",
+    "plan-tasks",
+    "claim-task",
+    "submit-extraction",
+    "recall",
+    "submit-adjudication",
+    "sync-approved",
+    "search",
+    "review-queue",
+    "status",
+  ]);
+
+  const payload = { repositoryKey: "1".repeat(64), worktreeKey: "2".repeat(64) };
+  const command = createMemoryCommandMessage({ requestId: "91", op: "status", payload });
+  assert.deepEqual(command, {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "MEMORY_COMMAND",
+    requestId: "91",
+    op: "status",
+    payload,
+  });
+  const result = createMemoryResultMessage({
+    requestId: "91",
+    op: "status",
+    payload: { chunks: {}, tasks: {}, candidates: {} },
+  });
+  assert.equal(assertProtocolMessage(result), result);
+  for (const op of MEMORY_OPS) {
+    assertProtocolMessage(createMemoryCommandMessage({ requestId: "1", op, payload: {} }));
+    assertProtocolMessage(createMemoryResultMessage({ requestId: "1", op, payload: {} }));
+  }
+
+  const invalid = (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME";
+  // Unknown, camelCase, and missing ops are rejected on both envelope types.
+  for (const op of ["promote", "bindRepository", "", undefined]) {
+    assert.throws(() => createMemoryCommandMessage({ requestId: "1", op, payload: {} }), invalid);
+    assert.throws(() => createMemoryResultMessage({ requestId: "1", op, payload: {} }), invalid);
+  }
+  // Payload must be a plain object.
+  for (const payloadValue of [undefined, null, [], "x", 7]) {
+    assert.throws(
+      () => createMemoryCommandMessage({ requestId: "1", op: "open", payload: payloadValue }),
+      invalid,
+    );
+    assert.throws(
+      () => createMemoryResultMessage({ requestId: "1", op: "open", payload: payloadValue }),
+      invalid,
+    );
+  }
+  // The envelope is exact-keyed.
+  assert.throws(() => assertProtocolMessage({ ...command, extra: true }), invalid);
+  assert.throws(() => assertProtocolMessage((({ op: _op, ...rest }) => rest)(command)), invalid);
 });
 
 test("engine status protocol is bounded, read-only, and rejects inconsistent state", () => {

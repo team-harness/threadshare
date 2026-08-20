@@ -30,7 +30,7 @@
           "type": { "enum": ["work_fact", "work_task", "work_method", "work_artifact"] },
           "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
           "confidence": { "enum": ["high", "medium", "low"] },
-          "scene": { "oneOf": [{ "$ref": "#/$defs/slug" }, { "type": "null" }] },
+          "scene": { "oneOf": [{ "$ref": "#/$defs/sceneName" }, { "type": "null" }] },
           "statements": {
             "type": "array",
             "items": {
@@ -108,7 +108,7 @@
   "$defs": {
     "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "sceneName": { "type": "string", "minLength": 1, "maxLength": 200 },
     "nonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "adjudicationBinding": {
       "type": "object",

@@ -20,7 +20,7 @@
           "type": { "enum": ["work_fact", "work_task", "work_method", "work_artifact"] },
           "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
           "confidence": { "enum": ["high", "medium", "low"] },
-          "scene": { "oneOf": [{ "$ref": "#/$defs/slug" }, { "type": "null" }] },
+          "scene": { "oneOf": [{ "$ref": "#/$defs/sceneName" }, { "type": "null" }] },
           "statements": {
             "type": "array",
             "items": {
@@ -41,8 +41,8 @@
   "$defs": {
     "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
-    "nonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "sceneName": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "decimalString": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
     "extractionBinding": {
       "type": "object",
       "additionalProperties": false,
@@ -59,9 +59,9 @@
           }
         },
         "sourceInputDigest": { "$ref": "#/$defs/hex64" },
-        "turnRevisions": { "type": "array", "items": { "$ref": "#/$defs/nonNegativeInteger" } },
+        "turnRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
         "payloadDigests": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
-        "deliveryEdgeRevisions": { "type": "array", "items": { "$ref": "#/$defs/nonNegativeInteger" } },
+        "deliveryEdgeRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
         "promptVersion": { "type": "string", "minLength": 1 },
         "schemaVersion": { "type": "string", "minLength": 1 },
         "chunkerVersion": { "type": "string", "minLength": 1 },
@@ -70,7 +70,7 @@
           "additionalProperties": false,
           "required": ["snapshotSeq", "evaluatedAt"],
           "properties": {
-            "snapshotSeq": { "$ref": "#/$defs/nonNegativeInteger" },
+            "snapshotSeq": { "$ref": "#/$defs/decimalString" },
             "evaluatedAt": { "type": "string", "minLength": 1 }
           }
         }

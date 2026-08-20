@@ -8,6 +8,7 @@ export const MEMORY_HEX64_PATTERN = /^[0-9a-f]{64}$/;
 export const MEMORY_HEX40_PATTERN = /^[0-9a-f]{40}$/;
 export const MEMORY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const MEMORY_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const MEMORY_DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 export const MEMORY_REPOSITORY_BINDING_FORMAT = "threadshare-memory-repository-binding@v1";
 export const MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT =
@@ -26,6 +27,9 @@ const hex64 = z.string().regex(MEMORY_HEX64_PATTERN, "expected lowercase sha256 
 const hex40 = z.string().regex(MEMORY_HEX40_PATTERN, "expected lowercase git object hex40");
 const identifier = z.string().regex(MEMORY_ID_PATTERN, "expected memory identifier");
 const slug = z.string().regex(MEMORY_SLUG_PATTERN, "expected memory slug");
+const decimalString = z.string().regex(MEMORY_DECIMAL_PATTERN, "expected canonical decimal string");
+// Scene names are free-form (Chinese scene names must work), only bounded.
+const sceneName = z.string().min(1).max(200);
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const positiveInteger = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
@@ -53,8 +57,8 @@ export const repositoryBindingSchema = z.object({
   publicRepositoryIdentity: nonEmptyString.nullable(),
   rootRealpathDigest: hex64,
   commonDirectoryIdentity: z.object({
-    device: nonNegativeInteger,
-    inode: nonNegativeInteger,
+    device: decimalString,
+    inode: decimalString,
   }).strict(),
   memoryRoot: z.literal(".threadshare/memory"),
 }).strict();
@@ -118,14 +122,14 @@ const extractionBindingSchema = z.object({
   databaseUuid: nonEmptyString,
   owner: ownerKeysSchema,
   sourceInputDigest: hex64,
-  turnRevisions: z.array(nonNegativeInteger),
+  turnRevisions: z.array(hex64),
   payloadDigests: z.array(hex64),
-  deliveryEdgeRevisions: z.array(nonNegativeInteger),
+  deliveryEdgeRevisions: z.array(hex64),
   promptVersion: nonEmptyString,
   schemaVersion: nonEmptyString,
   chunkerVersion: nonEmptyString,
   provenance: z.object({
-    snapshotSeq: nonNegativeInteger,
+    snapshotSeq: decimalString,
     evaluatedAt: nonEmptyString,
   }).strict(),
 }).strict();
@@ -185,7 +189,7 @@ const draftCandidateShape = {
   type: candidateTypeSchema,
   priority: priorityInteger,
   confidence: z.enum(["high", "medium", "low"]),
-  scene: slug.nullable(),
+  scene: sceneName.nullable(),
   statements: z.array(statementSchema),
 };
 
@@ -283,7 +287,7 @@ export const adjudicationResultSchema = z.object({
       content: nonEmptyString.optional(),
       type: candidateTypeSchema.optional(),
       priority: priorityInteger.optional(),
-      scene: slug.nullable().optional(),
+      scene: sceneName.nullable().optional(),
       occurred: z.array(nonEmptyString).optional(),
     }).strict().nullable(),
   }).strict()),

@@ -66,12 +66,11 @@ function sha256Hex(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function toSafeInteger(field, value) {
-  const asNumber = Number(value);
-  if (!Number.isSafeInteger(asNumber)) {
-    throw repositoryError("MEMORY_REPOSITORY_IDENTITY_UNAVAILABLE", `${field} exceeds the safe integer range`);
+function toDecimalString(field, value) {
+  if (typeof value !== "bigint" || value < 0n) {
+    throw repositoryError("MEMORY_REPOSITORY_IDENTITY_UNAVAILABLE", `${field} is not a non-negative bigint`);
   }
-  return asNumber;
+  return value.toString(10);
 }
 
 function stripRepositoryPath(rawPath) {
@@ -196,8 +195,8 @@ export async function resolveRepositoryBinding({ cwd, repositoryPath, originSecr
     publicRepositoryIdentity,
     rootRealpathDigest: sha256Hex(worktreeRealpath),
     commonDirectoryIdentity: Object.freeze({
-      device: toSafeInteger("device", identity.dev),
-      inode: toSafeInteger("inode", identity.ino),
+      device: toDecimalString("device", identity.dev),
+      inode: toDecimalString("inode", identity.ino),
     }),
     memoryRoot: MEMORY_ROOT,
   });

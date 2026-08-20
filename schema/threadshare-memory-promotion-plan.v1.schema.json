@@ -31,7 +31,7 @@
     "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "hex40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "nonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "decimalString": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
     "repositoryBinding": {
       "type": "object",
       "additionalProperties": false,
@@ -47,8 +47,8 @@
           "additionalProperties": false,
           "required": ["device", "inode"],
           "properties": {
-            "device": { "$ref": "#/$defs/nonNegativeInteger" },
-            "inode": { "$ref": "#/$defs/nonNegativeInteger" }
+            "device": { "$ref": "#/$defs/decimalString" },
+            "inode": { "$ref": "#/$defs/decimalString" }
           }
         },
         "memoryRoot": { "const": ".threadshare/memory" }

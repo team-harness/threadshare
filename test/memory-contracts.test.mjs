@@ -13,6 +13,7 @@ import {
   MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT,
   MEMORY_CONSOLIDATION_PATCH_FORMAT,
   MEMORY_CONTRACT_FORMATS,
+  MEMORY_DECIMAL_PATTERN,
   MEMORY_EVIDENCE_ASSESSMENT_FORMAT,
   MEMORY_EXTRACTION_TASK_FORMAT,
   MEMORY_HEX40_PATTERN,
@@ -51,7 +52,7 @@ function repositoryBinding() {
     worktreeKey: HEX("2"),
     publicRepositoryIdentity: "github.com/team-harness/threadshare",
     rootRealpathDigest: HEX("3"),
-    commonDirectoryIdentity: { device: 16777232, inode: 987654 },
+    commonDirectoryIdentity: { device: "16777232", inode: "987654" },
     memoryRoot: ".threadshare/memory",
   };
 }
@@ -122,13 +123,13 @@ function extractionBinding() {
     databaseUuid: "11111111-2222-4333-8444-555555555555",
     owner: { repositoryKey: HEX("1"), worktreeKey: HEX("2") },
     sourceInputDigest: HEX("9"),
-    turnRevisions: [1, 2, 3],
+    turnRevisions: [HEX("4"), HEX("5"), HEX("6")],
     payloadDigests: [HEX("a")],
-    deliveryEdgeRevisions: [1],
+    deliveryEdgeRevisions: [HEX("7")],
     promptVersion: "extraction-prompt@1",
     schemaVersion: "threadshare-memory-extraction-task@v1",
     chunkerVersion: "chunker@1",
-    provenance: { snapshotSeq: 42, evaluatedAt: "2026-08-20T00:00:00.000Z" },
+    provenance: { snapshotSeq: "42", evaluatedAt: "2026-08-20T00:00:00.000Z" },
   };
 }
 
@@ -435,6 +436,70 @@ test("validation patterns pin the documented shapes", () => {
   assert.doesNotMatch("Release-Workflow", MEMORY_SLUG_PATTERN);
   assert.doesNotMatch("-release", MEMORY_SLUG_PATTERN);
   assert.doesNotMatch(`a${"b".repeat(64)}`, MEMORY_SLUG_PATTERN);
+});
+
+test("rev2 type corrections: wire revisions are hex64, sequences and identity are decimal strings", () => {
+  // provenance.snapshotSeq is a canonical decimal string.
+  assert.match("0", MEMORY_DECIMAL_PATTERN);
+  assert.match("42", MEMORY_DECIMAL_PATTERN);
+  assert.doesNotMatch("042", MEMORY_DECIMAL_PATTERN);
+  assert.doesNotMatch("", MEMORY_DECIMAL_PATTERN);
+  assert.doesNotMatch("-1", MEMORY_DECIMAL_PATTERN);
+
+  // RepositoryBinding.commonDirectoryIdentity.device/inode are decimal strings.
+  const binding = repositoryBinding();
+  assert.throws(() => repositoryBindingSchema.parse({
+    ...binding,
+    commonDirectoryIdentity: { device: 16777232, inode: "987654" },
+  }));
+  assert.throws(() => repositoryBindingSchema.parse({
+    ...binding,
+    commonDirectoryIdentity: { device: "016777232", inode: "987654" },
+  }));
+
+  // ExtractionTask binding turnRevisions/deliveryEdgeRevisions are hex64 arrays,
+  // snapshotSeq is a decimal string.
+  const task = extractionTask();
+  assert.throws(() => extractionTaskSchema.parse({
+    ...task,
+    binding: { ...task.binding, turnRevisions: [1] },
+  }));
+  assert.throws(() => extractionTaskSchema.parse({
+    ...task,
+    binding: { ...task.binding, deliveryEdgeRevisions: [1] },
+  }));
+  assert.throws(() => extractionTaskSchema.parse({
+    ...task,
+    binding: {
+      ...task.binding,
+      provenance: { ...task.binding.provenance, snapshotSeq: 42 },
+    },
+  }));
+});
+
+test("candidate scene names are free-form bounded strings (Chinese scene names work)", () => {
+  const batch = candidateDraftBatch();
+  const withScene = (scene) => ({
+    ...batch,
+    candidates: [{ ...batch.candidates[0], scene }],
+  });
+  assert.deepEqual(
+    candidateDraftBatchSchema.parse(withScene("发布流程")),
+    withScene("发布流程"),
+  );
+  assert.deepEqual(candidateDraftBatchSchema.parse(withScene(null)), withScene(null));
+  assert.throws(() => candidateDraftBatchSchema.parse(withScene("")));
+  assert.throws(() => candidateDraftBatchSchema.parse(withScene("x".repeat(201))));
+
+  const result = adjudicationResult();
+  const merged = {
+    ...result,
+    adjudications: [{
+      ...result.adjudications[0],
+      mergedFields: { ...result.adjudications[0].mergedFields, scene: "发布流程" },
+    }],
+  };
+  assert.deepEqual(adjudicationResultSchema.parse(merged), merged);
 });
 
 test("memoryDigestHex is key-order independent and value sensitive", () => {
