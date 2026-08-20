@@ -231,7 +231,7 @@ MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 genera
 | 契约 | `test/memory-contracts.test.mjs` | schema 往返、digest 稳定性、非法输入 |
 | 格式 | `test/memory-format.test.mjs` | frontmatter 方言 round-trip、非法 frontmatter、容量/slug |
 | lint | `test/memory-lint.test.mjs` | secret 族阳性/阴性、entropy 边界、session id 检测 |
-| owner | `test/memory-repository.test.mjs` | 临时 git 仓库 + worktree fixture：唯一解析、多映射硬失败、symlink 根拒绝 |
+| owner | `test/memory-repository.test.mjs` | 临时 git 仓库 + worktree fixture：唯一解析、多映射硬失败、**symlink 根经 realpath 规范化后接受**（修订：拒绝 symlink 的安全约束在 promotion 写入器的逐级 no-follow traversal，而非 owner 解析——macOS /tmp 本身即 symlink，根级拒绝不可行；binding 的 key 一律基于 realpath 计算） |
 | 状态库 | `crates/insights-engine/tests/memory_state.rs` | DDL/迁移、claim 竞争、幂等、CAS、召回 digest、journal 恢复（进程内注入崩溃点：事务前后断言） |
 | 状态库-Node | `test/memory-state-client.test.mjs` | 协议往返、并发 claim（两客户端）、submit 幂等 |
 | 提炼 | `test/memory-extraction.test.mjs` | chunk 切分边界（含同 Turn 超预算）、coverage 申报、sourceInputDigest 稳定、evidence 派生（任务外 id 拒绝、无引用 unknown） |
