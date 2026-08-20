@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-runner-execution-plan.v1.schema.json",
+  "title": "Threadshare Memory Runner Execution Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "planDigest", "taskKind", "taskId", "runnerInputDigest", "inputCoverageDigest", "inputCoverage", "runnerProfile", "provider", "model", "endpoint", "bytesToSend", "localSessionPersistence", "providerRetention", "authorization"],
+  "properties": {
+    "format": { "const": "threadshare-memory-runner-execution-plan@v1" },
+    "planDigest": { "oneOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+    "taskKind": { "$ref": "#/$defs/taskKind" },
+    "taskId": { "$ref": "#/$defs/identifier" },
+    "runnerInputDigest": { "$ref": "#/$defs/hex64" },
+    "inputCoverageDigest": { "$ref": "#/$defs/hex64" },
+    "inputCoverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceKind", "opaqueSourceId", "revision", "contentDigest", "bytes", "truncated"],
+        "properties": {
+          "sourceKind": { "enum": ["transcript", "draft", "candidate-pool", "scene-index", "prompt"] },
+          "opaqueSourceId": { "type": "string", "minLength": 1 },
+          "revision": { "oneOf": [{ "$ref": "#/$defs/nonNegativeInteger" }, { "type": "null" }] },
+          "contentDigest": { "$ref": "#/$defs/hex64" },
+          "bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+          "truncated": { "type": "boolean" }
+        }
+      }
+    },
+    "runnerProfile": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "endpoint": { "type": "string", "minLength": 1 },
+    "bytesToSend": { "$ref": "#/$defs/nonNegativeInteger" },
+    "localSessionPersistence": { "const": "none" },
+    "providerRetention": { "enum": ["unknown", "no-retention", "provider-policy"] },
+    "authorization": { "enum": ["pending", "approved"] }
+  },
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "nonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "taskKind": { "enum": ["extraction", "adjudication", "consolidation"] }
+  }
+}
