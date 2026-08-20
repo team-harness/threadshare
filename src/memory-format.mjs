@@ -6,11 +6,19 @@
 //   - every frontmatter line is exactly `key: value` with key matching [a-z_]+;
 //   - a value starting with "[", "{", or '"', or equal to true/false/null, or
 //     forming a complete JSON number token, MUST be valid JSON (JSON.parse);
+//   - a value starting with "[" or "{" that does not close on its own line may
+//     span multiple lines (design §0 DEV-2 rev2): subsequent lines are consumed
+//     until the brackets balance — brackets inside JSON string literals do not
+//     participate, and escaped quotes ('\"') do not end a string — and the
+//     whole run must then be valid JSON; if the frontmatter ends before the
+//     brackets balance, the file is rejected (MEMORY_FORMAT_UNTERMINATED_JSON);
 //   - any other value is a bare string (trimmed); bare strings must not contain
 //     "#" — there are no comments in this dialect, so "#" is always an error;
-//   - multi-line values and duplicate keys are not supported.
+//   - the multi-line form above is the only multi-line value; duplicate keys
+//     are not supported.
 // The dialect is deterministic: `serializeMemoryEntry` emits one canonical byte
-// form and `parseMemoryEntry(serializeMemoryEntry(x))` deep-equals `x`.
+// form (non-scalar values always serialize as single-line canonical JSON) and
+// `parseMemoryEntry(serializeMemoryEntry(x))` deep-equals `x`.
 
 const FRONTMATTER_OPEN = "---\n";
 const FRONTMATTER_TERMINATOR = "\n---\n";
@@ -129,16 +137,72 @@ function parseScalarValue(key, rawValue) {
   return value;
 }
 
+// True once the leading "["/"{" of `text` has found its matching closer.
+// Brackets inside JSON string literals do not participate in balancing, and an
+// escaped quote ('\"') does not end a string. Content after the balancing
+// closer is left for JSON.parse to reject.
+function isJsonBracketBalanced(text) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const character of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") depth += 1;
+    else if (character === "}" || character === "]") {
+      depth -= 1;
+      if (depth <= 0) return true;
+    }
+  }
+  return false;
+}
+
 function parseFrontmatterLines(lines, { lineErrorCode }) {
   const result = {};
-  for (const line of lines) {
-    const match = LINE_PATTERN.exec(line);
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = LINE_PATTERN.exec(lines[index]);
     if (match === null) {
       throw formatError(lineErrorCode, "frontmatter lines must be `key: value` with a [a-z_]+ key");
     }
     const key = match[1];
     if (Object.hasOwn(result, key)) {
       throw formatError("MEMORY_FORMAT_DUPLICATE_KEY", `frontmatter key "${key}" appears more than once`);
+    }
+    const trimmed = match[2].trim();
+    const first = trimmed[0];
+    if ((first === "[" || first === "{") && !isJsonBracketBalanced(trimmed)) {
+      // Multi-line JSON value (design §0 DEV-2 rev2): consume lines until the
+      // brackets balance, then parse the whole run as JSON.
+      let value = trimmed;
+      let balanced = false;
+      while (index + 1 < lines.length) {
+        index += 1;
+        value += `\n${lines[index]}`;
+        if (isJsonBracketBalanced(value)) {
+          balanced = true;
+          break;
+        }
+      }
+      if (!balanced) {
+        throw formatError(
+          "MEMORY_FORMAT_UNTERMINATED_JSON",
+          `frontmatter value for "${key}" starts a JSON ${first === "[" ? "array" : "object"} whose brackets never balance before the frontmatter ends`,
+        );
+      }
+      try {
+        result[key] = JSON.parse(value);
+      } catch {
+        throw formatError(
+          "MEMORY_FORMAT_INVALID_JSON_VALUE",
+          `frontmatter value for "${key}" must be valid JSON`,
+        );
+      }
+      continue;
     }
     result[key] = parseScalarValue(key, match[2]);
   }
@@ -305,7 +369,9 @@ function serializeScalarValue(value) {
 
 /**
  * Serializes `{ frontmatter, body }` to the canonical entry byte form: fields
- * in proposal §5.1 order, deterministic value encodings, body verbatim.
+ * in proposal §5.1 order, deterministic value encodings (non-scalar values are
+ * always emitted as single-line canonical JSON, even when they were parsed
+ * from the multi-line form), body verbatim.
  * Round-trip guarantee: `parseMemoryEntry(serializeMemoryEntry(x))` deep-equals
  * the validated form of `x`.
  */

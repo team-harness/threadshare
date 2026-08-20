@@ -132,9 +132,11 @@ test("rejects malformed lines, keys, duplicates, comments, and bad JSON", () => 
     () => parseMemoryEntry(frontmatterTextWithLine("occurred", "occurred: [2026-08-12]")),
     "MEMORY_FORMAT_INVALID_JSON_VALUE",
   );
+  // An unbalanced "{" now scans forward for a closing line (DEV-2 rev2); when
+  // the frontmatter ends first, the dedicated unterminated code is reported.
   assertThrowsCode(
     () => parseMemoryEntry(frontmatterTextWithLine("priority", 'priority: {"broken"')),
-    "MEMORY_FORMAT_INVALID_JSON_VALUE",
+    "MEMORY_FORMAT_UNTERMINATED_JSON",
   );
 });
 
@@ -202,6 +204,127 @@ test("priority with a leading zero is a bare string, not an integer", () => {
   assertThrowsCode(
     () => parseMemoryEntry(frontmatterTextWithLine("priority", "priority: 8.5")),
     "MEMORY_FORMAT_INVALID_FIELD",
+  );
+});
+
+// Proposal §5.1 sample (multi-line evidence JSON object, quoted array
+// elements), verbatim minus the doc's trailing `# …` annotation callouts —
+// the dialect itself has no comments.
+const PROPOSAL_5_1_BODY =
+  "别重构旧鉴权模块的 session 中间件，移动端 v2.3 之前的客户端仍依赖其\n非标准 cookie 行为。改动前必须先在 staging 用 mobile-e2e 套件验证。\n";
+
+const PROPOSAL_5_1_TEXT = [
+  "---",
+  "id: auth-module-do-not-refactor",
+  "type: work_method",
+  "status: approved",
+  "priority: 85",
+  "confidence: high",
+  "provenance_strength: observed",
+  "claim_support: human-confirmed",
+  'limitations: ["not-authorship", "not-causality"]',
+  "scope: repo",
+  "scene: 鉴权模块维护",
+  'occurred: ["2026-08-12", "2026-08-18"]',
+  "evidence: {",
+  '  "commits": [',
+  '    { "repo": "github.com/team-harness/threadshare",',
+  `      "hash": "${COMMIT_HASH}" }`,
+  "  ],",
+  '  "paths": ["routes/api/session.ts"]',
+  "}",
+  "superseded_by: null",
+  "---",
+  PROPOSAL_5_1_BODY,
+].join("\n");
+
+test("parses the proposal §5.1 sample and round-trips through canonical form", () => {
+  const parsed = parseMemoryEntry(PROPOSAL_5_1_TEXT);
+  assert.deepEqual(parsed.frontmatter, CANONICAL_FRONTMATTER);
+  assert.equal(parsed.body, PROPOSAL_5_1_BODY);
+  // Serialization is deterministic: the multi-line evidence value collapses to
+  // single-line canonical JSON, and reparsing deep-equals the original parse.
+  const serialized = serializeMemoryEntry(parsed);
+  assert.match(
+    serialized,
+    /^evidence: \{"commits":\[\{"repo":"github\.com\/team-harness\/threadshare","hash":"[0-9a-f]{40}"\}\],"paths":\["routes\/api\/session\.ts"\]\}$/m,
+  );
+  assert.equal(serialized.split("\n---\n").length, 2);
+  assert.deepEqual(parseMemoryEntry(serialized), parsed);
+});
+
+test("multi-line arrays and nested objects parse and serialize to canonical single-line JSON", () => {
+  const text = frontmatterTextWithLine(
+    "occurred",
+    'occurred: [\n  "2026-08-12",\n  "2026-08-18"\n]',
+  );
+  const parsed = parseMemoryEntry(text);
+  assert.deepEqual(parsed.frontmatter.occurred, ["2026-08-12", "2026-08-18"]);
+  assert.equal(serializeMemoryEntry(parsed), CANONICAL_TEXT);
+  assert.deepEqual(parseMemoryEntry(serializeMemoryEntry(parsed)), parsed);
+});
+
+test("brackets, colons, and hashes inside JSON string literals do not affect balancing", () => {
+  const limitations =
+    'limitations: [\n  "closing } inside",\n  "closing ] inside",\n  "colon: and # hash",\n  "escaped \\" quote with { and ["\n]';
+  const parsed = parseMemoryEntry(frontmatterTextWithLine("limitations", limitations));
+  assert.deepEqual(parsed.frontmatter.limitations, [
+    "closing } inside",
+    "closing ] inside",
+    "colon: and # hash",
+    'escaped " quote with { and [',
+  ]);
+  const evidence = [
+    "evidence: {",
+    '  "commits": [],',
+    '  "paths": ["deep/[dir]/file}:{name#1.ts"]',
+    "}",
+  ].join("\n");
+  const parsedEvidence = parseMemoryEntry(frontmatterTextWithLine("evidence", evidence));
+  assert.deepEqual(parsedEvidence.frontmatter.evidence, {
+    commits: [],
+    paths: ["deep/[dir]/file}:{name#1.ts"],
+  });
+  const roundTripped = parseMemoryEntry(serializeMemoryEntry(parsedEvidence));
+  assert.deepEqual(roundTripped, parsedEvidence);
+});
+
+test("multi-line JSON that never closes is rejected with the unterminated code", () => {
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", 'evidence: {\n  "commits": [],\n  "paths": []')),
+    "MEMORY_FORMAT_UNTERMINATED_JSON",
+  );
+  // An unterminated string literal swallows the closing brackets too.
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", 'evidence: {\n  "commits": [],\n  "paths": ["unterminated\n}')),
+    "MEMORY_FORMAT_UNTERMINATED_JSON",
+  );
+});
+
+test("multi-line JSON that balances but is not valid JSON is rejected", () => {
+  // Trailing comma: brackets balance, JSON.parse fails.
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", 'evidence: {\n  "commits": [],\n  "paths": [],\n}')),
+    "MEMORY_FORMAT_INVALID_JSON_VALUE",
+  );
+  // Trailing garbage after the balancing closer stays part of the value.
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", 'evidence: {\n  "commits": [],\n  "paths": []\n} trailing')),
+    "MEMORY_FORMAT_INVALID_JSON_VALUE",
+  );
+});
+
+test("duplicate keys are still rejected when the first value spans multiple lines", () => {
+  const lines = [
+    "evidence: {",
+    '  "commits": [],',
+    '  "paths": []',
+    "}",
+    'evidence: {"commits":[],"paths":[]}',
+  ].join("\n");
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", lines)),
+    "MEMORY_FORMAT_DUPLICATE_KEY",
   );
 });
 

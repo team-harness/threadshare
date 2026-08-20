@@ -192,6 +192,8 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
 
 ### 5.1 L1 条目：`entries/<slug>.md`（git 内，净化后）
 
+（下例中 `# …` 尾注仅为本文档的讲解性标注；实际文件方言不支持注释——见实施设计 DEV-2）
+
 ```markdown
 ---
 id: auth-module-do-not-refactor        # 稳定逻辑 id（slug），即文件名
