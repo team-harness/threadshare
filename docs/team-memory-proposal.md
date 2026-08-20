@@ -201,15 +201,17 @@ priority: 85
 confidence: high                        # high | medium | low（Runner 建议值，供人工参考）
 provenance_strength: observed           # 仅表示关联来源强度；全部 statements 的最弱值
 claim_support: human-confirmed          # typed-fact | human-confirmed | mixed；git 内无 unverified
-limitations: [not-authorship, not-causality]   # 沿用 Delivery Trace 词汇表
+limitations: ["not-authorship", "not-causality"]   # 沿用 Delivery Trace 词汇表
 scope: repo                             # Phase 1 只接受 repo
 scene: 鉴权模块维护
-occurred: [2026-08-12, 2026-08-18]      # 时间戳轨迹，merge 时取并集
-evidence:                               # 仅可公开证据；原始引用在本机事务库
-  commits:
-    - repo: github.com/team-harness/threadshare
-      hash: 7fd2f23a1b04c9e8d2f6a35b7c01d94e8f123456
-  paths: [routes/api/session.ts]
+occurred: ["2026-08-12", "2026-08-18"]  # 时间戳轨迹，merge 时取并集
+evidence: {
+  "commits": [
+    { "repo": "github.com/team-harness/threadshare",
+      "hash": "7fd2f23a1b04c9e8d2f6a35b7c01d94e8f123456" }
+  ],
+  "paths": ["routes/api/session.ts"]
+}                                       # 仅可公开证据；值为多行 JSON（frontmatter 方言，实施设计 DEV-2）
 superseded_by: null
 ---
 别重构旧鉴权模块的 session 中间件，移动端 v2.3 之前的客户端仍依赖其

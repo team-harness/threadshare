@@ -8,8 +8,8 @@
 
 | # | 提案原文 | Phase 1 实现决策 | 理由与后续 |
 |---|---|---|---|
-| DEV-1 | D3：approved memory 经 memory ingest 进入 **Insights** Rust 表组与 memory FTS，供 Query 层 `memory-entry` resource 使用 | Phase 1 将 approved 投影放在 **memory-state.sqlite3** 内（`approved_entries` + `approved_fts`，按 `(repositoryKey, worktreeKey)` 分键，与提案一致的事务语义与 no-scan-on-query 约束）；`memory_search` MCP 与去重召回都走该投影。Insights 侧 `memory-entry` Query resource、ingest collection 与影子重建**顺延至 Phase 2** | 一次交付两套投影（insights + memory-state）会让 Phase 1 的 Rust 面积翻倍；memory-state 投影已满足全部功能与一致性要求（同事务更新、generation、versioned 召回）。风险：消费面暂无 snapshot-token 级联到 insights 快照——记录为 Phase 2 任务 |
-| DEV-2 | frontmatter 未指定方言 | 仓库无 YAML 依赖（仅 ajv/ajv-formats/jsonc-parser/markdown-it/zod），**不新增依赖**。定义严格 frontmatter 方言：`key: value`，value 为 JSON 字面量（字符串可省引号，数组/对象必须是合法 JSON）；自研解析器，保证确定性 round-trip | 新增 yaml 依赖违背仓库极简依赖文化；严格方言可精确校验、可 canonical 序列化 |
+| DEV-1（rev2 强化） | D3：approved memory 经 memory ingest 进入 **Insights** Rust 表组与 memory FTS | Phase 1 将 memory-state.sqlite3 定为 approved 记忆的**唯一持久化投影**（`approved_entries` + `approved_fts`，按 `(repositoryKey, worktreeKey)` 分键），并补齐完整一致性契约：① `sync-approved` 语义 = "Node 扫描 worktree 记忆文件（安全读取骨架）→ 计算 source_tree_digest（(path, contentDigest) 有序序列的 canonical digest）→ 扫描后 re-stat 全部文件，任何 dev/ino/size/mtime 漂移 → 本次标 `coverage: partial` 且**拒绝换代**（返回重试）→ 一致则引擎在**单事务**内全量替换该 owner 的 entries+FTS 并 generation+1 原子换代"；② `approved_projection` 持久化 `coverage`（complete|partial）与 source_tree_digest，`search`/`recall` 响应回传 generation+coverage；③ 崩溃安全由单事务保证（无中间态）；④ 无增量路径 → clean-vs-incremental 等价退化为"重复 sync 幂等 + 相同树 digest 短路"，写测试证明；⑤ **单一投影原则**：Phase 2 若迁往 Insights 投影，必须同一变更内移除本投影（不允许双投影并存） | 设计审查 #1：换库可行，但必须复刻 rev6 的 freshness/coverage/重建等价语义，不能只搬表 |
+| DEV-2（rev2 修订） | frontmatter 未指定方言 | 仓库无 YAML 依赖，**不新增依赖**。严格 frontmatter 方言：`key: value`，value 为 JSON 字面量（字符串可省引号；数组/对象必须是合法 JSON，**允许跨多行**——以 `[`/`{` 开头时按括号配平扫描到闭合行）；自研解析器，确定性 round-trip。上游提案 §5.1 示例同步改为合法 JSON 值（数组元素加引号、evidence 用 JSON 对象值） | 审查 #5：原单行方言无法表达提案 §5.1 的嵌套 evidence 与裸数组；多行 JSON 值兼顾人读与严格性 |
 | DEV-3 | conformance test 每次交付前运行 | 通过一次后缓存 `{profile, cliVersionFingerprint, testVersion}`，CLI 版本或 profile 或 testVersion 变化才重跑；`--reverify-runner` 强制重跑 | 全量探针较慢（需真实模型调用）；指纹失效语义与提案一致 |
 
 ## 1. 模块清单
@@ -42,14 +42,18 @@ MCP：`insights-mcp.mjs` 增补 `threadshare_memory_search`（只读）与 `thre
 
 ## 2. memory-state.sqlite3 DDL（v1）
 
-位置：`<state-dir>/memory/memory-state.sqlite3`（0600）。`memory_state_meta(key, value)` 存 `memoryStateUuid` 与 `schema_version = 1`。
+位置：`<state-dir>/memory/memory-state.sqlite3`（0600）。
+
+**类型对齐规约（审查 #5）**：凡镜像 Insights 侧的值一律沿用其 wire 类型——turn/payload/delivery-edge revision 为 **hex64 TEXT**、`snapshot_seq` 为 **canonical decimal string TEXT**（u64 超 JS safe integer）、device/inode 为 **TEXT**（现有 resolver 即返回字符串）；仅 memory-state 本地自增值（candidates.revision、generation、lease_epoch）用 INTEGER。
 
 ```sql
+CREATE TABLE memory_state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                                            -- memoryStateUuid, schema_version=1
 CREATE TABLE repository_bindings (
   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
   public_repository_identity TEXT, root_realpath TEXT NOT NULL,      -- 敏感，仅本库
   root_realpath_digest BLOB NOT NULL,
-  common_dir_device INTEGER NOT NULL, common_dir_inode INTEGER NOT NULL,
+  common_dir_device TEXT NOT NULL, common_dir_inode TEXT NOT NULL,
   memory_root TEXT NOT NULL DEFAULT '.threadshare/memory',
   status TEXT NOT NULL DEFAULT 'active',
   PRIMARY KEY (repository_key, worktree_key)
@@ -59,20 +63,26 @@ CREATE TABLE tasks (
   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
   chunk_ref TEXT, draft_batch_ref TEXT,
   binding_json TEXT NOT NULL, authorization_plan_digest BLOB,
-  lease_holder TEXT, lease_expires_at INTEGER,
+  lease_holder TEXT, lease_epoch INTEGER NOT NULL DEFAULT 0,
+  claim_token TEXT, lease_expires_at INTEGER,
   status TEXT NOT NULL DEFAULT 'pending',                            -- pending|claimed|submitted|stale
   created_at INTEGER NOT NULL
 );
-CREATE TABLE submissions (
+CREATE TABLE submissions (                                           -- 审查 #2：单 task 单 accepted 提交
+  task_id TEXT PRIMARY KEY, response_digest BLOB NOT NULL,
+  outcome_json TEXT NOT NULL,                                        -- 规范化结果，幂等重放返回它
+  received_at INTEGER NOT NULL
+);
+CREATE TABLE submission_conflicts (                                  -- 异 digest 的被拒尝试审计
   task_id TEXT NOT NULL, response_digest BLOB NOT NULL,
-  received_at INTEGER NOT NULL, PRIMARY KEY (task_id, response_digest)
+  received_at INTEGER NOT NULL
 );
 CREATE TABLE chunks (
   chunk_ref TEXT PRIMARY KEY,                                        -- sessionKey:turnStart:turnEnd:chunkDigest
   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
   session_key BLOB NOT NULL, turn_range TEXT NOT NULL, chunk_digest BLOB NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',                            -- pending|drafted|extracted|stale
-  provenance_snapshot_seq INTEGER
+  provenance_snapshot_seq TEXT
 );
 CREATE TABLE candidates (
   candidate_id TEXT PRIMARY KEY,
@@ -104,12 +114,17 @@ CREATE VIRTUAL TABLE approved_fts USING fts5(
 CREATE TABLE approved_projection (
   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
   generation INTEGER NOT NULL, source_tree_digest BLOB NOT NULL,     -- worktree 记忆文件全集 digest
+  coverage TEXT NOT NULL DEFAULT 'complete',                         -- complete|partial（DEV-1 契约）
   analyzer_version TEXT NOT NULL, recall_algorithm_version TEXT NOT NULL,
   PRIMARY KEY (repository_key, worktree_key)
 );
+CREATE TABLE runner_conformance (                                    -- conformance 指纹缓存
+  profile TEXT PRIMARY KEY, cli_version_fingerprint TEXT NOT NULL,
+  test_version TEXT NOT NULL, passed_at INTEGER NOT NULL
+);
 CREATE TABLE evidence_refs (
   candidate_id TEXT NOT NULL, statement_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
-  pointer_digest BLOB NOT NULL, session_key BLOB, turn_key BLOB, revision INTEGER,
+  pointer_digest BLOB NOT NULL, session_key BLOB, turn_key BLOB, revision TEXT,
   payload_sha256 BLOB, relation TEXT, strength TEXT, limitations_json TEXT,
   task_id TEXT NOT NULL, PRIMARY KEY (candidate_id, statement_id, evidence_id)
 );
@@ -121,12 +136,21 @@ CREATE TABLE assessments (
   statement_text_digest BLOB NOT NULL, revision INTEGER NOT NULL,
   PRIMARY KEY (candidate_id, statement_id)
 );
-CREATE TABLE promotion_journal (
+CREATE TABLE promotion_journal (                                     -- 审查 #4：显式批准态 + 可重放
   plan_id TEXT PRIMARY KEY, repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
+  plan_canonical_json TEXT NOT NULL,                                 -- 完整 canonical plan（批准对象）
+  plan_digest BLOB NOT NULL,
   candidate_ids_json TEXT NOT NULL, assessment_digest BLOB NOT NULL,
-  per_file_json TEXT NOT NULL,                                       -- [{targetPath,targetBlobHash,sanitizedDigest}]
-  policy_version TEXT NOT NULL, status TEXT NOT NULL,                -- approved|applied|voided
+  policy_version TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'generated',                          -- generated|approved|applying|applied|voided
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE promotion_files (                                       -- 精确批准字节 + 逐文件进度
+  plan_id TEXT NOT NULL, target_path TEXT NOT NULL,
+  target_blob_hash TEXT,                                             -- hex40|null
+  sanitized_content BLOB NOT NULL, sanitized_digest BLOB NOT NULL,
+  applied INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (plan_id, target_path)
 );
 CREATE TABLE authorization_log (
   plan_digest BLOB NOT NULL, task_id TEXT, runner_input_digest BLOB,
@@ -137,12 +161,14 @@ CREATE TABLE authorization_log (
 );
 ```
 
-事务边界（与提案 §5.5 一致）：
+事务边界（审查 #2/#3 修订）：
 
-- **tx-claim**：`UPDATE tasks SET status='claimed', lease_* WHERE task_id=? AND (status='pending' OR lease_expires_at < now)`，行级原子；
-- **tx-extraction-submit**：submissions 插入（幂等短路）→ candidates 插入 + candidate_fts + evidence_refs + assessments + candidate_projection.generation+1 + chunks.status='drafted' + tasks.status='submitted'，单事务；
-- **tx-adjudication-submit**：submissions 幂等 → 逐 target `UPDATE candidates ... WHERE candidate_id=? AND revision=?`（CAS，任一失败整体回滚置 stale）→ 裁决效果（quarantined/discarded/merge 重写 payload+revision+FTS）→ chunks.status='extracted' → tasks.status='submitted'，单事务；
-- **tx-promotion**：journal 状态推进与文件写入分离；`applied` 前崩溃 → 重放（写入器幂等：目标内容 digest 相同则跳过）。
+- **tx-claim**：`UPDATE tasks SET status='claimed', lease_holder=?, lease_epoch=lease_epoch+1, claim_token=?, lease_expires_at=? WHERE task_id=? AND (status='pending' OR (status='claimed' AND lease_expires_at < now))`——**submitted/stale 永不可重领**；claim_token 为随机值，随 task 返回给持有者；
+- **tx-submit（两种 submit 通用前置）**：提交必须携带 claim_token；事务内校验 `status='claimed' AND claim_token=? AND lease_expires_at >= now`，不满足即拒绝（旧持有者 lease 过期后被他人重领，其提交被 token CAS 挡下）。随后 submissions 幂等：task_id 已有行且 digest 相同 → 返回 outcome_json；digest 不同 → 记 submission_conflicts 并拒绝；
+- **tx-extraction-submit**：上述前置 → candidates+candidate_fts+evidence_refs+assessments 插入 → candidate_projection.generation+1 → chunks.status='drafted' → tasks.status='submitted' → 写 submissions.outcome_json，单事务；
+- **tx-adjudication-submit**：**召回重跑、resultSetDigest 比对、逐 target revision CAS、裁决应用、状态推进全部在同一个 `BEGIN IMMEDIATE` 事务内**（审查 #3：排除"重跑与提交之间投影被改"的窗口）；stale 时事务回滚、task 置 stale、返回结构化拒绝；
+- **跨库串行化（审查 #3）**：extraction/adjudication 的 submit 由 Node 编排层在 **insights writer lock**（`src/insights-writer-lock.mjs`）持有期间执行——与 `insights sync` 互斥，锁顺序固定"先 insights writer lock → 后 memory-state 事务"，锁内 re-read 相关 insights revision 完成 CAS；崩溃释放沿用现有 writer lock 的租约语义；
+- **tx-promotion**：状态机 `generated → approved（批准 op，绑定 plan_digest）→ applying → applied|voided`；apply 逐文件校验 blob hash → 从 promotion_files 取**批准时的精确字节**写入（no-follow + 原子 rename）→ 标 applied；**apply 的收尾数据库事务同步 candidates 置 promoted + revision+1 + candidate_fts 移除 + generation+1**（已晋升候选退出去重池）；崩溃后 open/status 时按 journal 自动恢复（applying 的 plan 逐文件幂等续作：目标内容 digest 已相同则跳过）。
 
 ## 3. 引擎协议新增（沿用现有分帧与信封）
 
@@ -150,21 +176,25 @@ CREATE TABLE authorization_log (
 
 | op（MEMORY_COMMAND.op） | 方向语义 | 要点 |
 |---|---|---|
-| `MEMORY_STATE_OPEN` | 打开/迁移 memory-state；返回 memoryStateUuid、schemaVersion | stateDir 由 Node 传入；chmod 0600 |
-| `MEMORY_BIND_REPOSITORY` | upsert repository_bindings | 绝对路径只进库 |
-| `MEMORY_PLAN_TASKS` | 写入 chunks（pending）与 tasks（pending） | Node 完成选材/分块后批量落库 |
-| `MEMORY_CLAIM_TASK` | claim + lease | 返回 task 全量 binding |
-| `MEMORY_SUBMIT_EXTRACTION` | tx-extraction-submit | 入参含 drafts + assessments + evidence_refs |
-| `MEMORY_RECALL` | 双 FTS + RRF；返回 per-draft ordered recallSets + union pool + digests | 只读 |
-| `MEMORY_SUBMIT_ADJUDICATION` | 提交前引擎内**重跑召回**比对 resultSetDigest，再 tx-adjudication-submit | stale 时返回结构化拒绝 |
-| `MEMORY_SYNC_APPROVED` | 以 worktree 扫描结果全量/增量更新 approved 投影 | 入参为 Node 解析后的 entries；source_tree_digest 比对短路 |
-| `MEMORY_SEARCH` | approved_fts BM25 检索 | 供 MCP/CLI 消费 |
-| `MEMORY_REVIEW_QUEUE` | 列 quarantined 候选 + assessments | 只读 |
-| `MEMORY_CONFIRM_STATEMENT` | 人审确认：校验 statement_text_digest + citations_digest 后置 human-confirmed | 漂移拒绝 |
-| `MEMORY_PROMOTION_PLAN` | 生成 plan（含 blob OID 计算）并入 journal（approved） | diff 由 Node 渲染 |
-| `MEMORY_PROMOTION_APPLY` | owner 重解析 + 逐项 blob/assessment/policy CAS + no-follow 写入 + journal applied | fail-closed |
-| `MEMORY_AUTHORIZE` | 写 authorization_log | plan/manifest 通用 |
-| `MEMORY_STATUS` | chunks/tasks/candidates 计数与游标概览 | 只读 |
+| `open` | 打开/迁移 memory-state；返回 memoryStateUuid、schemaVersion | stateDir 由 Node 传入；0600 |
+| `bind-repository` | upsert repository_bindings | 绝对路径只进库 |
+| `plan-tasks` | 写入 chunks（pending）与 tasks（pending），幂等 | Node 完成选材/分块后批量落库 |
+| `claim-task` | tx-claim；返回 task 全量 binding + claim_token | submitted/stale 不可重领 |
+| `submit-extraction` | tx-extraction-submit（含 token CAS 前置） | 入参含 drafts + assessments + evidence_refs |
+| `recall` | 双 FTS + RRF；返回 per-draft ordered recallSets + union pool + digests + 双投影 provenance | 只读 |
+| `submit-adjudication` | 单 `BEGIN IMMEDIATE` 事务内：重跑召回 + digest 比对 + revision CAS + 应用 | stale 返回结构化拒绝 |
+| `sync-approved` | DEV-1 契约：树 digest 一致才单事务全量替换 + 换代 | 不一致 → coverage: partial + 拒绝换代 |
+| `search` | approved_fts BM25 检索，回传 generation+coverage | 供 MCP/CLI 消费 |
+| `review-queue` | 列 quarantined 候选 + assessments | 只读 |
+| `status` | chunks/tasks/candidates 计数 + journal 恢复检查 | 只读（附带触发 promotion 恢复） |
+| `confirm-statement` | 校验 statement_text_digest + citations_digest 后置 human-confirmed | 漂移拒绝（4c） |
+| `discard-candidate` | quarantined/draft → discarded（含 adjudication:failed 人工处置） | （4c） |
+| `promotion-plan` | 生成 plan（blob OID + 净化字节入 promotion_files）→ status=generated | diff 由 Node 渲染（4c） |
+| `promotion-approve` | 绑定 plan_digest 的显式批准：generated → approved | 用户批准的唯一落点（4c） |
+| `promotion-apply` | approved → applying → 逐文件 CAS + no-follow 写入 → applied + 候选收尾事务（promoted + FTS 移除 + generation+1） | fail-closed（4c） |
+| `authorize` | 写 authorization_log | plan/manifest 通用（4c） |
+
+**op 级 wire schema 的 normative 来源**：`crates/insights-engine/src/memory_protocol.rs` 顶部文档注释块（实现时定稿，Node 侧照此实现 zod 校验；Stage 8 回写本文档）。每个 op 定义：请求 payload、成功结果、结构化拒绝（stale / idempotent-replay / conflict）与错误码。
 
 Node 侧每个请求在 `memory-state-client.mjs` 封装为 `memoryXxx(engine, params)`，请求/响应用 `memory-contracts.mjs` 的 zod schema 双向校验（沿用 insights-engine-protocol 的双向校验模式）。
 
@@ -243,3 +273,9 @@ MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 genera
 - **PromotionPlan@v1**：`{ format, planId, owner: RepositoryBinding@v1, candidateIds: string[], assessmentDigest: hex64, perFile: [{ targetPath: string, targetBlobHash: hex40|null, sanitizedContentDigest: hex64 }], policyVersion: string, diff: string }`。
 
 JSON Schema 落盘范围（Phase 1）：跨进程边界的四个契约（ExtractionTask / CandidateDraftBatch / AdjudicationTask / AdjudicationResult）+ 审计对象（RunnerExecutionPlan / AuthorizationManifest / PromotionPlan）落 `schema/threadshare-memory-*.v1.schema.json`；其余以 zod 为准，JSON Schema 补齐列入 Stage 8。
+
+**§9 类型修正（审查 #5）**：`binding.turnRevisions[]` / `deliveryEdgeRevisions[]` 为 **hex64 字符串数组**（Insights revision 的 wire 类型）、`provenance.snapshotSeq` 为 **canonical decimal string**、`commonDirectoryIdentity.device/inode` 为 **string**——Stage 2 契约库需按此修订（列入 Stage 4b 一并处理）。已实现的 Stage 2/3 代码中与此不符的字段在 Stage 4b 对接时统一修正。
+
+## 10. 设计审查记录（2026-08-20，codex cs-review）
+
+结论"先改再实现"，5 条 blocking 全部采纳，落点：#1 → §0 DEV-1 rev2（唯一投影 + sync 一致性契约 + coverage）；#2 → §2 tasks/submissions DDL 与 tx-claim/tx-submit（lease_epoch + claim_token CAS + 单 accepted 提交 + 冲突审计）；#3 → §2 跨库串行化（insights writer lock 包裹 submit + 锁顺序）与 adjudication 单 BEGIN IMMEDIATE；#4 → §2 promotion_journal/promotion_files DDL 与 generated→approved→applying→applied|voided 状态机、apply 收尾事务、`promotion-approve`/`discard-candidate` op；#5 → §2 类型对齐规约、§3 op 命名统一与 wire schema normative 来源声明、§9 类型修正、DEV-2 多行 JSON 值修订（上游提案 §5.1 示例同步修正）。已核对无问题：DEV-3/DEV-4/DEV-5 方向、CLI/MCP/协议/发布白名单接线结论。
