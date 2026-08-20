@@ -13,11 +13,18 @@
  *
  * Structured stale outcomes of `submit-adjudication` are not exceptions: the
  * result is a discriminated union on `status` (`"applied" | "stale"`). The
- * same pattern covers `confirm-statement` (`"confirmed" | "drifted"`) and
- * `promotion-apply` (`"applied" | "voided"`). Engine failures surface as
- * `InsightsEngineClientError` with the remote `TS_MEMORY_*` code; local
- * schema failures throw `MemoryStateClientError` with
+ * same pattern covers `confirm-statement` (`"confirmed" | "drifted"`),
+ * `promotion-apply` (`"applied" | "voided"`), and `sync-approved`
+ * (`"synced" | "conflict"`, where `"conflict"` reports a lost
+ * `expectedGeneration` CAS and the client must rescan). Engine failures
+ * surface as `InsightsEngineClientError` with the remote `TS_MEMORY_*` code;
+ * local schema failures throw `MemoryStateClientError` with
  * `TS_MEMORY_REQUEST_INVALID` / `TS_MEMORY_RESULT_INVALID`.
+ *
+ * The raw `engine.memoryCommand` transport gives envelope-level guarantees
+ * only and provides no op-level result validation or typing whatsoever;
+ * business code must always go through the typed `memoryXxx` wrappers in this
+ * module and must never call `engine.memoryCommand` directly.
  */
 
 import { z } from "zod";
@@ -38,7 +45,10 @@ const HEX40_PATTERN = /^[0-9a-f]{40}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const CLAIM_TOKEN_PATTERN = /^[0-9a-f]{32}$/;
 const DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+// The engine mints memory-state UUIDs and plan IDs as RFC 4122 v4 (version
+// nibble 4, variant [89ab]); pin the shape here so a non-v4 id is rejected.
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export class MemoryStateClientError extends Error {
   constructor(code, message, options = {}) {
@@ -51,7 +61,7 @@ export class MemoryStateClientError extends Error {
 const hex64 = z.string().regex(HEX64_PATTERN, "expected lowercase sha256 hex64");
 const claimToken = z.string().regex(CLAIM_TOKEN_PATTERN, "expected a hex32 claim token");
 const decimalString = z.string().regex(DECIMAL_PATTERN, "expected a canonical decimal string");
-const uuidString = z.string().regex(UUID_PATTERN, "expected a lowercase uuid");
+const uuidString = z.string().regex(UUID_PATTERN, "expected a lowercase uuid v4");
 const nonEmptyString = z.string().min(1);
 // Rust `valid_identifier`: non-empty, at most 256 bytes, no control characters
 // (Unicode Cc: U+0000-U+001F and U+007F-U+009F, matching Rust char::is_control).
@@ -271,6 +281,10 @@ const submitAdjudicationRequest = z.object({
       path: ["adjudications"],
     });
   }
+  // A target may be consumed by at most one adjudication: ids are unique
+  // across the whole request (mirrors the Rust-side validation; without it,
+  // `[{T,1},{T,2}]` could ride the engine's own revision bump).
+  const targetIds = new Set();
   for (const [index, adjudication] of request.adjudications.entries()) {
     if (!pending.delete(adjudication.draftRef)) {
       context.addIssue({
@@ -278,6 +292,16 @@ const submitAdjudicationRequest = z.object({
         message: "adjudications[].draftRef must match a recall draft exactly once",
         path: ["adjudications", index, "draftRef"],
       });
+    }
+    for (const [targetIndex, target] of adjudication.targets.entries()) {
+      if (targetIds.has(target.id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "adjudications[].targets[].id must be unique across the request",
+          path: ["adjudications", index, "targets", targetIndex, "id"],
+        });
+      }
+      targetIds.add(target.id);
     }
     if (adjudication.action === "store" || adjudication.action === "skip") {
       if (adjudication.mergedPayload !== null || adjudication.mergedSearchableText !== null) {
@@ -317,6 +341,10 @@ const syncApprovedRequest = z.object({
   ...ownerFields,
   sourceTreeDigest: hex64,
   coverage: coverageState,
+  // Generation CAS: must equal the owner's current approved projection
+  // generation (0 before the first sync); a mismatch returns the structured
+  // `"conflict"` result and the caller must rescan.
+  expectedGeneration: nonNegativeInteger,
   entries: z.array(z.object({
     entryId: identifier,
     revision: positiveInteger,
@@ -440,7 +468,9 @@ const authorizeRequest = z.object({
 
 const openResult = z.object({
   memoryStateUuid: uuidString,
-  schemaVersion: positiveInteger,
+  // The Node RESULT contract only knows schema version 1; a different version is
+  // an incompatible engine and must be rejected rather than silently accepted.
+  schemaVersion: z.literal(1),
 }).strict();
 
 const bindRepositoryResult = z.object({
@@ -523,7 +553,7 @@ const recallResult = z.object({
   }).strict()),
 }).strict();
 
-const submitAdjudicationResult = z.discriminatedUnion("status", [
+const submitAdjudicationResult = z.union([
   z.object({
     taskId: identifier,
     status: z.literal("applied"),
@@ -539,19 +569,31 @@ const submitAdjudicationResult = z.discriminatedUnion("status", [
   }).strict(),
   z.object({
     taskId: identifier,
-    status: z.literal("stale"),
+    // `"stale"` whenever the engine's lease-scoped CAS marked the task; the
+    // other values report the task's actual status after a zero-row CAS
+    // (the lease was reissued or resolved between the gate and the marking).
+    status: z.enum(["stale", "pending", "claimed", "submitted"]),
     reason: z.enum(["result-set-digest-mismatch", "revision-cas-failed"]),
     expectedResultSetDigest: hex64,
     actualResultSetDigest: hex64,
   }).strict(),
 ]);
 
-const syncApprovedResult = z.object({
-  generation: nonNegativeInteger,
-  coverage: z.literal("complete"),
-  unchanged: z.boolean(),
-  entryCount: nonNegativeInteger,
-}).strict();
+const syncApprovedResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("synced"),
+    generation: nonNegativeInteger,
+    coverage: z.literal("complete"),
+    unchanged: z.boolean(),
+    entryCount: nonNegativeInteger,
+  }).strict(),
+  z.object({
+    status: z.literal("conflict"),
+    generation: nonNegativeInteger,
+    coverage: coverageState,
+    sourceTreeDigest: hex64.nullable(),
+  }).strict(),
+]);
 
 const searchResult = z.object({
   generation: nonNegativeInteger,
@@ -744,6 +786,13 @@ async function runMemoryOp(engine, op, input, options) {
   }
 }
 
+// Only these typed wrappers are exported. Each validates the request payload
+// with zod before sending and validates the MEMORY_RESULT payload with zod
+// before returning, so callers get op-level request/result guarantees (pinned
+// schemaVersion, v4 UUIDs, strict object shapes). The raw `engine.memoryCommand`
+// on InsightsEngineClient carries only envelope-level checks and gives NO
+// op-level guarantee — always go through these wrappers, never call
+// `engine.memoryCommand` directly for a memory op.
 export function memoryOpen(engine, input, options = {}) {
   return runMemoryOp(engine, "open", input, options);
 }

@@ -11,6 +11,18 @@ const HIGH_ENTROPY_MIN_LENGTH = 20;
 const HIGH_ENTROPY_THRESHOLD_BITS = 4.0;
 const HIGH_ENTROPY_TOKEN_PATTERN = /[A-Za-z0-9+/=_-]{20,}/g;
 
+// Long hex runs (sha256/sha1/md5 digests, hex-encoded keys) are a blind spot for
+// the Shannon-entropy rule: hex's 16-symbol alphabet caps entropy at 4.0 bits per
+// character, and a real digest's skewed character distribution sits well below the
+// >= 4.0 block threshold. So a genuine hex-encoded credential slips past the block
+// rule entirely. This independent, entropy-free rule warns (not blocks — a long
+// hex reference in prose can be legitimate) on any contiguous hex run of at least
+// 32 characters that a caller has not marked as structured context via
+// allowedSpans. A bare commit hash in the body is exactly this shape, so it warns
+// too, nudging the author to move it into structured evidence.
+const ENCODED_SECRET_MIN_LENGTH = 32;
+const ENCODED_SECRET_HEX_PATTERN = /(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])/g;
+
 const UUID_V4_PATTERN =
   /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/g;
 const SESSION_CONTEXT_PATTERN = /session|agent/i;
@@ -105,6 +117,20 @@ function collectHighEntropyFindings(text, findings, allowedSpans) {
   }
 }
 
+function collectEncodedSecretFindings(text, findings, allowedSpans) {
+  ENCODED_SECRET_HEX_PATTERN.lastIndex = 0;
+  for (const match of text.matchAll(ENCODED_SECRET_HEX_PATTERN)) {
+    const token = match[0];
+    if (token.length < ENCODED_SECRET_MIN_LENGTH) continue;
+    const start = match.index;
+    const end = start + token.length;
+    // Structured evidence (e.g. evidence.commits[].hash, located from parsed
+    // frontmatter) is exempt exactly like the high-entropy rule.
+    if (isWithinAllowedSpan(allowedSpans, start, end)) continue;
+    findings.push(finding("MEMORY_LINT_POSSIBLE_ENCODED_SECRET", "warn", start, token));
+  }
+}
+
 function collectSessionIdFindings(text, findings) {
   UUID_V4_PATTERN.lastIndex = 0;
   for (const match of text.matchAll(UUID_V4_PATTERN)) {
@@ -144,8 +170,9 @@ function normalizeAllowedSpans(allowedSpans) {
  *
  * `options.allowedSpans` is an optional list of `{ start, end }` character
  * ranges (end exclusive) marking structured context — e.g. evidence commit
- * hashes a caller located from parsed frontmatter. High-entropy tokens fully
- * contained in an allowed span are exempt; nothing else is.
+ * hashes a caller located from parsed frontmatter. High-entropy tokens and long
+ * hex runs (the `MEMORY_LINT_POSSIBLE_ENCODED_SECRET` warn) fully contained in
+ * an allowed span are exempt; nothing else is.
  */
 export function lintMemoryText(text, { allowedSpans } = {}) {
   if (typeof text !== "string") throw new TypeError("lintMemoryText requires a string");
@@ -153,6 +180,7 @@ export function lintMemoryText(text, { allowedSpans } = {}) {
   const findings = [];
   collectPatternFindings(text, BLOCK_PATTERN_RULES, "block", findings);
   collectHighEntropyFindings(text, findings, spans);
+  collectEncodedSecretFindings(text, findings, spans);
   collectSessionIdFindings(text, findings);
   collectPatternFindings(text, WARN_PATTERN_RULES, "warn", findings);
   findings.sort((left, right) => left.index - right.index || (left.code < right.code ? -1 : left.code > right.code ? 1 : 0));

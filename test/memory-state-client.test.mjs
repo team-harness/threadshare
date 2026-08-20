@@ -361,9 +361,10 @@ test("memory ops run end-to-end against a real engine", {
       worktreeKey: WORKTREE_KEY,
       sourceTreeDigest,
       coverage: "complete",
+      expectedGeneration: 0,
       entries,
     }),
-    { generation: 1, coverage: "complete", unchanged: false, entryCount: 1 },
+    { status: "synced", generation: 1, coverage: "complete", unchanged: false, entryCount: 1 },
   );
   assert.deepEqual(
     await memorySyncApproved(client, {
@@ -371,9 +372,24 @@ test("memory ops run end-to-end against a real engine", {
       worktreeKey: WORKTREE_KEY,
       sourceTreeDigest,
       coverage: "complete",
+      expectedGeneration: 1,
       entries,
     }),
-    { generation: 1, coverage: "complete", unchanged: true, entryCount: 1 },
+    { status: "synced", generation: 1, coverage: "complete", unchanged: true, entryCount: 1 },
+  );
+
+  // A scan that raced a newer sync (stale expectedGeneration) is a structured
+  // conflict carrying the current generation and stored tree digest.
+  assert.deepEqual(
+    await memorySyncApproved(client, {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+      sourceTreeDigest: digestHex({ tree: "raced" }),
+      coverage: "complete",
+      expectedGeneration: 0,
+      entries: [],
+    }),
+    { status: "conflict", generation: 1, coverage: "complete", sourceTreeDigest },
   );
 
   // search finds the approved entry with generation/coverage provenance.
@@ -413,13 +429,15 @@ test("memory ops run end-to-end against a real engine", {
     },
   );
 
-  // partial scans are rejected with a structured conflict code.
+  // partial scans are rejected with a structured conflict code (and must pass
+  // the same generation CAS as complete scans).
   await assert.rejects(
     memorySyncApproved(client, {
       repositoryKey: REPOSITORY_KEY,
       worktreeKey: WORKTREE_KEY,
       sourceTreeDigest: digestHex({ tree: 2 }),
       coverage: "partial",
+      expectedGeneration: 1,
       entries: [],
     }),
     (error) => error.code === "TS_MEMORY_SYNC_PARTIAL",
@@ -677,4 +695,167 @@ test("concurrent claims from two engine processes award exactly one lease", {
   assert.equal(winners[0].value.task.status, "claimed");
   assert.match(winners[0].value.claimToken, HEX32_PATTERN);
   assert.equal(losers[0].reason.code, "TS_MEMORY_TASK_NOT_CLAIMABLE");
+});
+
+// A minimal engine stub that echoes a fixed RESULT, so the RESULT schema
+// tightening can be exercised without a debug engine binary.
+function stubEngine(result) {
+  return { memoryCommand: async () => result };
+}
+
+const V4_UUID = "6f9619ff-8b86-4d11-b42d-00c04fc964ff";
+const OPEN_INPUT = { stateDir: "/tmp/threadshare-open" };
+
+test("open RESULT pins schemaVersion to literal 1", async () => {
+  const valid = { memoryStateUuid: V4_UUID, schemaVersion: 1 };
+  assert.deepEqual(await memoryOpen(stubEngine(valid), OPEN_INPUT), valid);
+  await assert.rejects(
+    memoryOpen(stubEngine({ memoryStateUuid: V4_UUID, schemaVersion: 2 }), OPEN_INPUT),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_RESULT_INVALID",
+  );
+});
+
+test("open RESULT rejects UUIDs that are not v4", async () => {
+  // Wrong version nibble (position 14: "1" instead of "4").
+  await assert.rejects(
+    memoryOpen(
+      stubEngine({ memoryStateUuid: "6f9619ff-8b86-1d11-b42d-00c04fc964ff", schemaVersion: 1 }),
+      OPEN_INPUT,
+    ),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_RESULT_INVALID",
+  );
+  // Wrong variant nibble (position 19: "c" is not in [89ab]).
+  await assert.rejects(
+    memoryOpen(
+      stubEngine({ memoryStateUuid: "6f9619ff-8b86-4d11-c42d-00c04fc964ff", schemaVersion: 1 }),
+      OPEN_INPUT,
+    ),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_RESULT_INVALID",
+  );
+  // Uppercase hex is not the lowercase v4 shape the engine emits.
+  await assert.rejects(
+    memoryOpen(
+      stubEngine({ memoryStateUuid: V4_UUID.toUpperCase(), schemaVersion: 1 }),
+      OPEN_INPUT,
+    ),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_RESULT_INVALID",
+  );
+});
+
+test("sync-approved requires the expectedGeneration CAS and parses conflicts", async () => {
+  const neverSend = { memoryCommand: async () => { throw new Error("must not send"); } };
+  // The request without expectedGeneration is rejected locally.
+  await assert.rejects(
+    memorySyncApproved(neverSend, {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+      sourceTreeDigest: digestHex({ tree: 1 }),
+      coverage: "complete",
+      entries: [],
+    }),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_REQUEST_INVALID" &&
+      /expectedGeneration/.test(error.message),
+  );
+
+  // Both branches of the result union parse strictly.
+  const request = {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    sourceTreeDigest: digestHex({ tree: 1 }),
+    coverage: "complete",
+    expectedGeneration: 0,
+    entries: [],
+  };
+  const conflict = {
+    status: "conflict",
+    generation: 4,
+    coverage: "partial",
+    sourceTreeDigest: digestHex({ tree: "stored" }),
+  };
+  assert.deepEqual(await memorySyncApproved(stubEngine(conflict), request), conflict);
+  const synced = {
+    status: "synced", generation: 5, coverage: "complete", unchanged: false, entryCount: 0,
+  };
+  assert.deepEqual(await memorySyncApproved(stubEngine(synced), request), synced);
+  // The legacy status-less shape is no longer a valid result.
+  await assert.rejects(
+    memorySyncApproved(
+      stubEngine({ generation: 1, coverage: "complete", unchanged: false, entryCount: 0 }),
+      request,
+    ),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_RESULT_INVALID",
+  );
+});
+
+test("submit-adjudication rejects duplicate target ids across the request", async () => {
+  const neverSend = { memoryCommand: async () => { throw new Error("must not send"); } };
+  const base = {
+    taskId: "task-adj",
+    claimToken: "0".repeat(32),
+    responseDigest: digestHex({ response: "adjudication" }),
+    recall: {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+      drafts: [
+        { draftRef: "d1", candidateId: "c-1", queryText: "alpha" },
+        { draftRef: "d2", candidateId: "c-2", queryText: "beta" },
+      ],
+    },
+    expectedResultSetDigest: digestHex({ resultSet: 1 }),
+  };
+  const merged = { mergedPayload: { content: "m" }, mergedSearchableText: "m" };
+  // Duplicate ids inside one adjudication.
+  await assert.rejects(
+    memorySubmitAdjudication(neverSend, {
+      ...base,
+      adjudications: [
+        {
+          draftRef: "d1",
+          action: "merge",
+          targets: [{ id: "t-1", revision: 1 }, { id: "t-1", revision: 2 }],
+          ...merged,
+        },
+        { draftRef: "d2", action: "skip" },
+      ],
+    }),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_REQUEST_INVALID" &&
+      /targets\..*id.*unique|unique across the request/.test(error.message),
+  );
+  // Duplicate ids across two adjudications.
+  await assert.rejects(
+    memorySubmitAdjudication(neverSend, {
+      ...base,
+      adjudications: [
+        { draftRef: "d1", action: "merge", targets: [{ id: "t-1", revision: 1 }], ...merged },
+        { draftRef: "d2", action: "update", targets: [{ id: "t-1", revision: 1 }], ...merged },
+      ],
+    }),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_REQUEST_INVALID",
+  );
+  // Distinct target ids still validate locally (the stub then replies stale).
+  const stale = {
+    taskId: "task-adj",
+    status: "stale",
+    reason: "revision-cas-failed",
+    expectedResultSetDigest: base.expectedResultSetDigest,
+    actualResultSetDigest: digestHex({ resultSet: 2 }),
+  };
+  assert.deepEqual(
+    await memorySubmitAdjudication(stubEngine(stale), {
+      ...base,
+      adjudications: [
+        { draftRef: "d1", action: "merge", targets: [{ id: "t-1", revision: 1 }], ...merged },
+        { draftRef: "d2", action: "update", targets: [{ id: "t-2", revision: 1 }], ...merged },
+      ],
+    }),
+    stale,
+  );
 });

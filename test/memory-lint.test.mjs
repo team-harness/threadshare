@@ -130,6 +130,48 @@ test("allowedSpans exempts structured evidence context, and only that", () => {
   assert.equal(partial.length, 2);
 });
 
+test("warns on long hex runs the entropy rule misses (possible-encoded-secret)", () => {
+  const code = "MEMORY_LINT_POSSIBLE_ENCODED_SECRET";
+  // A hex64 over a 2-symbol alphabet: Shannon entropy is 1.0 bit/char, far below
+  // the 4.0 block threshold, so the high-entropy rule cannot see it — but a
+  // hex-encoded credential looks exactly like this. Only the encoded-secret rule
+  // catches it, and it does so as a warn (not a block).
+  const lowEntropyHex64 = "ab".repeat(32);
+  assertClean(`digest ${lowEntropyHex64} noted`, "MEMORY_LINT_HIGH_ENTROPY");
+
+  const warnFor = (text) => {
+    const hits = lintMemoryText(text).filter((item) => item.code === code);
+    assert.equal(hits.length, 1, `expected one ${code} in ${JSON.stringify(text)}`);
+    assert.equal(hits[0].severity, "warn");
+  };
+  // hex32, hex40 (a bare commit hash), and hex64 in both uniform and skewed
+  // (real SHA-256) character distributions all warn.
+  warnFor(`key ${"0123456789abcdef".repeat(2)} end`); // hex32
+  warnFor(`fixed in commit ${COMMIT_HASH} today`); // hex40, bare in the body
+  warnFor(`sha ${"e3b0c44298fc1c149afbf4c8996fb924".repeat(2)} recorded`); // hex64 real-ish
+  warnFor(`digest ${lowEntropyHex64} noted`); // hex64 low-entropy
+
+  // Short hex runs (< 32) are not false positives.
+  assertClean("crc 0123456789abcdef checked", code); // hex16
+  assertClean(`rev ${"a".repeat(31)} short`, code); // hex31, one below the floor
+  assertClean("build 42 at rev 7 today", code);
+});
+
+test("possible-encoded-secret exempts hex covered by allowedSpans, and only that", () => {
+  const code = "MEMORY_LINT_POSSIBLE_ENCODED_SECRET";
+  const text = `evidence {"hash":"${COMMIT_HASH}"} and prose ${COMMIT_HASH}`;
+  const first = text.indexOf(COMMIT_HASH);
+  const second = text.indexOf(COMMIT_HASH, first + 1);
+  // No spans: both hex40 occurrences warn.
+  assert.equal(lintMemoryText(text).filter((item) => item.code === code).length, 2);
+  // A span over the structured occurrence leaves only the prose one.
+  const findings = lintMemoryText(text, {
+    allowedSpans: [{ start: first, end: first + COMMIT_HASH.length }],
+  }).filter((item) => item.code === code);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].index, second);
+});
+
 test("detects provider session ids by uuid context and path fragments", () => {
   assertBlocked(
     "resume session 6f9619ff-8b86-4d11-b42d-00c04fc964ff for details",

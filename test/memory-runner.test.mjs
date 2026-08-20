@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { appendFile, chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -6,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { canonicalJson } from "../src/canonical-json.mjs";
 import {
   computeManifestDigest,
   computePlanDigest,
@@ -51,6 +53,23 @@ for (const script of [CONFORMANT, VIOLATING, ECHO, HANG, FLOOD, NETWORK_VIOLATIN
 
 const HEX64_PATTERN = /^[0-9a-f]{64}$/;
 
+// A stand-in for the origin-derived signing key the upper layer supplies. Two
+// distinct keys let the tests prove key binding (a record signed under one is
+// not accepted under the other). Both are >= 16 bytes.
+const SIGNING_KEY = Buffer.from("a1b2c3d4e5f60718293a4b5c6d7e8f90", "hex");
+const OTHER_SIGNING_KEY = Buffer.from("00112233445566778899aabbccddeeff", "hex");
+
+// Independent re-implementation of the record HMAC (HMAC-SHA256 over the
+// canonical record content, excluding the signature field). The test signs its
+// hand-built records so they mirror what runConformanceTest would produce.
+function signConformanceRecord(record, key = SIGNING_KEY) {
+  const { signature: _signature, ...content } = record;
+  return {
+    ...content,
+    signature: createHmac("sha256", key).update(canonicalJson(content), "utf8").digest("hex"),
+  };
+}
+
 function makeCoverage(sourceId = "chunk-0001") {
   return [
     {
@@ -78,16 +97,16 @@ function makePlan(stdinBytes, overrides = {}) {
   });
 }
 
-async function conformanceFor(binaryPath, profile = loadRunnerProfile("claude-cli")) {
+async function conformanceFor(binaryPath, profile = loadRunnerProfile("claude-cli"), key = SIGNING_KEY) {
   const identity = await computeRunnerBinaryIdentity(binaryPath);
-  return {
+  return signConformanceRecord({
     testVersion: CONFORMANCE_TEST_VERSION,
     profileDigest: computeRunnerProfileDigest(profile),
     binaryRealpath: identity.binaryRealpath,
     binaryContentSha256: identity.binaryContentSha256,
     cliVersionFingerprint: await computeCliVersionFingerprint(binaryPath),
     passedAt: new Date().toISOString(),
-  };
+  }, key);
 }
 
 function assertCode(code) {
@@ -146,10 +165,14 @@ test("conformant runner passes the deny-all probe and yields a bound identity re
   const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
     binaryPath: CONFORMANT,
     timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
   });
   assert.equal(result.passed, true);
   assert.deepEqual(result.failures, []);
   assert.equal(result.record.testVersion, CONFORMANCE_TEST_VERSION);
+  // The passing record is HMAC-signed, and the signature verifies under the key.
+  assert.match(result.record.signature, HEX64_PATTERN);
+  assert.equal(result.record.signature, signConformanceRecord(result.record).signature);
   // The record binds the profile (including argvTemplate) and the binary bytes.
   assert.equal(
     result.record.profileDigest,
@@ -169,6 +192,7 @@ test("runner connecting to the network canary fails conformance", async () => {
   const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
     binaryPath: NETWORK_VIOLATING,
     timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
   });
   assert.equal(result.passed, false);
   assert.equal(result.record, null);
@@ -183,6 +207,7 @@ test("runner leaving a lingering child process fails conformance", async () => {
   const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
     binaryPath: LINGERING,
     timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
   });
   assert.equal(result.passed, false);
   assert.equal(result.record, null);
@@ -197,6 +222,7 @@ test("violating runner fails on both the canary and the filesystem side effect",
   const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
     binaryPath: VIOLATING,
     timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
   });
   assert.equal(result.passed, false);
   assert.equal(result.record, null);
@@ -213,20 +239,22 @@ test("binary or profile identity drift invalidates a cached conformance record",
     await runConformanceTest(loadRunnerProfile("claude-cli"), {
       binaryPath: CONFORMANT,
       timeoutMs: 30_000,
+      signingKey: SIGNING_KEY,
     })
   ).record;
+  const key = { signingKey: SIGNING_KEY };
   const profileDigest = computeRunnerProfileDigest(loadRunnerProfile("claude-cli"));
   const sameBinary = await computeRunnerBinaryIdentity(CONFORMANT);
   const otherBinary = await computeRunnerBinaryIdentity(ECHO);
-  assert.equal(isConformanceValid(record, { profileDigest, ...sameBinary }), true);
-  assert.equal(isConformanceValid(record, { profileDigest, ...otherBinary }), false);
+  assert.equal(isConformanceValid(record, { profileDigest, ...sameBinary }, key), true);
+  assert.equal(isConformanceValid(record, { profileDigest, ...otherBinary }, key), false);
   // Every field is compared individually: realpath and content hash both bind.
   assert.equal(
     isConformanceValid(record, {
       profileDigest,
       binaryRealpath: otherBinary.binaryRealpath,
       binaryContentSha256: sameBinary.binaryContentSha256,
-    }),
+    }, key),
     false,
   );
   assert.equal(
@@ -234,7 +262,7 @@ test("binary or profile identity drift invalidates a cached conformance record",
       profileDigest,
       binaryRealpath: sameBinary.binaryRealpath,
       binaryContentSha256: otherBinary.binaryContentSha256,
-    }),
+    }, key),
     false,
   );
   // A profile change (any argvTemplate edit) invalidates the record too.
@@ -243,16 +271,16 @@ test("binary or profile identity drift invalidates a cached conformance record",
     ...profile,
     argvTemplate: [...profile.argvTemplate, "--verbose"],
   });
-  assert.equal(isConformanceValid(record, { profileDigest: alteredDigest, ...sameBinary }), false);
+  assert.equal(isConformanceValid(record, { profileDigest: alteredDigest, ...sameBinary }, key), false);
   assert.equal(
     isConformanceValid(record, {
       testVersion: "conformance-test@2",
       profileDigest,
       ...sameBinary,
-    }),
+    }, key),
     false,
   );
-  assert.equal(isConformanceValid(null, { profileDigest, ...sameBinary }), false);
+  assert.equal(isConformanceValid(null, { profileDigest, ...sameBinary }, key), false);
 });
 
 test("same binaryPath with replaced content but identical --version output fails conformance", async () => {
@@ -272,7 +300,7 @@ test("same binaryPath with replaced content but identical --version output fails
       isConformanceValid(record, {
         profileDigest: record.profileDigest,
         ...identity,
-      }),
+      }, { signingKey: SIGNING_KEY }),
       false,
     );
     const plan = makePlan("swap payload");
@@ -286,6 +314,7 @@ test("same binaryPath with replaced content but identical --version output fails
           stdinBytes: "swap payload",
           binaryPath: binary,
           timeoutMs: 30_000,
+          signingKey: SIGNING_KEY,
         }),
         assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
       );
@@ -294,6 +323,145 @@ test("same binaryPath with replaced content but identical --version output fails
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Conformance record authenticity (HMAC signature)
+// ---------------------------------------------------------------------------
+
+test("runConformanceTest fails closed without a signing key", async () => {
+  await assert.rejects(
+    runConformanceTest(loadRunnerProfile("claude-cli"), {
+      binaryPath: CONFORMANT,
+      timeoutMs: 30_000,
+    }),
+    assertCode("MEMORY_RUNNER_SIGNING_KEY_REQUIRED"),
+  );
+  // A too-short key is treated as no key at all.
+  await assert.rejects(
+    runConformanceTest(loadRunnerProfile("claude-cli"), {
+      binaryPath: CONFORMANT,
+      timeoutMs: 30_000,
+      signingKey: Buffer.from("short"),
+    }),
+    assertCode("MEMORY_RUNNER_SIGNING_KEY_REQUIRED"),
+  );
+});
+
+test("a record forged from public fields is rejected without a valid signature", async () => {
+  const identity = await computeRunnerBinaryIdentity(ECHO);
+  const current = {
+    profileDigest: computeRunnerProfileDigest(loadRunnerProfile("claude-cli")),
+    binaryRealpath: identity.binaryRealpath,
+    binaryContentSha256: identity.binaryContentSha256,
+  };
+  // Anyone can assemble these public fields; without the origin-derived key they
+  // cannot produce a verifying signature.
+  const forged = {
+    testVersion: CONFORMANCE_TEST_VERSION,
+    ...current,
+    cliVersionFingerprint: await computeCliVersionFingerprint(ECHO),
+    passedAt: new Date().toISOString(),
+  };
+  // No signature at all.
+  assert.equal(isConformanceValid(forged, current, { signingKey: SIGNING_KEY }), false);
+  // A bogus signature does not verify.
+  assert.equal(
+    isConformanceValid({ ...forged, signature: "0".repeat(64) }, current, { signingKey: SIGNING_KEY }),
+    false,
+  );
+  // Even a correctly signed record is invalid when checked with no key (fail-closed).
+  const signed = signConformanceRecord(forged);
+  assert.equal(isConformanceValid(signed, current), false);
+  assert.equal(isConformanceValid(signed, current, {}), false);
+  // Correctly signed and checked with the matching key: valid.
+  assert.equal(isConformanceValid(signed, current, { signingKey: SIGNING_KEY }), true);
+});
+
+test("a record signed under a different key is not accepted", async () => {
+  const identity = await computeRunnerBinaryIdentity(ECHO);
+  const current = {
+    profileDigest: computeRunnerProfileDigest(loadRunnerProfile("claude-cli")),
+    binaryRealpath: identity.binaryRealpath,
+    binaryContentSha256: identity.binaryContentSha256,
+  };
+  const record = await conformanceFor(ECHO, loadRunnerProfile("claude-cli"), OTHER_SIGNING_KEY);
+  // Signed under OTHER_SIGNING_KEY: verifies with that key, not with SIGNING_KEY.
+  assert.equal(isConformanceValid(record, current, { signingKey: OTHER_SIGNING_KEY }), true);
+  assert.equal(isConformanceValid(record, current, { signingKey: SIGNING_KEY }), false);
+});
+
+test("runExtractionRunner refuses a forged or wrongly-keyed record and never spawns", async () => {
+  const stdin = "forgery payload";
+  const plan = makePlan(stdin);
+  const approved = approvePlan(plan, { approvedDigest: plan.planDigest });
+  const identity = await computeRunnerBinaryIdentity(ECHO);
+  const forged = {
+    testVersion: CONFORMANCE_TEST_VERSION,
+    profileDigest: computeRunnerProfileDigest(loadRunnerProfile("claude-cli")),
+    binaryRealpath: identity.binaryRealpath,
+    binaryContentSha256: identity.binaryContentSha256,
+    cliVersionFingerprint: await computeCliVersionFingerprint(ECHO),
+    passedAt: new Date().toISOString(),
+  };
+  await withMarker(async (marker) => {
+    // Unsigned forgery is refused before any spawn.
+    await assert.rejects(
+      runExtractionRunner({
+        profile: loadRunnerProfile("claude-cli"),
+        conformance: forged,
+        plan: approved,
+        stdinBytes: stdin,
+        binaryPath: ECHO,
+        timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
+      }),
+      assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
+    );
+    // A record honestly signed under another key does not verify under this key.
+    const otherKeyed = signConformanceRecord(forged, OTHER_SIGNING_KEY);
+    await assert.rejects(
+      runExtractionRunner({
+        profile: loadRunnerProfile("claude-cli"),
+        conformance: otherKeyed,
+        plan: approved,
+        stdinBytes: stdin,
+        binaryPath: ECHO,
+        timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
+      }),
+      assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
+    );
+    // A properly signed record but no key supplied to the runner is fail-closed.
+    const signed = signConformanceRecord(forged);
+    await assert.rejects(
+      runExtractionRunner({
+        profile: loadRunnerProfile("claude-cli"),
+        conformance: signed,
+        plan: approved,
+        stdinBytes: stdin,
+        binaryPath: ECHO,
+        timeoutMs: 30_000,
+      }),
+      assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
+    );
+    assert.equal(existsSync(marker), false, "runner process must not have executed");
+  });
+
+  // Positive control: the same record with the matching key executes.
+  await withMarker(async (marker) => {
+    const result = await runExtractionRunner({
+      profile: loadRunnerProfile("claude-cli"),
+      conformance: signConformanceRecord(forged),
+      plan: approved,
+      stdinBytes: stdin,
+      binaryPath: ECHO,
+      timeoutMs: 30_000,
+      signingKey: SIGNING_KEY,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(existsSync(marker), true, "runner process should have executed");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -337,6 +505,7 @@ test("a plan built against a different argvTemplate is refused before any spawn"
         stdinBytes: "argv-drift payload",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_PROFILE_MISMATCH"),
     );
@@ -359,6 +528,7 @@ test("a conformance record probed under a different argvTemplate refuses executi
         stdinBytes: "profile-drift payload",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
     );
@@ -523,6 +693,7 @@ test("a single plan's input change invalidates only that plan within the manifes
       stdinBytes: "manifest input A2",
       binaryPath: ECHO,
       timeoutMs: 30_000,
+      signingKey: SIGNING_KEY,
     }),
     assertCode("MEMORY_RUNNER_PLAN_MISMATCH"),
   );
@@ -535,6 +706,7 @@ test("a single plan's input change invalidates only that plan within the manifes
     stdinBytes: "manifest input B1",
     binaryPath: ECHO,
     timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
   });
   assert.equal(result.exitCode, 0);
   assert.equal(JSON.parse(result.stdout).ok, true);
@@ -567,6 +739,7 @@ test("pending plans never execute", async () => {
         stdinBytes: "pending payload",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_PLAN_NOT_APPROVED"),
     );
@@ -587,6 +760,7 @@ test("stdin digest mismatch refuses without starting the runner process", async 
         stdinBytes: "content-B!",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_PLAN_MISMATCH"),
     );
@@ -606,6 +780,7 @@ test("missing or stale conformance refuses execution with no degraded path", asy
         stdinBytes: "conformance payload",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
     );
@@ -618,6 +793,7 @@ test("missing or stale conformance refuses execution with no degraded path", asy
         stdinBytes: "conformance payload",
         binaryPath: ECHO,
         timeoutMs: 30_000,
+        signingKey: SIGNING_KEY,
       }),
       assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
     );
@@ -637,6 +813,7 @@ test("approved plan with matching stdin executes and returns stdout", async () =
       stdinBytes: stdin,
       binaryPath: ECHO,
       timeoutMs: 30_000,
+      signingKey: SIGNING_KEY,
     });
     assert.equal(result.exitCode, 0);
     assert.equal(typeof result.durationMs, "number");
@@ -660,6 +837,7 @@ test("runner exceeding the timeout is killed", async () => {
       stdinBytes: stdin,
       binaryPath: HANG,
       timeoutMs: 500,
+      signingKey: SIGNING_KEY,
     }),
     assertCode("MEMORY_RUNNER_TIMEOUT"),
   );
@@ -678,6 +856,7 @@ test("runner exceeding the output limit is killed", async () => {
       binaryPath: FLOOD,
       timeoutMs: 30_000,
       maxOutputBytes: 64 * 1024,
+      signingKey: SIGNING_KEY,
     }),
     assertCode("MEMORY_RUNNER_OUTPUT_LIMIT"),
   );

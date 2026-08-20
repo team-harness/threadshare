@@ -143,16 +143,22 @@
 //!
 //! ## `submit-adjudication`
 //! One `BEGIN IMMEDIATE` transaction: claim-token CAS → submission idempotency
-//! (as in `submit-extraction`) → engine re-runs the embedded recall request and
-//! compares `resultSetDigest` (mismatch → rollback, task `stale`, structured
-//! stale result) → per-target candidate revision CAS (`UPDATE ... WHERE
-//! candidate_id=? AND revision=?` with the revision the adjudicator saw in
-//! `binding.poolItemRevisions`; any failure → rollback, task `stale`,
-//! structured stale result) → applies adjudications
-//! (`store` → draft quarantined; `skip` → draft discarded + FTS removal;
-//! `update`/`merge` → targets discarded + FTS removal, draft payload/FTS
-//! rewritten, revision+1, quarantined) → chunks `extracted` → task
-//! `submitted` → `candidate_projection.generation+1`.
+//! (as in `submit-extraction`) → engine re-runs the embedded recall request
+//! under a savepoint and compares `resultSetDigest` (mismatch → savepoint
+//! rollback, task `stale`, structured stale result) → per-target candidate
+//! revision CAS: every target revision must equal the revision the engine's
+//! own recall re-run observed in the pool, and the `UPDATE` is additionally
+//! constrained to the task owner and the `draft`/`quarantined` source states
+//! (any failure → savepoint rollback, task `stale`, structured stale result)
+//! → applies adjudications (`store` → draft quarantined; `skip` → draft
+//! discarded + FTS removal; `update`/`merge` → targets discarded + FTS
+//! removal, draft payload/FTS rewritten, revision+1, quarantined) → chunks
+//! `extracted` → task `submitted` → `candidate_projection.generation+1`.
+//! Stale outcomes never leave the outer transaction: the savepoint rollback
+//! and the stale marking commit atomically, and the stale marking is a CAS on
+//! `(claimToken, leaseEpoch, status='claimed')` so it can never touch a lease
+//! that was reissued to another holder. If that CAS matches zero rows the
+//! result reports the task's actual status instead of claiming `stale`.
 //! - request: `{ "taskId": string, "claimToken": string, "responseDigest": hex64,
 //!   "recall": <recall request payload>, "expectedResultSetDigest": hex64,
 //!   "adjudications": [{ "draftRef": string,
@@ -162,29 +168,45 @@
 //!   Every recall draft must be adjudicated exactly once. `update`/`merge`
 //!   require non-empty candidate-side `targets` (with the revisions the
 //!   adjudicator saw), `mergedPayload`, and `mergedSearchableText`;
-//!   `store`/`skip` forbid merged fields and mutate no targets.
+//!   `store`/`skip` forbid merged fields and mutate no targets. Target `id`s
+//!   must be unique across the whole request (a target may be consumed by at
+//!   most one adjudication).
 //! - result (applied): `{ "taskId": string, "status": "applied",
 //!   "idempotent": bool, "outcomes": [{ "draftRef": string, "action": string,
 //!     "candidateId": string, "candidateStatus": string, "revision": int }],
 //!   "candidateGeneration": int }`
 //! - result (stale, no state change except task `stale`): `{ "taskId": string,
-//!   "status": "stale", "reason": "result-set-digest-mismatch"|"revision-cas-failed",
+//!   "status": "stale"|"pending"|"claimed"|"submitted",
+//!   "reason": "result-set-digest-mismatch"|"revision-cas-failed",
 //!   "expectedResultSetDigest": hex64, "actualResultSetDigest": hex64 }`
+//!   (`status` is `"stale"` whenever the lease-scoped CAS marked the task; any
+//!   other value reports the task's actual status after a zero-row CAS.)
 //!
 //! ## `sync-approved`
-//! DEV-1 contract. `coverage: "partial"` scans are recorded on
-//! `approved_projection.coverage` and rejected with `TS_MEMORY_SYNC_PARTIAL`
-//! (no generation change). A complete scan whose `sourceTreeDigest` equals the
-//! stored digest (with stored coverage `complete`) short-circuits with
-//! `"unchanged": true`. Otherwise a single transaction replaces this owner's
-//! `approved_entries` + `approved_fts` wholesale and bumps `generation`.
+//! DEV-1 contract, generation-CAS guarded. The whole op runs in one
+//! `BEGIN IMMEDIATE` transaction. `expectedGeneration` must equal the current
+//! `approved_projection.generation` for this owner (0 when no projection row
+//! exists yet); a mismatch returns the structured `"conflict"` result with
+//! the current generation and stored `sourceTreeDigest` (the client must
+//! rescan) and changes nothing — this also stops a stale `partial` scan from
+//! downgrading a newer `complete` projection. After the CAS,
+//! `coverage: "partial"` scans are recorded on `approved_projection.coverage`
+//! and rejected with `TS_MEMORY_SYNC_PARTIAL` (no generation change). A
+//! complete scan whose `sourceTreeDigest` equals the stored digest (with
+//! stored coverage `complete`) short-circuits with `"unchanged": true`.
+//! Otherwise this owner's `approved_entries` + `approved_fts` are replaced
+//! wholesale and `generation` advances.
 //! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64,
 //!   "sourceTreeDigest": hex64, "coverage": "complete"|"partial",
+//!   "expectedGeneration": int (>= 0),
 //!   "entries": [{ "entryId": string, "revision": int, "contentDigest": hex64,
 //!     "frontmatter": object, "bodyText": string, "status": string,
 //!     "searchableText": string }] }`
-//! - result: `{ "generation": int, "coverage": "complete", "unchanged": bool,
-//!   "entryCount": int }`
+//! - result (synced): `{ "status": "synced", "generation": int,
+//!   "coverage": "complete", "unchanged": bool, "entryCount": int }`
+//! - result (conflict, no state change): `{ "status": "conflict",
+//!   "generation": int, "coverage": "complete"|"partial",
+//!   "sourceTreeDigest": hex64|null }`
 //!
 //! ## `search`
 //! Read-only owner-scoped BM25 over `approved_fts`.
@@ -813,6 +835,7 @@ impl SubmitAdjudicationRequest {
             self.adjudications.len() == refs.len(),
             "every recall draft must be adjudicated exactly once",
         )?;
+        let mut target_ids: Vec<&str> = Vec::new();
         for adjudication in &self.adjudications {
             let position = refs
                 .iter()
@@ -854,6 +877,11 @@ impl SubmitAdjudicationRequest {
                     target.revision >= 1,
                     "adjudications[].targets[].revision must be at least 1",
                 )?;
+                require(
+                    !target_ids.contains(&target.id.as_str()),
+                    "adjudications[].targets[].id must be unique across the request",
+                )?;
+                target_ids.push(target.id.as_str());
             }
         }
         Ok(())
@@ -879,6 +907,7 @@ pub struct SyncApprovedRequest {
     pub worktree_key: String,
     pub source_tree_digest: String,
     pub coverage: String,
+    pub expected_generation: i64,
     pub entries: Vec<ApprovedEntryInput>,
 }
 
@@ -889,6 +918,10 @@ impl SyncApprovedRequest {
         require(
             matches!(self.coverage.as_str(), "complete" | "partial"),
             "coverage must be complete or partial",
+        )?;
+        require(
+            self.expected_generation >= 0,
+            "expectedGeneration must be non-negative",
         )?;
         require(
             self.entries.len() <= 4096,
@@ -1351,15 +1384,6 @@ pub enum SubmitAdjudicationOutcome {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SyncApprovedOutcome {
-    pub generation: i64,
-    pub coverage: String,
-    pub unchanged: bool,
-    pub entry_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SearchItemWire {
     pub rank: u32,
     pub entry_id: String,
@@ -1583,7 +1607,7 @@ pub fn handle_memory_command(
         "sync-approved" => {
             let request: SyncApprovedRequest = parse_request(payload)?;
             request.validate().map_err(MemoryError::invalid)?;
-            to_wire(&storage.sync_approved(&request)?)
+            storage.sync_approved(&request)
         }
         "search" => {
             let request: MemorySearchRequest = parse_request(payload)?;

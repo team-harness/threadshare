@@ -15,12 +15,13 @@
 // The module never writes files except the conformance sandbox, which is removed after use.
 
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import { canonicalJson } from "./canonical-json.mjs";
 import {
   MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT,
   MEMORY_RUNNER_EXECUTION_PLAN_FORMAT,
@@ -261,6 +262,87 @@ async function executeRunnerProcess({
 }
 
 // ---------------------------------------------------------------------------
+// Conformance record authenticity (HMAC signature)
+// ---------------------------------------------------------------------------
+//
+// A conformance record's fields (testVersion, profileDigest, binaryRealpath,
+// binaryContentSha256, passedAt, ...) are all derived from public inputs: the
+// probe corpus version, the frozen profile, and the runner binary's realpath +
+// content hash. Any caller who can read those could hand-craft an object that
+// passes a pure field-by-field comparison and "prove" a runner already passed
+// the deny-all probe without ever running it.
+//
+// To bind a record to an actual passing probe, runConformanceTest signs the
+// record with HMAC-SHA256 under a signing key the upper layer derives from the
+// machine-local origin secret (never persisted alongside the record and never
+// derivable from public fields). Validation recomputes the HMAC over the
+// record's canonical content and compares it to the stored signature in
+// constant time. There is no unsigned mode: a missing key or missing/mismatched
+// signature is always invalid (fail-closed).
+//
+// KNOWN LIMITATION: this does NOT close the TOCTOU window where a local attacker
+// who already holds the signing key reads binaryContentSha256, then swaps the
+// binary on disk after the record is signed but before/around execution. Closing
+// that requires an OS-level guarantee (e.g. an exec of an fd whose bytes were
+// hashed, or a sealed/immutable runner image). What the signature removes is the
+// distinct, cheaper path of forging a "passed" record purely from public
+// information without holding the origin-derived key.
+
+const CONFORMANCE_SIGNING_KEY_MIN_BYTES = 16;
+
+// Normalize a caller-provided signing key (Buffer / Uint8Array, or an even-length
+// hex string) into a Buffer, or null when it is absent or malformed. Callers that
+// must fail closed treat null as "no valid key".
+function normalizeSigningKey(signingKey) {
+  if (signingKey instanceof Uint8Array) {
+    return signingKey.length >= CONFORMANCE_SIGNING_KEY_MIN_BYTES ? Buffer.from(signingKey) : null;
+  }
+  if (typeof signingKey === "string") {
+    if (signingKey.length === 0 || signingKey.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(signingKey)) {
+      return null;
+    }
+    const buffer = Buffer.from(signingKey, "hex");
+    return buffer.length >= CONFORMANCE_SIGNING_KEY_MIN_BYTES ? buffer : null;
+  }
+  return null;
+}
+
+// Canonical bytes signed over: the whole record except the signature field.
+function conformanceSignaturePayload(record) {
+  const { signature: _signature, ...content } = record;
+  return canonicalJson(content);
+}
+
+function computeConformanceSignature(record, keyBuffer) {
+  return createHmac("sha256", keyBuffer).update(conformanceSignaturePayload(record), "utf8").digest("hex");
+}
+
+// Constant-time comparison of two hex signature strings. Length inequality is a
+// short-circuit mismatch (timingSafeEqual requires equal-length buffers); the
+// signatures are fixed-width for a given HMAC so this leaks nothing useful.
+function constantTimeHexEqual(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+// True only when `record` carries a signature that verifies under `keyBuffer`.
+// Any serialization failure (a malformed forged record) counts as invalid.
+function conformanceSignatureVerifies(record, keyBuffer) {
+  if (record === null || typeof record !== "object") return false;
+  if (typeof record.signature !== "string" || record.signature.length === 0) return false;
+  let expected;
+  try {
+    expected = computeConformanceSignature(record, keyBuffer);
+  } catch {
+    return false;
+  }
+  return constantTimeHexEqual(record.signature, expected);
+}
+
+// ---------------------------------------------------------------------------
 // Conformance test (deny-all probe) + fingerprint cache records
 // ---------------------------------------------------------------------------
 
@@ -411,6 +493,10 @@ function decodeUtf8Strict(buffer) {
  * (including argvTemplate), the binary's realpath, and a sha256 over the
  * binary's bytes — the byte hash is computed before any process is spawned.
  * `cliVersionFingerprint` is retained as supplemental information only.
+ * A passing record is signed with HMAC-SHA256 under `options.signingKey`
+ * (a Buffer/Uint8Array or even-length hex string of at least 16 bytes, derived
+ * by the caller from the machine-local origin secret); the key is mandatory
+ * (fail-closed — there is no unsigned record) and never stored in the record.
  * Persisting the record is the caller's responsibility.
  */
 export async function runConformanceTest(profile, options = {}) {
@@ -421,6 +507,15 @@ export async function runConformanceTest(profile, options = {}) {
     "runner profile",
   );
   assertExecutableAdapter(parsed);
+  const signingKey = normalizeSigningKey(options.signingKey);
+  if (signingKey === null) {
+    throw runnerError(
+      "MEMORY_RUNNER_SIGNING_KEY_REQUIRED",
+      "runConformanceTest requires options.signingKey (a >=16-byte Buffer or even-length hex " +
+        "string derived from the machine-local origin secret); a conformance record is only " +
+        "trustworthy when signed, and there is no unsigned mode",
+    );
+  }
   const binaryPath = resolveBinaryPath(parsed, options.binaryPath);
   const profileDigest = computeRunnerProfileDigest(parsed);
   // Bind the binary identity from its bytes before any spawn.
@@ -511,17 +606,19 @@ export async function runConformanceTest(profile, options = {}) {
     if (failures.length > 0) {
       return Object.freeze({ passed: false, failures: Object.freeze(failures), record: null });
     }
+    const record = {
+      testVersion: CONFORMANCE_TEST_VERSION,
+      profileDigest,
+      binaryRealpath,
+      binaryContentSha256,
+      cliVersionFingerprint,
+      passedAt: new Date().toISOString(),
+    };
+    record.signature = computeConformanceSignature(record, signingKey);
     return Object.freeze({
       passed: true,
       failures: Object.freeze([]),
-      record: Object.freeze({
-        testVersion: CONFORMANCE_TEST_VERSION,
-        profileDigest,
-        binaryRealpath,
-        binaryContentSha256,
-        cliVersionFingerprint,
-        passedAt: new Date().toISOString(),
-      }),
+      record: Object.freeze(record),
     });
   } finally {
     await canary.close();
@@ -537,9 +634,19 @@ export async function runConformanceTest(profile, options = {}) {
  * in this build. `cliVersionFingerprint` is supplemental information and does
  * not participate in validity — a binary whose bytes changed is invalid even
  * when its --version output is identical.
+ *
+ * Beyond the field comparison, the record's HMAC signature must verify under
+ * `options.signingKey` (the same key class runConformanceTest signed with).
+ * This is fail-closed: a missing/malformed key, a record with no signature, or
+ * a signature that does not verify are all invalid. A record whose public
+ * fields were hand-crafted to match `current` but which was never signed by a
+ * holder of the origin-derived key is therefore rejected.
  */
-export function isConformanceValid(cached, current = {}) {
+export function isConformanceValid(cached, current = {}, options = {}) {
   if (cached === null || typeof cached !== "object") return false;
+  const signingKey = normalizeSigningKey(options.signingKey);
+  if (signingKey === null) return false;
+  if (!conformanceSignatureVerifies(cached, signingKey)) return false;
   const expectedVersion = current.testVersion ?? CONFORMANCE_TEST_VERSION;
   if (typeof cached.testVersion !== "string" || cached.testVersion !== expectedVersion) return false;
   for (const field of ["profileDigest", "binaryRealpath", "binaryContentSha256"]) {
@@ -805,6 +912,9 @@ function assertConformanceRecordShape(conformance) {
  *   - a structurally valid conformance record for the current probe corpus exists
  *     and its profileDigest equals the digest of the profile that would run now
  *     (any argvTemplate change invalidates it);
+ *   - the record's HMAC signature verifies under `signingKey` (a record forged
+ *     from public fields but never signed by a holder of the origin-derived key
+ *     is rejected; a missing key is fail-closed);
  *   - the plan is approved, its stored digest matches its content, and its
  *     runnerProfile digest equals the current profile's digest;
  *   - the recomputed digest of `stdinBytes` equals the approved runnerInputDigest;
@@ -819,6 +929,7 @@ export async function runExtractionRunner({
   timeoutMs,
   maxOutputBytes,
   binaryPath,
+  signingKey,
 } = {}) {
   const parsedProfile = parseWith(
     restrictedExtractionRunnerSchema,
@@ -828,6 +939,16 @@ export async function runExtractionRunner({
   );
   assertExecutableAdapter(parsedProfile);
   assertConformanceRecordShape(conformance);
+  const conformanceSigningKey = normalizeSigningKey(signingKey);
+  if (conformanceSigningKey === null || !conformanceSignatureVerifies(conformance, conformanceSigningKey)) {
+    throw runnerError(
+      "MEMORY_RUNNER_NOT_CONFORMANT",
+      "the conformance record has no verifiable HMAC signature under the provided signing key " +
+        "(a record forged from public fields is not a proof of a passing deny-all probe); " +
+        "refusing to deliver history content (re-run the conformance test with the " +
+        "origin-derived signing key; there is no degraded path)",
+    );
+  }
   const profileDigest = computeRunnerProfileDigest(parsedProfile);
   if (conformance.profileDigest !== profileDigest) {
     throw runnerError(
@@ -875,12 +996,16 @@ export async function runExtractionRunner({
   // Re-verify the binary from its bytes on disk; no process is spawned for this.
   const currentIdentity = await computeRunnerBinaryIdentity(resolvedBinary);
   if (
-    !isConformanceValid(conformance, {
-      testVersion: CONFORMANCE_TEST_VERSION,
-      profileDigest,
-      binaryRealpath: currentIdentity.binaryRealpath,
-      binaryContentSha256: currentIdentity.binaryContentSha256,
-    })
+    !isConformanceValid(
+      conformance,
+      {
+        testVersion: CONFORMANCE_TEST_VERSION,
+        profileDigest,
+        binaryRealpath: currentIdentity.binaryRealpath,
+        binaryContentSha256: currentIdentity.binaryContentSha256,
+      },
+      { signingKey: conformanceSigningKey },
+    )
   ) {
     throw runnerError(
       "MEMORY_RUNNER_NOT_CONFORMANT",

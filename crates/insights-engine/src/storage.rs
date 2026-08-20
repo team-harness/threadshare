@@ -295,7 +295,7 @@ pub(crate) fn wal_pressure_action(
     }
 }
 
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_owned();
     value.push(suffix);
     PathBuf::from(value)

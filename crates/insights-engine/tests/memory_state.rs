@@ -175,6 +175,7 @@ fn status_counts(storage: &MemoryStorage) -> Value {
 fn sync_request(
     digest_char: char,
     coverage: &str,
+    expected_generation: i64,
     entries: &[(&str, &str)],
 ) -> SyncApprovedRequest {
     let entry_values: Vec<Value> = entries
@@ -196,6 +197,7 @@ fn sync_request(
         "worktreeKey": TREE,
         "sourceTreeDigest": hex64(digest_char),
         "coverage": coverage,
+        "expectedGeneration": expected_generation,
         "entries": entry_values,
     }));
     value.validate().unwrap();
@@ -364,6 +366,7 @@ fn recall_orders_by_rrf_with_deterministic_tiebreaks() {
         .sync_approved(&sync_request(
             'a',
             "complete",
+            0,
             &[
                 ("entry-b", "alpha migration playbook"),
                 ("entry-a", "alpha migration playbook"),
@@ -619,27 +622,31 @@ fn sync_approved_shortcircuits_rejects_partial_and_advances_generations() {
         .sync_approved(&sync_request(
             'a',
             "complete",
+            0,
             &[("entry-1", "alpha guide")],
         ))
         .unwrap();
-    assert_eq!(first.generation, 1);
-    assert!(!first.unchanged);
-    assert_eq!(first.entry_count, 1);
+    assert_eq!(first["status"], "synced");
+    assert_eq!(first["generation"], 1);
+    assert_eq!(first["unchanged"], false);
+    assert_eq!(first["entryCount"], 1);
 
     // Same tree digest: idempotent short-circuit, no generation change.
     let replay = storage
         .sync_approved(&sync_request(
             'a',
             "complete",
+            1,
             &[("entry-1", "alpha guide")],
         ))
         .unwrap();
-    assert_eq!(replay.generation, 1);
-    assert!(replay.unchanged);
+    assert_eq!(replay["status"], "synced");
+    assert_eq!(replay["generation"], 1);
+    assert_eq!(replay["unchanged"], true);
 
     // Partial scans are recorded and rejected without a generation change.
     let error = storage
-        .sync_approved(&sync_request('b', "partial", &[]))
+        .sync_approved(&sync_request('b', "partial", 1, &[]))
         .unwrap_err();
     assert_eq!(error.code, "TS_MEMORY_SYNC_PARTIAL");
     let search: MemorySearchRequest = request(json!({
@@ -654,10 +661,15 @@ fn sync_approved_shortcircuits_rejects_partial_and_advances_generations() {
 
     // A complete scan replaces entries wholesale and advances the generation.
     let second = storage
-        .sync_approved(&sync_request('c', "complete", &[("entry-2", "beta guide")]))
+        .sync_approved(&sync_request(
+            'c',
+            "complete",
+            1,
+            &[("entry-2", "beta guide")],
+        ))
         .unwrap();
-    assert_eq!(second.generation, 2);
-    assert!(!second.unchanged);
+    assert_eq!(second["generation"], 2);
+    assert_eq!(second["unchanged"], false);
     let alpha_only: MemorySearchRequest = request(json!({
         "repositoryKey": REPO,
         "worktreeKey": TREE,
@@ -675,6 +687,154 @@ fn sync_approved_shortcircuits_rejects_partial_and_advances_generations() {
     assert_eq!(hits.items.len(), 1);
     assert_eq!(hits.items[0].entry_id, "entry-2");
     assert_eq!(hits.items[0].rank, 1);
+}
+
+#[test]
+fn sync_approved_generation_cas_rejects_lost_updates() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+
+    // Scanner A reads generation 0, then scanner B commits first.
+    let newer = storage
+        .sync_approved(&sync_request(
+            'b',
+            "complete",
+            0,
+            &[("entry-b", "beta guide")],
+        ))
+        .unwrap();
+    assert_eq!(newer["generation"], 1);
+
+    // A's older scan still carries expectedGeneration 0: structured conflict,
+    // no state change, and the stored digest tells A what to rescan against.
+    let stale_complete = sync_request('a', "complete", 0, &[("entry-a", "alpha guide")]);
+    let conflict = storage.sync_approved(&stale_complete).unwrap();
+    assert_eq!(conflict["status"], "conflict");
+    assert_eq!(conflict["generation"], 1);
+    assert_eq!(conflict["coverage"], "complete");
+    assert_eq!(conflict["sourceTreeDigest"], hex64('b'));
+
+    // B's newer projection is untouched by the rejected scan.
+    let beta: MemorySearchRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "query": "beta guide",
+    }));
+    let view = storage.search(&beta).unwrap();
+    assert_eq!(view.generation, 1);
+    assert_eq!(view.coverage, "complete");
+    assert_eq!(view.items.len(), 1);
+    let alpha: MemorySearchRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "query": "alpha",
+    }));
+    assert!(storage.search(&alpha).unwrap().items.is_empty());
+
+    // A stale partial scan cannot downgrade the newer complete projection.
+    let stale_partial = sync_request('c', "partial", 0, &[]);
+    let conflict = storage.sync_approved(&stale_partial).unwrap();
+    assert_eq!(conflict["status"], "conflict");
+    assert_eq!(conflict["generation"], 1);
+    assert_eq!(storage.search(&beta).unwrap().coverage, "complete");
+
+    // After rescanning at the current generation the sync applies.
+    let fresh = storage
+        .sync_approved(&sync_request(
+            'a',
+            "complete",
+            1,
+            &[("entry-a", "alpha guide")],
+        ))
+        .unwrap();
+    assert_eq!(fresh["status"], "synced");
+    assert_eq!(fresh["generation"], 2);
+}
+
+#[test]
+fn adjudication_rejects_duplicate_targets_and_pool_revision_drift() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let (token, digest) = setup_adjudication_fixture(&mut storage);
+
+    // `[{T,1},{T,2}]` tries to ride the engine's own revision bump: the first
+    // CAS moves the row to revision 2, so a current-row comparison would let
+    // the second target pass even though the recall pool saw revision 1.
+    let submit: SubmitAdjudicationRequest = request(json!({
+        "taskId": "task-adj",
+        "claimToken": token,
+        "responseDigest": hex64('d'),
+        "recall": {
+            "repositoryKey": REPO,
+            "worktreeKey": TREE,
+            "drafts": [{
+                "draftRef": "d1",
+                "candidateId": "cand-new",
+                "queryText": "legacy deploy runbook",
+            }],
+        },
+        "expectedResultSetDigest": digest,
+        "adjudications": [{
+            "draftRef": "d1",
+            "action": "merge",
+            "targets": [
+                { "id": "cand-old", "revision": 1 },
+                { "id": "cand-old", "revision": 2 },
+            ],
+            "mergedPayload": { "content": "merged deploy runbook", "type": "work_method" },
+            "mergedSearchableText": "merged deploy runbook",
+        }],
+    }));
+
+    // The protocol layer rejects duplicate target ids outright.
+    let error = submit.validate().unwrap_err();
+    assert!(error.contains("targets[].id must be unique"), "{error}");
+
+    // Defense in depth: even bypassing validation, the engine maps every
+    // target revision against the recall pool, so the second target fails the
+    // CAS and the whole submission rolls back.
+    let outcome = storage.submit_adjudication(&submit, 12_100).unwrap();
+    assert_eq!(outcome["status"], "stale");
+    assert_eq!(outcome["reason"], "revision-cas-failed");
+
+    let counts = status_counts(&storage);
+    assert_eq!(counts["candidates"]["draft"], 2);
+    assert_eq!(counts["candidates"]["quarantined"], 0);
+    assert_eq!(counts["candidates"]["discarded"], 0);
+    assert_eq!(counts["tasks"]["stale"], 1);
+
+    // The pool still carries cand-old at revision 1.
+    let after = storage
+        .recall(&recall_request("d1", "cand-new", "legacy deploy runbook"))
+        .unwrap();
+    assert_eq!(after.result_set_digest, digest);
+}
+
+#[test]
+fn stale_marking_never_touches_a_reclaimed_lease() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    // Holder A claims the adjudication task (lease 60s from now=12_000).
+    let (token_a, digest) = setup_adjudication_fixture(&mut storage);
+
+    // A's lease expires and holder B re-claims: fresh token, epoch 2.
+    let token_b = claim(&mut storage, "task-adj", "holder-b", 60_000, 100_000);
+    assert_ne!(token_b, token_a);
+
+    // A now drives its stale path (mismatching digest) with the superseded
+    // token. The lease-scoped gate rejects it, and crucially the stale
+    // marking never fires against B's re-issued lease.
+    let stale_attempt = adjudication_request(&token_a, &hex64('0'), "merge", 1);
+    let error = storage
+        .submit_adjudication(&stale_attempt, 100_100)
+        .unwrap_err();
+    assert_eq!(error.code, "TS_MEMORY_LEASE_LOST");
+
+    let counts = status_counts(&storage);
+    assert_eq!(counts["tasks"]["stale"], 0);
+    assert_eq!(counts["tasks"]["claimed"], 1);
+
+    // B's lease is fully intact: its own submission still applies.
+    let submit = adjudication_request(&token_b, &digest, "merge", 1);
+    let outcome = storage.submit_adjudication(&submit, 100_200).unwrap();
+    assert_eq!(outcome["status"], "applied");
 }
 
 #[test]

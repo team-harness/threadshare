@@ -27,9 +27,12 @@ use crate::memory_protocol::{
     RecallOutcome, RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire,
     ReviewQueueOutcome, ReviewQueueRequest, SearchItemWire, SearchOutcome,
     SubmitAdjudicationRequest, SubmitExtractionOutcome, SubmitExtractionRequest,
-    SyncApprovedOutcome, SyncApprovedRequest, TaskCountsWire, TaskLeaseWire, TaskWire,
+    SyncApprovedRequest, TaskCountsWire, TaskLeaseWire, TaskWire,
 };
-use crate::storage::persistent_file_permissions;
+use crate::storage::{
+    WAL_BACKPRESSURE_BYTES, WAL_PASSIVE_CHECKPOINT_BYTES, WalPressureAction,
+    persistent_file_permissions, sqlite_sidecar_path, wal_pressure_action,
+};
 use crate::try_canonical_json;
 
 /// Current memory-state schema version, stored in `memory_state_meta`.
@@ -873,6 +876,52 @@ impl MemoryStorage {
     pub fn state_dir(&self) -> Option<&Path> {
         self.state_dir.as_deref()
     }
+
+    /// WAL maintenance after every successful write transaction. The
+    /// memory-state connection disables `wal_autocheckpoint`, so this applies
+    /// the same threshold policy as the Insights store
+    /// (`EngineStorage::maintain_wal_after_commit`): a PASSIVE checkpoint at
+    /// 64 MiB and TRUNCATE backpressure at 128 MiB.
+    fn maintain_wal_after_commit(&self) -> Result<(), MemoryError> {
+        self.maintain_wal_after_commit_with_thresholds(
+            WAL_PASSIVE_CHECKPOINT_BYTES,
+            WAL_BACKPRESSURE_BYTES,
+        )?;
+        Ok(())
+    }
+
+    fn maintain_wal_after_commit_with_thresholds(
+        &self,
+        passive_checkpoint_bytes: u64,
+        backpressure_bytes: u64,
+    ) -> Result<WalPressureAction, MemoryError> {
+        let Some(database_path) = &self.database_path else {
+            return Ok(WalPressureAction::None);
+        };
+        let wal_path = sqlite_sidecar_path(database_path, "-wal");
+        let wal_bytes = match std::fs::metadata(wal_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let action = wal_pressure_action(wal_bytes, passive_checkpoint_bytes, backpressure_bytes);
+        let checkpoint_mode = match action {
+            WalPressureAction::None => return Ok(action),
+            WalPressureAction::PassiveCheckpoint => "PASSIVE",
+            WalPressureAction::Backpressure => "TRUNCATE",
+        };
+        let sql = format!("PRAGMA wal_checkpoint({checkpoint_mode})");
+        let (busy, _, _): (i64, i64, i64) = self
+            .connection
+            .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        if action == WalPressureAction::Backpressure && busy != 0 {
+            return Err(MemoryError::new(
+                "TS_MEMORY_WAL_BACKPRESSURE",
+                "the memory-state writer is waiting for readers to release the WAL snapshot",
+            ));
+        }
+        Ok(action)
+    }
 }
 
 impl MemoryStorage {
@@ -910,6 +959,7 @@ impl MemoryStorage {
                 request.status,
             ],
         )?;
+        self.maintain_wal_after_commit()?;
         Ok(BindRepositoryOutcome {
             repository_key: request.repository_key.clone(),
             worktree_key: request.worktree_key.clone(),
@@ -977,6 +1027,7 @@ impl MemoryStorage {
             inserted_tasks += changed;
         }
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(PlanTasksOutcome {
             inserted_chunks,
             skipped_chunks: request.chunks.len() - inserted_chunks,
@@ -1028,6 +1079,7 @@ impl MemoryStorage {
             MemoryError::failed("the claimed task disappeared inside the transaction")
         })?;
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(ClaimTaskOutcome {
             task: task_wire(&task),
             claim_token,
@@ -1064,6 +1116,7 @@ impl MemoryStorage {
         ) {
             Ok(SubmitGate::Idempotent(mut outcome)) => {
                 transaction.commit()?;
+                self.maintain_wal_after_commit()?;
                 outcome["idempotent"] = Value::Bool(true);
                 return Ok(outcome);
             }
@@ -1071,6 +1124,7 @@ impl MemoryStorage {
             Err(error) => {
                 if error.code == "TS_MEMORY_SUBMISSION_CONFLICT" {
                     transaction.commit()?;
+                    self.maintain_wal_after_commit()?;
                 }
                 return Err(error);
             }
@@ -1195,6 +1249,7 @@ impl MemoryStorage {
             now_unix_ms,
         )?;
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(outcome)
     }
 
@@ -1207,33 +1262,21 @@ impl MemoryStorage {
     /// `submit-adjudication` (design §2 tx-adjudication-submit): recall
     /// re-run, result-set digest comparison, per-target revision CAS,
     /// adjudication effects, and state advancement, all inside one
-    /// `BEGIN IMMEDIATE` transaction. Stale outcomes roll the transaction back
-    /// (leaving no rows) and mark the task `stale` afterwards.
+    /// `BEGIN IMMEDIATE` transaction. The recall re-run and the adjudication
+    /// effects live under a savepoint: stale outcomes roll the savepoint back
+    /// (leaving no adjudication rows) and mark the task `stale` inside the
+    /// same outer transaction with a lease-scoped CAS on
+    /// `(claim_token, lease_epoch, status='claimed')`, so a lease reissued to
+    /// another holder can never be marked stale and no `claimed` residue can
+    /// survive between the rollback and the marking.
     pub fn submit_adjudication(
         &mut self,
         request: &SubmitAdjudicationRequest,
         now_unix_ms: i64,
     ) -> Result<Value, MemoryError> {
         let response_digest = hex_blob(&request.response_digest)?;
-        let stale = |storage: &mut Self,
-                     task_id: &str,
-                     reason: &str,
-                     actual: &str|
-         -> Result<Value, MemoryError> {
-            storage.connection.execute(
-                "UPDATE tasks SET status='stale' WHERE task_id=?1 AND status='claimed'",
-                params![task_id],
-            )?;
-            Ok(serde_json::json!({
-                "taskId": task_id,
-                "status": "stale",
-                "reason": reason,
-                "expectedResultSetDigest": request.expected_result_set_digest,
-                "actualResultSetDigest": actual,
-            }))
-        };
 
-        enum TxOutcome {
+        enum ApplyOutcome {
             Applied(Value),
             Stale {
                 reason: &'static str,
@@ -1241,47 +1284,50 @@ impl MemoryStorage {
             },
         }
 
-        let tx_result = (|| -> Result<TxOutcome, MemoryError> {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let task = read_task(&transaction, &request.task_id)?.ok_or_else(|| {
-                MemoryError::new("TS_MEMORY_TASK_NOT_FOUND", "the task does not exist")
-            })?;
-            if task.kind != "adjudication" {
-                return Err(MemoryError::invalid("the task is not an adjudication task"));
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = read_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            MemoryError::new("TS_MEMORY_TASK_NOT_FOUND", "the task does not exist")
+        })?;
+        if task.kind != "adjudication" {
+            return Err(MemoryError::invalid("the task is not an adjudication task"));
+        }
+        if hex::encode(&task.repository_key) != request.recall.repository_key
+            || hex::encode(&task.worktree_key) != request.recall.worktree_key
+        {
+            return Err(MemoryError::invalid(
+                "the recall owner does not match the task owner",
+            ));
+        }
+        match submit_gate(
+            &transaction,
+            &task,
+            &request.claim_token,
+            &response_digest,
+            now_unix_ms,
+        ) {
+            Ok(SubmitGate::Idempotent(mut outcome)) => {
+                transaction.commit()?;
+                self.maintain_wal_after_commit()?;
+                outcome["idempotent"] = Value::Bool(true);
+                return Ok(outcome);
             }
-            if hex::encode(&task.repository_key) != request.recall.repository_key
-                || hex::encode(&task.worktree_key) != request.recall.worktree_key
-            {
-                return Err(MemoryError::invalid(
-                    "the recall owner does not match the task owner",
-                ));
-            }
-            match submit_gate(
-                &transaction,
-                &task,
-                &request.claim_token,
-                &response_digest,
-                now_unix_ms,
-            ) {
-                Ok(SubmitGate::Idempotent(mut outcome)) => {
+            Ok(SubmitGate::Proceed) => {}
+            Err(error) => {
+                if error.code == "TS_MEMORY_SUBMISSION_CONFLICT" {
                     transaction.commit()?;
-                    outcome["idempotent"] = Value::Bool(true);
-                    return Ok(TxOutcome::Applied(outcome));
+                    self.maintain_wal_after_commit()?;
                 }
-                Ok(SubmitGate::Proceed) => {}
-                Err(error) => {
-                    if error.code == "TS_MEMORY_SUBMISSION_CONFLICT" {
-                        transaction.commit()?;
-                    }
-                    return Err(error);
-                }
+                return Err(error);
             }
+        }
 
+        transaction.execute_batch("SAVEPOINT memory_adjudication_apply")?;
+        let apply_result = (|| -> Result<ApplyOutcome, MemoryError> {
             let recall = recall_on(&transaction, &request.recall)?;
             if recall.outcome.result_set_digest != request.expected_result_set_digest {
-                return Ok(TxOutcome::Stale {
+                return Ok(ApplyOutcome::Stale {
                     reason: "result-set-digest-mismatch",
                     actual: recall.outcome.result_set_digest,
                 });
@@ -1323,29 +1369,50 @@ impl MemoryStorage {
 
                 if matches!(adjudication.action.as_str(), "update" | "merge") {
                     for target in &adjudication.targets {
-                        if !recall
+                        // The submitted revision must equal exactly the
+                        // revision this transaction's own recall re-run saw in
+                        // the pool; comparing against the current row instead
+                        // would let consecutive revisions within one request
+                        // bypass the "revision the adjudicator saw" contract.
+                        let pool_revision = recall
                             .candidate_pool_revisions
                             .iter()
-                            .any(|(id, _)| *id == target.id)
-                        {
-                            return Err(MemoryError::invalid(format!(
-                                "target {} is not a candidate in the recall pool",
-                                target.id
-                            )));
+                            .find(|(id, _)| *id == target.id)
+                            .map(|(_, revision)| *revision)
+                            .ok_or_else(|| {
+                                MemoryError::invalid(format!(
+                                    "target {} is not a candidate in the recall pool",
+                                    target.id
+                                ))
+                            })?;
+                        if target.revision != pool_revision {
+                            return Ok(ApplyOutcome::Stale {
+                                reason: "revision-cas-failed",
+                                actual: recall.outcome.result_set_digest.clone(),
+                            });
                         }
                         let target_rowid: i64 = transaction.query_row(
-                            "SELECT rowid FROM candidates WHERE candidate_id=?1",
-                            params![target.id],
+                            "SELECT rowid FROM candidates
+                             WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                            params![target.id, task.repository_key, task.worktree_key],
                             |row| row.get(0),
                         )?;
                         let changed = transaction.execute(
                             "UPDATE candidates SET status='discarded', adjudication='done',
                                revision=revision+1, updated_at=?1
-                             WHERE candidate_id=?2 AND revision=?3",
-                            params![now_unix_ms, target.id, target.revision],
+                             WHERE candidate_id=?2 AND revision=?3
+                               AND repository_key=?4 AND worktree_key=?5
+                               AND status IN ('draft','quarantined')",
+                            params![
+                                now_unix_ms,
+                                target.id,
+                                target.revision,
+                                task.repository_key,
+                                task.worktree_key
+                            ],
                         )?;
                         if changed == 0 {
-                            return Ok(TxOutcome::Stale {
+                            return Ok(ApplyOutcome::Stale {
                                 reason: "revision-cas-failed",
                                 actual: recall.outcome.result_set_digest.clone(),
                             });
@@ -1443,28 +1510,91 @@ impl MemoryStorage {
                 &outcome,
                 now_unix_ms,
             )?;
-            transaction.commit()?;
-            Ok(TxOutcome::Applied(outcome))
+            Ok(ApplyOutcome::Applied(outcome))
         })();
-        match tx_result? {
-            TxOutcome::Applied(outcome) => Ok(outcome),
-            TxOutcome::Stale { reason, actual } => stale(self, &request.task_id, reason, &actual),
+        match apply_result? {
+            ApplyOutcome::Applied(outcome) => {
+                transaction.execute_batch("RELEASE memory_adjudication_apply")?;
+                transaction.commit()?;
+                self.maintain_wal_after_commit()?;
+                Ok(outcome)
+            }
+            ApplyOutcome::Stale { reason, actual } => {
+                transaction.execute_batch(
+                    "ROLLBACK TO memory_adjudication_apply; RELEASE memory_adjudication_apply",
+                )?;
+                // Lease-scoped stale marking inside the same transaction: only
+                // the exact lease this submission presented (and the gate just
+                // verified) may be marked. A zero-row CAS means the lease is
+                // no longer ours, so the result reports the actual task status
+                // instead of claiming `stale`.
+                let changed = transaction.execute(
+                    "UPDATE tasks SET status='stale'
+                     WHERE task_id=?1 AND claim_token=?2 AND lease_epoch=?3
+                       AND status='claimed'",
+                    params![&task.task_id, &request.claim_token, task.lease_epoch],
+                )?;
+                let status = if changed == 1 {
+                    "stale".to_owned()
+                } else {
+                    read_task(&transaction, &task.task_id)?
+                        .map(|current| current.status)
+                        .unwrap_or_else(|| "missing".to_owned())
+                };
+                transaction.commit()?;
+                self.maintain_wal_after_commit()?;
+                Ok(serde_json::json!({
+                    "taskId": task.task_id,
+                    "status": status,
+                    "reason": reason,
+                    "expectedResultSetDigest": request.expected_result_set_digest,
+                    "actualResultSetDigest": actual,
+                }))
+            }
         }
     }
 
-    /// `sync-approved` (DEV-1 contract): partial scans record `coverage:
-    /// partial` and are rejected; identical complete trees short-circuit;
-    /// otherwise the owner's entries and FTS rows are replaced wholesale and
-    /// `generation` advances, in one transaction.
-    pub fn sync_approved(
-        &mut self,
-        request: &SyncApprovedRequest,
-    ) -> Result<SyncApprovedOutcome, MemoryError> {
+    /// `sync-approved` (DEV-1 contract), generation-CAS guarded and fully
+    /// transactional: the projection read, the `expectedGeneration` CAS, the
+    /// partial-coverage marker, the unchanged short-circuit, and the wholesale
+    /// replacement all run inside one `BEGIN IMMEDIATE` transaction, so a
+    /// stale scan (complete or partial) can never overwrite or downgrade a
+    /// projection that advanced after the scan started. A CAS miss returns
+    /// the structured `"conflict"` result with the current generation and
+    /// stored source tree digest; the client must rescan.
+    pub fn sync_approved(&mut self, request: &SyncApprovedRequest) -> Result<Value, MemoryError> {
         let repository_key = hex_blob(&request.repository_key)?;
         let worktree_key = hex_blob(&request.worktree_key)?;
         let source_tree_digest = hex_blob(&request.source_tree_digest)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(i64, Vec<u8>, String)> = transaction
+            .query_row(
+                "SELECT generation, source_tree_digest, coverage FROM approved_projection
+                 WHERE repository_key=?1 AND worktree_key=?2",
+                params![repository_key, worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let current_generation = existing
+            .as_ref()
+            .map_or(0, |(generation, _, _)| *generation);
+        if request.expected_generation != current_generation {
+            // Nothing was written; dropping the transaction releases the lock.
+            return Ok(serde_json::json!({
+                "status": "conflict",
+                "generation": current_generation,
+                "coverage": existing
+                    .as_ref()
+                    .map_or("complete", |(_, _, coverage)| coverage.as_str()),
+                "sourceTreeDigest": existing
+                    .as_ref()
+                    .map(|(_, stored_digest, _)| hex::encode(stored_digest)),
+            }));
+        }
         if request.coverage == "partial" {
-            self.connection.execute(
+            transaction.execute(
                 "INSERT INTO approved_projection(
                    repository_key, worktree_key, generation, source_tree_digest, coverage,
                    analyzer_version, recall_algorithm_version)
@@ -1478,40 +1608,31 @@ impl MemoryStorage {
                     RECALL_ALGORITHM_VERSION
                 ],
             )?;
+            transaction.commit()?;
+            self.maintain_wal_after_commit()?;
             return Err(MemoryError::new(
                 "TS_MEMORY_SYNC_PARTIAL",
                 "the worktree scan was partial; retry after the tree quiesces",
             ));
         }
-        let existing: Option<(i64, Vec<u8>, String)> = self
-            .connection
-            .query_row(
-                "SELECT generation, source_tree_digest, coverage FROM approved_projection
-                 WHERE repository_key=?1 AND worktree_key=?2",
-                params![repository_key, worktree_key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
         if let Some((generation, stored_digest, coverage)) = &existing
             && coverage == "complete"
             && *stored_digest == source_tree_digest
         {
-            let entry_count: i64 = self.connection.query_row(
+            let entry_count: i64 = transaction.query_row(
                 "SELECT COUNT(*) FROM approved_entries
                  WHERE repository_key=?1 AND worktree_key=?2",
                 params![repository_key, worktree_key],
                 |row| row.get(0),
             )?;
-            return Ok(SyncApprovedOutcome {
-                generation: *generation,
-                coverage: "complete".to_owned(),
-                unchanged: true,
-                entry_count: entry_count as usize,
-            });
+            return Ok(serde_json::json!({
+                "status": "synced",
+                "generation": generation,
+                "coverage": "complete",
+                "unchanged": true,
+                "entryCount": entry_count,
+            }));
         }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "DELETE FROM approved_fts WHERE rowid IN (
                SELECT rowid FROM approved_entries WHERE repository_key=?1 AND worktree_key=?2)",
@@ -1570,12 +1691,14 @@ impl MemoryStorage {
             |row| row.get(0),
         )?;
         transaction.commit()?;
-        Ok(SyncApprovedOutcome {
-            generation,
-            coverage: "complete".to_owned(),
-            unchanged: false,
-            entry_count: request.entries.len(),
-        })
+        self.maintain_wal_after_commit()?;
+        Ok(serde_json::json!({
+            "status": "synced",
+            "generation": generation,
+            "coverage": "complete",
+            "unchanged": false,
+            "entryCount": request.entries.len(),
+        }))
     }
 
     /// `search` (read-only): owner-scoped BM25 over `approved_fts`.
@@ -1873,6 +1996,7 @@ impl MemoryStorage {
             params![&request.candidate_id, &request.statement_id],
         )?;
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "candidateId": request.candidate_id,
             "statementId": request.statement_id,
@@ -1938,6 +2062,7 @@ impl MemoryStorage {
         transaction.execute("DELETE FROM candidate_fts WHERE rowid=?1", params![rowid])?;
         let generation = bump_candidate_generation(&transaction, &repository_key, &worktree_key)?;
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "candidateId": request.candidate_id,
             "status": "discarded",
@@ -2163,6 +2288,7 @@ impl MemoryStorage {
             }));
         }
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "planId": plan_id,
             "planDigest": hex::encode(plan_digest),
@@ -2227,6 +2353,7 @@ impl MemoryStorage {
             }
         };
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "planId": request.plan_id,
             "planDigest": request.plan_digest,
@@ -2245,6 +2372,7 @@ impl MemoryStorage {
             "UPDATE promotion_journal SET status='voided', updated_at=?1 WHERE plan_id=?2",
             params![now_unix_ms, plan_id],
         )?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "planId": plan_id,
             "status": "voided",
@@ -2328,6 +2456,7 @@ impl MemoryStorage {
                 was_applied,
             )
         };
+        self.maintain_wal_after_commit()?;
         let files = read_promotion_files(&self.connection, &request.plan_id)?;
         if was_applied {
             let candidates =
@@ -2455,6 +2584,7 @@ impl MemoryStorage {
             params![now_unix_ms, &request.plan_id],
         )?;
         transaction.commit()?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "planId": request.plan_id,
             "status": "applied",
@@ -2530,11 +2660,98 @@ impl MemoryStorage {
                     .transpose()?,
             ],
         )?;
+        self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
             "planDigest": request.plan_digest,
             "taskId": request.task_id,
             "via": request.via,
             "decidedAt": now_unix_ms,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_database_path(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "threadshare-memory-wal-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("memory-state.sqlite3")
+    }
+
+    #[test]
+    fn checkpoints_a_persistent_wal_at_write_boundaries() {
+        let database_path = temp_database_path("checkpoint");
+        let storage = MemoryStorage::open(&database_path).unwrap();
+        let autocheckpoint: i64 = storage
+            .connection
+            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(autocheckpoint, 0);
+
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TABLE wal_pressure_fixture(value BLOB NOT NULL);
+                 INSERT INTO wal_pressure_fixture(value) VALUES (zeroblob(262144));",
+            )
+            .unwrap();
+        let wal_path = sqlite_sidecar_path(&database_path, "-wal");
+        assert!(std::fs::metadata(&wal_path).unwrap().len() > 0);
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(1, u64::MAX)
+                .unwrap(),
+            WalPressureAction::PassiveCheckpoint
+        );
+
+        storage
+            .connection
+            .execute(
+                "INSERT INTO wal_pressure_fixture(value) VALUES (zeroblob(4096))",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(1, 2)
+                .unwrap(),
+            WalPressureAction::Backpressure
+        );
+        assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), 0);
+
+        // Below both thresholds nothing happens, and the default write-path
+        // maintenance (fixed 64/128 MiB thresholds) is a no-op for small WALs.
+        storage
+            .connection
+            .execute(
+                "INSERT INTO wal_pressure_fixture(value) VALUES (zeroblob(64))",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(u64::MAX - 1, u64::MAX)
+                .unwrap(),
+            WalPressureAction::None
+        );
+        storage.maintain_wal_after_commit().unwrap();
+    }
+
+    #[test]
+    fn in_memory_databases_skip_wal_maintenance() {
+        let storage = MemoryStorage::open_in_memory().unwrap();
+        assert_eq!(
+            storage
+                .maintain_wal_after_commit_with_thresholds(1, 2)
+                .unwrap(),
+            WalPressureAction::None
+        );
     }
 }
