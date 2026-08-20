@@ -124,7 +124,7 @@ const MESSAGE_TYPES = new Set([
 ]);
 
 /**
- * Stage 4a Team Memory op names (`MEMORY_COMMAND.op` / `MEMORY_RESULT.op`),
+ * Stage 4a + 4c Team Memory op names (`MEMORY_COMMAND.op` / `MEMORY_RESULT.op`),
  * lowercase kebab-case, mirroring `MEMORY_OPS` in
  * `crates/insights-engine/src/memory_protocol.rs`.
  */
@@ -140,6 +140,12 @@ export const MEMORY_OPS = Object.freeze([
   "search",
   "review-queue",
   "status",
+  "confirm-statement",
+  "discard-candidate",
+  "promotion-plan",
+  "promotion-approve",
+  "promotion-apply",
+  "authorize",
 ]);
 const MEMORY_OP_SET = new Set(MEMORY_OPS);
 

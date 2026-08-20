@@ -25,7 +25,13 @@
 //! `TS_MEMORY_TASK_NOT_FOUND`, `TS_MEMORY_TASK_NOT_CLAIMABLE`,
 //! `TS_MEMORY_LEASE_LOST`, `TS_MEMORY_SUBMISSION_CONFLICT` (conflict),
 //! `TS_MEMORY_SYNC_PARTIAL` (conflict), `TS_MEMORY_STATE_FAILED`,
-//! `TS_MEMORY_STATE_CORRUPT` (storage).
+//! `TS_MEMORY_STATE_CORRUPT` (storage). Stage 4c adds:
+//! `TS_MEMORY_ASSESSMENT_NOT_FOUND`, `TS_MEMORY_CANDIDATE_NOT_FOUND`,
+//! `TS_MEMORY_BINDING_NOT_FOUND`, `TS_MEMORY_PLAN_NOT_FOUND`,
+//! `TS_MEMORY_TARGET_PATH_INVALID` (validation),
+//! `TS_MEMORY_CANDIDATE_STALE`, `TS_MEMORY_UNVERIFIED_CLAIM`,
+//! `TS_MEMORY_PLAN_STATE_INVALID`, `TS_MEMORY_PLAN_DIGEST_MISMATCH`,
+//! `TS_MEMORY_OWNER_MISMATCH` (conflict).
 //!
 //! All digests on the wire are lowercase sha256 hex64 strings. `repositoryKey`,
 //! `worktreeKey`, `sessionKey`, `turnKey` are hex64. Timestamps are integer Unix
@@ -200,23 +206,133 @@
 //!     "statementTextDigest": hex64, "revision": int }] }] }`
 //!
 //! ## `status`
-//! Read-only per-owner counters.
+//! Read-only per-owner counters, including the promotion-journal recovery
+//! check: plans stuck in `applying` (crash during `promotion-apply`) are
+//! reported in `promotions.applyingPlanIds` so the caller can re-run
+//! `promotion-apply` (idempotent resume).
 //! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64 }`
 //! - result: `{ "chunks": { "pending": int, "drafted": int, "extracted": int,
 //!   "stale": int }, "tasks": { "pending": int, "claimed": int,
 //!   "submitted": int, "stale": int }, "candidates": { "draft": int,
-//!   "quarantined": int, "promoted": int, "discarded": int } }`
+//!   "quarantined": int, "promoted": int, "discarded": int },
+//!   "promotions": { "generated": int, "approved": int, "applying": int,
+//!   "applied": int, "voided": int, "applyingPlanIds": [string] } }`
 //!
-//! Later stages add: `confirm-statement`, `discard-candidate`,
-//! `promotion-plan`, `promotion-approve`, `promotion-apply`, `authorize`.
+//! # Ops (Stage 4c)
+//!
+//! ## `confirm-statement`
+//! One transaction: loads the `(candidateId, statementId)` assessment
+//! (`TS_MEMORY_ASSESSMENT_NOT_FOUND` when absent) and compares both digests
+//! against what the reviewer saw. Any drift returns the structured
+//! `"drifted"` result without state change; a match sets
+//! `claimSupport='human-confirmed'`, `assessedBy='human'`, `revision+1`.
+//! - request: `{ "candidateId": string, "statementId": string,
+//!   "statementTextDigest": hex64, "citationsDigest": hex64 }`
+//! - result (confirmed): `{ "candidateId": string, "statementId": string,
+//!   "status": "confirmed", "claimSupport": "human-confirmed",
+//!   "assessedBy": "human", "revision": int }`
+//! - result (drifted, no state change): `{ "candidateId": string,
+//!   "statementId": string, "status": "drifted",
+//!   "actualStatementTextDigest": hex64, "actualCitationsDigest": hex64 }`
+//!
+//! ## `discard-candidate`
+//! One transaction: the candidate must exist (`TS_MEMORY_CANDIDATE_NOT_FOUND`),
+//! be `draft` or `quarantined`, and match `expectedRevision` (both violations:
+//! `TS_MEMORY_CANDIDATE_STALE`). It then becomes `discarded` with
+//! `revision+1`, its `candidate_fts` row is removed, and
+//! `candidate_projection.generation` advances.
+//! - request: `{ "candidateId": string, "expectedRevision": int }`
+//! - result: `{ "candidateId": string, "status": "discarded",
+//!   "revision": int, "candidateGeneration": int }`
+//!
+//! ## `promotion-plan`
+//! One transaction. Requires an active `repository_bindings` row for the owner
+//! (`TS_MEMORY_BINDING_NOT_FOUND`). Every candidate must exist for the owner
+//! and be `quarantined` (`TS_MEMORY_CANDIDATE_NOT_FOUND` /
+//! `TS_MEMORY_CANDIDATE_STALE`), and every statement must be verified: any
+//! assessment with `claimSupport: "unverified"`, or any
+//! `payload.statements[].statementId` without an assessment row, fails with
+//! `TS_MEMORY_UNVERIFIED_CLAIM`. Each `targetPath` must be a normalized
+//! relative path (no absolute paths, `.`/`..`, empty segments, backslashes,
+//! colons, or control characters — enforced at validation) strictly below the
+//! binding's `memoryRoot` (`TS_MEMORY_TARGET_PATH_INVALID`).
+//! `sanitizedContent` is strict base64 of the exact sanitized bytes
+//! (per file ≤ 1 MiB decoded, ≤ 128 files, ≤ 8 MiB total). The engine
+//! computes `assessmentDigest` (canonical digest of the related assessment
+//! rows ordered by `(candidateId, statementId)`), stores the sanitized bytes
+//! in `promotion_files` with `sanitizedDigest = sha256(bytes)`, writes the
+//! canonical plan document to `promotion_journal` with `status='generated'`,
+//! and returns the plan summary. `planDigest` is the canonical digest of the
+//! plan document `{ format: "threadshare-memory-promotion-plan@v1", planId,
+//! owner: { repositoryKey, worktreeKey, memoryRoot }, candidateIds,
+//! policyVersion, assessmentDigest, perFile: [{ targetPath, targetBlobHash,
+//! sanitizedContentDigest }] }`.
+//! - request: `{ "owner": { "repositoryKey": hex64, "worktreeKey": hex64 },
+//!   "candidateIds": [string] (1..=512, unique), "policyVersion": string,
+//!   "perFile": [{ "targetPath": string, "sanitizedContent": base64,
+//!     "targetBlobHash": hex40|null }] (1..=128, unique targetPath) }`
+//! - result: `{ "planId": uuid, "planDigest": hex64, "status": "generated",
+//!   "owner": { "repositoryKey": hex64, "worktreeKey": hex64,
+//!   "memoryRoot": string }, "candidateIds": [string],
+//!   "policyVersion": string, "assessmentDigest": hex64,
+//!   "files": [{ "targetPath": string, "targetBlobHash": hex40|null,
+//!     "sanitizedDigest": hex64, "bytes": int }] }`
+//!
+//! ## `promotion-approve`
+//! The explicit, digest-bound user approval (`generated → approved`). The
+//! request digest must equal the stored `planDigest` exactly
+//! (`TS_MEMORY_PLAN_DIGEST_MISMATCH` otherwise). Re-approving an already
+//! `approved` plan with the matching digest replays idempotently; any other
+//! state fails with `TS_MEMORY_PLAN_STATE_INVALID`.
+//! - request: `{ "planId": string, "planDigest": hex64 }`
+//! - result: `{ "planId": string, "planDigest": hex64,
+//!   "status": "approved", "idempotent": bool }`
+//!
+//! ## `promotion-apply`
+//! `approved → applying → applied | voided`. The plan owner is re-resolved:
+//! `ownerRootRealpath` must equal `repository_bindings.root_realpath`
+//! (`TS_MEMORY_OWNER_MISMATCH`). Per file (ordered by `targetPath`) the
+//! engine itself reads the current worktree bytes through the no-follow
+//! traversal and computes the git blob OID (`sha1("blob {len}\0"+bytes)`;
+//! missing file → expected `targetBlobHash` null). Any mismatch with the
+//! plan's recorded hash, any symlink path component, or content drift on an
+//! already-applied file voids the plan and returns the structured `"voided"`
+//! result with the drifted path. A passing file is written with the exact
+//! `promotion_files` bytes (per-segment `openat` + `O_NOFOLLOW` +
+//! `O_DIRECTORY`, temp file + atomic rename) and marked `applied=1`. After
+//! all files, a closing transaction marks the journal `applied` and moves the
+//! plan candidates `quarantined → promoted` with `revision+1`, removes their
+//! `candidate_fts` rows (they leave the recall pool), and advances
+//! `candidate_projection.generation`. Crash recovery: a plan left in
+//! `applying` (reported by `status`) may be re-applied; files whose current
+//! content digest already equals `sanitizedDigest` are skipped idempotently,
+//! and an `applied` plan replays with `"idempotent": true`. `generated` and
+//! `voided` plans are rejected with `TS_MEMORY_PLAN_STATE_INVALID`.
+//! - request: `{ "planId": string, "ownerRootRealpath": "<absolute path>" }`
+//! - result (applied): `{ "planId": string, "status": "applied",
+//!   "idempotent": bool, "appliedFiles": [string],
+//!   "candidates": [{ "candidateId": string, "revision": int,
+//!     "status": "promoted" }], "candidateGeneration": int }`
+//! - result (voided): `{ "planId": string, "status": "voided",
+//!   "driftedPath": string }`
+//!
+//! ## `authorize`
+//! Appends one `authorization_log` row (plan- or manifest-scoped input
+//! authorization audit).
+//! - request: `{ "planDigest": hex64, "taskId": string|null,
+//!   "runnerInputDigest": hex64|null, "inputCoverageDigest": hex64|null,
+//!   "provider": string, "model": string, "endpoint": string, "bytes": int,
+//!   "via": "interactive"|"digest"|"manifest", "manifestDigest": hex64|null }`
+//! - result: `{ "planDigest": hex64, "taskId": string|null, "via": string,
+//!   "decidedAt": int }`
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::memory_state::{MemoryError, MemoryStorage};
 
-/// Stage 4a op names (`MEMORY_COMMAND.op`), lowercase kebab-case per design §3.
-pub const MEMORY_OPS: [&str; 11] = [
+/// Stage 4a + 4c op names (`MEMORY_COMMAND.op`), lowercase kebab-case per design §3.
+pub const MEMORY_OPS: [&str; 17] = [
     "open",
     "bind-repository",
     "plan-tasks",
@@ -228,6 +344,12 @@ pub const MEMORY_OPS: [&str; 11] = [
     "search",
     "review-queue",
     "status",
+    "confirm-statement",
+    "discard-candidate",
+    "promotion-plan",
+    "promotion-approve",
+    "promotion-apply",
+    "authorize",
 ];
 
 pub fn is_memory_op(op: &str) -> bool {
@@ -236,9 +358,20 @@ pub fn is_memory_op(op: &str) -> bool {
 
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PAYLOAD_ITEMS: usize = 512;
+const MAX_PLAN_FILES: usize = 128;
+const MAX_PLAN_FILE_BYTES: usize = 1024 * 1024;
+const MAX_PLAN_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TARGET_PATH_BYTES: usize = 1024;
 
 fn is_hex64(value: &str) -> bool {
     value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_hex40(value: &str) -> bool {
+    value.len() == 40
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -844,6 +977,214 @@ impl MemoryStatusRequest {
     }
 }
 
+/// Normalized relative path check for `promotion-plan` targets: relative,
+/// slash-separated, no empty/`.`/`..` segments, no backslashes, colons, or
+/// control characters. Containment below the binding's `memoryRoot` is
+/// enforced by the storage op (which knows the binding).
+fn valid_target_path(value: &str, label: &str) -> Result<(), String> {
+    require(
+        !value.is_empty() && value.len() <= MAX_TARGET_PATH_BYTES,
+        &format!("{label} must be between 1 and {MAX_TARGET_PATH_BYTES} bytes"),
+    )?;
+    require(
+        !value.contains('\\') && !value.contains(':') && !value.chars().any(char::is_control),
+        &format!("{label} must not contain backslashes, colons, or control characters"),
+    )?;
+    require(
+        !value.starts_with('/'),
+        &format!("{label} must be a relative path"),
+    )?;
+    for segment in value.split('/') {
+        require(
+            !segment.is_empty(),
+            &format!("{label} must not contain empty segments"),
+        )?;
+        require(
+            segment != "." && segment != "..",
+            &format!("{label} must not contain dot segments"),
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmStatementRequest {
+    pub candidate_id: String,
+    pub statement_id: String,
+    pub statement_text_digest: String,
+    pub citations_digest: String,
+}
+
+impl ConfirmStatementRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.candidate_id, "candidateId")?;
+        valid_identifier(&self.statement_id, "statementId")?;
+        valid_hex64(&self.statement_text_digest, "statementTextDigest")?;
+        valid_hex64(&self.citations_digest, "citationsDigest")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscardCandidateRequest {
+    pub candidate_id: String,
+    pub expected_revision: i64,
+}
+
+impl DiscardCandidateRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.candidate_id, "candidateId")?;
+        require(
+            self.expected_revision >= 1,
+            "expectedRevision must be at least 1",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromotionOwnerInput {
+    pub repository_key: String,
+    pub worktree_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromotionFileInput {
+    pub target_path: String,
+    pub sanitized_content: String,
+    pub target_blob_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromotionPlanRequest {
+    pub owner: PromotionOwnerInput,
+    pub candidate_ids: Vec<String>,
+    pub policy_version: String,
+    pub per_file: Vec<PromotionFileInput>,
+}
+
+impl PromotionPlanRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        owner_fields(&self.owner.repository_key, &self.owner.worktree_key)?;
+        require(
+            !self.candidate_ids.is_empty() && self.candidate_ids.len() <= MAX_PAYLOAD_ITEMS,
+            "candidateIds must contain between 1 and 512 entries",
+        )?;
+        let mut candidate_ids = Vec::new();
+        for candidate_id in &self.candidate_ids {
+            valid_identifier(candidate_id, "candidateIds[]")?;
+            require(
+                !candidate_ids.contains(&candidate_id.as_str()),
+                "candidateIds[] must be unique",
+            )?;
+            candidate_ids.push(candidate_id.as_str());
+        }
+        valid_identifier(&self.policy_version, "policyVersion")?;
+        require(
+            !self.per_file.is_empty() && self.per_file.len() <= MAX_PLAN_FILES,
+            "perFile must contain between 1 and 128 entries",
+        )?;
+        let mut total_bytes = 0usize;
+        let mut target_paths = Vec::new();
+        for file in &self.per_file {
+            valid_target_path(&file.target_path, "perFile[].targetPath")?;
+            require(
+                !target_paths.contains(&file.target_path.as_str()),
+                "perFile[].targetPath must be unique",
+            )?;
+            target_paths.push(file.target_path.as_str());
+            let bytes = crate::memory_promotion::decode_base64(&file.sanitized_content)
+                .ok_or_else(|| {
+                    "perFile[].sanitizedContent must be strict padded base64".to_owned()
+                })?;
+            require(
+                bytes.len() <= MAX_PLAN_FILE_BYTES,
+                "perFile[].sanitizedContent exceeds 1 MiB decoded",
+            )?;
+            total_bytes += bytes.len();
+            if let Some(blob_hash) = &file.target_blob_hash {
+                require(
+                    is_hex40(blob_hash),
+                    "perFile[].targetBlobHash must be a git blob OID (hex40)",
+                )?;
+            }
+        }
+        require(
+            total_bytes <= MAX_PLAN_TOTAL_BYTES,
+            "perFile decoded content exceeds 8 MiB in total",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromotionApproveRequest {
+    pub plan_id: String,
+    pub plan_digest: String,
+}
+
+impl PromotionApproveRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.plan_id, "planId")?;
+        valid_hex64(&self.plan_digest, "planDigest")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromotionApplyRequest {
+    pub plan_id: String,
+    pub owner_root_realpath: String,
+}
+
+impl PromotionApplyRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.plan_id, "planId")?;
+        require(
+            std::path::Path::new(&self.owner_root_realpath).is_absolute(),
+            "ownerRootRealpath must be an absolute path",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizeRequest {
+    pub plan_digest: String,
+    pub task_id: Option<String>,
+    pub runner_input_digest: Option<String>,
+    pub input_coverage_digest: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub endpoint: String,
+    pub bytes: i64,
+    pub via: String,
+    pub manifest_digest: Option<String>,
+}
+
+impl AuthorizeRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_hex64(&self.plan_digest, "planDigest")?;
+        if let Some(task_id) = &self.task_id {
+            valid_identifier(task_id, "taskId")?;
+        }
+        valid_optional_hex64(self.runner_input_digest.as_ref(), "runnerInputDigest")?;
+        valid_optional_hex64(self.input_coverage_digest.as_ref(), "inputCoverageDigest")?;
+        valid_identifier(&self.provider, "provider")?;
+        valid_identifier(&self.model, "model")?;
+        valid_identifier(&self.endpoint, "endpoint")?;
+        require(self.bytes >= 0, "bytes must be non-negative")?;
+        require(
+            matches!(self.via.as_str(), "interactive" | "digest" | "manifest"),
+            "via must be interactive, digest, or manifest",
+        )?;
+        valid_optional_hex64(self.manifest_digest.as_ref(), "manifestDigest")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Result payload shapes (engine → client).
 // ---------------------------------------------------------------------------
@@ -1095,10 +1436,22 @@ pub struct CandidateCountsWire {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PromotionCountsWire {
+    pub generated: i64,
+    pub approved: i64,
+    pub applying: i64,
+    pub applied: i64,
+    pub voided: i64,
+    pub applying_plan_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryStatusOutcome {
     pub chunks: ChunkCountsWire,
     pub tasks: TaskCountsWire,
     pub candidates: CandidateCountsWire,
+    pub promotions: PromotionCountsWire,
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,6 +1480,12 @@ pub fn validate_command_payload(op: &str, payload: &Value) -> Result<(), String>
         "search" => parse(payload, MemorySearchRequest::validate),
         "review-queue" => parse(payload, ReviewQueueRequest::validate),
         "status" => parse(payload, MemoryStatusRequest::validate),
+        "confirm-statement" => parse(payload, ConfirmStatementRequest::validate),
+        "discard-candidate" => parse(payload, DiscardCandidateRequest::validate),
+        "promotion-plan" => parse(payload, PromotionPlanRequest::validate),
+        "promotion-approve" => parse(payload, PromotionApproveRequest::validate),
+        "promotion-apply" => parse(payload, PromotionApplyRequest::validate),
+        "authorize" => parse(payload, AuthorizeRequest::validate),
         _ => Err(format!("unknown memory op {op}")),
     }
 }
@@ -1240,6 +1599,36 @@ pub fn handle_memory_command(
             let request: MemoryStatusRequest = parse_request(payload)?;
             request.validate().map_err(MemoryError::invalid)?;
             to_wire(&storage.status(&request)?)
+        }
+        "confirm-statement" => {
+            let request: ConfirmStatementRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.confirm_statement(&request)
+        }
+        "discard-candidate" => {
+            let request: DiscardCandidateRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.discard_candidate(&request, now_unix_ms)
+        }
+        "promotion-plan" => {
+            let request: PromotionPlanRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.promotion_plan(&request, now_unix_ms)
+        }
+        "promotion-approve" => {
+            let request: PromotionApproveRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.promotion_approve(&request, now_unix_ms)
+        }
+        "promotion-apply" => {
+            let request: PromotionApplyRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.promotion_apply(&request, now_unix_ms)
+        }
+        "authorize" => {
+            let request: AuthorizeRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.authorize(&request, now_unix_ms)
         }
         other => Err(MemoryError::invalid(format!("unknown memory op {other}"))),
     }

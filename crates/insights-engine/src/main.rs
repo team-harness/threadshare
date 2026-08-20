@@ -256,12 +256,23 @@ fn deep_query_engine_error(error: QueryError) -> EngineError {
 
 fn memory_engine_error(error: MemoryError) -> EngineError {
     let category = match error.code {
-        "TS_MEMORY_REQUEST_INVALID" | "TS_MEMORY_TASK_NOT_FOUND" => "validation",
+        "TS_MEMORY_REQUEST_INVALID"
+        | "TS_MEMORY_TASK_NOT_FOUND"
+        | "TS_MEMORY_ASSESSMENT_NOT_FOUND"
+        | "TS_MEMORY_CANDIDATE_NOT_FOUND"
+        | "TS_MEMORY_BINDING_NOT_FOUND"
+        | "TS_MEMORY_PLAN_NOT_FOUND"
+        | "TS_MEMORY_TARGET_PATH_INVALID" => "validation",
         "TS_MEMORY_STATE_NOT_OPEN"
         | "TS_MEMORY_TASK_NOT_CLAIMABLE"
         | "TS_MEMORY_LEASE_LOST"
         | "TS_MEMORY_SUBMISSION_CONFLICT"
-        | "TS_MEMORY_SYNC_PARTIAL" => "conflict",
+        | "TS_MEMORY_SYNC_PARTIAL"
+        | "TS_MEMORY_CANDIDATE_STALE"
+        | "TS_MEMORY_UNVERIFIED_CLAIM"
+        | "TS_MEMORY_PLAN_STATE_INVALID"
+        | "TS_MEMORY_PLAN_DIGEST_MISMATCH"
+        | "TS_MEMORY_OWNER_MISMATCH" => "conflict",
         _ => "storage",
     };
     EngineError::new(error.code, category, error.message)

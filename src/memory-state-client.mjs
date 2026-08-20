@@ -1,8 +1,9 @@
 /**
- * Team Memory Stage 4a op wrappers over `InsightsEngineClient.memoryCommand`
- * (design doc `docs/team-memory-phase1-design.md` §3, DEV-4).
+ * Team Memory Stage 4a + 4c op wrappers over
+ * `InsightsEngineClient.memoryCommand` (design doc
+ * `docs/team-memory-phase1-design.md` §3, DEV-4).
  *
- * Each Stage 4a op gets one `memoryXxx(engine, input, options)` function that
+ * Each op gets one `memoryXxx(engine, input, options)` function that
  * validates the request payload with zod before sending, sends one
  * `MEMORY_COMMAND{op}` frame, and validates the `MEMORY_RESULT` payload with
  * zod before returning it. The zod schemas mirror the normative wire schema in
@@ -11,10 +12,12 @@
  * live in `insights-engine-protocol.mjs`.
  *
  * Structured stale outcomes of `submit-adjudication` are not exceptions: the
- * result is a discriminated union on `status` (`"applied" | "stale"`). Engine
- * failures surface as `InsightsEngineClientError` with the remote
- * `TS_MEMORY_*` code; local schema failures throw `MemoryStateClientError`
- * with `TS_MEMORY_REQUEST_INVALID` / `TS_MEMORY_RESULT_INVALID`.
+ * result is a discriminated union on `status` (`"applied" | "stale"`). The
+ * same pattern covers `confirm-statement` (`"confirmed" | "drifted"`) and
+ * `promotion-apply` (`"applied" | "voided"`). Engine failures surface as
+ * `InsightsEngineClientError` with the remote `TS_MEMORY_*` code; local
+ * schema failures throw `MemoryStateClientError` with
+ * `TS_MEMORY_REQUEST_INVALID` / `TS_MEMORY_RESULT_INVALID`.
  */
 
 import { z } from "zod";
@@ -25,8 +28,14 @@ export const MEMORY_MAX_PAYLOAD_ITEMS = 512;
 export const MEMORY_MAX_RECALL_DRAFTS = 64;
 export const MEMORY_MAX_SYNC_ENTRIES = 4096;
 export const MEMORY_MAX_LEASE_MS = 86_400_000;
+export const MEMORY_MAX_PLAN_FILES = 128;
+export const MEMORY_MAX_PLAN_FILE_BYTES = 1024 * 1024;
+export const MEMORY_MAX_PLAN_TOTAL_BYTES = 8 * 1024 * 1024;
+export const MEMORY_MAX_TARGET_PATH_BYTES = 1024;
 
 const HEX64_PATTERN = /^[0-9a-f]{64}$/;
+const HEX40_PATTERN = /^[0-9a-f]{40}$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const CLAIM_TOKEN_PATTERN = /^[0-9a-f]{32}$/;
 const DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
@@ -76,6 +85,27 @@ const ownerFields = {
   repositoryKey: hex64,
   worktreeKey: hex64,
 };
+
+const hex40 = z.string().regex(HEX40_PATTERN, "expected a git blob OID (lowercase hex40)");
+// Rust `decode_base64`: strict standard alphabet, mandatory padding, length
+// a multiple of four; decoded size bounded per file.
+const base64Content = z.string().refine(
+  (value) => BASE64_PATTERN.test(value) &&
+    Buffer.from(value, "base64").length <= MEMORY_MAX_PLAN_FILE_BYTES,
+  { message: "expected strict padded base64 of at most 1 MiB decoded" },
+);
+// Rust `valid_target_path`: normalized relative path — no absolute paths,
+// backslashes, colons, control characters, empty or dot segments.
+const targetPath = z.string().refine(
+  (value) => value.length > 0 &&
+    value.length <= MEMORY_MAX_TARGET_PATH_BYTES &&
+    !value.includes("\\") &&
+    !value.includes(":") &&
+    !CONTROL_CHARACTER_PATTERN.test(value) &&
+    !value.startsWith("/") &&
+    value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
+  { message: "expected a normalized relative path without dot or empty segments" },
+);
 
 const taskKind = z.enum(["extraction", "adjudication", "consolidation"]);
 const coverageState = z.enum(["complete", "partial"]);
@@ -326,6 +356,84 @@ const reviewQueueRequest = z.object({
 
 const statusRequest = z.object({ ...ownerFields }).strict();
 
+const confirmStatementRequest = z.object({
+  candidateId: identifier,
+  statementId: identifier,
+  statementTextDigest: hex64,
+  citationsDigest: hex64,
+}).strict();
+
+const discardCandidateRequest = z.object({
+  candidateId: identifier,
+  expectedRevision: positiveInteger,
+}).strict();
+
+const promotionPlanRequest = z.object({
+  owner: z.object({ ...ownerFields }).strict(),
+  candidateIds: z.array(identifier).min(1).max(MEMORY_MAX_PAYLOAD_ITEMS),
+  policyVersion: identifier,
+  perFile: z.array(z.object({
+    targetPath,
+    sanitizedContent: base64Content,
+    targetBlobHash: hex40.nullable(),
+  }).strict()).min(1).max(MEMORY_MAX_PLAN_FILES),
+}).strict().superRefine((request, context) => {
+  const candidateIds = new Set();
+  for (const candidateId of request.candidateIds) {
+    if (candidateIds.has(candidateId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "candidateIds[] must be unique",
+        path: ["candidateIds"],
+      });
+    }
+    candidateIds.add(candidateId);
+  }
+  const targetPaths = new Set();
+  let totalBytes = 0;
+  for (const [index, file] of request.perFile.entries()) {
+    if (targetPaths.has(file.targetPath)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "perFile[].targetPath must be unique",
+        path: ["perFile", index, "targetPath"],
+      });
+    }
+    targetPaths.add(file.targetPath);
+    totalBytes += Buffer.from(file.sanitizedContent, "base64").length;
+  }
+  if (totalBytes > MEMORY_MAX_PLAN_TOTAL_BYTES) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "perFile decoded content exceeds 8 MiB in total",
+      path: ["perFile"],
+    });
+  }
+});
+
+const promotionApproveRequest = z.object({
+  planId: identifier,
+  planDigest: hex64,
+}).strict();
+
+const promotionApplyRequest = z.object({
+  planId: identifier,
+  ownerRootRealpath: absolutePath,
+}).strict();
+
+const authorizeRequest = z.object({
+  planDigest: hex64,
+  taskId: identifier.nullable().default(null),
+  runnerInputDigest: hex64.nullable().default(null),
+  inputCoverageDigest: hex64.nullable().default(null),
+  provider: identifier,
+  model: identifier,
+  endpoint: identifier,
+  bytes: nonNegativeInteger,
+  via: z.enum(["interactive", "digest", "manifest"]),
+  manifestDigest: hex64.nullable().default(null),
+}).strict();
+
 // ---------------------------------------------------------------------------
 // Result schemas (engine → client).
 // ---------------------------------------------------------------------------
@@ -497,6 +605,92 @@ const statusResult = z.object({
     promoted: nonNegativeInteger,
     discarded: nonNegativeInteger,
   }).strict(),
+  promotions: z.object({
+    generated: nonNegativeInteger,
+    approved: nonNegativeInteger,
+    applying: nonNegativeInteger,
+    applied: nonNegativeInteger,
+    voided: nonNegativeInteger,
+    applyingPlanIds: z.array(identifier),
+  }).strict(),
+}).strict();
+
+const confirmStatementResult = z.discriminatedUnion("status", [
+  z.object({
+    candidateId: identifier,
+    statementId: identifier,
+    status: z.literal("confirmed"),
+    claimSupport: z.literal("human-confirmed"),
+    assessedBy: z.literal("human"),
+    revision: positiveInteger,
+  }).strict(),
+  z.object({
+    candidateId: identifier,
+    statementId: identifier,
+    status: z.literal("drifted"),
+    actualStatementTextDigest: hex64,
+    actualCitationsDigest: hex64,
+  }).strict(),
+]);
+
+const discardCandidateResult = z.object({
+  candidateId: identifier,
+  status: z.literal("discarded"),
+  revision: positiveInteger,
+  candidateGeneration: nonNegativeInteger,
+}).strict();
+
+const promotionPlanResult = z.object({
+  planId: uuidString,
+  planDigest: hex64,
+  status: z.literal("generated"),
+  owner: z.object({
+    ...ownerFields,
+    memoryRoot: identifier,
+  }).strict(),
+  candidateIds: z.array(identifier).min(1),
+  policyVersion: identifier,
+  assessmentDigest: hex64,
+  files: z.array(z.object({
+    targetPath,
+    targetBlobHash: hex40.nullable(),
+    sanitizedDigest: hex64,
+    bytes: nonNegativeInteger,
+  }).strict()).min(1),
+}).strict();
+
+const promotionApproveResult = z.object({
+  planId: identifier,
+  planDigest: hex64,
+  status: z.literal("approved"),
+  idempotent: z.boolean(),
+}).strict();
+
+const promotionApplyResult = z.discriminatedUnion("status", [
+  z.object({
+    planId: identifier,
+    status: z.literal("applied"),
+    idempotent: z.boolean(),
+    appliedFiles: z.array(targetPath),
+    candidates: z.array(z.object({
+      candidateId: identifier,
+      revision: positiveInteger,
+      status: z.literal("promoted"),
+    }).strict()),
+    candidateGeneration: nonNegativeInteger,
+  }).strict(),
+  z.object({
+    planId: identifier,
+    status: z.literal("voided"),
+    driftedPath: targetPath,
+  }).strict(),
+]);
+
+const authorizeResult = z.object({
+  planDigest: hex64,
+  taskId: identifier.nullable(),
+  via: z.enum(["interactive", "digest", "manifest"]),
+  decidedAt: nonNegativeInteger,
 }).strict();
 
 const OP_SPECS = Object.freeze({
@@ -511,6 +705,12 @@ const OP_SPECS = Object.freeze({
   "search": { request: searchRequest, result: searchResult },
   "review-queue": { request: reviewQueueRequest, result: reviewQueueResult },
   "status": { request: statusRequest, result: statusResult },
+  "confirm-statement": { request: confirmStatementRequest, result: confirmStatementResult },
+  "discard-candidate": { request: discardCandidateRequest, result: discardCandidateResult },
+  "promotion-plan": { request: promotionPlanRequest, result: promotionPlanResult },
+  "promotion-approve": { request: promotionApproveRequest, result: promotionApproveResult },
+  "promotion-apply": { request: promotionApplyRequest, result: promotionApplyResult },
+  "authorize": { request: authorizeRequest, result: authorizeResult },
 });
 
 function firstIssue(error) {
@@ -586,4 +786,28 @@ export function memoryReviewQueue(engine, input, options = {}) {
 
 export function memoryStatus(engine, input, options = {}) {
   return runMemoryOp(engine, "status", input, options);
+}
+
+export function memoryConfirmStatement(engine, input, options = {}) {
+  return runMemoryOp(engine, "confirm-statement", input, options);
+}
+
+export function memoryDiscardCandidate(engine, input, options = {}) {
+  return runMemoryOp(engine, "discard-candidate", input, options);
+}
+
+export function memoryPromotionPlan(engine, input, options = {}) {
+  return runMemoryOp(engine, "promotion-plan", input, options);
+}
+
+export function memoryPromotionApprove(engine, input, options = {}) {
+  return runMemoryOp(engine, "promotion-approve", input, options);
+}
+
+export function memoryPromotionApply(engine, input, options = {}) {
+  return runMemoryOp(engine, "promotion-apply", input, options);
+}
+
+export function memoryAuthorize(engine, input, options = {}) {
+  return runMemoryOp(engine, "authorize", input, options);
 }

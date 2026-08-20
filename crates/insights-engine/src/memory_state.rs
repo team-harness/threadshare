@@ -14,11 +14,16 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::memory_promotion::{
+    PromotionFsError, decode_base64, git_blob_oid_hex, read_worktree_file, write_worktree_file,
+};
 use crate::memory_protocol::{
-    AdjudicationDraftOutcome, ApprovedProjectionWire, BindRepositoryOutcome, BindRepositoryRequest,
-    CandidateCountsWire, CandidateProjectionWire, CandidateStateWire, ChunkCountsWire,
-    ClaimTaskOutcome, ClaimTaskRequest, MemorySearchRequest, MemoryStatusOutcome,
-    MemoryStatusRequest, PlanTasksOutcome, PlanTasksRequest, PoolItemWire, RecallHitWire,
+    AdjudicationDraftOutcome, ApprovedProjectionWire, AuthorizeRequest, BindRepositoryOutcome,
+    BindRepositoryRequest, CandidateCountsWire, CandidateProjectionWire, CandidateStateWire,
+    ChunkCountsWire, ClaimTaskOutcome, ClaimTaskRequest, ConfirmStatementRequest,
+    DiscardCandidateRequest, MemorySearchRequest, MemoryStatusOutcome, MemoryStatusRequest,
+    PlanTasksOutcome, PlanTasksRequest, PoolItemWire, PromotionApplyRequest,
+    PromotionApproveRequest, PromotionCountsWire, PromotionPlanRequest, RecallHitWire,
     RecallOutcome, RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire,
     ReviewQueueOutcome, ReviewQueueRequest, SearchItemWire, SearchOutcome,
     SubmitAdjudicationRequest, SubmitExtractionOutcome, SubmitExtractionRequest,
@@ -41,6 +46,10 @@ pub const APPROVED_ANALYZER_VERSION: &str = "memory-approved@1";
 
 /// Relative database location inside the state directory (design §2).
 pub const MEMORY_STATE_RELATIVE_PATH: &str = "memory/memory-state.sqlite3";
+
+/// `format` self-identifier of the canonical promotion plan document
+/// persisted in `promotion_journal.plan_canonical_json` (design §9).
+pub const PROMOTION_PLAN_FORMAT: &str = "threadshare-memory-promotion-plan@v1";
 
 const MAX_SUMMARY_CHARS: usize = 240;
 const FTS_MAX_TOKENS: usize = 32;
@@ -1707,7 +1716,9 @@ impl MemoryStorage {
         Ok(ReviewQueueOutcome { items })
     }
 
-    /// `status` (read-only): per-owner counters by status.
+    /// `status` (read-only): per-owner counters by status, plus the
+    /// promotion-journal recovery check (`applying` plans are reported so the
+    /// caller can resume `promotion-apply`).
     pub fn status(
         &self,
         request: &MemoryStatusRequest,
@@ -1726,6 +1737,22 @@ impl MemoryStorage {
                     |row| row.get(0),
                 )
                 .map_err(MemoryError::from)
+        };
+        let mut applying_statement = self.connection.prepare(
+            "SELECT plan_id FROM promotion_journal
+             WHERE repository_key=?1 AND worktree_key=?2 AND status='applying'
+             ORDER BY plan_id",
+        )?;
+        let applying_plan_ids = applying_statement
+            .query_map(params![&repository_key, &worktree_key], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        let promotions = PromotionCountsWire {
+            generated: count("promotion_journal", "generated")?,
+            approved: count("promotion_journal", "approved")?,
+            applying: count("promotion_journal", "applying")?,
+            applied: count("promotion_journal", "applied")?,
+            voided: count("promotion_journal", "voided")?,
+            applying_plan_ids,
         };
         Ok(MemoryStatusOutcome {
             chunks: ChunkCountsWire {
@@ -1746,6 +1773,768 @@ impl MemoryStorage {
                 promoted: count("candidates", "promoted")?,
                 discarded: count("candidates", "discarded")?,
             },
+            promotions,
         })
+    }
+}
+
+/// `(rowid, revision, status, repository_key, worktree_key)` of a candidate.
+type CandidateRow = (i64, i64, String, Vec<u8>, Vec<u8>);
+
+/// `(target_path, target_blob_hash, sanitized_content, sanitized_digest)` of
+/// one `promotion-plan` file before insertion.
+type PlanFileRow = (String, Option<String>, Vec<u8>, Vec<u8>);
+
+/// One `promotion_files` row loaded for `promotion-apply`.
+struct PromotionFileRow {
+    target_path: String,
+    target_blob_hash: Option<String>,
+    sanitized_content: Vec<u8>,
+    sanitized_digest: Vec<u8>,
+    applied: i64,
+}
+
+fn read_promotion_files(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<Vec<PromotionFileRow>, MemoryError> {
+    let mut statement = connection.prepare(
+        "SELECT target_path, target_blob_hash, sanitized_content, sanitized_digest, applied
+         FROM promotion_files WHERE plan_id=?1 ORDER BY target_path",
+    )?;
+    let rows = statement
+        .query_map(params![plan_id], |row| {
+            Ok(PromotionFileRow {
+                target_path: row.get(0)?,
+                target_blob_hash: row.get(1)?,
+                sanitized_content: row.get(2)?,
+                sanitized_digest: row.get(3)?,
+                applied: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn candidate_ids_from_json(candidate_ids_json: &str) -> Vec<String> {
+    match parse_json(candidate_ids_json) {
+        Value::Array(values) => values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Stage 4c ops: statement confirmation, candidate discard, and the
+/// promotion state machine (design §2 tx-promotion; proposal D5, §6.5).
+impl MemoryStorage {
+    /// `confirm-statement`: digest-bound human confirmation. Drift returns a
+    /// structured `"drifted"` result without any state change.
+    pub fn confirm_statement(
+        &mut self,
+        request: &ConfirmStatementRequest,
+    ) -> Result<Value, MemoryError> {
+        let statement_text_digest = hex_blob(&request.statement_text_digest)?;
+        let citations_digest = hex_blob(&request.citations_digest)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(Vec<u8>, Vec<u8>, i64)> = transaction
+            .query_row(
+                "SELECT statement_text_digest, citations_digest, revision
+                 FROM assessments WHERE candidate_id=?1 AND statement_id=?2",
+                params![&request.candidate_id, &request.statement_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (stored_text_digest, stored_citations_digest, revision) = row.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_ASSESSMENT_NOT_FOUND",
+                "no assessment exists for this candidate statement",
+            )
+        })?;
+        if stored_text_digest != statement_text_digest
+            || stored_citations_digest != citations_digest
+        {
+            transaction.commit()?;
+            return Ok(serde_json::json!({
+                "candidateId": request.candidate_id,
+                "statementId": request.statement_id,
+                "status": "drifted",
+                "actualStatementTextDigest": hex::encode(stored_text_digest),
+                "actualCitationsDigest": hex::encode(stored_citations_digest),
+            }));
+        }
+        transaction.execute(
+            "UPDATE assessments SET claim_support='human-confirmed', assessed_by='human',
+               revision=revision+1
+             WHERE candidate_id=?1 AND statement_id=?2",
+            params![&request.candidate_id, &request.statement_id],
+        )?;
+        transaction.commit()?;
+        Ok(serde_json::json!({
+            "candidateId": request.candidate_id,
+            "statementId": request.statement_id,
+            "status": "confirmed",
+            "claimSupport": "human-confirmed",
+            "assessedBy": "human",
+            "revision": revision + 1,
+        }))
+    }
+
+    /// `discard-candidate`: revision CAS, then `draft`/`quarantined` →
+    /// `discarded`, FTS removal, and a projection generation bump.
+    pub fn discard_candidate(
+        &mut self,
+        request: &DiscardCandidateRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<CandidateRow> = transaction
+            .query_row(
+                "SELECT rowid, revision, status, repository_key, worktree_key
+                 FROM candidates WHERE candidate_id=?1",
+                params![&request.candidate_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (rowid, revision, status, repository_key, worktree_key) = row.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_CANDIDATE_NOT_FOUND",
+                "the candidate does not exist",
+            )
+        })?;
+        if !matches!(status.as_str(), "draft" | "quarantined") {
+            return Err(MemoryError::new(
+                "TS_MEMORY_CANDIDATE_STALE",
+                format!("the candidate is {status} and cannot be discarded"),
+            ));
+        }
+        if revision != request.expected_revision {
+            return Err(MemoryError::new(
+                "TS_MEMORY_CANDIDATE_STALE",
+                format!(
+                    "the candidate revision is {revision}, not the expected {}",
+                    request.expected_revision
+                ),
+            ));
+        }
+        transaction.execute(
+            "UPDATE candidates SET status='discarded', revision=revision+1, updated_at=?1
+             WHERE rowid=?2",
+            params![now_unix_ms, rowid],
+        )?;
+        transaction.execute("DELETE FROM candidate_fts WHERE rowid=?1", params![rowid])?;
+        let generation = bump_candidate_generation(&transaction, &repository_key, &worktree_key)?;
+        transaction.commit()?;
+        Ok(serde_json::json!({
+            "candidateId": request.candidate_id,
+            "status": "discarded",
+            "revision": revision + 1,
+            "candidateGeneration": generation,
+        }))
+    }
+
+    /// `promotion-plan`: verifies quarantined candidates with fully verified
+    /// statements and memoryRoot-contained targets, then persists the
+    /// canonical plan (`generated`) plus the exact sanitized bytes.
+    pub fn promotion_plan(
+        &mut self,
+        request: &PromotionPlanRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        let repository_key = hex_blob(&request.owner.repository_key)?;
+        let worktree_key = hex_blob(&request.owner.worktree_key)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let memory_root: Option<String> = transaction
+            .query_row(
+                "SELECT memory_root FROM repository_bindings
+                 WHERE repository_key=?1 AND worktree_key=?2",
+                params![&repository_key, &worktree_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let memory_root = memory_root.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_BINDING_NOT_FOUND",
+                "the owner has no repository binding; run bind-repository first",
+            )
+        })?;
+
+        let mut assessment_documents: Vec<(String, String, Value)> = Vec::new();
+        for candidate_id in &request.candidate_ids {
+            let row: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT status, payload_json FROM candidates
+                     WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                    params![candidate_id, &repository_key, &worktree_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (status, payload_json) = row.ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_CANDIDATE_NOT_FOUND",
+                    format!("candidate {candidate_id} does not exist for this owner"),
+                )
+            })?;
+            if status != "quarantined" {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_CANDIDATE_STALE",
+                    format!("candidate {candidate_id} is {status}, not quarantined"),
+                ));
+            }
+            let mut assessed_statement_ids: Vec<String> = Vec::new();
+            let mut statement = transaction.prepare(
+                "SELECT statement_id, citations_digest, provenance_strength, limitations_json,
+                        claim_support, assessed_by, statement_text_digest, revision
+                 FROM assessments WHERE candidate_id=?1 ORDER BY statement_id",
+            )?;
+            let rows = statement.query_map(params![candidate_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })?;
+            for row in rows {
+                let (
+                    statement_id,
+                    citations_digest,
+                    provenance_strength,
+                    limitations_json,
+                    claim_support,
+                    assessed_by,
+                    statement_text_digest,
+                    revision,
+                ) = row?;
+                if !matches!(claim_support.as_str(), "typed-fact" | "human-confirmed") {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_UNVERIFIED_CLAIM",
+                        format!(
+                            "candidate {candidate_id} statement {statement_id} is {claim_support}; \
+                             confirm every statement before planning a promotion"
+                        ),
+                    ));
+                }
+                let document = serde_json::json!({
+                    "candidateId": candidate_id,
+                    "statementId": statement_id,
+                    "citationsDigest": hex::encode(citations_digest),
+                    "provenanceStrength": provenance_strength,
+                    "limitations": parse_json(&limitations_json),
+                    "claimSupport": claim_support,
+                    "assessedBy": assessed_by,
+                    "statementTextDigest": hex::encode(statement_text_digest),
+                    "revision": revision,
+                });
+                assessed_statement_ids.push(statement_id.clone());
+                assessment_documents.push((candidate_id.clone(), statement_id, document));
+            }
+            drop(statement);
+            if let Some(statements) = parse_json(&payload_json)
+                .get("statements")
+                .and_then(Value::as_array)
+            {
+                for statement in statements {
+                    if let Some(statement_id) = statement.get("statementId").and_then(Value::as_str)
+                        && !assessed_statement_ids.iter().any(|id| id == statement_id)
+                    {
+                        return Err(MemoryError::new(
+                            "TS_MEMORY_UNVERIFIED_CLAIM",
+                            format!(
+                                "candidate {candidate_id} statement {statement_id} has no \
+                                 assessment and cannot be promoted"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        assessment_documents
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let assessment_digest_hex = canonical_digest_hex(&Value::Array(
+            assessment_documents
+                .into_iter()
+                .map(|(_, _, document)| document)
+                .collect(),
+        ))?;
+
+        let memory_root_prefix = format!("{memory_root}/");
+        let mut per_file_documents = Vec::new();
+        let mut file_rows: Vec<PlanFileRow> = Vec::new();
+        for file in &request.per_file {
+            if !file.target_path.starts_with(&memory_root_prefix) {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_TARGET_PATH_INVALID",
+                    format!(
+                        "targetPath {} is outside the binding memoryRoot {memory_root}",
+                        file.target_path
+                    ),
+                ));
+            }
+            let content = decode_base64(&file.sanitized_content).ok_or_else(|| {
+                MemoryError::invalid("perFile[].sanitizedContent must be strict padded base64")
+            })?;
+            let sanitized_digest = Sha256::digest(&content).to_vec();
+            per_file_documents.push(serde_json::json!({
+                "targetPath": file.target_path,
+                "targetBlobHash": file.target_blob_hash,
+                "sanitizedContentDigest": hex::encode(&sanitized_digest),
+            }));
+            file_rows.push((
+                file.target_path.clone(),
+                file.target_blob_hash.clone(),
+                content,
+                sanitized_digest,
+            ));
+        }
+
+        let plan_id = new_memory_state_uuid(&transaction)?;
+        let plan_document = serde_json::json!({
+            "format": PROMOTION_PLAN_FORMAT,
+            "planId": plan_id,
+            "owner": {
+                "repositoryKey": request.owner.repository_key,
+                "worktreeKey": request.owner.worktree_key,
+                "memoryRoot": memory_root,
+            },
+            "candidateIds": request.candidate_ids,
+            "policyVersion": request.policy_version,
+            "assessmentDigest": assessment_digest_hex,
+            "perFile": per_file_documents,
+        });
+        let plan_canonical_json = canonical(&plan_document)?;
+        let plan_digest = Sha256::digest(plan_canonical_json.as_bytes()).to_vec();
+        transaction.execute(
+            "INSERT INTO promotion_journal(
+               plan_id, repository_key, worktree_key, plan_canonical_json, plan_digest,
+               candidate_ids_json, assessment_digest, policy_version, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'generated', ?9)",
+            params![
+                plan_id,
+                repository_key,
+                worktree_key,
+                plan_canonical_json,
+                plan_digest,
+                canonical(&serde_json::json!(request.candidate_ids))?,
+                hex_blob(&assessment_digest_hex)?,
+                request.policy_version,
+                now_unix_ms,
+            ],
+        )?;
+        let mut files = Vec::new();
+        for (target_path, target_blob_hash, content, sanitized_digest) in file_rows {
+            transaction.execute(
+                "INSERT INTO promotion_files(
+                   plan_id, target_path, target_blob_hash, sanitized_content, sanitized_digest,
+                   applied)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![
+                    plan_id,
+                    target_path,
+                    target_blob_hash,
+                    content,
+                    sanitized_digest
+                ],
+            )?;
+            files.push(serde_json::json!({
+                "targetPath": target_path,
+                "targetBlobHash": target_blob_hash,
+                "sanitizedDigest": hex::encode(&sanitized_digest),
+                "bytes": content.len(),
+            }));
+        }
+        transaction.commit()?;
+        Ok(serde_json::json!({
+            "planId": plan_id,
+            "planDigest": hex::encode(plan_digest),
+            "status": "generated",
+            "owner": {
+                "repositoryKey": request.owner.repository_key,
+                "worktreeKey": request.owner.worktree_key,
+                "memoryRoot": memory_root,
+            },
+            "candidateIds": request.candidate_ids,
+            "policyVersion": request.policy_version,
+            "assessmentDigest": assessment_digest_hex,
+            "files": files,
+        }))
+    }
+
+    /// `promotion-approve`: the digest-bound explicit approval
+    /// (`generated → approved`); the sole approval channel (proposal D5).
+    pub fn promotion_approve(
+        &mut self,
+        request: &PromotionApproveRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        let requested_digest = hex_blob(&request.plan_digest)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(Vec<u8>, String)> = transaction
+            .query_row(
+                "SELECT plan_digest, status FROM promotion_journal WHERE plan_id=?1",
+                params![&request.plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (stored_digest, status) = row.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_PLAN_NOT_FOUND",
+                "the promotion plan does not exist",
+            )
+        })?;
+        if stored_digest != requested_digest {
+            return Err(MemoryError::new(
+                "TS_MEMORY_PLAN_DIGEST_MISMATCH",
+                "the approval digest does not match the stored plan digest",
+            ));
+        }
+        let idempotent = match status.as_str() {
+            "generated" => {
+                transaction.execute(
+                    "UPDATE promotion_journal SET status='approved', updated_at=?1
+                     WHERE plan_id=?2",
+                    params![now_unix_ms, &request.plan_id],
+                )?;
+                false
+            }
+            "approved" => true,
+            other => {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_PLAN_STATE_INVALID",
+                    format!("the plan is {other} and cannot be approved"),
+                ));
+            }
+        };
+        transaction.commit()?;
+        Ok(serde_json::json!({
+            "planId": request.plan_id,
+            "planDigest": request.plan_digest,
+            "status": "approved",
+            "idempotent": idempotent,
+        }))
+    }
+
+    fn void_plan(
+        &mut self,
+        plan_id: &str,
+        drifted_path: &str,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        self.connection.execute(
+            "UPDATE promotion_journal SET status='voided', updated_at=?1 WHERE plan_id=?2",
+            params![now_unix_ms, plan_id],
+        )?;
+        Ok(serde_json::json!({
+            "planId": plan_id,
+            "status": "voided",
+            "driftedPath": drifted_path,
+        }))
+    }
+
+    /// `promotion-apply` (design §2 tx-promotion): owner re-resolution, the
+    /// engine-computed git blob OID CAS per file, no-follow writes of the
+    /// approved bytes, per-file `applied` progress for crash recovery, and
+    /// the closing transaction that promotes the candidates out of the
+    /// recall pool.
+    pub fn promotion_apply(
+        &mut self,
+        request: &PromotionApplyRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        // Phase 1: journal gate + owner re-resolution, then mark `applying`.
+        let (repository_key, worktree_key, candidate_ids, root_realpath, was_applied) = {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let row: Option<(Vec<u8>, Vec<u8>, String, String)> = transaction
+                .query_row(
+                    "SELECT repository_key, worktree_key, candidate_ids_json, status
+                     FROM promotion_journal WHERE plan_id=?1",
+                    params![&request.plan_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let (repository_key, worktree_key, candidate_ids_json, status) =
+                row.ok_or_else(|| {
+                    MemoryError::new(
+                        "TS_MEMORY_PLAN_NOT_FOUND",
+                        "the promotion plan does not exist",
+                    )
+                })?;
+            let was_applied = match status.as_str() {
+                "approved" | "applying" => false,
+                "applied" => true,
+                other => {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_PLAN_STATE_INVALID",
+                        format!("the plan is {other} and cannot be applied"),
+                    ));
+                }
+            };
+            let root_realpath: Option<String> = transaction
+                .query_row(
+                    "SELECT root_realpath FROM repository_bindings
+                     WHERE repository_key=?1 AND worktree_key=?2",
+                    params![&repository_key, &worktree_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let root_realpath = root_realpath.ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_BINDING_NOT_FOUND",
+                    "the plan owner has no repository binding",
+                )
+            })?;
+            if root_realpath != request.owner_root_realpath {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_OWNER_MISMATCH",
+                    "ownerRootRealpath does not match the bound worktree root",
+                ));
+            }
+            if !was_applied {
+                transaction.execute(
+                    "UPDATE promotion_journal SET status='applying', updated_at=?1
+                     WHERE plan_id=?2",
+                    params![now_unix_ms, &request.plan_id],
+                )?;
+            }
+            transaction.commit()?;
+            (
+                repository_key,
+                worktree_key,
+                candidate_ids_from_json(&candidate_ids_json),
+                root_realpath,
+                was_applied,
+            )
+        };
+        let files = read_promotion_files(&self.connection, &request.plan_id)?;
+        if was_applied {
+            let candidates =
+                self.promoted_candidate_states(&candidate_ids, &repository_key, &worktree_key)?;
+            let generation =
+                read_candidate_projection(&self.connection, &repository_key, &worktree_key)?
+                    .generation;
+            return Ok(serde_json::json!({
+                "planId": request.plan_id,
+                "status": "applied",
+                "idempotent": true,
+                "appliedFiles": files
+                    .iter()
+                    .map(|file| file.target_path.clone())
+                    .collect::<Vec<_>>(),
+                "candidates": candidates,
+                "candidateGeneration": generation,
+            }));
+        }
+
+        // Phase 2: per-file blob CAS + no-follow write, with `applied`
+        // progress persisted after each file for idempotent resume.
+        let root = PathBuf::from(&root_realpath);
+        let mut applied_files = Vec::new();
+        for file in &files {
+            let segments: Vec<&str> = file.target_path.split('/').collect();
+            let current = match read_worktree_file(&root, &segments) {
+                Ok(current) => current,
+                Err(PromotionFsError::Symlink) => {
+                    return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+                }
+                Err(PromotionFsError::Io(error)) => {
+                    return Err(MemoryError::failed(format!(
+                        "promotion apply could not read {}: {error}",
+                        file.target_path
+                    )));
+                }
+            };
+            let current_digest = current
+                .as_deref()
+                .map(|bytes| Sha256::digest(bytes).to_vec());
+            let already_exact = current_digest.as_deref() == Some(file.sanitized_digest.as_slice());
+            if file.applied == 1 {
+                if already_exact {
+                    applied_files.push(file.target_path.clone());
+                    continue;
+                }
+                // Applied earlier but the content drifted afterwards.
+                return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+            }
+            if !already_exact {
+                let observed_blob = current.as_deref().map(git_blob_oid_hex);
+                if observed_blob.as_deref() != file.target_blob_hash.as_deref() {
+                    return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+                }
+                match write_worktree_file(&root, &segments, &file.sanitized_content) {
+                    Ok(()) => {}
+                    Err(PromotionFsError::Symlink) => {
+                        return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+                    }
+                    Err(PromotionFsError::Io(error)) => {
+                        return Err(MemoryError::failed(format!(
+                            "promotion apply could not write {}: {error}",
+                            file.target_path
+                        )));
+                    }
+                }
+            }
+            self.connection.execute(
+                "UPDATE promotion_files SET applied=1 WHERE plan_id=?1 AND target_path=?2",
+                params![&request.plan_id, &file.target_path],
+            )?;
+            applied_files.push(file.target_path.clone());
+        }
+
+        // Phase 3: closing transaction — journal `applied`, candidates
+        // `promoted` (+revision, out of FTS), generation bump.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut candidates = Vec::new();
+        for candidate_id in &candidate_ids {
+            let row: Option<(i64, i64, String)> = transaction
+                .query_row(
+                    "SELECT rowid, revision, status FROM candidates
+                     WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                    params![candidate_id, &repository_key, &worktree_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let (rowid, revision, status) = row.ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_CANDIDATE_NOT_FOUND",
+                    format!("candidate {candidate_id} disappeared before promotion"),
+                )
+            })?;
+            let final_revision = match status.as_str() {
+                "promoted" => revision,
+                "quarantined" => {
+                    transaction.execute(
+                        "UPDATE candidates SET status='promoted', revision=revision+1,
+                           updated_at=?1 WHERE rowid=?2",
+                        params![now_unix_ms, rowid],
+                    )?;
+                    transaction
+                        .execute("DELETE FROM candidate_fts WHERE rowid=?1", params![rowid])?;
+                    revision + 1
+                }
+                other => {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_CANDIDATE_STALE",
+                        format!("candidate {candidate_id} is {other} and cannot be promoted"),
+                    ));
+                }
+            };
+            candidates.push(serde_json::json!({
+                "candidateId": candidate_id,
+                "revision": final_revision,
+                "status": "promoted",
+            }));
+        }
+        let generation = bump_candidate_generation(&transaction, &repository_key, &worktree_key)?;
+        transaction.execute(
+            "UPDATE promotion_journal SET status='applied', updated_at=?1 WHERE plan_id=?2",
+            params![now_unix_ms, &request.plan_id],
+        )?;
+        transaction.commit()?;
+        Ok(serde_json::json!({
+            "planId": request.plan_id,
+            "status": "applied",
+            "idempotent": false,
+            "appliedFiles": applied_files,
+            "candidates": candidates,
+            "candidateGeneration": generation,
+        }))
+    }
+
+    fn promoted_candidate_states(
+        &self,
+        candidate_ids: &[String],
+        repository_key: &[u8],
+        worktree_key: &[u8],
+    ) -> Result<Vec<Value>, MemoryError> {
+        let mut candidates = Vec::new();
+        for candidate_id in candidate_ids {
+            let row: Option<(i64, String)> = self
+                .connection
+                .query_row(
+                    "SELECT revision, status FROM candidates
+                     WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                    params![candidate_id, repository_key, worktree_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((revision, status)) = row {
+                candidates.push(serde_json::json!({
+                    "candidateId": candidate_id,
+                    "revision": revision,
+                    "status": status,
+                }));
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// `authorize`: appends one `authorization_log` audit row.
+    pub fn authorize(
+        &mut self,
+        request: &AuthorizeRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        self.connection.execute(
+            "INSERT INTO authorization_log(
+               plan_digest, task_id, runner_input_digest, input_coverage_digest, provider,
+               model, endpoint, bytes, decided_at, via, manifest_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                hex_blob(&request.plan_digest)?,
+                request.task_id,
+                request
+                    .runner_input_digest
+                    .as_deref()
+                    .map(hex_blob)
+                    .transpose()?,
+                request
+                    .input_coverage_digest
+                    .as_deref()
+                    .map(hex_blob)
+                    .transpose()?,
+                request.provider,
+                request.model,
+                request.endpoint,
+                request.bytes,
+                now_unix_ms,
+                request.via,
+                request
+                    .manifest_digest
+                    .as_deref()
+                    .map(hex_blob)
+                    .transpose()?,
+            ],
+        )?;
+        Ok(serde_json::json!({
+            "planDigest": request.plan_digest,
+            "taskId": request.task_id,
+            "via": request.via,
+            "decidedAt": now_unix_ms,
+        }))
     }
 }

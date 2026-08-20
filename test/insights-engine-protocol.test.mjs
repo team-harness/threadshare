@@ -614,6 +614,12 @@ test("memory envelope pins the op enum and requires plain-object payloads", () =
     "search",
     "review-queue",
     "status",
+    "confirm-statement",
+    "discard-candidate",
+    "promotion-plan",
+    "promotion-approve",
+    "promotion-apply",
+    "authorize",
   ]);
 
   const payload = { repositoryKey: "1".repeat(64), worktreeKey: "2".repeat(64) };

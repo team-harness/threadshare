@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,10 +9,16 @@ import { canonicalJson } from "../src/canonical-json.mjs";
 import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
 import {
   MemoryStateClientError,
+  memoryAuthorize,
   memoryBindRepository,
   memoryClaimTask,
+  memoryConfirmStatement,
+  memoryDiscardCandidate,
   memoryOpen,
   memoryPlanTasks,
+  memoryPromotionApply,
+  memoryPromotionApprove,
+  memoryPromotionPlan,
   memoryRecall,
   memoryReviewQueue,
   memorySearch,
@@ -402,6 +408,8 @@ test("memory ops run end-to-end against a real engine", {
       chunks: { pending: 0, drafted: 0, extracted: 1, stale: 0 },
       tasks: { pending: 0, claimed: 0, submitted: 2, stale: 1 },
       candidates: { draft: 1, quarantined: 1, promoted: 0, discarded: 0 },
+      promotions: { generated: 0, approved: 0, applying: 0, applied: 0, voided: 0,
+        applyingPlanIds: [] },
     },
   );
 
@@ -415,6 +423,176 @@ test("memory ops run end-to-end against a real engine", {
       entries: [],
     }),
     (error) => error.code === "TS_MEMORY_SYNC_PARTIAL",
+  );
+
+  // --- Stage 4c: confirmation and the full promotion chain. ---
+
+  // A plan over the still-unverified candidate is refused.
+  const sanitizedContent = Buffer.from(
+    "# Release workflow notes\n\nRelease tests are grouped under npm run test:release.\n",
+    "utf8",
+  );
+  const targetPath = ".threadshare/memory/entries/release-workflow-notes.md";
+  const planInput = {
+    owner: { repositoryKey: REPOSITORY_KEY, worktreeKey: WORKTREE_KEY },
+    candidateIds: ["c-1"],
+    policyVersion: "sanitize@1",
+    perFile: [{
+      targetPath,
+      sanitizedContent: sanitizedContent.toString("base64"),
+      targetBlobHash: null,
+    }],
+  };
+  await assert.rejects(
+    memoryPromotionPlan(client, planInput),
+    (error) => error.code === "TS_MEMORY_UNVERIFIED_CLAIM",
+  );
+
+  // confirm-statement is digest-bound: drift is a structured result.
+  const statementTextDigest = digestHex("test:release covers protocol tests.");
+  const citationsDigest = digestHex([{ evidenceId: "ev-1" }]);
+  const drifted = await memoryConfirmStatement(client, {
+    candidateId: "c-1",
+    statementId: "s-1",
+    statementTextDigest: digestHex("some other statement text"),
+    citationsDigest,
+  });
+  assert.equal(drifted.status, "drifted");
+  assert.equal(drifted.actualStatementTextDigest, statementTextDigest);
+  assert.equal(drifted.actualCitationsDigest, citationsDigest);
+  const confirmed = await memoryConfirmStatement(client, {
+    candidateId: "c-1",
+    statementId: "s-1",
+    statementTextDigest,
+    citationsDigest,
+  });
+  assert.deepEqual(confirmed, {
+    candidateId: "c-1",
+    statementId: "s-1",
+    status: "confirmed",
+    claimSupport: "human-confirmed",
+    assessedBy: "human",
+    revision: 2,
+  });
+
+  // promotion-plan persists the sanitized bytes and the canonical digest.
+  const planned = await memoryPromotionPlan(client, planInput);
+  assert.equal(planned.status, "generated");
+  assert.deepEqual(planned.owner, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    memoryRoot: ".threadshare/memory",
+  });
+  assert.deepEqual(planned.candidateIds, ["c-1"]);
+  assert.deepEqual(planned.files, [{
+    targetPath,
+    targetBlobHash: null,
+    sanitizedDigest: createHash("sha256").update(sanitizedContent).digest("hex"),
+    bytes: sanitizedContent.length,
+  }]);
+
+  // promotion-approve binds the exact plan digest.
+  await assert.rejects(
+    memoryPromotionApprove(client, {
+      planId: planned.planId,
+      planDigest: digestHex({ tampered: true }),
+    }),
+    (error) => error.code === "TS_MEMORY_PLAN_DIGEST_MISMATCH",
+  );
+  assert.deepEqual(
+    await memoryPromotionApprove(client, {
+      planId: planned.planId,
+      planDigest: planned.planDigest,
+    }),
+    { planId: planned.planId, planDigest: planned.planDigest, status: "approved",
+      idempotent: false },
+  );
+
+  // promotion-apply re-resolves the owner root before touching the worktree.
+  await assert.rejects(
+    memoryPromotionApply(client, {
+      planId: planned.planId,
+      ownerRootRealpath: path.join(directory, "elsewhere"),
+    }),
+    (error) => error.code === "TS_MEMORY_OWNER_MISMATCH",
+  );
+  const appliedPlan = await memoryPromotionApply(client, {
+    planId: planned.planId,
+    ownerRootRealpath: directory,
+  });
+  assert.equal(appliedPlan.status, "applied");
+  assert.equal(appliedPlan.idempotent, false);
+  assert.deepEqual(appliedPlan.appliedFiles, [targetPath]);
+  assert.deepEqual(appliedPlan.candidates, [{
+    candidateId: "c-1",
+    revision: 3,
+    status: "promoted",
+  }]);
+  assert.equal(appliedPlan.candidateGeneration, 3);
+
+  // The exact approved bytes landed in the bound worktree.
+  assert.deepEqual(await readFile(path.join(directory, targetPath)), sanitizedContent);
+
+  // Re-applying an applied plan replays idempotently.
+  const replayApply = await memoryPromotionApply(client, {
+    planId: planned.planId,
+    ownerRootRealpath: directory,
+  });
+  assert.equal(replayApply.status, "applied");
+  assert.equal(replayApply.idempotent, true);
+
+  // The promoted candidate left the recall pool and the review queue.
+  const promotedRecall = await memoryRecall(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    drafts: [{ draftRef: "p-1", candidateId: "p-1", queryText: "release tests npm" }],
+  });
+  assert.equal(promotedRecall.pool.some((item) => item.id === "c-1"), false);
+  assert.deepEqual(
+    (await memoryReviewQueue(client, {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+    })).items,
+    [],
+  );
+
+  // discard-candidate is a revision CAS.
+  await assert.rejects(
+    memoryDiscardCandidate(client, { candidateId: "c-2", expectedRevision: 7 }),
+    (error) => error.code === "TS_MEMORY_CANDIDATE_STALE",
+  );
+  assert.deepEqual(
+    await memoryDiscardCandidate(client, { candidateId: "c-2", expectedRevision: 1 }),
+    { candidateId: "c-2", status: "discarded", revision: 2, candidateGeneration: 4 },
+  );
+
+  // authorize appends an audit row bound to the plan digest.
+  const authorized = await memoryAuthorize(client, {
+    planDigest: planned.planDigest,
+    provider: "claude",
+    model: "claude-test-1",
+    endpoint: "api.anthropic.com",
+    bytes: 2048,
+    via: "interactive",
+  });
+  assert.equal(authorized.planDigest, planned.planDigest);
+  assert.equal(authorized.taskId, null);
+  assert.equal(authorized.via, "interactive");
+  assert.equal(typeof authorized.decidedAt, "number");
+
+  // The status counters reflect the finished promotion.
+  assert.deepEqual(
+    await memoryStatus(client, {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+    }),
+    {
+      chunks: { pending: 0, drafted: 0, extracted: 1, stale: 0 },
+      tasks: { pending: 0, claimed: 0, submitted: 2, stale: 1 },
+      candidates: { draft: 0, quarantined: 0, promoted: 1, discarded: 1 },
+      promotions: { generated: 0, approved: 0, applying: 0, applied: 1, voided: 0,
+        applyingPlanIds: [] },
+    },
   );
 
   // Local zod validation rejects before any frame is sent.
@@ -436,6 +614,17 @@ test("memory ops run end-to-end against a real engine", {
       error.code === "TS_MEMORY_REQUEST_INVALID" &&
       /update\/merge/.test(error.message),
   );
+  for (const badTargetPath of ["/abs.md", "../escape.md", "a//b.md", "a\\b.md", "a/./b.md"]) {
+    await assert.rejects(
+      memoryPromotionPlan(client, {
+        ...planInput,
+        perFile: [{ targetPath: badTargetPath, sanitizedContent: "", targetBlobHash: null }],
+      }),
+      (error) => error instanceof MemoryStateClientError &&
+        error.code === "TS_MEMORY_REQUEST_INVALID",
+      badTargetPath,
+    );
+  }
 });
 
 test("concurrent claims from two engine processes award exactly one lease", {

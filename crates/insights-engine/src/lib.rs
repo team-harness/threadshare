@@ -18,6 +18,7 @@ pub mod fact_repository;
 pub mod fact_staging;
 pub mod fts_projection;
 pub mod insights_overview;
+pub mod memory_promotion;
 pub mod memory_protocol;
 pub mod memory_state;
 pub mod normalized_repository;

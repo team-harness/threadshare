@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use threadshare_insights_engine::memory_protocol::{
-    BindRepositoryRequest, ClaimTaskRequest, MemorySearchRequest, MemoryStatusRequest,
-    PlanTasksRequest, RecallRequest, SubmitAdjudicationRequest, SubmitExtractionRequest,
-    SyncApprovedRequest,
+    BindRepositoryRequest, ClaimTaskRequest, ConfirmStatementRequest, DiscardCandidateRequest,
+    MemorySearchRequest, MemoryStatusRequest, PlanTasksRequest, PromotionApplyRequest,
+    PromotionApproveRequest, PromotionPlanRequest, RecallRequest, SubmitAdjudicationRequest,
+    SubmitExtractionRequest, SyncApprovedRequest,
 };
 use threadshare_insights_engine::memory_state::{MEMORY_STATE_SCHEMA_VERSION, MemoryStorage};
 
@@ -708,4 +709,649 @@ fn bind_repository_upserts_and_never_echoes_the_realpath() {
     rebind.validate().unwrap();
     let outcome = storage.bind_repository(&rebind).unwrap();
     assert_eq!(outcome.status, "inactive");
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4c: confirmation, discard, and the promotion state machine.
+// ---------------------------------------------------------------------------
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let padded = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let word =
+            (u32::from(padded[0]) << 16) | (u32::from(padded[1]) << 8) | u32::from(padded[2]);
+        out.push(ALPHABET[(word >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(word >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(word >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[word as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn bind_worktree(storage: &mut MemoryStorage, root: &std::path::Path) {
+    let bind: BindRepositoryRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "publicRepositoryIdentity": null,
+        "rootRealpath": root.to_str().unwrap(),
+        "rootRealpathDigest": hex64('e'),
+        "commonDirDevice": "1",
+        "commonDirInode": "2",
+    }));
+    bind.validate().unwrap();
+    storage.bind_repository(&bind).unwrap();
+}
+
+/// Runs a candidate through extraction and a `store` adjudication so it is
+/// `quarantined` with one `s1` assessment (`statementTextDigest` hex64('8'),
+/// `citationsDigest` hex64('7'), the given `claimSupport`).
+fn quarantine_candidate(
+    storage: &mut MemoryStorage,
+    label: &str,
+    candidate_id: &str,
+    content: &str,
+    claim_support: &str,
+) {
+    let chunk_ref = format!("chunk-{label}");
+    let task_id = format!("task-{label}");
+    plan_chunk_and_task(storage, &chunk_ref, &task_id, "extraction", 1_000);
+    let token = claim(storage, &task_id, "holder-q", 60_000, 10_000);
+    let submit: SubmitExtractionRequest = request(json!({
+        "taskId": task_id,
+        "claimToken": token,
+        "responseDigest": hex64('a'),
+        "drafts": [{
+            "candidateId": candidate_id,
+            "payload": {
+                "content": content,
+                "type": "work_method",
+                "statements": [{ "statementId": "s1", "text": content, "evidenceIds": [] }],
+            },
+            "searchableText": content,
+        }],
+        "evidenceRefs": [],
+        "assessments": [{
+            "candidateId": candidate_id,
+            "statementId": "s1",
+            "citationsDigest": hex64('7'),
+            "provenanceStrength": "direct",
+            "limitations": [],
+            "claimSupport": claim_support,
+            "assessedBy": "deterministic",
+            "statementTextDigest": hex64('8'),
+            "revision": 1,
+        }],
+    }));
+    submit.validate().unwrap();
+    storage.submit_extraction(&submit, 10_100).unwrap();
+
+    let adjudication_task = format!("task-{label}-adj");
+    plan_chunk_and_task(storage, "", &adjudication_task, "adjudication", 1_000);
+    let adjudication_token = claim(storage, &adjudication_task, "holder-q", 60_000, 11_000);
+    let recall = recall_request("d1", candidate_id, content);
+    let digest = storage.recall(&recall).unwrap().result_set_digest;
+    let submit: SubmitAdjudicationRequest = request(json!({
+        "taskId": adjudication_task,
+        "claimToken": adjudication_token,
+        "responseDigest": hex64('e'),
+        "recall": {
+            "repositoryKey": REPO,
+            "worktreeKey": TREE,
+            "drafts": [{ "draftRef": "d1", "candidateId": candidate_id, "queryText": content }],
+        },
+        "expectedResultSetDigest": digest,
+        "adjudications": [{ "draftRef": "d1", "action": "store" }],
+    }));
+    submit.validate().unwrap();
+    let outcome = storage.submit_adjudication(&submit, 11_100).unwrap();
+    assert_eq!(outcome["status"], "applied");
+}
+
+fn confirm_request(
+    candidate_id: &str,
+    text_char: char,
+    citations_char: char,
+) -> ConfirmStatementRequest {
+    let value: ConfirmStatementRequest = request(json!({
+        "candidateId": candidate_id,
+        "statementId": "s1",
+        "statementTextDigest": hex64(text_char),
+        "citationsDigest": hex64(citations_char),
+    }));
+    value.validate().unwrap();
+    value
+}
+
+fn promotion_plan_request(candidate_ids: &[&str], per_file: Value) -> PromotionPlanRequest {
+    let value: PromotionPlanRequest = request(json!({
+        "owner": { "repositoryKey": REPO, "worktreeKey": TREE },
+        "candidateIds": candidate_ids,
+        "policyVersion": "sanitize@1",
+        "perFile": per_file,
+    }));
+    value.validate().unwrap();
+    value
+}
+
+fn approve_request(plan_id: &str, plan_digest: &str) -> PromotionApproveRequest {
+    let value: PromotionApproveRequest = request(json!({
+        "planId": plan_id,
+        "planDigest": plan_digest,
+    }));
+    value.validate().unwrap();
+    value
+}
+
+fn apply_request(plan_id: &str, root: &std::path::Path) -> PromotionApplyRequest {
+    let value: PromotionApplyRequest = request(json!({
+        "planId": plan_id,
+        "ownerRootRealpath": root.to_str().unwrap(),
+    }));
+    value.validate().unwrap();
+    value
+}
+
+#[test]
+fn confirm_statement_rejects_digest_drift_and_confirms_matches() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    quarantine_candidate(
+        &mut storage,
+        "c1",
+        "cand-1",
+        "release checklist",
+        "unverified",
+    );
+
+    let missing = confirm_request("cand-missing", '8', '7');
+    assert_eq!(
+        storage.confirm_statement(&missing).unwrap_err().code,
+        "TS_MEMORY_ASSESSMENT_NOT_FOUND"
+    );
+
+    // Statement text drift: structured rejection, no state change.
+    let drifted = storage
+        .confirm_statement(&confirm_request("cand-1", '9', '7'))
+        .unwrap();
+    assert_eq!(drifted["status"], "drifted");
+    assert_eq!(drifted["actualStatementTextDigest"], hex64('8'));
+    assert_eq!(drifted["actualCitationsDigest"], hex64('7'));
+
+    // Citations drift is caught too.
+    let drifted = storage
+        .confirm_statement(&confirm_request("cand-1", '8', '9'))
+        .unwrap();
+    assert_eq!(drifted["status"], "drifted");
+
+    // The drifted attempts did not confirm anything: a plan is still refused.
+    bind_worktree(&mut storage, std::path::Path::new("/tmp/worktree-confirm"));
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([{
+            "targetPath": ".threadshare/memory/entries/checklist.md",
+            "sanitizedContent": base64(b"checklist\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    assert_eq!(
+        storage.promotion_plan(&plan, 20_000).unwrap_err().code,
+        "TS_MEMORY_UNVERIFIED_CLAIM"
+    );
+
+    // Matching digests confirm the statement and bump the assessment revision.
+    let confirmed = storage
+        .confirm_statement(&confirm_request("cand-1", '8', '7'))
+        .unwrap();
+    assert_eq!(confirmed["status"], "confirmed");
+    assert_eq!(confirmed["claimSupport"], "human-confirmed");
+    assert_eq!(confirmed["assessedBy"], "human");
+    assert_eq!(confirmed["revision"], 2);
+    assert!(storage.promotion_plan(&plan, 20_100).is_ok());
+}
+
+#[test]
+fn discard_candidate_uses_revision_cas_and_leaves_the_recall_pool() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    quarantine_candidate(
+        &mut storage,
+        "d1",
+        "cand-1",
+        "rollback recipe",
+        "unverified",
+    );
+
+    let missing: DiscardCandidateRequest = request(json!({
+        "candidateId": "cand-x",
+        "expectedRevision": 1,
+    }));
+    assert_eq!(
+        storage
+            .discard_candidate(&missing, 30_000)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_CANDIDATE_NOT_FOUND"
+    );
+
+    // The store adjudication bumped the candidate to revision 2.
+    let stale: DiscardCandidateRequest = request(json!({
+        "candidateId": "cand-1",
+        "expectedRevision": 1,
+    }));
+    assert_eq!(
+        storage.discard_candidate(&stale, 30_000).unwrap_err().code,
+        "TS_MEMORY_CANDIDATE_STALE"
+    );
+
+    let discard: DiscardCandidateRequest = request(json!({
+        "candidateId": "cand-1",
+        "expectedRevision": 2,
+    }));
+    discard.validate().unwrap();
+    let outcome = storage.discard_candidate(&discard, 30_100).unwrap();
+    assert_eq!(outcome["status"], "discarded");
+    assert_eq!(outcome["revision"], 3);
+    let counts = status_counts(&storage);
+    assert_eq!(counts["candidates"]["discarded"], 1);
+    assert_eq!(counts["candidates"]["quarantined"], 0);
+
+    // Discarded candidates no longer recall.
+    let probe = storage
+        .recall(&recall_request("p1", "unrelated", "rollback recipe"))
+        .unwrap();
+    assert!(probe.pool.iter().all(|item| item.id != "cand-1"));
+
+    // Discarding again is refused (already discarded).
+    assert_eq!(
+        storage
+            .discard_candidate(
+                &request(json!({ "candidateId": "cand-1", "expectedRevision": 3 })),
+                30_200
+            )
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_CANDIDATE_STALE"
+    );
+}
+
+#[test]
+fn promotion_plan_rejects_escaping_and_out_of_root_target_paths() {
+    // Wire-level validation refuses non-normalized relative paths.
+    for target_path in [
+        "/absolute/entry.md",
+        "../escape.md",
+        ".threadshare/memory/../escape.md",
+        ".threadshare//memory/entry.md",
+        ".threadshare\\memory\\entry.md",
+        ".threadshare/memory/./entry.md",
+        "",
+    ] {
+        let value: PromotionPlanRequest = request(json!({
+            "owner": { "repositoryKey": REPO, "worktreeKey": TREE },
+            "candidateIds": ["cand-1"],
+            "policyVersion": "sanitize@1",
+            "perFile": [{
+                "targetPath": target_path,
+                "sanitizedContent": base64(b"x"),
+                "targetBlobHash": null,
+            }],
+        }));
+        assert!(value.validate().is_err(), "{target_path}");
+    }
+
+    // A normalized path outside the binding memoryRoot is refused by the op.
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    quarantine_candidate(&mut storage, "p1", "cand-1", "path rules", "typed-fact");
+    bind_worktree(&mut storage, std::path::Path::new("/tmp/worktree-paths"));
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([{
+            "targetPath": "docs/outside.md",
+            "sanitizedContent": base64(b"outside\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    assert_eq!(
+        storage.promotion_plan(&plan, 20_000).unwrap_err().code,
+        "TS_MEMORY_TARGET_PATH_INVALID"
+    );
+}
+
+#[test]
+fn promotion_full_chain_writes_files_and_retires_candidates() {
+    let worktree = temp_state_dir("promotion-worktree");
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "f1",
+        "cand-1",
+        "release workflow notes",
+        "typed-fact",
+    );
+
+    let content = b"# Release workflow\n\nRun npm run test:release before tagging.\n";
+    let target_path = ".threadshare/memory/entries/release-workflow.md";
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(content),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    assert_eq!(planned["status"], "generated");
+    assert_eq!(planned["owner"]["memoryRoot"], ".threadshare/memory");
+    assert_eq!(planned["files"][0]["bytes"], content.len());
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    let plan_digest = planned["planDigest"].as_str().unwrap().to_owned();
+
+    // Approval binds the exact plan digest; a mismatch is refused.
+    assert_eq!(
+        storage
+            .promotion_approve(&approve_request(&plan_id, &hex64('0')), 20_100)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_DIGEST_MISMATCH"
+    );
+    // Applying an unapproved plan is refused.
+    assert_eq!(
+        storage
+            .promotion_apply(&apply_request(&plan_id, &worktree), 20_150)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_STATE_INVALID"
+    );
+    let approved = storage
+        .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_200)
+        .unwrap();
+    assert_eq!(approved["status"], "approved");
+    assert_eq!(approved["idempotent"], false);
+    let replay = storage
+        .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_250)
+        .unwrap();
+    assert_eq!(replay["idempotent"], true);
+
+    // Owner re-resolution: a different realpath is refused.
+    assert_eq!(
+        storage
+            .promotion_apply(
+                &apply_request(&plan_id, std::path::Path::new("/tmp/other-worktree")),
+                20_300
+            )
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_OWNER_MISMATCH"
+    );
+
+    let applied = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_400)
+        .unwrap();
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(applied["idempotent"], false);
+    assert_eq!(applied["appliedFiles"][0], target_path);
+    assert_eq!(applied["candidates"][0]["candidateId"], "cand-1");
+    assert_eq!(applied["candidates"][0]["status"], "promoted");
+    assert_eq!(applied["candidates"][0]["revision"], 3);
+
+    // The exact approved bytes landed in the worktree.
+    assert_eq!(
+        std::fs::read(worktree.join(target_path)).unwrap(),
+        content.to_vec()
+    );
+
+    // The promoted candidate left the recall pool and the counters advanced.
+    let probe = storage
+        .recall(&recall_request("p1", "unrelated", "release workflow notes"))
+        .unwrap();
+    assert!(probe.pool.iter().all(|item| item.id != "cand-1"));
+    let counts = status_counts(&storage);
+    assert_eq!(counts["candidates"]["promoted"], 1);
+    assert_eq!(counts["candidates"]["quarantined"], 0);
+    assert_eq!(counts["promotions"]["applied"], 1);
+    assert_eq!(counts["promotions"]["applyingPlanIds"], json!([]));
+
+    // Re-applying an applied plan replays idempotently without rewrites.
+    let replay = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_500)
+        .unwrap();
+    assert_eq!(replay["status"], "applied");
+    assert_eq!(replay["idempotent"], true);
+    assert_eq!(replay["candidates"][0]["status"], "promoted");
+}
+
+#[test]
+fn promotion_apply_voids_the_plan_on_blob_drift() {
+    let worktree = temp_state_dir("promotion-drift");
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(&mut storage, "b1", "cand-1", "drifted entry", "typed-fact");
+
+    let target_path = ".threadshare/memory/entries/drift.md";
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(b"planned bytes\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    let plan_digest = planned["planDigest"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_100)
+        .unwrap();
+
+    // The plan expected the file to be absent, but it appeared after approval.
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/entries")).unwrap();
+    std::fs::write(worktree.join(target_path), b"user wrote this first\n").unwrap();
+
+    let outcome = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(outcome["status"], "voided");
+    assert_eq!(outcome["driftedPath"], target_path);
+    // The user's bytes were not touched, the candidate stayed quarantined.
+    assert_eq!(
+        std::fs::read(worktree.join(target_path)).unwrap(),
+        b"user wrote this first\n".to_vec()
+    );
+    let counts = status_counts(&storage);
+    assert_eq!(counts["candidates"]["quarantined"], 1);
+    assert_eq!(counts["promotions"]["voided"], 1);
+
+    // A voided plan cannot be applied or approved again.
+    assert_eq!(
+        storage
+            .promotion_apply(&apply_request(&plan_id, &worktree), 20_300)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_STATE_INVALID"
+    );
+    assert_eq!(
+        storage
+            .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_400)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_STATE_INVALID"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn promotion_apply_fails_closed_on_symlinked_path_segments() {
+    let worktree = temp_state_dir("promotion-symlink");
+    let outside = temp_state_dir("promotion-symlink-outside");
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(&mut storage, "s1", "cand-1", "symlink guard", "typed-fact");
+
+    // `.threadshare/memory/linked` is a symlinked directory segment.
+    std::fs::create_dir_all(worktree.join(".threadshare/memory")).unwrap();
+    std::os::unix::fs::symlink(&outside, worktree.join(".threadshare/memory/linked")).unwrap();
+
+    let target_path = ".threadshare/memory/linked/entry.md";
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(b"never written\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    let plan_digest = planned["planDigest"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_100)
+        .unwrap();
+
+    let outcome = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(outcome["status"], "voided");
+    assert_eq!(outcome["driftedPath"], target_path);
+    // Nothing escaped through the symlink.
+    assert!(!outside.join("entry.md").exists());
+    assert_eq!(status_counts(&storage)["promotions"]["voided"], 1);
+}
+
+#[test]
+fn promotion_apply_resumes_idempotently_after_a_partial_crash() {
+    let worktree = temp_state_dir("promotion-resume-worktree");
+    let state_dir = temp_state_dir("promotion-resume-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(&mut storage, "r1", "cand-1", "resume entry", "typed-fact");
+
+    let first_content = b"first file bytes\n";
+    let second_content = b"second file bytes\n";
+    let plan = promotion_plan_request(
+        &["cand-1"],
+        json!([
+            {
+                "targetPath": ".threadshare/memory/entries/a-first.md",
+                "sanitizedContent": base64(first_content),
+                "targetBlobHash": null,
+            },
+            {
+                "targetPath": ".threadshare/memory/entries/b-second.md",
+                "sanitizedContent": base64(second_content),
+                "targetBlobHash": null,
+            },
+        ]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    let plan_digest = planned["planDigest"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_100)
+        .unwrap();
+
+    // Simulate a crash mid-apply: the first file was written and journaled
+    // (`applied=1`), the plan was left in `applying`.
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/entries")).unwrap();
+    std::fs::write(
+        worktree.join(".threadshare/memory/entries/a-first.md"),
+        first_content,
+    )
+    .unwrap();
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying' WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET applied=1
+             WHERE plan_id=?1 AND target_path='.threadshare/memory/entries/a-first.md'",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    drop(tweak);
+
+    // The status op reports the recovery candidate.
+    let counts = status_counts(&storage);
+    assert_eq!(counts["promotions"]["applying"], 1);
+    assert_eq!(counts["promotions"]["applyingPlanIds"], json!([&plan_id]));
+
+    // Re-apply resumes file-by-file and completes the closing transaction.
+    let outcome = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(outcome["status"], "applied");
+    assert_eq!(outcome["idempotent"], false);
+    assert_eq!(
+        outcome["appliedFiles"],
+        json!([
+            ".threadshare/memory/entries/a-first.md",
+            ".threadshare/memory/entries/b-second.md",
+        ])
+    );
+    assert_eq!(
+        std::fs::read(worktree.join(".threadshare/memory/entries/a-first.md")).unwrap(),
+        first_content.to_vec()
+    );
+    assert_eq!(
+        std::fs::read(worktree.join(".threadshare/memory/entries/b-second.md")).unwrap(),
+        second_content.to_vec()
+    );
+    let counts = status_counts(&storage);
+    assert_eq!(counts["candidates"]["promoted"], 1);
+    assert_eq!(counts["promotions"]["applied"], 1);
+    assert_eq!(counts["promotions"]["applying"], 0);
+}
+
+#[test]
+fn authorize_appends_audit_rows() {
+    let state_dir = temp_state_dir("authorize");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    let authorize: threadshare_insights_engine::memory_protocol::AuthorizeRequest =
+        request(json!({
+            "planDigest": hex64('a'),
+            "taskId": "task-1",
+            "runnerInputDigest": hex64('b'),
+            "inputCoverageDigest": hex64('c'),
+            "provider": "claude",
+            "model": "claude-test-1",
+            "endpoint": "api.anthropic.com",
+            "bytes": 4096,
+            "via": "interactive",
+            "manifestDigest": null,
+        }));
+    authorize.validate().unwrap();
+    let outcome = storage.authorize(&authorize, 42_000).unwrap();
+    assert_eq!(outcome["planDigest"], hex64('a'));
+    assert_eq!(outcome["taskId"], "task-1");
+    assert_eq!(outcome["via"], "interactive");
+    assert_eq!(outcome["decidedAt"], 42_000);
+
+    let audit = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    let (bytes, via, decided_at): (i64, String, i64) = audit
+        .query_row(
+            "SELECT bytes, via, decided_at FROM authorization_log",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (bytes, via.as_str(), decided_at),
+        (4096, "interactive", 42_000)
+    );
 }
