@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { computePlanDigest, computeRunnerInputDigest } from "../src/memory-contracts.mjs";
+import {
+  computeManifestDigest,
+  computePlanDigest,
+  computeRunnerInputDigest,
+} from "../src/memory-contracts.mjs";
 import {
   ADJUDICATION_PROMPT,
   EXTRACTION_PROMPT,
@@ -22,6 +26,8 @@ import {
   buildAuthorizationManifest,
   buildExecutionPlan,
   computeCliVersionFingerprint,
+  computeRunnerBinaryIdentity,
+  computeRunnerProfileDigest,
   isConformanceValid,
   loadRunnerProfile,
   runConformanceTest,
@@ -34,10 +40,12 @@ const VIOLATING = path.join(FIXTURES, "fake-violating.mjs");
 const ECHO = path.join(FIXTURES, "fake-echo.mjs");
 const HANG = path.join(FIXTURES, "fake-hang.mjs");
 const FLOOD = path.join(FIXTURES, "fake-flood.mjs");
+const NETWORK_VIOLATING = path.join(FIXTURES, "fake-network-violating.mjs");
+const LINGERING = path.join(FIXTURES, "fake-lingering.mjs");
 
 // The fake runners rely on their shebang; make sure they are executable even on
 // checkouts that lost the executable bit.
-for (const script of [CONFORMANT, VIOLATING, ECHO, HANG, FLOOD]) {
+for (const script of [CONFORMANT, VIOLATING, ECHO, HANG, FLOOD, NETWORK_VIOLATING, LINGERING]) {
   await chmod(script, 0o755);
 }
 
@@ -70,9 +78,13 @@ function makePlan(stdinBytes, overrides = {}) {
   });
 }
 
-async function conformanceFor(binaryPath) {
+async function conformanceFor(binaryPath, profile = loadRunnerProfile("claude-cli")) {
+  const identity = await computeRunnerBinaryIdentity(binaryPath);
   return {
     testVersion: CONFORMANCE_TEST_VERSION,
+    profileDigest: computeRunnerProfileDigest(profile),
+    binaryRealpath: identity.binaryRealpath,
+    binaryContentSha256: identity.binaryContentSha256,
     cliVersionFingerprint: await computeCliVersionFingerprint(binaryPath),
     passedAt: new Date().toISOString(),
   };
@@ -130,7 +142,7 @@ test("codex profile hard-fails on every execution entry point", async () => {
 // Conformance test
 // ---------------------------------------------------------------------------
 
-test("conformant runner passes the deny-all probe and yields a fingerprint record", async () => {
+test("conformant runner passes the deny-all probe and yields a bound identity record", async () => {
   const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
     binaryPath: CONFORMANT,
     timeoutMs: 30_000,
@@ -138,11 +150,46 @@ test("conformant runner passes the deny-all probe and yields a fingerprint recor
   assert.equal(result.passed, true);
   assert.deepEqual(result.failures, []);
   assert.equal(result.record.testVersion, CONFORMANCE_TEST_VERSION);
+  // The record binds the profile (including argvTemplate) and the binary bytes.
+  assert.equal(
+    result.record.profileDigest,
+    computeRunnerProfileDigest(loadRunnerProfile("claude-cli")),
+  );
+  const identity = await computeRunnerBinaryIdentity(CONFORMANT);
+  assert.equal(result.record.binaryRealpath, identity.binaryRealpath);
+  assert.equal(result.record.binaryRealpath, await realpath(CONFORMANT));
+  assert.equal(result.record.binaryContentSha256, identity.binaryContentSha256);
+  assert.match(result.record.binaryContentSha256, HEX64_PATTERN);
+  // cliVersionFingerprint is retained as supplemental information only.
   assert.match(result.record.cliVersionFingerprint, HEX64_PATTERN);
   assert.ok(!Number.isNaN(Date.parse(result.record.passedAt)));
-  assert.equal(
-    result.record.cliVersionFingerprint,
-    await computeCliVersionFingerprint(CONFORMANT),
+});
+
+test("runner connecting to the network canary fails conformance", async () => {
+  const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
+    binaryPath: NETWORK_VIOLATING,
+    timeoutMs: 30_000,
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.record, null);
+  const codes = result.failures.map((failure) => failure.code);
+  assert.ok(
+    codes.includes("MEMORY_RUNNER_CONFORMANCE_NETWORK"),
+    `missing network failure: ${codes}`,
+  );
+});
+
+test("runner leaving a lingering child process fails conformance", async () => {
+  const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
+    binaryPath: LINGERING,
+    timeoutMs: 30_000,
+  });
+  assert.equal(result.passed, false);
+  assert.equal(result.record, null);
+  const codes = result.failures.map((failure) => failure.code);
+  assert.ok(
+    codes.includes("MEMORY_RUNNER_CONFORMANCE_LINGERING"),
+    `missing lingering-process failure: ${codes}`,
   );
 });
 
@@ -161,25 +208,92 @@ test("violating runner fails on both the canary and the filesystem side effect",
   );
 });
 
-test("fingerprint drift invalidates a cached conformance record", async () => {
+test("binary or profile identity drift invalidates a cached conformance record", async () => {
   const record = (
     await runConformanceTest(loadRunnerProfile("claude-cli"), {
       binaryPath: CONFORMANT,
       timeoutMs: 30_000,
     })
   ).record;
-  const sameBinary = await computeCliVersionFingerprint(CONFORMANT);
-  const otherBinary = await computeCliVersionFingerprint(ECHO);
-  assert.equal(isConformanceValid(record, { cliVersionFingerprint: sameBinary }), true);
-  assert.equal(isConformanceValid(record, { cliVersionFingerprint: otherBinary }), false);
+  const profileDigest = computeRunnerProfileDigest(loadRunnerProfile("claude-cli"));
+  const sameBinary = await computeRunnerBinaryIdentity(CONFORMANT);
+  const otherBinary = await computeRunnerBinaryIdentity(ECHO);
+  assert.equal(isConformanceValid(record, { profileDigest, ...sameBinary }), true);
+  assert.equal(isConformanceValid(record, { profileDigest, ...otherBinary }), false);
+  // Every field is compared individually: realpath and content hash both bind.
   assert.equal(
     isConformanceValid(record, {
-      testVersion: "conformance-test@2",
-      cliVersionFingerprint: sameBinary,
+      profileDigest,
+      binaryRealpath: otherBinary.binaryRealpath,
+      binaryContentSha256: sameBinary.binaryContentSha256,
     }),
     false,
   );
-  assert.equal(isConformanceValid(null, { cliVersionFingerprint: sameBinary }), false);
+  assert.equal(
+    isConformanceValid(record, {
+      profileDigest,
+      binaryRealpath: sameBinary.binaryRealpath,
+      binaryContentSha256: otherBinary.binaryContentSha256,
+    }),
+    false,
+  );
+  // A profile change (any argvTemplate edit) invalidates the record too.
+  const profile = loadRunnerProfile("claude-cli");
+  const alteredDigest = computeRunnerProfileDigest({
+    ...profile,
+    argvTemplate: [...profile.argvTemplate, "--verbose"],
+  });
+  assert.equal(isConformanceValid(record, { profileDigest: alteredDigest, ...sameBinary }), false);
+  assert.equal(
+    isConformanceValid(record, {
+      testVersion: "conformance-test@2",
+      profileDigest,
+      ...sameBinary,
+    }),
+    false,
+  );
+  assert.equal(isConformanceValid(null, { profileDigest, ...sameBinary }), false);
+});
+
+test("same binaryPath with replaced content but identical --version output fails conformance", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "threadshare-memory-runner-swap-"));
+  const binary = path.join(directory, "fake-echo.mjs");
+  try {
+    await copyFile(ECHO, binary);
+    await chmod(binary, 0o755);
+    const record = await conformanceFor(binary);
+    // Replace the binary content in place; a trailing comment keeps the
+    // --version output byte-identical, so the legacy fingerprint still matches.
+    await appendFile(binary, "\n// tampered after conformance\n");
+    assert.equal(await computeCliVersionFingerprint(binary), record.cliVersionFingerprint);
+    const identity = await computeRunnerBinaryIdentity(binary);
+    assert.notEqual(identity.binaryContentSha256, record.binaryContentSha256);
+    assert.equal(
+      isConformanceValid(record, {
+        profileDigest: record.profileDigest,
+        ...identity,
+      }),
+      false,
+    );
+    const plan = makePlan("swap payload");
+    const approved = approvePlan(plan, { approvedDigest: plan.planDigest });
+    await withMarker(async (marker) => {
+      await assert.rejects(
+        runExtractionRunner({
+          profile: loadRunnerProfile("claude-cli"),
+          conformance: record,
+          plan: approved,
+          stdinBytes: "swap payload",
+          binaryPath: binary,
+          timeoutMs: 30_000,
+        }),
+        assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
+      );
+      assert.equal(existsSync(marker), false, "tampered binary must not have executed");
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -196,6 +310,60 @@ test("buildExecutionPlan binds exact input bytes and starts pending", () => {
   assert.equal(plan.runnerInputDigest, computeRunnerInputDigest(stdin));
   assert.match(plan.inputCoverageDigest, HEX64_PATTERN);
   assert.equal(plan.planDigest, computePlanDigest(plan));
+  // The plan binds the full runner profile (including argvTemplate), not just
+  // the adapter name.
+  assert.match(plan.runnerProfile, HEX64_PATTERN);
+  assert.equal(plan.runnerProfile, computeRunnerProfileDigest(loadRunnerProfile("claude-cli")));
+});
+
+test("any argvTemplate change makes the plan's profile digest mismatch", () => {
+  const profile = loadRunnerProfile("claude-cli");
+  const altered = { ...profile, argvTemplate: [...profile.argvTemplate, "--verbose"] };
+  const plan = makePlan("argv payload", { profile: altered });
+  assert.notEqual(plan.runnerProfile, computeRunnerProfileDigest(profile));
+});
+
+test("a plan built against a different argvTemplate is refused before any spawn", async () => {
+  const profile = loadRunnerProfile("claude-cli");
+  const altered = { ...profile, argvTemplate: [...profile.argvTemplate, "--verbose"] };
+  const plan = makePlan("argv-drift payload", { profile: altered });
+  const approved = approvePlan(plan, { approvedDigest: plan.planDigest });
+  await withMarker(async (marker) => {
+    await assert.rejects(
+      runExtractionRunner({
+        profile,
+        conformance: await conformanceFor(ECHO),
+        plan: approved,
+        stdinBytes: "argv-drift payload",
+        binaryPath: ECHO,
+        timeoutMs: 30_000,
+      }),
+      assertCode("MEMORY_RUNNER_PROFILE_MISMATCH"),
+    );
+    assert.equal(existsSync(marker), false, "runner process must not have executed");
+  });
+});
+
+test("a conformance record probed under a different argvTemplate refuses execution", async () => {
+  const profile = loadRunnerProfile("claude-cli");
+  const altered = { ...profile, argvTemplate: [...profile.argvTemplate, "--verbose"] };
+  const plan = makePlan("profile-drift payload");
+  const approved = approvePlan(plan, { approvedDigest: plan.planDigest });
+  await withMarker(async (marker) => {
+    await assert.rejects(
+      runExtractionRunner({
+        profile,
+        // The record binds the altered profile, not the one that would run now.
+        conformance: await conformanceFor(ECHO, altered),
+        plan: approved,
+        stdinBytes: "profile-drift payload",
+        binaryPath: ECHO,
+        timeoutMs: 30_000,
+      }),
+      assertCode("MEMORY_RUNNER_NOT_CONFORMANT"),
+    );
+    assert.equal(existsSync(marker), false, "runner process must not have executed");
+  });
 });
 
 test("approvePlan only accepts the exact plan digest", () => {
@@ -244,6 +412,90 @@ test("manifest lists every plan digest and approves plans individually", () => {
   const approvedB = approvePlanFromManifest(planB, approvedManifest);
   assert.equal(approvedA.authorization, "approved");
   assert.equal(approvedB.authorization, "approved");
+});
+
+function forgeManifest({ plans, totalBytes }) {
+  // A schema-valid manifest whose own digest is self-consistent, so only the
+  // semantic cross-checks (totalBytes, entry/plan field binding) can reject it.
+  const forged = {
+    format: "threadshare-memory-authorization-manifest@v1",
+    manifestDigest: null,
+    plans,
+    totalBytes,
+    authorization: "pending",
+  };
+  return { ...forged, manifestDigest: computeManifestDigest(forged) };
+}
+
+test("approveManifest rejects a manifest whose totalBytes disagrees with its entries", () => {
+  const plan = makePlan("fourteen bytes"); // 14 bytes
+  const forged = forgeManifest({
+    plans: [
+      {
+        planDigest: plan.planDigest,
+        taskKind: plan.taskKind,
+        taskId: plan.taskId,
+        bytesToSend: plan.bytesToSend,
+      },
+    ],
+    // The displayed total understates what would actually be sent.
+    totalBytes: 1,
+  });
+  assert.throws(
+    () => approveManifest(forged, { approvedDigest: forged.manifestDigest }),
+    assertCode("MEMORY_RUNNER_MANIFEST_MISMATCH"),
+  );
+});
+
+test("approvePlanFromManifest rejects entries whose display fields contradict the plan", () => {
+  // Review-reproduced scenario: the manifest shows a benign 1-byte adjudication
+  // entry while the listed planDigest actually belongs to a 14-byte extraction.
+  const plan = makePlan("fourteen bytes", { taskId: "real-task" });
+  assert.equal(plan.taskKind, "extraction");
+  assert.equal(plan.bytesToSend, 14);
+  const forged = forgeManifest({
+    plans: [
+      {
+        planDigest: plan.planDigest,
+        taskKind: "adjudication",
+        taskId: "benign-label",
+        bytesToSend: 1,
+      },
+    ],
+    totalBytes: 1,
+  });
+  const approved = approveManifest(forged, { approvedDigest: forged.manifestDigest });
+  assert.throws(
+    () => approvePlanFromManifest(plan, approved),
+    assertCode("MEMORY_RUNNER_MANIFEST_MISMATCH"),
+  );
+
+  // Each display field binds individually.
+  for (const overrides of [
+    { taskKind: "adjudication" },
+    { taskId: "benign-label" },
+    { bytesToSend: 1 },
+  ]) {
+    const entry = {
+      planDigest: plan.planDigest,
+      taskKind: plan.taskKind,
+      taskId: plan.taskId,
+      bytesToSend: plan.bytesToSend,
+      ...overrides,
+    };
+    const variant = forgeManifest({ plans: [entry], totalBytes: entry.bytesToSend });
+    const approvedVariant = approveManifest(variant, { approvedDigest: variant.manifestDigest });
+    assert.throws(
+      () => approvePlanFromManifest(plan, approvedVariant),
+      assertCode("MEMORY_RUNNER_MANIFEST_MISMATCH"),
+      `expected rejection for forged ${Object.keys(overrides).join(",")}`,
+    );
+  }
+
+  // An honest manifest built from the same plan still approves it.
+  const honest = buildAuthorizationManifest([plan]);
+  const approvedHonest = approveManifest(honest, { approvedDigest: honest.manifestDigest });
+  assert.equal(approvePlanFromManifest(plan, approvedHonest).authorization, "approved");
 });
 
 test("a single plan's input change invalidates only that plan within the manifest", async () => {

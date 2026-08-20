@@ -19,11 +19,29 @@
 // The dialect is deterministic: `serializeMemoryEntry` emits one canonical byte
 // form (non-scalar values always serialize as single-line canonical JSON) and
 // `parseMemoryEntry(serializeMemoryEntry(x))` deep-equals `x`.
+//
+// Read-stage hardening (stable error codes):
+//   - a UTF-8 BOM is rejected (MEMORY_FORMAT_BOM_NOT_ALLOWED) and CR/CRLF line
+//     endings are rejected (MEMORY_FORMAT_CRLF_NOT_ALLOWED) — the write path
+//     refuses CR in bodies for the same reason;
+//   - capacity caps: frontmatter ≤ 64 KiB total (MEMORY_FORMAT_FRONTMATTER_TOO_LARGE),
+//     ≤ 8 KiB per line (MEMORY_FORMAT_LINE_TOO_LONG), ≤ 512 lines
+//     (MEMORY_FORMAT_TOO_MANY_LINES), JSON nesting ≤ 16 (MEMORY_FORMAT_JSON_TOO_DEEP);
+//   - multi-line JSON values are scanned by an incremental cross-line state
+//     machine (inString/escaped/depth carried between lines), so each byte is
+//     visited once and an unterminated large value cannot cause quadratic work.
 
 const FRONTMATTER_OPEN = "---\n";
 const FRONTMATTER_TERMINATOR = "\n---\n";
 const META_START = "-----META-START-----";
 const META_END = "-----META-END-----";
+
+// Read-stage capacity limits (DoS hardening): enforced before/while parsing,
+// each with a stable error code.
+const MAX_FRONTMATTER_BYTES = 64 * 1024;
+const MAX_FRONTMATTER_LINE_BYTES = 8 * 1024;
+const MAX_FRONTMATTER_LINES = 512;
+const MAX_JSON_DEPTH = 16;
 
 const LINE_PATTERN = /^([a-z_]+): (.+)$/;
 const JSON_NUMBER_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/;
@@ -137,32 +155,65 @@ function parseScalarValue(key, rawValue) {
   return value;
 }
 
-// True once the leading "["/"{" of `text` has found its matching closer.
-// Brackets inside JSON string literals do not participate in balancing, and an
-// escaped quote ('\"') does not end a string. Content after the balancing
-// closer is left for JSON.parse to reject.
-function isJsonBracketBalanced(text) {
+// Incremental JSON bracket scanner: consumes each chunk exactly once and
+// carries inString/escaped/depth state across chunks (O(n) over the whole
+// value, never re-scanning the accumulated text). Brackets inside JSON string
+// literals do not participate in balancing, and an escaped quote ('\"') does
+// not end a string. `push` returns true once the leading "["/"{" has found its
+// matching closer; content after the balancing closer is left for JSON.parse
+// to reject. Nesting deeper than MAX_JSON_DEPTH is rejected during the scan.
+function createJsonBalanceScanner(key) {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (const character of text) {
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-    if (character === '"') inString = true;
-    else if (character === "{" || character === "[") depth += 1;
-    else if (character === "}" || character === "]") {
-      depth -= 1;
-      if (depth <= 0) return true;
-    }
-  }
-  return false;
+  let balanced = false;
+  return {
+    push(chunk) {
+      if (balanced) return true;
+      for (const character of chunk) {
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+          continue;
+        }
+        if (character === '"') inString = true;
+        else if (character === "{" || character === "[") {
+          depth += 1;
+          if (depth > MAX_JSON_DEPTH) {
+            throw formatError(
+              "MEMORY_FORMAT_JSON_TOO_DEEP",
+              `frontmatter value for "${key}" nests JSON deeper than the limit of ${MAX_JSON_DEPTH}`,
+            );
+          }
+        } else if (character === "}" || character === "]") {
+          depth -= 1;
+          if (depth <= 0) {
+            balanced = true;
+            return true;
+          }
+        }
+      }
+      return false;
+    },
+  };
 }
 
 function parseFrontmatterLines(lines, { lineErrorCode }) {
+  if (lines.length > MAX_FRONTMATTER_LINES) {
+    throw formatError(
+      "MEMORY_FORMAT_TOO_MANY_LINES",
+      `frontmatter has ${lines.length} lines; the limit is ${MAX_FRONTMATTER_LINES}`,
+    );
+  }
+  for (const line of lines) {
+    if (Buffer.byteLength(line, "utf8") > MAX_FRONTMATTER_LINE_BYTES) {
+      throw formatError(
+        "MEMORY_FORMAT_LINE_TOO_LONG",
+        `a frontmatter line exceeds the ${MAX_FRONTMATTER_LINE_BYTES}-byte limit`,
+      );
+    }
+  }
   const result = {};
   for (let index = 0; index < lines.length; index += 1) {
     const match = LINE_PATTERN.exec(lines[index]);
@@ -175,38 +226,60 @@ function parseFrontmatterLines(lines, { lineErrorCode }) {
     }
     const trimmed = match[2].trim();
     const first = trimmed[0];
-    if ((first === "[" || first === "{") && !isJsonBracketBalanced(trimmed)) {
-      // Multi-line JSON value (design §0 DEV-2 rev2): consume lines until the
-      // brackets balance, then parse the whole run as JSON.
-      let value = trimmed;
-      let balanced = false;
-      while (index + 1 < lines.length) {
-        index += 1;
-        value += `\n${lines[index]}`;
-        if (isJsonBracketBalanced(value)) {
-          balanced = true;
-          break;
+    if (first === "[" || first === "{") {
+      const scanner = createJsonBalanceScanner(key);
+      if (!scanner.push(trimmed)) {
+        // Multi-line JSON value (design §0 DEV-2 rev2): consume lines until the
+        // brackets balance — each line is scanned exactly once by the
+        // incremental scanner — then parse the whole run as JSON.
+        let value = trimmed;
+        let balanced = false;
+        while (index + 1 < lines.length) {
+          index += 1;
+          value += `\n${lines[index]}`;
+          if (scanner.push(lines[index])) {
+            balanced = true;
+            break;
+          }
         }
+        if (!balanced) {
+          throw formatError(
+            "MEMORY_FORMAT_UNTERMINATED_JSON",
+            `frontmatter value for "${key}" starts a JSON ${first === "[" ? "array" : "object"} whose brackets never balance before the frontmatter ends`,
+          );
+        }
+        try {
+          result[key] = JSON.parse(value);
+        } catch {
+          throw formatError(
+            "MEMORY_FORMAT_INVALID_JSON_VALUE",
+            `frontmatter value for "${key}" must be valid JSON`,
+          );
+        }
+        continue;
       }
-      if (!balanced) {
-        throw formatError(
-          "MEMORY_FORMAT_UNTERMINATED_JSON",
-          `frontmatter value for "${key}" starts a JSON ${first === "[" ? "array" : "object"} whose brackets never balance before the frontmatter ends`,
-        );
-      }
-      try {
-        result[key] = JSON.parse(value);
-      } catch {
-        throw formatError(
-          "MEMORY_FORMAT_INVALID_JSON_VALUE",
-          `frontmatter value for "${key}" must be valid JSON`,
-        );
-      }
-      continue;
     }
     result[key] = parseScalarValue(key, match[2]);
   }
   return result;
+}
+
+function assertNoBom(text, subject) {
+  if (text.charCodeAt(0) === 0xfeff) {
+    throw formatError(
+      "MEMORY_FORMAT_BOM_NOT_ALLOWED",
+      `${subject} must not start with a UTF-8 byte order mark`,
+    );
+  }
+}
+
+function assertNoCarriageReturn(text, subject) {
+  if (text.includes("\r")) {
+    throw formatError(
+      "MEMORY_FORMAT_CRLF_NOT_ALLOWED",
+      `${subject} must use LF line endings only; CRLF (or a bare CR) is not allowed`,
+    );
+  }
 }
 
 function invalidField(field, expectation) {
@@ -330,6 +403,8 @@ export function validateEntryFrontmatter(frontmatter) {
 /** Parses an `entries/<slug>.md` file into `{ frontmatter, body }`. */
 export function parseMemoryEntry(text) {
   if (typeof text !== "string") throw new TypeError("entry text must be a string");
+  assertNoBom(text, "entry files");
+  assertNoCarriageReturn(text, "entry files");
   if (!text.startsWith(FRONTMATTER_OPEN)) {
     throw formatError("MEMORY_FORMAT_MISSING_FRONTMATTER", 'entry files must start with "---\\n"');
   }
@@ -341,6 +416,12 @@ export function parseMemoryEntry(text) {
     );
   }
   const rawFrontmatter = text.slice(FRONTMATTER_OPEN.length, terminator);
+  if (Buffer.byteLength(rawFrontmatter, "utf8") > MAX_FRONTMATTER_BYTES) {
+    throw formatError(
+      "MEMORY_FORMAT_FRONTMATTER_TOO_LARGE",
+      `entry frontmatter exceeds the ${MAX_FRONTMATTER_BYTES}-byte limit`,
+    );
+  }
   const body = text.slice(terminator + FRONTMATTER_TERMINATOR.length);
   const lines = rawFrontmatter === "" ? [] : rawFrontmatter.split("\n");
   const parsed = parseFrontmatterLines(lines, { lineErrorCode: "MEMORY_FORMAT_INVALID_LINE" });
@@ -377,6 +458,8 @@ function serializeScalarValue(value) {
  */
 export function serializeMemoryEntry({ frontmatter, body }) {
   if (typeof body !== "string") throw new TypeError("entry body must be a string");
+  // The write path never produces what the read path would reject.
+  assertNoCarriageReturn(body, "entry bodies");
   const normalized = validateEntryFrontmatter(frontmatter);
   const lines = ENTRY_FIELDS.map((field) => {
     const value = normalized[field];
@@ -403,6 +486,8 @@ function invalidMetaField(field, expectation) {
  */
 export function parseSceneMeta(text) {
   if (typeof text !== "string") throw new TypeError("scene text must be a string");
+  assertNoBom(text, "scene files");
+  assertNoCarriageReturn(text, "scene files");
   const lines = text.split("\n");
   if (lines[0] !== META_START) {
     throw formatError("MEMORY_FORMAT_MISSING_META", `scene files must start with "${META_START}"`);

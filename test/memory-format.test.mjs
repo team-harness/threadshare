@@ -328,6 +328,76 @@ test("duplicate keys are still rejected when the first value spans multiple line
   );
 });
 
+test("rejects a UTF-8 BOM with a stable code", () => {
+  assertThrowsCode(() => parseMemoryEntry(`\uFEFF${CANONICAL_TEXT}`), "MEMORY_FORMAT_BOM_NOT_ALLOWED");
+  assertThrowsCode(() => parseSceneMeta(`\uFEFF${SCENE_TEXT}`), "MEMORY_FORMAT_BOM_NOT_ALLOWED");
+});
+
+test("rejects CRLF line endings with a stable code", () => {
+  assertThrowsCode(
+    () => parseMemoryEntry(CANONICAL_TEXT.replaceAll("\n", "\r\n")),
+    "MEMORY_FORMAT_CRLF_NOT_ALLOWED",
+  );
+  // A single stray carriage return is enough to reject.
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("scene", "scene: 鉴权模块维护\r")),
+    "MEMORY_FORMAT_CRLF_NOT_ALLOWED",
+  );
+  assertThrowsCode(
+    () => parseSceneMeta(SCENE_TEXT.replaceAll("\n", "\r\n")),
+    "MEMORY_FORMAT_CRLF_NOT_ALLOWED",
+  );
+  // The write path refuses to produce what the read path would reject.
+  assertThrowsCode(
+    () => serializeMemoryEntry({ frontmatter: CANONICAL_FRONTMATTER, body: "line\r\n" }),
+    "MEMORY_FORMAT_CRLF_NOT_ALLOWED",
+  );
+});
+
+test("rejects oversized frontmatter with a stable code before parsing", () => {
+  const big = "x".repeat(7000);
+  const lines = Array.from({ length: 10 }, (_, index) => `key_${index}: ${big}`);
+  const text = `---\n${lines.join("\n")}\n---\nbody\n`;
+  assertThrowsCode(() => parseMemoryEntry(text), "MEMORY_FORMAT_FRONTMATTER_TOO_LARGE");
+});
+
+test("rejects overlong frontmatter lines with a stable code", () => {
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("scene", `scene: ${"x".repeat(9000)}`)),
+    "MEMORY_FORMAT_LINE_TOO_LONG",
+  );
+});
+
+test("an unterminated huge multi-line value stops at the line cap, proving early termination", () => {
+  // 600 lines of an unclosed JSON object: the reader must refuse at the
+  // 512-line cap instead of scanning (or re-scanning) the accumulated value.
+  const value = `evidence: {\n${'  "k": 1,\n'.repeat(599)}`.trimEnd();
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("evidence", value)),
+    "MEMORY_FORMAT_TOO_MANY_LINES",
+  );
+});
+
+test("rejects JSON nesting deeper than 16 with a stable code", () => {
+  const deep = `limitations: ${"[".repeat(17)}${"]".repeat(17)}`;
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("limitations", deep)),
+    "MEMORY_FORMAT_JSON_TOO_DEEP",
+  );
+  // The same depth spread over multiple lines is caught by the incremental scanner.
+  const deepMultiline = `limitations: ${"[\n".repeat(17)}${"]".repeat(17)}`;
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("limitations", deepMultiline)),
+    "MEMORY_FORMAT_JSON_TOO_DEEP",
+  );
+  // Depth 16 is accepted at the read stage; only field validation rejects it.
+  const okDepth = `limitations: ${"[".repeat(16)}${"]".repeat(16)}`;
+  assertThrowsCode(
+    () => parseMemoryEntry(frontmatterTextWithLine("limitations", okDepth)),
+    "MEMORY_FORMAT_INVALID_FIELD",
+  );
+});
+
 test("accepts deprecated entries pointing at their successor", () => {
   const parsed = parseMemoryEntry(entryText({ status: "deprecated", superseded_by: "new-entry" }));
   assert.equal(parsed.frontmatter.status, "deprecated");

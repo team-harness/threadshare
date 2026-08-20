@@ -7,11 +7,9 @@
 
 import { parseMemoryEntry } from "./memory-format.mjs";
 
-const HIGH_ENTROPY_MIN_LENGTH = 28;
+const HIGH_ENTROPY_MIN_LENGTH = 20;
 const HIGH_ENTROPY_THRESHOLD_BITS = 4.0;
-const HIGH_ENTROPY_TOKEN_PATTERN = /[A-Za-z0-9+/=_-]{28,}/g;
-const GIT_HASH_HEX40_PATTERN = /^[0-9a-f]{40}$/;
-const GIT_HASH_HEX64_PATTERN = /^[0-9a-f]{64}$/;
+const HIGH_ENTROPY_TOKEN_PATTERN = /[A-Za-z0-9+/=_-]{20,}/g;
 
 const UUID_V4_PATTERN =
   /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/g;
@@ -19,10 +17,16 @@ const SESSION_CONTEXT_PATTERN = /session|agent/i;
 const SESSION_CONTEXT_WINDOW = 48;
 
 const BLOCK_PATTERN_RULES = [
-  { code: "MEMORY_LINT_AWS_ACCESS_KEY", pattern: /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}/g },
+  { code: "MEMORY_LINT_AWS_ACCESS_KEY", pattern: /(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}/g },
   {
     code: "MEMORY_LINT_GITHUB_TOKEN",
-    pattern: /(?<![A-Za-z0-9])(?:gh[pos]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+    pattern: /(?<![A-Za-z0-9])(?:gh[oprsu]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g,
+  },
+  { code: "MEMORY_LINT_GITLAB_TOKEN", pattern: /(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{16,}/g },
+  { code: "MEMORY_LINT_NPM_TOKEN", pattern: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{16,}/g },
+  {
+    code: "MEMORY_LINT_GOOGLE_API_KEY",
+    pattern: /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g,
   },
   { code: "MEMORY_LINT_SLACK_TOKEN", pattern: /(?<![A-Za-z0-9])xox[abps]-[A-Za-z0-9-]{8,}/g },
   { code: "MEMORY_LINT_MODEL_API_KEY", pattern: /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g },
@@ -34,6 +38,10 @@ const BLOCK_PATTERN_RULES = [
   { code: "MEMORY_LINT_URL_CREDENTIALS", pattern: /:\/\/[^\s/@:]+:[^\s/@]+@/g },
   { code: "MEMORY_LINT_PROVIDER_SESSION_ID", pattern: /~\/\.claude\/projects\//g },
   { code: "MEMORY_LINT_PROVIDER_SESSION_ID", pattern: /\.codex\/sessions/g },
+  // Windows session path shapes (backslash separators).
+  { code: "MEMORY_LINT_PROVIDER_SESSION_ID", pattern: /\\\.claude\\projects\\/g },
+  { code: "MEMORY_LINT_PROVIDER_SESSION_ID", pattern: /\.codex\\sessions/g },
+  { code: "MEMORY_LINT_PROVIDER_SESSION_ID", pattern: /AppData\\(?:[^\\\s]+\\)*Claude(?![A-Za-z0-9])/g },
 ];
 
 const WARN_PATTERN_RULES = [
@@ -76,14 +84,21 @@ function collectPatternFindings(text, rules, severity, findings) {
   }
 }
 
-function collectHighEntropyFindings(text, findings) {
+function isWithinAllowedSpan(allowedSpans, start, end) {
+  return allowedSpans.some((span) => span.start <= start && end <= span.end);
+}
+
+function collectHighEntropyFindings(text, findings, allowedSpans) {
   HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
   for (const match of text.matchAll(HIGH_ENTROPY_TOKEN_PATTERN)) {
     const token = match[0];
     if (token.length < HIGH_ENTROPY_MIN_LENGTH) continue;
-    // Git object ids are expected memory content (evidence commits, digests):
-    // an all-lowercase hex string of exactly 40 or 64 characters is exempt.
-    if (GIT_HASH_HEX40_PATTERN.test(token) || GIT_HASH_HEX64_PATTERN.test(token)) continue;
+    // There is no unconditional hex exemption: a bare hex40/hex64 in prose is
+    // treated like any other token. Expected digests (e.g. the evidence
+    // commit hashes a caller has already parsed out of structured context)
+    // are exempted only via caller-provided allowedSpans that fully cover
+    // the token.
+    if (isWithinAllowedSpan(allowedSpans, match.index, match.index + token.length)) continue;
     if (shannonEntropyBitsPerCharacter(token) >= HIGH_ENTROPY_THRESHOLD_BITS) {
       findings.push(finding("MEMORY_LINT_HIGH_ENTROPY", "block", match.index, token));
     }
@@ -102,42 +117,97 @@ function collectSessionIdFindings(text, findings) {
   }
 }
 
+function normalizeAllowedSpans(allowedSpans) {
+  if (allowedSpans === undefined) return [];
+  if (!Array.isArray(allowedSpans)) {
+    throw new TypeError("allowedSpans must be an array of { start, end } spans");
+  }
+  return allowedSpans.map((span) => {
+    if (
+      span === null ||
+      typeof span !== "object" ||
+      !Number.isSafeInteger(span.start) ||
+      !Number.isSafeInteger(span.end) ||
+      span.start < 0 ||
+      span.end < span.start
+    ) {
+      throw new TypeError("each allowed span must be { start, end } with 0 <= start <= end");
+    }
+    return { start: span.start, end: span.end };
+  });
+}
+
 /**
  * Lints memory text for secrets and private material. Returns findings sorted
  * by index, each `{ code, severity: "block"|"warn", index, excerpt }` with a
  * redacted excerpt.
+ *
+ * `options.allowedSpans` is an optional list of `{ start, end }` character
+ * ranges (end exclusive) marking structured context — e.g. evidence commit
+ * hashes a caller located from parsed frontmatter. High-entropy tokens fully
+ * contained in an allowed span are exempt; nothing else is.
  */
-export function lintMemoryText(text) {
+export function lintMemoryText(text, { allowedSpans } = {}) {
   if (typeof text !== "string") throw new TypeError("lintMemoryText requires a string");
+  const spans = normalizeAllowedSpans(allowedSpans);
   const findings = [];
   collectPatternFindings(text, BLOCK_PATTERN_RULES, "block", findings);
-  collectHighEntropyFindings(text, findings);
+  collectHighEntropyFindings(text, findings, spans);
   collectSessionIdFindings(text, findings);
   collectPatternFindings(text, WARN_PATTERN_RULES, "warn", findings);
   findings.sort((left, right) => left.index - right.index || (left.code < right.code ? -1 : left.code > right.code ? 1 : 0));
   return findings;
 }
 
+const FRONTMATTER_TERMINATOR = "\n---\n";
+
+// Locations of evidence.commits[].hash values inside the frontmatter region.
+// Only the frontmatter (structured, schema-validated context) is searched:
+// the same hex appearing in the body gets no exemption.
+function evidenceHashSpans(entryText, frontmatter) {
+  const terminator = entryText.indexOf(FRONTMATTER_TERMINATOR);
+  if (terminator === -1) return [];
+  const frontmatterEnd = terminator + FRONTMATTER_TERMINATOR.length;
+  const spans = [];
+  for (const commit of frontmatter.evidence.commits) {
+    let cursor = 0;
+    while (cursor < frontmatterEnd) {
+      const index = entryText.indexOf(commit.hash, cursor);
+      if (index === -1 || index >= frontmatterEnd) break;
+      spans.push({ start: index, end: index + commit.hash.length });
+      cursor = index + commit.hash.length;
+    }
+  }
+  return spans;
+}
+
 /**
  * Promotion gate for a single entry file: sanitization lint plus frontmatter
  * validation via memory-format. `ok` is true only when the entry parses and no
  * `block` finding is present (warnings alone do not block promotion).
+ * The parsed evidence.commits[].hash locations are passed to the linter as
+ * allowedSpans, so structured evidence hashes never block promotion while the
+ * same material in the body still does.
  */
 export function lintEntryForPromotion(entryText) {
   if (typeof entryText !== "string") throw new TypeError("lintEntryForPromotion requires a string");
-  const findings = lintMemoryText(entryText);
+  let parsed = null;
+  let formatFinding = null;
   try {
-    parseMemoryEntry(entryText);
+    parsed = parseMemoryEntry(entryText);
   } catch (error) {
-    findings.push({
+    formatFinding = {
       code: typeof error.code === "string" ? error.code : "MEMORY_FORMAT_INVALID",
       severity: "block",
       index: 0,
       // Format error messages name fields, never raw values, so they are safe
       // to surface here.
       excerpt: String(error.message).slice(0, 120),
-    });
+    };
   }
+  const allowedSpans = parsed === null ? [] : evidenceHashSpans(entryText, parsed.frontmatter);
+  const findings = lintMemoryText(entryText, { allowedSpans });
+  if (formatFinding !== null) findings.push(formatFinding);
   const ok = findings.every((item) => item.severity !== "block");
   return { ok, findings };
 }
