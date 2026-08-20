@@ -18,6 +18,8 @@ use threadshare_insights_engine::evidence_path::{
 use threadshare_insights_engine::insights_overview::{
     CapabilityListKind, CapabilityPageRequest, InsightsOverviewRequest,
 };
+use threadshare_insights_engine::memory_protocol::handle_memory_command;
+use threadshare_insights_engine::memory_state::{MemoryError, MemoryStorage};
 use threadshare_insights_engine::protocol::{
     MAX_FRAME_BYTES, MessageKind, PROTOCOL_FORMAT, PROTOCOL_VERSION, ProtocolError,
     accepted_contract_from_hello, bounded_message, read_frame, request_id,
@@ -57,6 +59,7 @@ enum State {
 
 struct EngineServer {
     storage: EngineStorage,
+    memory: Option<MemoryStorage>,
     database_uuid: String,
     state: State,
 }
@@ -249,6 +252,19 @@ fn deep_query_engine_error(error: QueryError) -> EngineError {
         _ => ("validation", "Local Insights query could not be completed"),
     };
     EngineError::new(error.code, category, message)
+}
+
+fn memory_engine_error(error: MemoryError) -> EngineError {
+    let category = match error.code {
+        "TS_MEMORY_REQUEST_INVALID" | "TS_MEMORY_TASK_NOT_FOUND" => "validation",
+        "TS_MEMORY_STATE_NOT_OPEN"
+        | "TS_MEMORY_TASK_NOT_CLAIMABLE"
+        | "TS_MEMORY_LEASE_LOST"
+        | "TS_MEMORY_SUBMISSION_CONFLICT"
+        | "TS_MEMORY_SYNC_PARTIAL" => "conflict",
+        _ => "storage",
+    };
+    EngineError::new(error.code, category, error.message)
 }
 
 fn delivery_trace_engine_error(error: DeliveryTraceError) -> EngineError {
@@ -615,6 +631,7 @@ impl EngineServer {
         let database_uuid = storage.database_uuid()?;
         Ok(Self {
             storage,
+            memory: None,
             database_uuid,
             state: State::AwaitHello,
         })
@@ -1163,6 +1180,35 @@ impl EngineServer {
                                     "requestId": request_id,
                                     "request": request,
                                     "response": response,
+                                }),
+                            ))
+                        }
+                        MessageKind::MemoryCommand => {
+                            let op = message["op"]
+                                .as_str()
+                                .expect("validated memory op")
+                                .to_owned();
+                            let now_unix_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|elapsed| elapsed.as_millis() as i64)
+                                .unwrap_or_default();
+                            let payload = handle_memory_command(
+                                &mut self.memory,
+                                &op,
+                                &message["payload"],
+                                now_unix_ms,
+                            )
+                            .map_err(memory_engine_error)?;
+                            Ok((
+                                State::Ready {
+                                    accepted_contract: accepted_contract.clone(),
+                                },
+                                json!({
+                                    "format": PROTOCOL_FORMAT,
+                                    "type": "MEMORY_RESULT",
+                                    "requestId": request_id,
+                                    "op": op,
+                                    "payload": payload,
                                 }),
                             ))
                         }

@@ -756,6 +756,41 @@
       "payloadSha256": "107c87deaf9f139cb5206e27b74d4409b5cb9b2e4058138875501ebcabac10d7",
       "lengthPrefixHex": "000000ca",
       "canonicalPayload": "{\"category\":\"conflict\",\"code\":\"TS_INSIGHTS_GENERATION_CONFLICT\",\"fatal\":false,\"format\":\"threadshare-insights-protocol@v1\",\"message\":\"generation conflict\",\"requestId\":\"2\",\"retryable\":true,\"type\":\"ERROR\"}"
+    },
+    {
+      "name": "memory-command",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "MEMORY_COMMAND",
+        "requestId": "91",
+        "op": "status",
+        "payload": {
+          "repositoryKey": "1111111111111111111111111111111111111111111111111111111111111111",
+          "worktreeKey": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      "payloadByteLength": 276,
+      "payloadSha256": "7b80d4a19f78b2e45cb8219b4d0af6370b99d69eb4c9200652b21a35e4f94486",
+      "lengthPrefixHex": "00000114",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"op\":\"status\",\"payload\":{\"repositoryKey\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"worktreeKey\":\"2222222222222222222222222222222222222222222222222222222222222222\"},\"requestId\":\"91\",\"type\":\"MEMORY_COMMAND\"}"
+    },
+    {
+      "name": "memory-result",
+      "message": {
+        "format": "threadshare-insights-protocol@v1",
+        "type": "MEMORY_RESULT",
+        "requestId": "91",
+        "op": "status",
+        "payload": {
+          "chunks": { "pending": 2, "drafted": 1, "extracted": 0, "stale": 0 },
+          "tasks": { "pending": 1, "claimed": 1, "submitted": 1, "stale": 0 },
+          "candidates": { "draft": 2, "quarantined": 1, "promoted": 0, "discarded": 0 }
+        }
+      },
+      "payloadByteLength": 296,
+      "payloadSha256": "40fca7cb72eddc7eeb6aa0e88e287dc1f9825476c4ae83af9f6ee3280fbb1c54",
+      "lengthPrefixHex": "00000128",
+      "canonicalPayload": "{\"format\":\"threadshare-insights-protocol@v1\",\"op\":\"status\",\"payload\":{\"candidates\":{\"discarded\":0,\"draft\":2,\"promoted\":0,\"quarantined\":1},\"chunks\":{\"drafted\":1,\"extracted\":0,\"pending\":2,\"stale\":0},\"tasks\":{\"claimed\":1,\"pending\":1,\"stale\":0,\"submitted\":1}},\"requestId\":\"91\",\"type\":\"MEMORY_RESULT\"}"
     }
   ]
 }

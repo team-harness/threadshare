@@ -167,6 +167,8 @@ pub enum MessageKind {
     InsightsRecipe,
     ReadInsightsDeliveryTrace,
     InsightsDeliveryTrace,
+    MemoryCommand,
+    MemoryResult,
     AbortSession,
     SessionAborted,
     AbortTraceSource,
@@ -228,6 +230,8 @@ impl MessageKind {
             Self::InsightsRecipe => "INSIGHTS_RECIPE",
             Self::ReadInsightsDeliveryTrace => "READ_INSIGHTS_DELIVERY_TRACE",
             Self::InsightsDeliveryTrace => "INSIGHTS_DELIVERY_TRACE",
+            Self::MemoryCommand => "MEMORY_COMMAND",
+            Self::MemoryResult => "MEMORY_RESULT",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
             Self::AbortTraceSource => "ABORT_TRACE_SOURCE",
@@ -3673,6 +3677,8 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "INSIGHTS_RECIPE" => MessageKind::InsightsRecipe,
         "READ_INSIGHTS_DELIVERY_TRACE" => MessageKind::ReadInsightsDeliveryTrace,
         "INSIGHTS_DELIVERY_TRACE" => MessageKind::InsightsDeliveryTrace,
+        "MEMORY_COMMAND" => MessageKind::MemoryCommand,
+        "MEMORY_RESULT" => MessageKind::MemoryResult,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
         "ABORT_TRACE_SOURCE" => MessageKind::AbortTraceSource,
@@ -4628,6 +4634,34 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 .validate_against(&request)
                 .map_err(|_| invalid_frame("INSIGHTS_DELIVERY_TRACE.response is invalid"))?;
         }
+        MessageKind::MemoryCommand => {
+            validate_envelope(message, kind, &["op", "payload"])?;
+            let op = non_empty_string(field(message, "op", kind.as_str())?, "MEMORY_COMMAND.op")?;
+            if !crate::memory_protocol::is_memory_op(op) {
+                return Err(invalid_frame(format!(
+                    "MEMORY_COMMAND.op {op} is not supported"
+                )));
+            }
+            let payload = field(message, "payload", kind.as_str())?;
+            if !payload.is_object() {
+                return Err(invalid_frame("MEMORY_COMMAND.payload must be an object"));
+            }
+            crate::memory_protocol::validate_command_payload(op, payload).map_err(|error| {
+                invalid_frame(format!("MEMORY_COMMAND.payload is invalid: {error}"))
+            })?;
+        }
+        MessageKind::MemoryResult => {
+            validate_envelope(message, kind, &["op", "payload"])?;
+            let op = non_empty_string(field(message, "op", kind.as_str())?, "MEMORY_RESULT.op")?;
+            if !crate::memory_protocol::is_memory_op(op) {
+                return Err(invalid_frame(format!(
+                    "MEMORY_RESULT.op {op} is not supported"
+                )));
+            }
+            if !field(message, "payload", kind.as_str())?.is_object() {
+                return Err(invalid_frame("MEMORY_RESULT.payload must be an object"));
+            }
+        }
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
             decimal_u64(
@@ -5280,6 +5314,8 @@ mod tests {
                 MessageKind::AbortSession,
                 MessageKind::SessionAborted,
                 MessageKind::Error,
+                MessageKind::MemoryCommand,
+                MessageKind::MemoryResult,
             ]
         );
     }
