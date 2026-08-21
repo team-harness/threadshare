@@ -1,7 +1,7 @@
 # Threadshare 团队记忆与经验总结 提案
 
-状态：Proposed（提案，未实施）
-日期：2026-08-20（rev6，五轮设计审查意见均已吸收，另含一次自查增补，见附录 B）
+状态：Active（rev7；Phase 1 已实现并通过真实 Codex 验收，Phase 2/3 未启动）
+日期：2026-08-21（rev7；五轮设计审查意见、自查增补与 Phase 1 实施反馈均已吸收，见附录 B）
 适用范围：本机 Threadshare Insights 与新增的仓库内记忆库；云端共享面在本提案中保持**未设计**状态（见 Phase 3）
 
 设计输入：
@@ -9,7 +9,7 @@
 - 对 [TencentDB-Agent-Memory](https://github.com/Tencent/TencentDB-Agent-Memory) 的完整源码调研（MemoryProxy 拦截与会话还原、MemoryCore L0–L3 分层提炼管线、检索召回、Skill 提取、团队共享模型），详见附录 A
 - Threadshare 现有架构：ADR-0001（持久化事务性投影）、ADR-0003（Delivery Trace 证据图）、Deep Query 设计（snapshot / revision / coverage / 禁止静默截断契约）、`insights-intent-source.mjs` 的 Markdown 证据源适配器模式、`skills/threadshare/SKILL.md` 的本地数据边界（"原始内容不得传给网络服务，除非用户明确要求"）
 - 2026-08-20 五轮设计审查（cs-review）：rev1 五条、rev2 复审五条、rev3 复审五条、rev4 复审三条、rev5 复审四条，本版已全部吸收（附录 B 逐条对应）
-- 本机 CLI 能力实测（第三轮审查）：Claude Code 2.1.222 支持 `--tools ""` / `--bare` / `--safe-mode` / `--no-session-persistence` / `--strict-mcp-config`；Codex CLI 0.147.0 仅有 read-only/workspace-write/danger-full-access sandbox，`shell_tool` 不可禁用，**无 deny-all tool allowlist**
+- 本机 CLI 能力复测（Phase 1 收尾）：Claude Code 2.1.222 支持 `--tools ""` / `--bare` / `--safe-mode` / `--no-session-persistence` / `--strict-mcp-config`；Codex CLI 0.147.0 可通过 feature flags 禁用 `shell_tool`、`unified_exec`、`code_mode_host` 及浏览器/插件/MCP 等 ambient 能力，执行宿主在真实 canary 调用中 fail-closed；两者仍必须逐二进制/profile 通过 deny-all conformance，不能只信参数声明
 - 目标场景：不做实时代理拦截，**事后回看**本机已记录的 Codex / Claude Code 会话，提炼团队可共享的记忆与经验
 
 ## 1. 决策摘要
@@ -18,7 +18,7 @@
 
 1. **L0 已存在**：provider 会话文件 + insights 索引天然就是 L0 层。
 2. **新增四类提炼产物**：L1 原子记忆、L2 场景文档、L3 团队守则（doctrine）、Skill（SKILL.md 兼容格式，agent-neutral 存放）。
-3. **提炼由受限 Runner 执行，且资格靠一致性测试证明**：历史内容只交付给通过 **deny-all conformance test** 的隔离 Runner。Phase 1 仅启用 Claude profile（本机实测具备可落地参数面）；**Codex profile 保持 hard-fail**，直至其提供真正的 no-tools runner 或引入 OS 级隔离。宿主无可验证 Runner 时，Threadshare 拒绝交付历史内容。
+3. **提炼由受限 Runner 执行，且资格靠一致性测试证明**：历史内容只交付给通过 **deny-all conformance test** 的隔离 Runner。Phase 1 启用 Claude 与 Codex profile；Codex 额外使用一次性 `HOME/CODEX_HOME`、空 MCP 配置、显式 feature deny、`--ignore-user-config/--ignore-rules` 与 `--ephemeral`，并把 exact model/HTTPS endpoint 固化进 profile digest。宿主无可验证 Runner 时，Threadshare 拒绝交付历史内容。
 4. **transcript 出网需绑定精确输入并显式授权**：每次提炼前生成 `RunnerExecutionPlan@v1`，绑定 task、输入 digest、全部输入 coverage、provider/model/endpoint、发送字节数，以及**分开申报**的本机会话持久化与服务端留存；runner 参数只创建 pending plan，交互确认或 `--approve-plan <digest>` 才授权；批量提炼可用 `AuthorizationManifest@v1` 一次确认一组**逐个列明**的 plan digest（每个 plan 仍只对自身 digest 生效、单独失效）。MCP 不得自行授权。Runner 强制本机 no-session-persistence；**Threadshare 不承诺也不暗示模型服务端的留存策略**（providerRetention 默认 unknown，如实展示）。
 5. **提炼阶段的全部状态在单一事务库内**：任务、提交、候选（draft/quarantined）、原始 evidence refs、chunk 游标全部是 `memory-state.sqlite3` 的表，单事务提交；**不再有事务外的 quarantine/、evidence-refs/ 文件目录**。审批后的 git 写入走独立的可恢复 promotion journal，不声称与提炼同事务。
 6. **提取与裁决拆为两阶段任务**（消除循环依赖）：`ExtractionTask → CandidateDraftBatch → 双 FTS + RRF 召回 → AdjudicationTask → AdjudicationResult → 事务性入隔离区`，两阶段各有 taskId / lease / binding / 幂等提交。
@@ -53,7 +53,7 @@
 | F6 | 全局 snapshot 序号随每次 Session commit 递增，与任务相关性无关 | `normalized_repository.rs`（session_commits.snapshot_seq） |
 | F7 | MCP server 只能控制自己暴露的工具，无法撤销宿主 ambient capabilities | `src/insights-mcp.mjs`；MCP 协议语义 |
 | F8 | 现有 `POST /api/v1/shares` 只接受 `threadshare-history@v1`；ADR-0003 只授权独立 portable contract | `src/share-api.ts`；ADR-0003 |
-| F9 | **Claude Code 2.1.222 具备可验证的零工具参数面**（`--tools ""` / `--bare` / `--safe-mode` / `--no-session-persistence` / `--strict-mcp-config`）；**Codex CLI 0.147.0 无 deny-all tool allowlist**（read-only sandbox 仅禁写，不禁 shell 与本机读取） | 第三轮审查本机实测 |
+| F9 | **Claude Code 2.1.222 具备可验证的零工具参数面**；**Codex CLI 0.147.0 虽无单一 `--tools none`，但 feature deny 可关闭 shell/unified exec/code-mode host 及其他 ambient capability**。真实 canary 中 code-mode host fail-closed；资格仍由完整 conformance 与二进制/profile 指纹决定 | 第三轮审查 + 2026-08-21 Phase 1 复测 |
 | F10 | 现有本地数据边界："原始 Query 内容不得传给网络服务，除非用户明确要求" | `skills/threadshare/SKILL.md` |
 | F11 | SQLite 事务无法原子提交外部文件系统对象 | SQLite 语义 |
 | F12 | Insights state 是本机全局库；同一 project key 可被多个注册仓库声明；现有 repository resolver 可取得 real worktree root 与 git common directory identity | `src/insights-paths.mjs`；Delivery Trace 设计 §10.2；`src/insights-repository-source.mjs` |
@@ -65,14 +65,14 @@
 **Runner 资格（对 F7 / F9）**：
 
 - `RestrictedExtractionRunner@v1` profile 随包分发，但 **profile 声明不构成资格**；资格由 **deny-all conformance test** 证明：Threadshare 在交付任何历史内容之前，先以对抗性探针任务运行该 profile（探针 prompt 诱导执行 shell / 读写文件 / 调用 MCP / 发起任务外网络请求），验证全部被拒且无副作用，通过后记录 `{profile, cliVersion, testVersion}` 指纹；CLI 版本或 profile 变化即失效重测；
-- **Phase 1 仅启用 Claude profile**（F9：`--tools "" --bare --safe-mode --no-session-persistence --strict-mcp-config` 构成可落地参数面，仍须通过 conformance test 而非信任参数文档）；**Codex profile 保持 hard-fail**——在 Codex 提供真正的 no-tools runner 或引入 OS 级隔离（容器/沙箱进程）之前不启用；
+- **Phase 1 启用 Claude 与 Codex profile**。Claude 使用 `--tools "" --bare --safe-mode --no-session-persistence --strict-mcp-config`；Codex profile v2 使用显式 model/HTTPS endpoint、空 `mcp_servers`、执行/浏览器/插件等 feature deny、`--ignore-user-config/--ignore-rules`、`--ephemeral` 与一次性 home。宿主环境缩减为认证、代理、证书与 locale 白名单，不透传任意项目 secret、`NODE_OPTIONS` 或动态加载变量；v2 使旧 conformance 指纹自动失效重测。参数面只是前置条件，两者仍须真实通过 conformance；
 - **硬失败规则：宿主环境不能提供通过 conformance test 的 Runner 时，Threadshare 必须拒绝向任何 Agent 交付历史内容**；不降级、不回退到 ambient Agent；
 - transcript 经 stdin 交付、结果经 stdout 回收；超时与输出上限强制执行；**Runner 必须以本机 no-session-persistence 模式运行**（`localSessionPersistence: none`），避免提炼运行自身生成新的可索引会话（防反馈回路）。
 
 **出网授权（对 F10）**：Runner 无本机工具，但会把未裁剪的 transcript 发往模型端点——这是内容离开本机，必须显式授权：
 
 - 每次提炼执行前，Threadshare 先确定性序列化将交给 Runner 的完整 stdin，再生成 **`RunnerExecutionPlan@v1`**：`taskKind + taskId + runnerInputDigest + inputCoverageDigest`、全部输入来源 coverage（包含 transcript、draft、候选池摘要）、provider、model、精确发送字节数、网络目的地，以及**两级分开申报的留存**——`localSessionPersistence: none`（Runner 本机不留会话，CLI 参数可保证）与 `providerRetention: unknown | no-retention | provider-policy`（模型服务端留存，**Threadshare 无法凭 CLI 参数保证**，默认 unknown，如实展示，不得伪装为本机可保证属性）；
-- `planDigest = sha256(canonical plan without authorization decision)`。`memory extract --runner claude --request <file|->` 只生成并展示 pending plan，不交付内容；交互式确认或非交互 `--approve-plan <planDigest>` 才授权该**唯一输入**。task input、候选池、coverage、endpoint、model 或留存字段任一变化都产生新 digest，必须重新确认；
+- `planDigest = sha256(canonical plan without authorization decision)`。`memory extract --runner <claude|codex> --request <file|->` 只生成并展示 pending plan，不交付内容；Codex 新 preview 还需绑定 `--runner-model` 与 `--runner-endpoint`。交互式确认或非交互 `--approve-plan <planDigest>` 才授权该**唯一输入**。task input、候选池、coverage、endpoint、model 或留存字段任一变化都产生新 digest，必须重新确认；
 - **批量授权（自查增补）**：批量提炼时逐任务唯一 digest × 两阶段任务会导致确认次数爆炸（50 个 chunk ≈ 100 次确认）。可生成 `AuthorizationManifest@v1`——逐个列明各 pending plan 的 digest、taskKind 与字节数，一次交互确认批准清单内全部 digest；每个 plan 仍只对自身 digest 生效，任一 plan 的输入变化只作废该 plan、不影响清单内其他已批准 plan；**不存在"整包授权覆盖未来任务"的语义**；manifest 批准同样写入审计日志；
 - **MCP 不得自行授权**：ambient 宿主 Agent 经 MCP 触发提炼只能创建 pending plan，等待用户在 CLI 侧确认；MCP 响应永不携带 transcript；
 - 全部授权决定写入审计日志。
@@ -301,7 +301,7 @@ authorization_log: planDigest, taskId, runnerInputDigest,
 
 **`RepositoryBinding@v1`**（Threadshare 内部 owner）：`{ repositoryKey, worktreeKey, publicRepositoryIdentity, rootRealpathDigest, commonDirectoryIdentity: { device, inode }, memoryRoot: ".threadshare/memory" }`。repositoryKey/worktreeKey 由本机 origin secret 派生；publicRepositoryIdentity 必须经过 credential/query/fragment 净化。绝对路径只存 repository_bindings 表，不进入任务 stdout、git 或 MCP。project 解析为零个或多个 repository 时均硬失败；调用方必须显式指定唯一 repository/worktree 后重试。
 
-**`RestrictedExtractionRunner@v1`**（runner profile）：`{ adapter: claude-cli, version, argvTemplate（参数白名单）, toolPolicy: none, network: model-only, ephemeral: required, timeoutMs, maxOutputBytes, conformance: { testVersion, passedAt, cliVersionFingerprint } }`。**conformance 记录缺失或指纹失配 → 该 profile 不可用**。Phase 1 仅 claude-cli；codex-cli 保持 hard-fail（F9）。
+**`RestrictedExtractionRunner@v1`**（runner profile）：`{ adapter: claude-cli | codex-cli, version, argvTemplate（参数白名单）, toolPolicy: none, network: model-only, ephemeral: required, timeoutMs, maxOutputBytes, conformance: { testVersion, passedAt, cliVersionFingerprint } }`。**conformance 记录缺失或指纹失配 → 该 profile 不可用**。Codex profile 的 argv 固化 exact model/HTTPS endpoint、空 MCP 配置与全部 deny flags；运行时只复制认证材料到一次性 home，不加载用户配置、规则、Skills 或插件，结束后删除。
 
 **`RunnerExecutionPlan@v1`**：`{ planDigest, taskKind, taskId, runnerInputDigest, inputCoverageDigest, inputCoverage: [ { sourceKind, opaqueSourceId, revision, contentDigest, bytes, truncated } ], runnerProfile, provider, model, endpoint, bytesToSend, localSessionPersistence: none, providerRetention: unknown | no-retention | provider-policy, authorization: pending | approved }`。`runnerInputDigest = sha256(exact stdin bytes)`；planDigest 覆盖除 authorization 决定外的完整 canonical plan。批准只对该 digest 生效，执行前重新计算 stdin digest 并比对。MCP 只能产生 `pending`；CLI 交互确认或 `--approve-plan <digest>` 转为 approved。`providerRetention` 如实展示，不得伪装为本机可保证属性。
 
@@ -463,16 +463,16 @@ git entry:                                           approved ──被替代─
 
 工作流：
 
-6. Runner 基础设施：claude-cli profile、**deny-all conformance test**（对抗性探针 + 指纹记录 + 失效重测）、ephemeral 强制、超时/输出上限、无合格 Runner 即拒绝交付的硬失败路径；codex-cli 显式 hard-fail 占位
+6. Runner 基础设施：claude-cli + codex-cli profile、**deny-all conformance test**（对抗性探针 + 指纹记录 + 失效重测）、ephemeral/一次性 home 强制、超时/输出上限、无合格 Runner 即拒绝交付的硬失败路径
 7. 执行授权：精确输入绑定的 `RunnerExecutionPlan@v1`、交互确认 / `--approve-plan <digest>`、MCP pending 语义、authorization log
 8. `memory init / review / promote / lint / assemble` CLI；唯一 owner 解析、逐条 claim review、PromotionPlan assessment/blob CAS、no-follow 原子写入、净化管线
-9. 两阶段提炼任务：显式有界筛选请求、worktree/hard-sealed 强制 scope、完整 Turn + Delivery Trace 回读、三层 selection binding、chunk 切分与 coverage 申报、ExtractionTask / AdjudicationTask 组装、双投影召回、candidate revision CAS、chunk 级游标（`memory extract` CLI；MCP 仅编排/审阅）
+9. 两阶段提炼任务：显式有界筛选请求、worktree/hard-sealed 强制 scope、完整 Turn + Delivery Trace 回读、三层 selection binding、chunk 切分与 coverage 申报、ExtractionTask / AdjudicationTask 组装、双投影召回、candidate revision CAS、chunk 级游标（`memory extract` CLI；MCP 可生成 pending preview，不能授权或执行）
 10. 提炼 prompt 资产（L1 code 模式 + 防 role-capture + 批量裁决），随包分发
-11. `threadshare_memory_search` MCP 工具
+11. `threadshare_memory_search` / `threadshare_memory_status` / `threadshare_memory_extract_preview` MCP 工具；preview 只落本机 0600 pending artifact，响应不含 transcript
 
 验收（全链路之外的专项）：
 
-- **Conformance**：对抗性探针验证 claude profile 拒绝 shell/文件/MCP/任务外网络且无副作用；CLI 版本变化触发重测；codex profile 验证 hard-fail；
+- **Conformance**：对抗性探针验证 Claude/Codex profile 拒绝 shell/文件/MCP/任务外网络且无副作用；CLI 二进制或 profile 变化触发重测；`npm run test:memory-codex-live` 必须用真实 Codex 完成 conformance、L1 提取、裁决，并证明不新增可索引 Session；fake runner 只用于超时、漂移、网络违规等确定性故障注入，不能作为 Runner 可用性验收；
 - **授权**：MCP 与仅指定 runner 均只产生 pending plan；未批准 digest 不交付任何输入；用相同字节数替换 transcript 或候选池内容时 runnerInputDigest/inputCoverageDigest 必须变化并要求重新确认；manifest 批准后修改其中一个 task 的输入，仅该 plan 失效、清单内其余 plan 照常执行；runner 运行不产生新的可索引会话；
 - **事务**：并发 claim 竞争唯一持有；candidate 行、revision、FTS、assessment 与游标推进同事务的逐崩溃点注入；同 taskId 重复提交幂等；promotion journal 半途崩溃恢复；
 - **CAS/召回**：无关会话同步推进 snapshotSeq 时任务不失效；相关 turn revision 漂移拒绝；approved/candidate 任一侧新条目进入 top-5 或池项 revision/content/state 漂移均使任务重出；projection generation 变化但 resultSetDigest 相同则接受；并发 merge 同一 candidate 仅一个 revision CAS 成功；跨 chunk 重复被捕获；
@@ -482,7 +482,7 @@ git entry:                                           approved ──被替代─
 
 ### Phase 2 — 归纳与装配
 
-12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展；15. Codex runner 重评估（若其提供 no-tools 能力或引入 OS 级隔离）
+12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展。原第 15 项 Codex runner 重评估已前移为 Phase 1 完成门并于 2026-08-21 验收，不计入 Phase 2；**Phase 2 尚未启动**。
 
 ### Phase 3 — Skill 提取与跨仓共享
 
@@ -521,7 +521,7 @@ git entry:                                           approved ──被替代─
 | R6 | 非 git 项目 / 跨仓库经验 | Phase 1 不支持；与 Phase 3 独立 ADR 一并设计 |
 | R7 | 分块全量比截断多耗 LLM | 接受（正确性优先）；选材控制总量；预算可调 |
 | R8 | `--regenerate-secret` 状态迁移 | 按 chunkDigest 尽力迁移，失败回 pending |
-| R9 | Runner 可用面窄（Phase 1 仅 Claude） | 按 D1 硬失败并明确报因；Codex 待其能力补齐或 OS 级隔离后重评估（Phase 2 第 15 项） |
+| R9 | Runner 参数或 CLI 升级重新打开 ambient capability | profile 固化全部 deny 参数；二进制内容/profile digest 变化使签名 conformance 失效；真实 Codex live gate 作为发布前专项验收，失败即拒绝交付 |
 | R10 | conformance test 的探针覆盖不完备 | 测试用例随包版本化、可追加；指纹绑定 CLI 版本，升级即重测；缺陷按安全 issue 流程处理 |
 | R11 | 模型服务端可能留存 transcript（providerRetention 无法由本机保证） | RunnerExecutionPlan 如实申报 providerRetention（默认 unknown）；团队可在 profile 中固定为已签约 no-retention 的端点；这是授权决策的输入而非技术保证 |
 | R12 | 生成性记忆逐条确认降低审核吞吐 | 接受（可信度优先）；“批准全部”仅开放给确定性 typed-fact；review UI 把 statement 与证据并排，减少确认成本 |
@@ -566,7 +566,7 @@ git entry:                                           approved ──被替代─
 
 | 审查意见 | 结论 | 落点 |
 |---|---|---|
-| 1. [Blocking] Codex Runner 无法证明"零工具"，profile 声明≠资格 | 采纳 | D1：deny-all conformance test（对抗性探针 + 指纹 + 失效重测）；Phase 1 仅 Claude profile，Codex hard-fail；F9；Phase 2 第 15 项重评估；R9/R10 |
+| 1. [Blocking] Codex Runner 无法证明"零工具"，profile 声明≠资格 | 采纳并在 Phase 1 复测后收口 | D1：资格始终由 deny-all conformance + 二进制/profile 指纹证明；Codex 0.147.0 采用 feature deny + fail-closed code-mode host + 一次性 home，并由真实 live gate 验证。原 Phase 2 重评估项已前移完成；F9、R9/R10 |
 | 2. [Blocking] SQLite 事务不能包含外部 sidecar/quarantine 文件 | 采纳 | D4/§5.5：candidates、evidence_refs、submissions、chunks 全部入 memory-state 表，单事务；git 写入改独立 promotion journal（可恢复重放）；F11 |
 | 3. [Blocking] 提取与逐候选去重存在循环依赖 | 采纳 | D4 两阶段任务：ExtractionTask→CandidateDraftBatch → Threadshare 召回 → AdjudicationTask→AdjudicationResult，各自 taskId/lease/binding/幂等；§5.6 契约拆分；§6.3/6.4 重写 |
 | 4. [Blocking] 原始 transcript 出网缺显式授权契约 | 采纳 | D1：RunnerExecutionPlan@v1；CLI 显式参数=授权、MCP 仅 pending；no-session-persistence 强制（防反馈回路）；authorization_log；F10；验收项 |

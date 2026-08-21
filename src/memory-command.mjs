@@ -38,6 +38,7 @@ import {
   authorizationManifestSchema,
   candidateDraftBatchSchema,
   extractionTaskSchema,
+  restrictedExtractionRunnerSchema,
   runnerExecutionPlanSchema,
 } from "./memory-contracts.mjs";
 import {
@@ -88,6 +89,7 @@ import {
   computeRunnerProfileDigest,
   isConformanceValid,
   loadRunnerProfile,
+  resolveRunnerBinaryPath,
   runConformanceTest,
   runExtractionRunner,
 } from "./memory-runner.mjs";
@@ -99,7 +101,7 @@ const MEMORY_ACTIONS = Object.freeze([
 const MEMORY_ROOT = ".threadshare/memory";
 const MEMORY_SUBDIRS = Object.freeze(["entries", "scenes", "skills"]);
 const POLICY_VERSION = "sanitize@1";
-const RUNNER_ADAPTERS = Object.freeze({ claude: "claude-cli" });
+const RUNNER_ADAPTERS = Object.freeze({ claude: "claude-cli", codex: "codex-cli" });
 const ASSEMBLE_BEGIN = "<!-- BEGIN THREADSHARE MEMORY (generated; do not edit by hand) -->";
 const ASSEMBLE_END = "<!-- END THREADSHARE MEMORY -->";
 
@@ -163,15 +165,15 @@ function parseRunner(action, options, { required = true } = {}) {
     if (!required) return null;
     throw memoryDiagnostic(
       "TS_USAGE_OPTION_DEPENDENCY",
-      `memory ${action} requires --runner claude.`,
-      `Run \`threadshare memory ${action} --runner claude\`.`,
+      `memory ${action} requires --runner <claude|codex>.`,
+      `Run \`threadshare memory ${action} --runner codex\` or choose claude.`,
     );
   }
   if (!Object.hasOwn(RUNNER_ADAPTERS, options.runner)) {
     throw memoryDiagnostic(
       "TS_USAGE_INVALID_VALUE",
-      `memory ${action} --runner must be claude in Phase 1.`,
-      "Only the claude runner is available. Codex is hard-failed (design DEV/F9).",
+      `memory ${action} --runner must be claude or codex.`,
+      "Choose a restricted runner that can pass deny-all conformance.",
     );
   }
   return options.runner;
@@ -247,12 +249,19 @@ export function parseMemoryInvocation(positionals, options) {
       };
     }
     case "reverify-runner":
-      assertAllowedOptions(action, options, ["runner", "format"]);
+      assertAllowedOptions(action, options, ["runner", "runner-model", "runner-endpoint", "format"]);
       if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
-      return { action, runner: parseRunner(action, options), format: parseFormat(action, options) };
+      return {
+        action,
+        runner: parseRunner(action, options),
+        runnerModel: options["runner-model"],
+        runnerEndpoint: options["runner-endpoint"],
+        format: parseFormat(action, options),
+      };
     case "extract": {
       assertAllowedOptions(action, options, [
-        "repository", "runner", "approve-plan", "approve-manifest", "limit", "format", "request",
+        "repository", "runner", "runner-model", "runner-endpoint", "approve-plan",
+        "approve-manifest", "limit", "format", "request",
       ]);
       if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
       if (options["approve-plan"] !== undefined && options["approve-manifest"] !== undefined) {
@@ -268,6 +277,21 @@ export function parseMemoryInvocation(positionals, options) {
           "TS_USAGE_OPTION_CONFLICT",
           "memory extract approval cannot be combined with --request.",
           "Approve the stored plan by digest alone; use --request only to create a new preview.",
+        );
+      }
+      if ((options["approve-plan"] !== undefined || options["approve-manifest"] !== undefined) &&
+          (options["runner-model"] !== undefined || options["runner-endpoint"] !== undefined)) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_CONFLICT",
+          "memory extract approval cannot override the pending runner model or endpoint.",
+          "Approve the stored plan by digest; its exact runner profile is already bound and private.",
+        );
+      }
+      if ((options["runner-model"] === undefined) !== (options["runner-endpoint"] === undefined)) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_DEPENDENCY",
+          "--runner-model and --runner-endpoint must be supplied together.",
+          "Provide both exact Codex delivery settings, or neither when approving a stored plan.",
         );
       }
       if (options["approve-plan"] === undefined && options["approve-manifest"] === undefined &&
@@ -293,6 +317,8 @@ export function parseMemoryInvocation(positionals, options) {
         action,
         repository: options.repository,
         runner: parseRunner(action, options),
+        runnerModel: options["runner-model"],
+        runnerEndpoint: options["runner-endpoint"],
         approvePlan: options["approve-plan"],
         approveManifest: options["approve-manifest"],
         requestSource: options.request,
@@ -1143,15 +1169,68 @@ async function storeConformance(memoryStateDir, profileName, record) {
   );
 }
 
-function runnerBinaryPath(options) {
-  return options.runnerBinaryPath ?? process.env.THREADSHARE_MEMORY_RUNNER_BIN ?? undefined;
+function runnerBinaryPath(options, profile) {
+  if (options.runnerBinaryPath !== undefined) return options.runnerBinaryPath;
+  if (profile.adapter === "codex-cli" && process.env.THREADSHARE_MEMORY_CODEX_BIN) {
+    return process.env.THREADSHARE_MEMORY_CODEX_BIN;
+  }
+  return process.env.THREADSHARE_MEMORY_RUNNER_BIN ?? undefined;
+}
+
+function runnerConfiguration(invocation, options) {
+  if (invocation.runner === "claude") {
+    if (invocation.runnerModel !== undefined || invocation.runnerEndpoint !== undefined) {
+      throw memoryDiagnostic(
+        "TS_USAGE_INVALID_VALUE",
+        "Explicit runner model/endpoint settings are currently supported only for codex.",
+        "Remove those options or choose --runner codex.",
+      );
+    }
+    return {
+      profileName: RUNNER_ADAPTERS.claude,
+      profile: loadRunnerProfile(RUNNER_ADAPTERS.claude),
+      provider: "claude",
+      model: options.runnerModel ?? process.env.THREADSHARE_MEMORY_RUNNER_MODEL ?? "claude-latest",
+      endpoint: "api.anthropic.com",
+    };
+  }
+  const model = invocation.runnerModel ?? options.runnerModel ??
+    process.env.THREADSHARE_MEMORY_RUNNER_MODEL;
+  const endpoint = invocation.runnerEndpoint ?? options.runnerEndpoint ??
+    process.env.THREADSHARE_MEMORY_RUNNER_ENDPOINT;
+  if (typeof model !== "string" || model.length === 0 ||
+      typeof endpoint !== "string" || endpoint.length === 0) {
+    throw memoryDiagnostic(
+      "TS_USAGE_OPTION_DEPENDENCY",
+      "The codex runner requires an exact model and HTTPS endpoint for plan binding.",
+      "Pass --runner-model <model> and --runner-endpoint <https-url> when creating the preview.",
+    );
+  }
+  return {
+    profileName: RUNNER_ADAPTERS.codex,
+    profile: loadRunnerProfile(RUNNER_ADAPTERS.codex, { model, endpoint }),
+    provider: "openai",
+    model,
+    endpoint,
+  };
+}
+
+function assertPendingRunner(pending, runner) {
+  const expected = RUNNER_ADAPTERS[runner];
+  if (pending.profile.adapter !== expected) {
+    throw memoryDiagnostic(
+      "TS_USAGE_INVALID_VALUE",
+      `The pending plan belongs to ${pending.profile.adapter}, not ${expected}.`,
+      `Re-run approval with --runner ${pending.profile.adapter === "codex-cli" ? "codex" : "claude"}.`,
+    );
+  }
 }
 
 async function ensureConformance(context, profile, profileName, options, { force = false } = {}) {
-  const binaryPath = runnerBinaryPath(options);
+  const binaryPath = await resolveRunnerBinaryPath(profile, runnerBinaryPath(options, profile));
   const signingKey = context.originSecret;
   const cached = force ? null : await loadConformance(context.memoryStateDir, profileName);
-  if (cached !== null && binaryPath !== undefined) {
+  if (cached !== null) {
     const identity = await computeRunnerBinaryIdentity(binaryPath);
     const current = {
       testVersion: CONFORMANCE_TEST_VERSION,
@@ -1165,6 +1244,8 @@ async function ensureConformance(context, profile, profileName, options, { force
     binaryPath,
     signingKey,
     timeoutMs: options.conformanceTimeoutMs,
+    codexAuthPath: options.codexAuthPath,
+    tempRoot: options.runnerTempRoot,
   });
   if (result.passed !== true || result.record === null) {
     const failureCodes = result.failures.map((failure) => failure.code).join(", ");
@@ -1179,8 +1260,7 @@ async function ensureConformance(context, profile, profileName, options, { force
 }
 
 async function runReverifyRunner(invocation, options) {
-  const profileName = RUNNER_ADAPTERS[invocation.runner];
-  const profile = loadRunnerProfile(profileName);
+  const { profileName, profile } = runnerConfiguration(invocation, options);
   const context = await openMemoryContext({ ...invocation, resolveOwner: false }, options);
   try {
     const record = await ensureConformance(context, profile, profileName, options, { force: true });
@@ -1307,8 +1387,16 @@ function pendingRunnerPlanPath(memoryStateDir, planDigest) {
   return path.join(memoryStateDir, "runner-plans", `${planDigest}.json`);
 }
 
-async function persistPendingRunnerPlan(context, plan, stdinBytes, extraction = null) {
+async function persistPendingRunnerPlan(context, plan, stdinBytes, extraction = null, profile) {
   const parsedPlan = runnerExecutionPlanSchema.parse(plan);
+  const parsedProfile = restrictedExtractionRunnerSchema.parse(profile);
+  if (computeRunnerProfileDigest(parsedProfile) !== parsedPlan.runnerProfile) {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_STATE_INVALID",
+      "The pending runner profile does not match its execution plan.",
+      "Regenerate the extraction preview.",
+    );
+  }
   const buffer = Buffer.from(stdinBytes);
   let extractionSource;
   if (extraction !== null) {
@@ -1330,6 +1418,7 @@ async function persistPendingRunnerPlan(context, plan, stdinBytes, extraction = 
       format: PENDING_RUNNER_PLAN_FORMAT,
       owner: context.owner,
       plan: parsedPlan,
+      profile: parsedProfile,
       stdinBase64: buffer.toString("base64"),
       ...(extractionSource === undefined ? {} : { extraction: extractionSource }),
     },
@@ -1342,8 +1431,10 @@ async function loadPendingRunnerPlan(context, planDigest) {
   const artifact = await readPrivateJson(artifactPath);
   if (artifact === null) return null;
   let plan;
+  let profile;
   try {
     plan = runnerExecutionPlanSchema.parse(artifact.plan);
+    profile = restrictedExtractionRunnerSchema.parse(artifact.profile);
   } catch {
     throw memoryDiagnostic(
       "TS_INSIGHTS_STATE_INVALID",
@@ -1358,6 +1449,7 @@ async function loadPendingRunnerPlan(context, planDigest) {
     artifact.format !== PENDING_RUNNER_PLAN_FORMAT ||
     !ownerMatches(artifact.owner, context.owner) ||
     plan.planDigest !== planDigest ||
+    computeRunnerProfileDigest(profile) !== plan.runnerProfile ||
     stdinBytes === null ||
     stdinBytes.toString("base64") !== artifact.stdinBase64
   ) {
@@ -1389,7 +1481,7 @@ async function loadPendingRunnerPlan(context, planDigest) {
       );
     }
   }
-  return { plan, stdinBytes, extraction };
+  return { plan, profile, stdinBytes, extraction };
 }
 
 function pendingRunnerManifestPath(memoryStateDir, manifestDigest) {
@@ -1450,11 +1542,8 @@ async function recordRunnerAuthorization(context, plan, { via, manifestDigest = 
   });
 }
 
-function buildExtractionArtifacts(context, selection, options) {
-  const provider = "claude";
-  const model = options.runnerModel ?? process.env.THREADSHARE_MEMORY_RUNNER_MODEL ?? "claude-latest";
-  const endpoint = "api.anthropic.com";
-  const profile = loadRunnerProfile(RUNNER_ADAPTERS.claude);
+function buildExtractionArtifacts(context, selection, configuration) {
+  const { provider, model, endpoint, profile } = configuration;
   const artifacts = [];
   for (const session of selection.sessions) {
     const chunks = chunkSession({ turns: session.turns });
@@ -1551,11 +1640,11 @@ async function planExtractionArtifacts(context, built, limit) {
   return built.artifacts.filter((artifact) => claimable.has(artifact.taskId)).slice(0, limit);
 }
 
-async function persistExtractionPlans(context, artifacts, request) {
+async function persistExtractionPlans(context, artifacts, request, profile) {
   for (const artifact of artifacts) {
     await persistPendingRunnerPlan(context, artifact.plan, artifact.stdinBytes, {
       request,
-    });
+    }, profile);
   }
   const manifest = artifacts.length > 1
     ? buildAuthorizationManifest(artifacts.map((artifact) => artifact.plan))
@@ -1587,7 +1676,12 @@ async function revalidatePendingExtraction(context, pending, options) {
     options,
     evaluatedAt,
   );
-  const current = buildExtractionArtifacts(context, selection, options).artifacts
+  const current = buildExtractionArtifacts(context, selection, {
+    profile: pending.profile,
+    provider: pending.plan.provider,
+    model: pending.plan.model,
+    endpoint: pending.plan.endpoint,
+  }).artifacts
     .find((artifact) => artifact.taskId === pending.plan.taskId);
   if (current === undefined || !extractionInputMatches(pending.extraction.task, current.task)) {
     throw memoryDiagnostic(
@@ -1679,8 +1773,10 @@ async function deliverExtraction(
     conformance,
     plan: approvedPlan,
     stdinBytes: artifact.stdinBytes,
-    binaryPath: runnerBinaryPath(options),
+    binaryPath: runnerBinaryPath(options, profile),
     signingKey: context.originSecret,
+    codexAuthPath: options.codexAuthPath,
+    tempRoot: options.runnerTempRoot,
   });
   const draftBatch = candidateDraftBatchSchema.parse(JSON.parse(execution.stdout.toString("utf8")));
   if (
@@ -1844,11 +1940,11 @@ async function prepareAdjudication(context, profile, artifact, extractionResult)
     taskId: adjTaskId,
     stdinBytes,
     profile,
-    provider: "claude",
+    provider: artifact.plan.provider,
     model: artifact.plan.model,
     endpoint: artifact.plan.endpoint,
   });
-  await persistPendingRunnerPlan(context, plan, stdinBytes);
+  await persistPendingRunnerPlan(context, plan, stdinBytes, null, profile);
   return { plan, stdinBytes };
 }
 
@@ -1902,10 +1998,22 @@ async function deliverPendingAdjudication(
     conformance,
     plan: approvedPlan,
     stdinBytes: pending.stdinBytes,
-    binaryPath: runnerBinaryPath(options),
+    binaryPath: runnerBinaryPath(options, profile),
     signingKey: context.originSecret,
+    codexAuthPath: options.codexAuthPath,
+    tempRoot: options.runnerTempRoot,
   });
   const result = adjudicationResultSchema.parse(JSON.parse(execution.stdout.toString("utf8")));
+  if (
+    result.taskId !== task.taskId ||
+    canonicalJson(result.binding) !== canonicalJson(task.binding)
+  ) {
+    throw memoryDiagnostic(
+      "TS_INPUT_SCHEMA_INVALID",
+      "The adjudication runner did not echo the authorized task binding.",
+      "Treat the runner result as failed; do not apply adjudication from another input.",
+    );
+  }
   const poolByKey = new Map(task.pool.map((item) => [`${item.sourceKind}:${item.id}`, item]));
   const adjudications = result.adjudications.map((a) => {
     const base = { draftRef: a.draftRef, action: a.action };
@@ -1957,14 +2065,9 @@ function failedRunnerPlan(entry, error) {
   };
 }
 
-async function deliverStoredManifest(context, profile, manifest, options) {
+async function deliverStoredManifest(context, manifest, runner, options) {
   const approvedManifest = approveManifest(manifest, { approvedDigest: manifest.manifestDigest });
-  const conformance = await ensureConformance(
-    context,
-    profile,
-    RUNNER_ADAPTERS.claude,
-    options,
-  );
+  const conformanceByProfile = new Map();
   const delivered = [];
   const failed = [];
   const pendingAdjudications = [];
@@ -1977,6 +2080,19 @@ async function deliverStoredManifest(context, profile, manifest, options) {
           `No pending runner plan matches ${entry.planDigest}.`,
           "Regenerate the manifest; approvals never extend to missing or future plans.",
         );
+      }
+      assertPendingRunner(pending, runner);
+      const profile = pending.profile;
+      const profileDigest = computeRunnerProfileDigest(profile);
+      let conformance = conformanceByProfile.get(profileDigest);
+      if (conformance === undefined) {
+        conformance = await ensureConformance(
+          context,
+          profile,
+          profile.adapter,
+          options,
+        );
+        conformanceByProfile.set(profileDigest, conformance);
       }
       const approvedPlan = approvePlanFromManifest(pending.plan, approvedManifest);
       const authorization = {
@@ -2022,12 +2138,39 @@ async function deliverStoredManifest(context, profile, manifest, options) {
   };
 }
 
+async function createExtractionPreview(context, invocation, request, limit, options) {
+  const configuration = runnerConfiguration(invocation, options);
+  const evaluatedAt = extractionEvaluatedAt(options);
+  const { selection } = await collectExtractionSelection(
+    context, normalizeMemoryExtractionRequest(request), options, evaluatedAt,
+  );
+  const built = buildExtractionArtifacts(context, selection, configuration);
+  const selected = await planExtractionArtifacts(context, built, limit);
+  const manifest = await persistExtractionPlans(context, selected, request, built.profile);
+  return {
+    action: "extract",
+    authorized: false,
+    dataSource: "insights-retrospective",
+    plans: selected.map((artifact) => summarizePlan(artifact.plan)),
+    manifestDigest: manifest?.manifestDigest ?? null,
+    selection: {
+      requestDigest: selection.requestDigest,
+      resultSetDigest: selection.resultSetDigest,
+      matchedSessions: selection.sessions.length,
+      rejectedSessions: selection.rejected.length,
+      pendingChunks: selected.length,
+    },
+    note: selected.length === 0
+      ? "No claimable chunks matched the request. No transcript was delivered."
+      : "No transcript was delivered. Re-run in the CLI with --approve-plan <digest> (or --approve-manifest <digest>) to authorize exactly the listed delivery.",
+  };
+}
+
 async function runExtract(invocation, options) {
   const context = await openMemoryContext(invocation, options);
   try {
     const authorizedDigest = invocation.approvePlan;
     const manifestDigest = invocation.approveManifest;
-    const profile = loadRunnerProfile(RUNNER_ADAPTERS.claude);
 
     if (authorizedDigest !== undefined) {
       const pending = await loadPendingRunnerPlan(context, authorizedDigest);
@@ -2038,11 +2181,13 @@ async function runExtract(invocation, options) {
           "Run memory extract with --request to generate the plan before authorizing it.",
         );
       }
+      assertPendingRunner(pending, invocation.runner);
+      const profile = pending.profile;
       const approvedPlan = approvePlan(pending.plan, { approvedDigest: authorizedDigest });
       const conformance = await ensureConformance(
         context,
         profile,
-        RUNNER_ADAPTERS.claude,
+        profile.adapter,
         options,
       );
       if (pending.plan.taskKind === "extraction") {
@@ -2107,7 +2252,7 @@ async function runExtract(invocation, options) {
           "Run memory extract with --request to generate the manifest before authorizing it.",
         );
       }
-      const result = await deliverStoredManifest(context, profile, storedManifest, options);
+      const result = await deliverStoredManifest(context, storedManifest, invocation.runner, options);
       return {
         action: "extract",
         authorized: true,
@@ -2120,30 +2265,7 @@ async function runExtract(invocation, options) {
     }
 
     const request = await readMemoryExtractionRequest(invocation, options);
-    const evaluatedAt = extractionEvaluatedAt(options);
-    const { selection } = await collectExtractionSelection(
-      context, request, options, evaluatedAt,
-    );
-    const built = buildExtractionArtifacts(context, selection, options);
-    const selected = await planExtractionArtifacts(context, built, invocation.limit);
-    const manifest = await persistExtractionPlans(context, selected, request);
-    return {
-      action: "extract",
-      authorized: false,
-      dataSource: "insights-retrospective",
-      plans: selected.map((artifact) => summarizePlan(artifact.plan)),
-      manifestDigest: manifest?.manifestDigest ?? null,
-      selection: {
-        requestDigest: selection.requestDigest,
-        resultSetDigest: selection.resultSetDigest,
-        matchedSessions: selection.sessions.length,
-        rejectedSessions: selection.rejected.length,
-        pendingChunks: selected.length,
-      },
-      note: selected.length === 0
-        ? "No claimable chunks matched the request. No transcript was delivered."
-        : "No transcript was delivered. Re-run with --approve-plan <digest> (or --approve-manifest <digest>) to authorize exactly the listed delivery.",
-    };
+    return await createExtractionPreview(context, invocation, request, invocation.limit, options);
   } finally {
     await context.close();
   }
@@ -2277,13 +2399,13 @@ export function formatMemoryCommandResult(result, invocation) {
 }
 
 // ---------------------------------------------------------------------------
-// MCP executors (read-only): threadshare_memory_search / _status
+// MCP executors: read-only search/status plus pending-only extraction preview
 // ---------------------------------------------------------------------------
 
 /**
- * Run one read-only memory MCP action. `search` returns items + generation +
- * coverage; `status` returns per-owner counters. Neither carries transcript
- * bytes. Extraction is never triggered here; the tools only point to the CLI.
+ * `search` and `status` are read-only. `extract-preview` may persist private
+ * pending plans, but never approves or starts a runner. No MCP result carries
+ * transcript bytes.
  */
 export async function executeMemoryMcp(action, args, options = {}) {
   const context = await openMemoryContext({ resolveOwner: true, repository: options.repository }, options);
@@ -2315,9 +2437,25 @@ export async function executeMemoryMcp(action, args, options = {}) {
           voided: status.promotions.voided,
         },
         extraction: {
-          entrypoint: "cli",
-          note: "Extraction is not exposed over MCP; run `threadshare memory extract` to preview and separately authorize each delivery. No transcript is ever returned here.",
+          entrypoint: "mcp-preview-cli-approval",
+          note: "MCP can create pending extraction plans only. Use the CLI to approve each exact delivery digest; no transcript is ever returned here.",
         },
+      };
+    }
+    if (action === "extract-preview") {
+      const preview = await createExtractionPreview(context, {
+        runner: args.runner,
+        runnerModel: args.model,
+        runnerEndpoint: args.endpoint,
+      }, args.request, args.limit ?? 1, options);
+      return {
+        format: "threadshare-memory-extraction-preview@v1",
+        authorized: false,
+        dataSource: preview.dataSource,
+        plans: preview.plans,
+        manifestDigest: preview.manifestDigest,
+        selection: preview.selection,
+        note: preview.note,
       };
     }
     throw new Error(`unknown memory mcp action: ${action}`);

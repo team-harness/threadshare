@@ -230,8 +230,8 @@ export function validatePackOutput(packOutput, metadata) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   if (metadata.kind !== "platform") {
-    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 336 * 1024) {
-      throw new Error("npm root package compressed size must not exceed 336 KiB");
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 352 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 352 KiB");
     }
     if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1664 * 1024) {
       throw new Error("npm root package unpacked size must not exceed 1.625 MiB");

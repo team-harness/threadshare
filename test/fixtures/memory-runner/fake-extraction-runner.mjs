@@ -79,7 +79,9 @@ if (task === null || typeof task !== "object") {
 } else if (task.format === "threadshare-memory-adjudication-task@v1") {
   output = {
     format: "threadshare-memory-adjudication-result@v1",
-    taskId: task.taskId,
+    taskId: process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING
+      ? `${task.taskId}-other`
+      : task.taskId,
     binding: task.binding,
     adjudications: (task.drafts ?? []).map((draft) => ({
       draftRef: draft.candidateId,

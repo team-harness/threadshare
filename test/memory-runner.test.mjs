@@ -142,19 +142,78 @@ test("loadRunnerProfile rejects unknown profile names", () => {
   assert.throws(() => loadRunnerProfile("gemini-cli"), assertCode("MEMORY_RUNNER_UNKNOWN_PROFILE"));
 });
 
-test("codex profile hard-fails on every execution entry point", async () => {
-  const codex = loadRunnerProfile("codex-cli");
-  assert.equal(codex.adapter, "codex-cli");
-  await assert.rejects(runConformanceTest(codex), (error) => {
-    assert.equal(error.code, "MEMORY_RUNNER_CODEX_UNSUPPORTED");
-    assert.match(error.message, /no-tools/);
-    assert.match(error.message, /re-evaluate/i);
-    return true;
+test("codex profile binds exact model/endpoint and disables every ambient execution surface", async () => {
+  const codex = loadRunnerProfile("codex-cli", {
+    model: "gpt-5.6-sol",
+    endpoint: "https://api.openai.com/v1",
   });
+  assert.equal(codex.adapter, "codex-cli");
+  assert.equal(codex.version, "2");
+  assert.ok(codex.argvTemplate.includes("exec"));
+  assert.ok(codex.argvTemplate.includes("--ephemeral"));
+  assert.ok(codex.argvTemplate.includes("--ignore-user-config"));
+  assert.ok(codex.argvTemplate.includes("--ignore-rules"));
+  assert.ok(codex.argvTemplate.includes("gpt-5.6-sol"));
+  assert.ok(codex.argvTemplate.includes('model_providers.threadshare_memory.base_url="https://api.openai.com/v1"'));
+  for (const feature of [
+    "shell_tool", "unified_exec", "code_mode_host", "apps", "plugins", "browser_use",
+    "computer_use", "hooks", "image_generation", "multi_agent", "view_image",
+  ]) {
+    const index = codex.argvTemplate.indexOf(feature);
+    assert.notEqual(index, -1, `missing Codex deny flag for ${feature}`);
+    assert.equal(codex.argvTemplate[index - 1], "--disable");
+  }
+  assert.deepEqual(codex.argvTemplate.slice(-1), ["-"]);
+  assert.equal(codex.toolPolicy, "none");
   await assert.rejects(
-    runExtractionRunner({ profile: codex, conformance: null, plan: null, stdinBytes: "x" }),
-    assertCode("MEMORY_RUNNER_CODEX_UNSUPPORTED"),
+    runConformanceTest(codex),
+    assertCode("MEMORY_RUNNER_SIGNING_KEY_REQUIRED"),
   );
+});
+
+test("codex runner receives no arbitrary host environment secrets", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "threadshare-memory-codex-env-"));
+  const previous = process.env.THREADSHARE_MEMORY_FORBIDDEN_SECRET;
+  process.env.THREADSHARE_MEMORY_FORBIDDEN_SECRET = "must-not-reach-runner";
+  try {
+    const profile = loadRunnerProfile("codex-cli", {
+      model: "gpt-test",
+      endpoint: "https://api.example.invalid/v1",
+    });
+    const conformance = await runConformanceTest(profile, {
+      binaryPath: CONFORMANT,
+      codexAuthPath: path.join(root, "missing-auth.json"),
+      tempRoot: root,
+      signingKey: SIGNING_KEY,
+    });
+    assert.equal(conformance.passed, true);
+    const stdinBytes = Buffer.from("bounded test input", "utf8");
+    const pending = buildExecutionPlan({
+      taskKind: "extraction",
+      taskId: "codex-env-task",
+      stdinBytes,
+      inputCoverage: makeCoverage(),
+      profile,
+      provider: "openai",
+      model: "gpt-test",
+      endpoint: "https://api.example.invalid/v1",
+    });
+    const execution = await runExtractionRunner({
+      profile,
+      conformance: conformance.record,
+      plan: approvePlan(pending, { approvedDigest: pending.planDigest }),
+      stdinBytes,
+      binaryPath: CONFORMANT,
+      codexAuthPath: path.join(root, "missing-auth.json"),
+      tempRoot: root,
+      signingKey: SIGNING_KEY,
+    });
+    assert.equal(JSON.parse(execution.stdout).environmentLeak, null);
+  } finally {
+    if (previous === undefined) delete process.env.THREADSHARE_MEMORY_FORBIDDEN_SECRET;
+    else process.env.THREADSHARE_MEMORY_FORBIDDEN_SECRET = previous;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -186,6 +245,27 @@ test("conformant runner passes the deny-all probe and yields a bound identity re
   // cliVersionFingerprint is retained as supplemental information only.
   assert.match(result.record.cliVersionFingerprint, HEX64_PATTERN);
   assert.ok(!Number.isNaN(Date.parse(result.record.passedAt)));
+});
+
+test("registered runner command resolves from PATH before identity binding and execution", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "threadshare-memory-runner-path-"));
+  const binary = path.join(root, "claude");
+  const previousPath = process.env.PATH;
+  try {
+    await copyFile(CONFORMANT, binary);
+    await chmod(binary, 0o755);
+    process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+    const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
+      timeoutMs: 30_000,
+      signingKey: SIGNING_KEY,
+    });
+    assert.equal(result.passed, true);
+    assert.equal(result.record.binaryRealpath, await realpath(binary));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("runner connecting to the network canary fails conformance", async () => {

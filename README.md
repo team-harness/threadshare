@@ -256,6 +256,23 @@ threadshare memory promote --plan <plan-id>
 threadshare memory assemble --provider claude
 ```
 
+Codex is also a restricted Phase 1 runner. A new Codex preview binds the exact model and HTTPS
+endpoint; later approval reuses that private stored profile and cannot override it:
+
+```bash
+threadshare memory extract --runner codex \
+  --runner-model <model> \
+  --runner-endpoint <https-url> \
+  --request memory-filter.json
+threadshare memory extract --runner codex --approve-plan <extraction-digest>
+threadshare memory extract --runner codex --approve-plan <adjudication-digest>
+```
+
+Agents may create the same pending-only preview with `threadshare_memory_extract_preview` over the
+local Insights MCP server. That tool can write the private pending artifact, but it cannot approve a
+digest, start either runner stage, or return transcript bytes. `threadshare_memory_search` and
+`threadshare_memory_status` remain read-only.
+
 Each runner stage is deny-all except for its model connection and receives transcript bytes only after
 the user approves that stage's exact digest and byte summary. `review` requires a real TTY and confirms
 every generated statement; non-interactive callers can inspect pending work but cannot approve it.

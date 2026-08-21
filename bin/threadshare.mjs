@@ -1124,6 +1124,8 @@ async function main() {
       limit: options.limit,
       repository: options.repository,
       runner: options.runner,
+      "runner-model": options["runner-model"],
+      "runner-endpoint": options["runner-endpoint"],
       "approve-plan": options["approve-plan"],
       "approve-manifest": options["approve-manifest"],
       plan: options.plan,

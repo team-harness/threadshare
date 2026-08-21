@@ -54,9 +54,10 @@ test("Insights MCP exposes Agent discovery and three deep read tools over newlin
     "threadshare_insights_evidence",
     "threadshare_memory_search",
     "threadshare_memory_status",
+    "threadshare_memory_extract_preview",
   ]);
   assert.equal(byId.get(2).result.tools.every((tool) =>
-    tool.annotations.readOnlyHint === true && tool.annotations.openWorldHint === false), true);
+    tool.annotations.openWorldHint === false), true);
   const recipeTool = byId.get(2).result.tools.find(({ name }) =>
     name === "threadshare_insights_recipe");
   assert.equal(recipeTool.inputSchema.properties.name.enum.includes("delivery-trace@1"), true);
@@ -73,8 +74,17 @@ test("Insights MCP exposes Agent discovery and three deep read tools over newlin
   assert.equal(calls[0].invocation.action, "query");
 });
 
-test("Memory MCP exposes read-only search and status tools without transcript bytes", async () => {
+test("Memory MCP exposes read-only recall plus pending-only extraction without transcript bytes", async () => {
   const calls = [];
+  const request = {
+    format: "threadshare-memory-extraction-request@v1",
+    window: {
+      after: "2026-08-01T00:00:00.000Z",
+      before: "2026-08-02T00:00:00.000Z",
+    },
+    query: "release verification",
+    filters: { providers: ["codex"] },
+  };
   const responses = await runMessages([
     { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     {
@@ -84,6 +94,19 @@ test("Memory MCP exposes read-only search and status tools without transcript by
     {
       jsonrpc: "2.0", id: 3, method: "tools/call",
       params: { name: "threadshare_memory_status", arguments: {} },
+    },
+    {
+      jsonrpc: "2.0", id: 4, method: "tools/call",
+      params: {
+        name: "threadshare_memory_extract_preview",
+        arguments: {
+          runner: "codex",
+          model: "gpt-5.6-sol",
+          endpoint: "https://api.openai.com/v1",
+          request,
+          limit: 2,
+        },
+      },
     },
   ], {
     async memoryExecute(action, args) {
@@ -96,13 +119,28 @@ test("Memory MCP exposes read-only search and status tools without transcript by
           items: [{ rank: 1, entryId: "release-notes", revision: 1, contentDigest: "a".repeat(64), status: "active", summary: "release" }],
         };
       }
-      return {
+      if (action === "status") return {
         format: "threadshare-memory-status@v1",
         chunks: { pending: 0, drafted: 0, extracted: 1, stale: 0 },
         tasks: { pending: 0, claimed: 0, submitted: 1, stale: 0 },
         candidates: { draft: 0, quarantined: 1, promoted: 0, discarded: 0 },
         promotions: { generated: 0, approved: 0, applied: 0, voided: 0 },
         extraction: { entrypoint: "cli", note: "no transcript here" },
+      };
+      return {
+        format: "threadshare-memory-extraction-preview@v1",
+        authorized: false,
+        plans: [{
+          planDigest: "b".repeat(64),
+          taskKind: "extraction",
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          endpoint: "https://api.openai.com/v1",
+          bytesToSend: 512,
+          authorization: "pending",
+        }],
+        manifestDigest: null,
+        selection: { matchedSessions: 1, rejectedSessions: 0, pendingChunks: 1 },
       };
     },
   });
@@ -111,8 +149,16 @@ test("Memory MCP exposes read-only search and status tools without transcript by
   assert.deepEqual(memoryTools.map((tool) => tool.name), [
     "threadshare_memory_search",
     "threadshare_memory_status",
+    "threadshare_memory_extract_preview",
   ]);
-  assert.equal(memoryTools.every((tool) => tool.annotations.readOnlyHint === true), true);
+  assert.equal(memoryTools[0].annotations.readOnlyHint, true);
+  assert.equal(memoryTools[1].annotations.readOnlyHint, true);
+  assert.deepEqual(memoryTools[2].annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
   // search carries generation + coverage.
   assert.equal(byId.get(2).result.isError, false);
   assert.equal(byId.get(2).result.structuredContent.generation, 3);
@@ -121,8 +167,46 @@ test("Memory MCP exposes read-only search and status tools without transcript by
   assert.equal(byId.get(3).result.isError, false);
   assert.equal(byId.get(3).result.structuredContent.extraction.entrypoint, "cli");
   assert.equal(JSON.stringify(byId.get(3).result).includes("transcript"), true);
-  assert.deepEqual(calls.map((call) => call.action), ["search", "status"]);
+  // Preview persists only private pending plans; neither the request nor the response carries transcript bytes.
+  assert.equal(byId.get(4).result.isError, false, JSON.stringify(byId.get(4).result));
+  assert.equal(byId.get(4).result.structuredContent.authorized, false);
+  assert.equal(byId.get(4).result.structuredContent.plans[0].authorization, "pending");
+  assert.equal(JSON.stringify(byId.get(4).result).includes("release tests must stay private"), false);
+  assert.deepEqual(calls.map((call) => call.action), ["search", "status", "extract-preview"]);
   assert.deepEqual(calls[0].args, { query: "release tests", limit: 5 });
+  assert.deepEqual(calls[2].args, {
+    runner: "codex",
+    model: "gpt-5.6-sol",
+    endpoint: "https://api.openai.com/v1",
+    request,
+    limit: 2,
+  });
+});
+
+test("Memory MCP extraction preview rejects every authorization-shaped field", async () => {
+  const responses = await runMessages([{
+    jsonrpc: "2.0", id: "preview", method: "tools/call",
+    params: {
+      name: "threadshare_memory_extract_preview",
+      arguments: {
+        runner: "codex",
+        request: {
+          format: "threadshare-memory-extraction-request@v1",
+          window: {
+            after: "2026-08-01T00:00:00.000Z",
+            before: "2026-08-02T00:00:00.000Z",
+          },
+        },
+        approvePlan: "a".repeat(64),
+      },
+    },
+  }], {
+    async memoryExecute() {
+      throw new Error("memoryExecute must not run for an authorization-shaped MCP request");
+    },
+  });
+  assert.equal(responses[0].result.isError, true);
+  assert.match(responses[0].result.structuredContent.problem, /preview/u);
 });
 
 test("Memory MCP rejects a malformed search request as a stable tool error", async () => {

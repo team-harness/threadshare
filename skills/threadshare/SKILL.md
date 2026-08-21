@@ -108,7 +108,10 @@ Use `threadshare_memory_search` for read-only recall of approved memory in the c
 If coverage is partial, stop and ask the user to run the explicit local maintenance flow; do not treat
 partial results as a complete candidate pool.
 
-Start a new extraction with `threadshare memory extract --runner claude --request <file|->`. The
+Start a new extraction with `threadshare memory extract --runner <claude|codex> --request <file|->`,
+or call `threadshare_memory_extract_preview` to create the same pending-only plan over MCP. A Codex
+preview also requires an exact `model` and HTTPS `endpoint` (CLI: `--runner-model` plus
+`--runner-endpoint`). The MCP tool cannot approve a digest, start a Runner, or return transcript. The
 `threadshare-memory-extraction-request@v1` object requires a canonical UTC `window.after` / `before`
 (at most 366 days) and may contain `query` plus `filters.providers`, `sessionKeys`,
 `toolCapabilityKeys`, `skillCapabilityKeys`, `resultEvidence`, and `capabilityTerminalStates`.
@@ -118,7 +121,8 @@ to supply or weaken those fields. More than 200 matching Turns is a hard error, 
 Start without an approval option so `memory extract` prints the exact runner plan, provider, model,
 retention state, and bytes to send. Show that summary to the user. Only after they approve it may you
 repeat the command with its exact `--approve-plan` or `--approve-manifest` digest; approval reads the
-private pending artifact and does not take `--request` again.
+private pending artifact and its bound runner profile, and does not take `--request`, model, or endpoint
+again. MCP never performs this approval step.
 
 Extraction and adjudication are separate network deliveries. Approval of the extraction digest never
 authorizes the adjudication digest printed afterward; obtain a second explicit approval. Never use an

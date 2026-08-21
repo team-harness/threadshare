@@ -206,6 +206,18 @@ test("memory extract requires a filtered Insights request for a new plan", () =>
   assert.equal(invocation.requestSource, "memory-filter.json");
   assert.equal(invocation.session, undefined);
 
+  const codex = parseMemoryInvocation(["memory", "extract"], {
+    repository: "/work/threadshare",
+    runner: "codex",
+    "runner-model": "gpt-5.6-sol",
+    "runner-endpoint": "https://api.openai.com/v1",
+    request: "memory-filter.json",
+    format: "json",
+  });
+  assert.equal(codex.runner, "codex");
+  assert.equal(codex.runnerModel, "gpt-5.6-sol");
+  assert.equal(codex.runnerEndpoint, "https://api.openai.com/v1");
+
   assert.throws(
     () => parseMemoryInvocation(["memory", "extract"], {
       repository: "/work/threadshare",
@@ -231,6 +243,43 @@ test("memory extract requires a filtered Insights request for a new plan", () =>
     }),
     (error) => error?.code === "TS_USAGE_OPTION_CONFLICT",
   );
+});
+
+test("Memory MCP creates a private Codex pending preview and never runs it", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const preview = await executeMemoryMcp("extract-preview", {
+    runner: "codex",
+    model: "gpt-5.6-sol",
+    endpoint: "https://api.openai.com/v1",
+    request,
+    limit: 1,
+  }, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  assert.equal(preview.format, "threadshare-memory-extraction-preview@v1");
+  assert.equal(preview.authorized, false);
+  assert.equal(preview.plans.length, 1);
+  assert.equal(preview.plans[0].provider, "openai");
+  assert.equal(preview.plans[0].model, "gpt-5.6-sol");
+  assert.equal(preview.plans[0].endpoint, "https://api.openai.com/v1");
+  assert.equal(preview.plans[0].authorization, "pending");
+
+  const sidecar = JSON.parse(await readFile(path.join(
+    fixture.options.paths.stateDirectory,
+    "memory",
+    "runner-plans",
+    `${preview.plans[0].planDigest}.json`,
+  ), "utf8"));
+  assert.equal(sidecar.profile.adapter, "codex-cli");
+  assert.equal(sidecar.profile.argvTemplate.includes("--ephemeral"), true);
+  assert.equal(sidecar.profile.argvTemplate.includes("shell_tool"), true);
+  assert.equal(Buffer.from(sidecar.stdinBase64, "base64").toString("utf8")
+    .includes(MEMORY_FAKE_PROVIDER_SESSION_ID), false);
 });
 
 async function extractCandidate(fixture) {
@@ -717,5 +766,49 @@ test("adjudication requires a second exact runner-plan approval", {
     }
   } finally {
     database.close();
+  }
+});
+
+test("adjudication rejects a schema-valid result bound to another task", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  const pending = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      request: "memory-request.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  const afterExtraction = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+      "approve-plan": pending.plans[0].planDigest,
+    }),
+    fixture.options,
+  );
+  const previous = process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING;
+  process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING = "1";
+  try {
+    await assert.rejects(
+      executeMemoryCommand(
+        parseMemoryInvocation(["memory", "extract"], {
+          repository: fixture.repository,
+          runner: "claude",
+          format: "json",
+          "approve-plan": afterExtraction.plans[0].planDigest,
+        }),
+        fixture.options,
+      ),
+      (error) => error.code === "TS_INPUT_SCHEMA_INVALID" && /task binding/.test(error.message),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING;
+    else process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING = previous;
   }
 });

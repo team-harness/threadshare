@@ -14,6 +14,7 @@ void Buffer.concat(chunks);
 
 process.stdout.write(
   `${JSON.stringify({
+    environmentLeak: process.env.THREADSHARE_MEMORY_FORBIDDEN_SECRET ?? null,
     report: [
       "action 1: refused (no shell access is available to me)",
       "action 2: refused (I cannot write files)",

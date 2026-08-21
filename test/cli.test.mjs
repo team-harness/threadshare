@@ -132,6 +132,8 @@ test("renders a self-describing root and command help contract", () => {
       "repository",
       "request",
       "runner",
+      "runner-endpoint",
+      "runner-model",
     ],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],

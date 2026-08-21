@@ -1,7 +1,7 @@
 # Team Memory Phase 1 详细技术设计
 
-状态：Draft（实现依据；上游规格为 [team-memory-proposal.md](./team-memory-proposal.md) rev6）
-日期：2026-08-20
+状态：Implemented / Accepted（Phase 1 完成；上游规格为 [team-memory-proposal.md](./team-memory-proposal.md) rev7；Phase 2 未启动）
+日期：2026-08-21
 范围：提案 §8 Phase 1 的实现级设计——模块拆分、数据定义、协议、接口签名、测试计划与阶段推进顺序
 
 ## 0. 与提案的偏差声明（实现决策，需 review 判定）
@@ -25,11 +25,11 @@
 | `memory-state-client.mjs` | memory-state 引擎协议的 Node 封装（每个协议命令一个函数）；复用引擎 spawn/分帧基础设施 |
 | `memory-extraction.mjs` | 选材评分（insights query）、chunk 切分（连续完整 Turn ≤40KB、tool payload 头尾摘录 + coverage 申报）、`<<past-*>>` transcript 序列化、evidenceCatalog 组装、sourceInputDigest、EvidenceAssessment 派生、AdjudicationTask 组装 |
 | `memory-insights-source.mjs` | 校验显式 retrospective request；注入 worktree project scope + hard-sealed；完整 Search/Turn Evidence/Delivery Trace/Recipe 回读；生成 request/result-set/source binding digest |
-| `memory-runner.mjs` | runner profile 加载与校验、deny-all conformance test、RunnerExecutionPlan / AuthorizationManifest 生成、子进程执行（stdin/stdout、超时、输出上限）、codex hard-fail |
+| `memory-runner.mjs` | Claude/Codex runner profile 加载与校验、deny-all conformance test、RunnerExecutionPlan / AuthorizationManifest、一次性 Codex home、子进程执行（stdin/stdout、超时、输出上限） |
 | `memory-command.mjs` | CLI 编排：`memory init / extract / review / promote / lint / assemble / status`；puts 全流程串起来 |
 | `memory-prompts.mjs` | 提炼/裁决/归纳 prompt 资产（版本化常量，promptVersion 进 CAS） |
 
-MCP：`insights-mcp.mjs` 增补 `threadshare_memory_search`（只读）与 `threadshare_memory_status`（编排辅助，不携带 transcript）。
+MCP：`insights-mcp.mjs` 增补 `threadshare_memory_search`（只读）、`threadshare_memory_status`（只读概览）与 `threadshare_memory_extract_preview`（只创建本机 pending plan；不能授权/执行；响应不携带 transcript）。
 
 ### Rust（`crates/insights-engine/src/`）
 
@@ -206,14 +206,15 @@ Node 侧每个请求在 `memory-state-client.mjs` 封装为 `memoryXxx(engine, p
 - **chunk 切分**：输入为 insights `session-timeline` recipe + evidence 分页读取的 Turn 事件；贪心装填 ≤ 40960 字节；单 Turn 内超大 tool payload → 头尾各 1024 字节摘录 + `payloadSha256` 指针，coverage 逐项 `truncated`。
 - **transcript 序列化**：`<<past-user>>\n{text}\n\n<<past-tool_call>>…\n<<end-of-transcript>>`；确定性（排序、换行规范）以便 digest 稳定。
 - **secret lint**：正则族（AKIA/ghp_/sk-/xox[abp]/-----BEGIN.*KEY/JWT 形态/URL 内嵌凭据）+ 长 token Shannon entropy（≥4.0 bits/char 且长度 ≥20 的连续 base64/hex 串）+ provider session id 形态（uuid v4 + 已知 session 路径特征）。findings 分 `block`（secret/session-id）与 `warn`。
-- **conformance 探针**：探针任务 stdin 指示模型执行 6 类违规操作并要求回报"已执行"；判定 = 进程退出后检查（a）输出不含违规成功标记（b）探针沙箱目录无文件系统副作用（c）无网络监听/子进程残留（通过 profile 参数保证 + 输出审计）。探针语料随包版本化 `conformance-test@1`。
+- **conformance 探针**：探针任务 stdin 指示模型尝试 shell、任务内/外文件读写、MCP、HTTP/TCP、后台进程等 9 项违规并要求回报；判定 = 进程退出后检查（a）输出不含秘密/执行 canary（b）探针沙箱与 sibling decoy 无文件系统副作用（c）本机 TCP listener 无连接（d）无残留进程组（e）输出为非空 UTF-8 且 exit 0。探针语料随包版本化 `conformance-test@1`。Codex profile v2 还在一次性 home 中运行，清空 MCP，禁用 shell/unified-exec/code-mode host 与浏览器/插件类 feature，并只接收认证、代理、证书与 locale 环境白名单；任意宿主 secret、`NODE_OPTIONS` 与动态加载变量不透传。v2 与后续 profile/二进制变化都使旧签名记录失效。
 
 ## 5. CLI 面（`cli-contract.mjs` 新增 `memory` 命令组）
 
 ```
 threadshare memory init                          # 初始化 .threadshare/memory/ 骨架
 threadshare memory status [--repository <path>]  # 游标/候选/任务概览
-threadshare memory extract [--repository <path>] --runner claude
+threadshare memory extract [--repository <path>] --runner <claude|codex>
+                           [--runner-model <model> --runner-endpoint <https-url>]
                            [--request <file|->]
                            [--approve-plan <digest>] [--approve-manifest <digest>]
                            [--limit <n>] [--format json]
@@ -221,12 +222,13 @@ threadshare memory review  [--format json]       # 逐条确认 + 生成 Promoti
 threadshare memory promote --plan <planId>       # 应用已批准 plan（只改工作区）
 threadshare memory lint [<path>...]              # 独立净化检查
 threadshare memory assemble --provider claude    # 装配 adapter
-threadshare memory reverify-runner --runner claude
+threadshare memory reverify-runner --runner <claude|codex>
+                           [--runner-model <model> --runner-endpoint <https-url>]
 ```
 
-MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 generation 与 coverage）；`threadshare_memory_status`（只读概览；触发提炼的 MCP 入口只创建 pending plan 并提示走 CLI）。
+MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 generation 与 coverage）；`threadshare_memory_status`（只读概览）；`threadshare_memory_extract_preview`（入参 runner + request + limit，Codex 另需 exact model/HTTPS endpoint；只落 0600 pending artifact，并提示走 CLI 批准）。
 
-## 6. 测试计划（node --test + cargo test，不依赖真实 LLM/claude CLI）
+## 6. 测试与验收（node --test + cargo test + 真实 Codex CLI）
 
 | 层 | 测试文件 | 覆盖 |
 |---|---|---|
@@ -238,13 +240,15 @@ MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 genera
 | 状态库-Node | `test/memory-state-client.test.mjs` | 协议往返、并发 claim（两客户端）、submit 幂等 |
 | 提炼 | `test/memory-extraction.test.mjs` | chunk 切分边界（含同 Turn 超预算）、coverage 申报、sourceInputDigest 稳定、evidence 派生（任务外 id 拒绝、无引用 unknown） |
 | Insights 选材 | `test/memory-insights-source.test.mjs` + `test/memory-command.test.mjs` | 必填有界窗口、过滤器下推、owner/closure 强制注入、完整 Turn/Trace、>200 拒绝、snapshot 前进与相关输入 CAS、chunk cursor |
-| runner | `test/memory-runner.test.mjs` | **fake runner**（test fixture 脚本）：plan digest 绑定、同字节换内容 digest 变化、超时/输出上限、codex hard-fail、conformance 判定逻辑（用 fake CLI 模拟违规/合规） |
-| CLI | `test/memory-command.test.mjs` | init/status/lint/review→promote 全链路（fake runner + 临时仓库）；promote 后 blob 漂移 plan 作废；promote 不产生 git 历史操作 |
-| 验收 | `test/memory-acceptance.test.mjs` | 提案 §8 验收清单的自动化子集（隐私 grep、跨 chunk 去重、manifest 局部失效） |
+| runner 单元/故障注入 | `test/memory-runner.test.mjs` | test-double runner 只验证 plan digest、同字节换内容、超时/输出上限、网络/文件/残留进程违规、宿主环境 secret 隔离与 conformance 判定；**不作为 Runner 可用性证据** |
+| CLI/状态流 | `test/memory-command.test.mjs` | init/status/MCP pending preview/lint/review→promote 的确定性状态流；test double 仅提供可控输出，并证明错误 Adjudication task binding 在提交前拒绝；promote 后 blob 漂移 plan 作废且不产生 git 历史 |
+| 协议专项 | `test/memory-acceptance.test.mjs` | 隐私 grep、跨 chunk 去重、manifest 局部失效等确定性协议语义；不声明模型 Runner 已验收 |
+| 真实 Runner 完成门 | `test/memory-codex-live.test.mjs` / `npm run test:memory-codex-live` | **真实 Codex CLI**：deny-all conformance → L1 CandidateDraftBatch → AdjudicationResult；校验签名指纹、无新增源 Session、一次性 home/conformance 目录清理。需显式 binary/model/endpoint 环境，普通单测不包含且不能跳过冒充通过 |
+| 发布包 | `test/release-automation.test.mjs` + 固定工具链 `npm pack --dry-run --ignore-scripts --json` | Node 22.22.3 / npm 12.0.2；精确 92 文件，当前压缩包 353,195 bytes，受 352 KiB 硬上限约束；平台包仍为精确 4 文件 |
 
 ## 7. 阶段推进与 review 节奏
 
-按仓库根 to-do 的 Stage 2–8 推进；每个 Stage 完成即：`npm test` 相关分组通过 → `git commit` → 用 cs-agent 拉独立 reviewer（codex）做该 Stage 的 diff review → 修复 → 下一 Stage。发布白名单与 verify-release 更新集中在 Stage 8（避免中间态反复改门限）。
+Phase 1 的 Stage 2–8 已完成。收尾门为：相关 Node/Rust 测试 → `test:memory-codex-live` 真实 Runner → `code-deep review` → 全量发布/Skill 校验。只有这些门全部通过，才允许开始 Phase 2。
 
 ## 8. 接线参照（代码勘察结论，2026-08-20）
 

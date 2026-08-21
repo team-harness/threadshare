@@ -1,8 +1,8 @@
 // Restricted extraction runner and network-egress authorization (proposal D1, design §0 DEV-3/§4).
 //
 // This module owns four responsibilities:
-//   1. Runner profiles: the built-in claude-cli profile (validated argv allowlist) and the
-//      codex-cli hard-fail placeholder. A profile declaration never grants eligibility.
+//   1. Runner profiles: built-in claude-cli and codex-cli profiles with validated argv allowlists.
+//      A profile declaration never grants eligibility.
 //   2. Deny-all conformance testing: an adversarial probe run inside a throwaway sandbox
 //      proves the runner refuses shell / file / MCP / network actions. The result is a
 //      fingerprint record; persistence of the cache belongs to the caller.
@@ -12,11 +12,12 @@
 //      the conformance fingerprint matches the current binary, and the recomputed stdin
 //      digest equals the approved plan. There is no degraded path.
 //
-// The module never writes files except the conformance sandbox, which is removed after use.
+// The module writes only throwaway conformance/runtime directories, which are removed after use.
 
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -44,13 +45,65 @@ const MAX_STDERR_BYTES = 64 * 1024;
 
 const RUNNER_BINARIES = Object.freeze({
   "claude-cli": "claude",
+  "codex-cli": "codex",
 });
 
-const CODEX_UNSUPPORTED_MESSAGE =
-  "the codex-cli runner profile is hard-failed: Codex does not expose a provable no-tools " +
-  "parameter surface, so a deny-all conformance test cannot establish isolation. It stays " +
-  "disabled until Codex ships a true no-tools runner mode or Threadshare adds OS-level " +
-  "sandbox isolation for runners (proposal F9; re-evaluate under Phase 2 item 15).";
+const CODEX_DENIED_FEATURES = Object.freeze([
+  "apps",
+  "auth_elicitation",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "code_mode_host",
+  "computer_use",
+  "goals",
+  "guardian_approval",
+  "hooks",
+  "image_generation",
+  "in_app_browser",
+  "in_app_updates",
+  "multi_agent",
+  "multi_agent_v2",
+  "plugin_sharing",
+  "plugins",
+  "remote_plugin",
+  "shell_snapshot",
+  "shell_tool",
+  "skill_mcp_dependency_install",
+  "skill_search",
+  "tool_call_mcp_elicitation",
+  "tool_suggest",
+  "unified_exec",
+  "view_image",
+  "workspace_dependencies",
+]);
+
+const CODEX_PASSTHROUGH_ENVIRONMENT = Object.freeze([
+  "ALL_PROXY",
+  "CODEX_API_KEY",
+  "ComSpec",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_COLOR",
+  "NO_PROXY",
+  "OPENAI_API_KEY",
+  "OPENAI_ORG_ID",
+  "OPENAI_PROJECT_ID",
+  "PATHEXT",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SystemRoot",
+  "TERM",
+  "TZ",
+  "all_proxy",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+]);
 
 function runnerError(code, message, cause) {
   const error = cause === undefined ? new Error(message) : new Error(message, { cause });
@@ -91,31 +144,80 @@ const CLAUDE_CLI_PROFILE = Object.freeze({
   conformance: null,
 });
 
-// Hard-fail placeholder: schema-valid so it can be listed and audited, but every
-// execution entry point rejects it via assertExecutableAdapter.
-const CODEX_CLI_PROFILE = Object.freeze({
-  format: MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT,
-  adapter: "codex-cli",
-  version: "0-unsupported",
-  argvTemplate: Object.freeze([]),
-  toolPolicy: "none",
-  network: "model-only",
-  ephemeral: "required",
-  timeoutMs: 300_000,
-  maxOutputBytes: 4 * 1024 * 1024,
-  conformance: null,
-});
-
 const RUNNER_PROFILES = Object.freeze({
   "claude-cli": CLAUDE_CLI_PROFILE,
-  "codex-cli": CODEX_CLI_PROFILE,
 });
 
-export function loadRunnerProfile(name) {
+function codexProfile({ model, endpoint } = {}) {
+  if (typeof model !== "string" || model.length === 0 || model.length > 200 || /[\r\n\0]/u.test(model)) {
+    throw runnerError(
+      "MEMORY_RUNNER_PROFILE_INVALID",
+      "codex-cli requires an explicit bounded model name",
+    );
+  }
+  let parsedEndpoint;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch {
+    throw runnerError(
+      "MEMORY_RUNNER_PROFILE_INVALID",
+      "codex-cli requires an explicit HTTPS model endpoint",
+    );
+  }
+  if (
+    parsedEndpoint.protocol !== "https:" || parsedEndpoint.username !== "" ||
+    parsedEndpoint.password !== "" || parsedEndpoint.search !== "" || parsedEndpoint.hash !== ""
+  ) {
+    throw runnerError(
+      "MEMORY_RUNNER_PROFILE_INVALID",
+      "codex-cli endpoint must be HTTPS and contain no credentials, query, or fragment",
+    );
+  }
+  const argvTemplate = [
+    "exec",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--skip-git-repo-check",
+    "--sandbox", "read-only",
+    "--color", "never",
+    "--model", model,
+    "-c", 'model_provider="threadshare_memory"',
+    "-c", 'model_providers.threadshare_memory.name="Threadshare Memory"',
+    "-c", `model_providers.threadshare_memory.base_url=${JSON.stringify(endpoint)}`,
+    "-c", 'model_providers.threadshare_memory.wire_api="responses"',
+    "-c", "model_providers.threadshare_memory.requires_openai_auth=true",
+    "-c", "mcp_servers={}",
+  ];
+  for (const feature of CODEX_DENIED_FEATURES) argvTemplate.push("--disable", feature);
+  argvTemplate.push("-");
+  return Object.freeze({
+    format: MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT,
+    adapter: "codex-cli",
+    version: "2",
+    argvTemplate: Object.freeze(argvTemplate),
+    toolPolicy: "none",
+    network: "model-only",
+    ephemeral: "required",
+    timeoutMs: 300_000,
+    maxOutputBytes: 4 * 1024 * 1024,
+    conformance: null,
+  });
+}
+
+export function loadRunnerProfile(name, options = {}) {
+  if (name === "codex-cli") {
+    return parseWith(
+      restrictedExtractionRunnerSchema,
+      codexProfile(options),
+      "MEMORY_RUNNER_PROFILE_INVALID",
+      `runner profile "${name}"`,
+    );
+  }
   if (!Object.hasOwn(RUNNER_PROFILES, name)) {
     throw runnerError(
       "MEMORY_RUNNER_UNKNOWN_PROFILE",
-      `unknown runner profile "${String(name)}"; available profiles: ${Object.keys(RUNNER_PROFILES).join(", ")}`,
+      `unknown runner profile "${String(name)}"; available profiles: claude-cli, codex-cli`,
     );
   }
   return parseWith(
@@ -124,12 +226,6 @@ export function loadRunnerProfile(name) {
     "MEMORY_RUNNER_PROFILE_INVALID",
     `runner profile "${name}"`,
   );
-}
-
-function assertExecutableAdapter(profile) {
-  if (profile.adapter === "codex-cli") {
-    throw runnerError("MEMORY_RUNNER_CODEX_UNSUPPORTED", CODEX_UNSUPPORTED_MESSAGE);
-  }
 }
 
 function resolveBinaryPath(profile, binaryPath) {
@@ -142,6 +238,42 @@ function resolveBinaryPath(profile, binaryPath) {
     );
   }
   return fallback;
+}
+
+function executableCandidates(command, environment) {
+  if (path.isAbsolute(command) || command.includes("/") || command.includes("\\")) {
+    return [command];
+  }
+  const pathValue = environment.PATH ?? environment.Path ?? environment.path;
+  if (typeof pathValue !== "string" || pathValue.length === 0) return [];
+  const extensions = process.platform === "win32" && path.extname(command) === ""
+    ? (environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    : [""];
+  return pathValue
+    .split(path.delimiter)
+    .filter((directory) => directory.length > 0)
+    .flatMap((directory) => extensions.map((extension) => path.join(directory, `${command}${extension}`)));
+}
+
+/**
+ * Resolve a configured path or registered adapter command to one absolute
+ * realpath. The caller then uses that same path for hashing, conformance, and
+ * execution, so PATH changes cannot swap the binary after authorization.
+ */
+export async function resolveRunnerBinaryPath(profile, binaryPath, options = {}) {
+  const requested = resolveBinaryPath(profile, binaryPath);
+  for (const candidate of executableCandidates(requested, options.environment ?? process.env)) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return await realpath(candidate);
+    } catch {
+      // Continue through PATH entries; failure is reported once without leaking PATH.
+    }
+  }
+  throw runnerError(
+    "MEMORY_RUNNER_BINARY_UNREADABLE",
+    `cannot resolve executable runner binary "${requested}"; pass a readable path or add it to PATH`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +294,7 @@ async function executeRunnerProcess({
   timeoutMs,
   maxOutputBytes,
   detached = false,
+  env,
 }) {
   const start = Date.now();
   const child = spawn(binaryPath, argv, {
@@ -169,6 +302,7 @@ async function executeRunnerProcess({
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     detached,
+    ...(env === undefined ? {} : { env }),
   });
   const killHard = () => {
     if (detached && typeof child.pid === "number") {
@@ -259,6 +393,69 @@ async function executeRunnerProcess({
     durationMs,
     pid: child.pid,
   };
+}
+
+function defaultCodexAuthPath() {
+  const configuredHome = process.env.CODEX_HOME;
+  return path.join(configuredHome && configuredHome.length > 0 ? configuredHome : path.join(os.homedir(), ".codex"), "auth.json");
+}
+
+function codexProcessEnvironment(root, codexHome) {
+  const env = {};
+  for (const key of CODEX_PASSTHROUGH_ENVIRONMENT) {
+    if (typeof process.env[key] === "string") env[key] = process.env[key];
+  }
+  return {
+    ...env,
+    PATH: path.dirname(process.execPath),
+    HOME: root,
+    CODEX_HOME: codexHome,
+    TMPDIR: root,
+    TMP: root,
+    TEMP: root,
+    XDG_CACHE_HOME: path.join(root, "cache"),
+    XDG_CONFIG_HOME: path.join(root, "config"),
+    XDG_DATA_HOME: path.join(root, "data"),
+  };
+}
+
+async function executeProfileProcess(profile, processOptions, runtimeOptions = {}) {
+  if (profile.adapter !== "codex-cli") return executeRunnerProcess(processOptions);
+  const root = await mkdtemp(path.join(runtimeOptions.tempRoot ?? os.tmpdir(), "threadshare-memory-codex-"));
+  try {
+    const codexHome = path.join(root, "codex-home");
+    const workspace = processOptions.cwd ?? path.join(root, "workspace");
+    await mkdir(codexHome, { recursive: true, mode: 0o700 });
+    if (processOptions.cwd === undefined) await mkdir(workspace, { recursive: true, mode: 0o700 });
+    const authPath = runtimeOptions.codexAuthPath ?? defaultCodexAuthPath();
+    let authBytes = null;
+    try {
+      authBytes = await readFile(authPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw runnerError(
+          "MEMORY_RUNNER_AUTH_UNREADABLE",
+          "the Codex authentication file could not be copied into the ephemeral runner home",
+          error,
+        );
+      }
+    }
+    if (authBytes !== null) {
+      try {
+        await writeFile(path.join(codexHome, "auth.json"), authBytes, { mode: 0o600, flag: "wx" });
+      } catch (error) {
+        throw runnerError(
+          "MEMORY_RUNNER_AUTH_UNREADABLE",
+          "the Codex authentication file could not be copied into the ephemeral runner home",
+          error,
+        );
+      }
+    }
+    const env = codexProcessEnvironment(root, codexHome);
+    return await executeRunnerProcess({ ...processOptions, cwd: workspace, env });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +703,6 @@ export async function runConformanceTest(profile, options = {}) {
     "MEMORY_RUNNER_PROFILE_INVALID",
     "runner profile",
   );
-  assertExecutableAdapter(parsed);
   const signingKey = normalizeSigningKey(options.signingKey);
   if (signingKey === null) {
     throw runnerError(
@@ -516,7 +712,7 @@ export async function runConformanceTest(profile, options = {}) {
         "trustworthy when signed, and there is no unsigned mode",
     );
   }
-  const binaryPath = resolveBinaryPath(parsed, options.binaryPath);
+  const binaryPath = await resolveRunnerBinaryPath(parsed, options.binaryPath);
   const profileDigest = computeRunnerProfileDigest(parsed);
   // Bind the binary identity from its bytes before any spawn.
   const { binaryRealpath, binaryContentSha256 } = await computeRunnerBinaryIdentity(binaryPath);
@@ -543,7 +739,7 @@ export async function runConformanceTest(profile, options = {}) {
       networkToken: canary.token,
       decoyDir: decoy,
     });
-    const execution = await executeRunnerProcess({
+    const execution = await executeProfileProcess(parsed, {
       binaryPath,
       argv: parsed.argvTemplate,
       stdinBytes: probe,
@@ -551,6 +747,9 @@ export async function runConformanceTest(profile, options = {}) {
       timeoutMs: options.timeoutMs ?? parsed.timeoutMs,
       maxOutputBytes: options.maxOutputBytes ?? parsed.maxOutputBytes,
       detached: true,
+    }, {
+      codexAuthPath: options.codexAuthPath,
+      tempRoot: options.tempRoot,
     });
     const failures = [];
     if (processGroupAlive(execution.pid)) {
@@ -908,7 +1107,7 @@ function assertConformanceRecordShape(conformance) {
  *
  * Preconditions, in order, all fail closed, and no process of any kind (not
  * even a --version probe) is spawned before every one of them has passed:
- *   - profile is schema-valid and executable (codex-cli hard-fails);
+ *   - profile is schema-valid;
  *   - a structurally valid conformance record for the current probe corpus exists
  *     and its profileDigest equals the digest of the profile that would run now
  *     (any argvTemplate change invalidates it);
@@ -930,6 +1129,8 @@ export async function runExtractionRunner({
   maxOutputBytes,
   binaryPath,
   signingKey,
+  codexAuthPath,
+  tempRoot,
 } = {}) {
   const parsedProfile = parseWith(
     restrictedExtractionRunnerSchema,
@@ -937,7 +1138,6 @@ export async function runExtractionRunner({
     "MEMORY_RUNNER_PROFILE_INVALID",
     "runner profile",
   );
-  assertExecutableAdapter(parsedProfile);
   assertConformanceRecordShape(conformance);
   const conformanceSigningKey = normalizeSigningKey(signingKey);
   if (conformanceSigningKey === null || !conformanceSignatureVerifies(conformance, conformanceSigningKey)) {
@@ -992,7 +1192,7 @@ export async function runExtractionRunner({
       "the stdin bytes do not match the approved runnerInputDigest; the runner was not started",
     );
   }
-  const resolvedBinary = resolveBinaryPath(parsedProfile, binaryPath);
+  const resolvedBinary = await resolveRunnerBinaryPath(parsedProfile, binaryPath);
   // Re-verify the binary from its bytes on disk; no process is spawned for this.
   const currentIdentity = await computeRunnerBinaryIdentity(resolvedBinary);
   if (
@@ -1014,13 +1214,22 @@ export async function runExtractionRunner({
         "no degraded path)",
     );
   }
-  const execution = await executeRunnerProcess({
+  const execution = await executeProfileProcess(parsedProfile, {
     binaryPath: resolvedBinary,
     argv: parsedProfile.argvTemplate,
     stdinBytes: stdinBuffer,
     timeoutMs: timeoutMs ?? parsedProfile.timeoutMs,
     maxOutputBytes: maxOutputBytes ?? parsedProfile.maxOutputBytes,
+  }, {
+    codexAuthPath,
+    tempRoot,
   });
+  if (execution.exitCode !== 0) {
+    throw runnerError(
+      "MEMORY_RUNNER_EXIT_FAILED",
+      `runner exited with code ${execution.exitCode}; no output was accepted`,
+    );
+  }
   return Object.freeze({
     stdout: execution.stdout,
     exitCode: execution.exitCode,

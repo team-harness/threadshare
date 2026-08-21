@@ -16,6 +16,7 @@ const TOOL_NAMES = Object.freeze([
   "threadshare_insights_evidence",
   "threadshare_memory_search",
   "threadshare_memory_status",
+  "threadshare_memory_extract_preview",
 ]);
 
 function plainObject(value) {
@@ -32,15 +33,16 @@ async function readSchema(name) {
 }
 
 async function toolCatalog() {
-  const [spec, query, recipe, evidence, gitDiffEvidence, memorySearch] = await Promise.all([
+  const [spec, query, recipe, evidence, gitDiffEvidence, memorySearch, memoryExtraction] = await Promise.all([
     readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
     readSchema("threadshare-insights-recipe-request.v1.schema.json"),
     readSchema("threadshare-insights-evidence-request.v2.schema.json"),
     readSchema("threadshare-insights-git-diff-evidence-request.v1.schema.json"),
     readSchema("threadshare-memory-search-request.v1.schema.json"),
+    readSchema("threadshare-memory-extraction-request.v1.schema.json"),
   ]);
-  const annotations = {
+  const readOnlyAnnotations = {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
@@ -57,14 +59,14 @@ async function toolCatalog() {
         additionalProperties: false,
       },
       outputSchema: spec,
-      annotations,
+      annotations: readOnlyAnnotations,
     },
     {
       name: TOOL_NAMES[1],
       title: "Query local Threadshare Insights",
       description: "Run a bounded typed records or aggregate query over the committed local Insights index.",
       inputSchema: query,
-      annotations,
+      annotations: readOnlyAnnotations,
     },
     {
       name: TOOL_NAMES[2],
@@ -87,7 +89,7 @@ async function toolCatalog() {
           request: recipe,
         },
       },
-      annotations,
+      annotations: readOnlyAnnotations,
     },
     {
       name: TOOL_NAMES[3],
@@ -97,25 +99,53 @@ async function toolCatalog() {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         oneOf: [evidence, gitDiffEvidence],
       },
-      annotations,
+      annotations: readOnlyAnnotations,
     },
     {
       name: TOOL_NAMES[4],
       title: "Search approved local Team Memory",
       description: "Search the owner repository's approved Team Memory; returns items with generation and coverage.",
       inputSchema: memorySearch,
-      annotations,
+      annotations: readOnlyAnnotations,
     },
     {
       name: TOOL_NAMES[5],
       title: "Summarize local Team Memory state",
-      description: "Return owner Team Memory counters. Extraction is CLI-only; no transcript is ever returned.",
+      description: "Return owner Team Memory counters; no transcript is ever returned.",
       inputSchema: {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         type: "object",
         additionalProperties: false,
       },
-      annotations,
+      annotations: readOnlyAnnotations,
+    },
+    {
+      name: TOOL_NAMES[6],
+      title: "Preview a bounded local Team Memory extraction",
+      description: "Create private pending runner plans from filtered Insights history. Never authorizes delivery, starts a runner, or returns transcript bytes.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["runner", "request"],
+        properties: {
+          runner: { enum: ["claude", "codex"] },
+          model: { type: "string", minLength: 1, maxLength: 200 },
+          endpoint: { type: "string", format: "uri", pattern: "^https://" },
+          limit: { type: "integer", minimum: 1, maximum: 50, default: 1 },
+          request: memoryExtraction,
+        },
+        allOf: [{
+          if: { properties: { runner: { const: "codex" } }, required: ["runner"] },
+          then: { required: ["model", "endpoint"] },
+        }],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
   ]);
 }
@@ -130,7 +160,7 @@ function memoryToolError(error, action) {
   const value = {
     code,
     problem: sanitizeDiagnosticProblem(error instanceof Error ? error.message : String(error)),
-    next: `Run \`threadshare memory ${action} --help\` and retry.`,
+    next: `Run \`threadshare memory ${action === "extract-preview" ? "extract" : action} --help\` and retry.`,
   };
   return {
     content: [{ type: "text", text: JSON.stringify(value) }],
@@ -195,6 +225,22 @@ function toolInvocation(name, args) {
       });
     }
     return { memory: { action: "status", args } };
+  }
+  if (name === TOOL_NAMES[6]) {
+    if (!exactKeys(args, ["runner", "model", "endpoint", "limit", "request"]) ||
+        (args.runner !== "claude" && args.runner !== "codex") || !plainObject(args.request) ||
+        (Object.hasOwn(args, "limit") &&
+         (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 50)) ||
+        (Object.hasOwn(args, "model") &&
+         (typeof args.model !== "string" || args.model.length === 0 || args.model.length > 200)) ||
+        (Object.hasOwn(args, "endpoint") && typeof args.endpoint !== "string") ||
+        (args.runner === "codex" &&
+         (typeof args.model !== "string" || typeof args.endpoint !== "string"))) {
+      throw Object.assign(new Error(
+        "memory extraction preview requires runner, request, optional limit, and explicit Codex model/HTTPS endpoint",
+      ), { code: "TS_INSIGHTS_REQUEST_INVALID" });
+    }
+    return { memory: { action: "extract-preview", args } };
   }
   return null;
 }
@@ -270,7 +316,7 @@ export function createInsightsMcpServer(options = {}) {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "threadshare-insights", version: "1.0.0" },
-          instructions: "Users ask natural-language questions. Call threadshare_insights_spec to choose the bounded read-only plan; ask before sync when freshness matters.",
+          instructions: "Users ask natural-language questions. Call threadshare_insights_spec for bounded reads. Team Memory extraction over MCP can only create private pending plans; approval and runner execution remain CLI-only.",
         },
       };
     }
@@ -298,7 +344,9 @@ export function createInsightsMcpServer(options = {}) {
         // bad request never tears down the JSON-RPC stream.
         const memoryAction = message.params.name === TOOL_NAMES[4]
           ? "search"
-          : message.params.name === TOOL_NAMES[5] ? "status" : null;
+          : message.params.name === TOOL_NAMES[5]
+            ? "status"
+            : message.params.name === TOOL_NAMES[6] ? "extract-preview" : null;
         return {
           jsonrpc: "2.0", id: message.id,
           result: memoryAction === null
