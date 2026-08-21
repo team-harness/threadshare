@@ -3,7 +3,6 @@ import path from "node:path";
 
 import { canonicalJson } from "./canonical-json.mjs";
 import { normalizeInsightsRecipeRequest } from "./insights-query.mjs";
-import { scoreCandidateSessions } from "./memory-extraction.mjs";
 
 const MEMORY_EXTRACTION_REQUEST_FORMAT = "threadshare-memory-extraction-request@v1";
 const INSIGHTS_EVIDENCE_REQUEST_FORMAT = "threadshare-insights-evidence-request@v2";
@@ -11,6 +10,10 @@ const DELIVERY_TRACE_REQUEST_FORMAT = "threadshare-insights-delivery-trace-reque
 const RECIPE_REQUEST_FORMAT = "threadshare-insights-recipe-request@v1";
 const MAX_WINDOW_MS = 366 * 86_400_000;
 const MAX_SEARCH_RESULTS = 200;
+const MIN_ELIGIBLE_TURNS = 3;
+const MAX_EXTRACTION_CANDIDATE_SESSIONS = Math.floor(
+  MAX_SEARCH_RESULTS / MIN_ELIGIBLE_TURNS,
+);
 const MAX_FILTER_KEYS = 64;
 const MAX_EVIDENCE_PAGES = 16_384;
 const HEX64 = /^[0-9a-f]{64}$/u;
@@ -285,15 +288,12 @@ function parseEvidenceLines(content) {
 function materializeTurnEvidence(content, turn, turnIndex) {
   const parsed = parseEvidenceLines(content);
   const events = [];
-  let toolInvocations = 0;
   for (const eventKey of parsed.eventOrder) {
     const envelope = parsed.events.get(eventKey);
     if (envelope.turnKey !== turn.turnKey) continue;
     if (envelope.completeness !== "full") {
       throw sourceError("TS_INSIGHTS_ENGINE_PROTOCOL", "A selected Turn contains incomplete evidence");
     }
-    if (envelope.kind === "capability-invocation") toolInvocations += 1;
-    if (envelope.kind === "skill-load") toolInvocations += 1;
     const payloads = (parsed.payloadsByEvent.get(eventKey) ?? []).sort((left, right) =>
       left.kind.localeCompare(right.kind) || left.payloadKey.localeCompare(right.payloadKey));
     let role;
@@ -324,7 +324,6 @@ function materializeTurnEvidence(content, turn, turnIndex) {
   }
   return {
     turn: { turnIndex, turnRevision: turn.revision, events },
-    toolInvocations,
   };
 }
 
@@ -495,25 +494,95 @@ async function readSessionTrace(reader, sessionKey, request, scope, snapshot, ev
   );
 }
 
-async function recoveredFailureCount(reader, sessionKey, request, scope, snapshot, evaluatedAt, signal) {
-  const recipeRequest = normalizeInsightsRecipeRequest({
+function extractionCandidateRecipeRequest(request, scope, evaluatedAt, turnKeys) {
+  return normalizeInsightsRecipeRequest({
     format: RECIPE_REQUEST_FORMAT,
     window: request.window,
     filters: {
       providers: request.filters.providers,
       projectKeys: scope.projectKeys,
-      sessionKeys: [sessionKey],
+      turnKeys,
     },
-    limit: 50,
+    limit: MAX_EXTRACTION_CANDIDATE_SESSIONS,
     allowDegraded: false,
-  }, { name: "failure-chains@1", evaluatedAt });
-  const response = await reader.recipe(recipeRequest, { signal });
-  assertSameSnapshot(response, snapshot, "Failure-chain recipe");
-  if (response.truncated === true || decimal(response.totalItemCount, "Failure-chain total") >
-      BigInt(response.items.length)) {
-    throw sourceError("TS_QUERY_TOO_BROAD", "Failure-chain scoring is incomplete; narrow the filter");
+  }, { name: "extraction-candidates@1", evaluatedAt });
+}
+
+function safeCount(value, label) {
+  const parsed = decimal(value, label);
+  if (parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw sourceError("TS_INSIGHTS_ENGINE_PROTOCOL", `${label} exceeds the safe integer range`);
   }
-  return response.items.filter((item) => item.status === "resolved").length;
+  return Number(parsed);
+}
+
+function validateCandidateRecipe(response, snapshot, grouped) {
+  assertSameSnapshot(response, snapshot, "Extraction-candidate recipe");
+  if (response.name !== "extraction-candidates@1" || response.truncated === true ||
+      decimal(response.totalItemCount, "Extraction-candidate total") !==
+        BigInt(response.items.length) ||
+      response.items.length > MAX_EXTRACTION_CANDIDATE_SESSIONS) {
+    throw sourceError(
+      "TS_INSIGHTS_ENGINE_PROTOCOL",
+      "Extraction-candidate Recipe returned an incomplete or mismatched result",
+    );
+  }
+  const candidates = new Map();
+  let previous = null;
+  for (const item of response.items) {
+    const turns = grouped.get(item.sessionKey);
+    const score = safeCount(item.score, "Extraction-candidate score");
+    const contributionTotal = Object.values(item.contributions ?? {})
+      .reduce((total, value) => total + decimal(value, "Extraction-candidate contribution"), 0n);
+    const eligibleTurns = safeCount(
+      item.eligibleTurnCount,
+      "Extraction-candidate eligibleTurnCount",
+    );
+    if (turns === undefined || turns.length < MIN_ELIGIBLE_TURNS ||
+        turns.length !== eligibleTurns || candidates.has(item.sessionKey) ||
+        item.evidence?.kind !== "session" || item.evidence.sessionKey !== item.sessionKey ||
+        contributionTotal !== BigInt(score)) {
+      throw sourceError(
+        "TS_INSIGHTS_ENGINE_PROTOCOL",
+        "Extraction-candidate Recipe escaped or changed the exact Search Turn set",
+      );
+    }
+    if (previous !== null && (score > previous.score ||
+        (score === previous.score && item.sessionKey <= previous.sessionKey))) {
+      throw sourceError(
+        "TS_INSIGHTS_ENGINE_PROTOCOL",
+        "Extraction-candidate Recipe order is not stable",
+      );
+    }
+    candidates.set(item.sessionKey, {
+      item,
+      score,
+      eligibleTurns,
+      signals: {
+        deliveryDirect: safeCount(item.contributions.directDelivery, "direct contribution"),
+        deliveryObserved: safeCount(item.contributions.observedDelivery, "observed contribution"),
+        recoveredFailureChain: safeCount(
+          item.contributions.recoveredFailureChains,
+          "recovered-failure contribution",
+        ),
+        toolDensity: safeCount(item.contributions.capabilityDensity, "capability contribution"),
+        conclusiveFinalAnswer: safeCount(
+          item.contributions.conclusiveFinalAnswer,
+          "final-answer contribution",
+        ),
+      },
+    });
+    previous = { score, sessionKey: item.sessionKey };
+  }
+  for (const [sessionKey, turns] of grouped) {
+    if ((turns.length >= MIN_ELIGIBLE_TURNS) !== candidates.has(sessionKey)) {
+      throw sourceError(
+        "TS_INSIGHTS_ENGINE_PROTOCOL",
+        "Extraction-candidate Recipe omitted an eligible Search Session",
+      );
+    }
+  }
+  return candidates;
 }
 
 function selectedTurnSet(results) {
@@ -559,13 +628,32 @@ async function collectOnce({ reader, request, scope, evaluatedAt, signal }) {
     group.push(turn);
     grouped.set(turn.sessionKey, group);
   }
+  if (response.results.length === 0) {
+    return deepFreeze({
+      databaseUuid: snapshot.databaseUuid,
+      snapshotSeq: snapshot.snapshotSeq,
+      evaluatedAt,
+      request,
+      requestDigest,
+      resultSetDigest,
+      sessions: [],
+      rejected: [],
+    });
+  }
+  const candidateResponse = await reader.recipe(extractionCandidateRecipeRequest(
+    request,
+    scope,
+    evaluatedAt,
+    response.results.map((turn) => turn.turnKey).sort(),
+  ), { signal });
+  const candidateByKey = validateCandidateRecipe(candidateResponse, snapshot, grouped);
   const sessions = [];
   const rejected = [];
   for (const [sessionKey, rawTurns] of grouped) {
     rawTurns.sort((left, right) =>
       left.observedTimestamp.localeCompare(right.observedTimestamp) ||
       left.turnKey.localeCompare(right.turnKey));
-    if (rawTurns.length < 3) {
+    if (rawTurns.length < MIN_ELIGIBLE_TURNS) {
       rejected.push({
         sessionKey,
         eligibleTurns: rawTurns.length,
@@ -573,13 +661,16 @@ async function collectOnce({ reader, request, scope, evaluatedAt, signal }) {
       });
       continue;
     }
+  }
+  for (const candidate of candidateResponse.items) {
+    const sessionKey = candidate.sessionKey;
+    const rawTurns = grouped.get(sessionKey);
+    const score = candidateByKey.get(sessionKey);
     const materialized = [];
-    let toolInvocations = 0;
     const turnBindings = [];
     for (const [turnIndex, rawTurn] of rawTurns.entries()) {
       const loaded = await readCompleteTurn(reader, rawTurn, turnIndex, snapshot, signal);
       materialized.push(loaded.turn);
-      toolInvocations += loaded.toolInvocations;
       turnBindings.push({
         turnKey: rawTurn.turnKey,
         revision: rawTurn.revision,
@@ -589,17 +680,13 @@ async function collectOnce({ reader, request, scope, evaluatedAt, signal }) {
     const deliveryEdges = await readSessionTrace(
       reader, sessionKey, request, scope, snapshot, evaluatedAt, signal,
     );
-    const recoveredFailureChains = await recoveredFailureCount(
-      reader, sessionKey, request, scope, snapshot, evaluatedAt, signal,
-    );
-    const directDeliveryEdges = deliveryEdges.filter((edge) => edge.strength === "direct").length;
-    const observedDeliveryEdges = deliveryEdges.filter((edge) => edge.strength === "observed").length;
     const sourceBindingDigest = digest({
       requestDigest,
       resultSetDigest,
       sessionKey,
       turnBindings,
       deliveryEdges,
+      candidate,
     });
     sessions.push({
       sessionKey,
@@ -612,21 +699,23 @@ async function collectOnce({ reader, request, scope, evaluatedAt, signal }) {
       turns: materialized,
       turnBindings,
       deliveryEdges,
-      directDeliveryEdges,
-      observedDeliveryEdges,
-      recoveredFailureChains,
-      toolInvocations,
-      conclusiveFinalAnswer: rawTurns.some((turn) =>
-        typeof turn.finalAnswerExcerpt === "string" && turn.finalAnswerExcerpt.trim() !== ""),
+      directDeliveryEdges: safeCount(candidate.directDeliveryEdgeCount, "direct edge count"),
+      observedDeliveryEdges: safeCount(candidate.observedDeliveryEdgeCount, "observed edge count"),
+      recoveredFailureChains: safeCount(
+        candidate.recoveredFailureChainCount,
+        "recovered failure count",
+      ),
+      toolInvocations: safeCount(
+        candidate.mainCapabilityInvocationCount,
+        "main capability count",
+      ),
+      conclusiveFinalAnswer: candidate.hasConclusiveFinalAnswer,
+      score: score.score,
+      eligibleTurns: score.eligibleTurns,
+      signals: score.signals,
       sourceBindingDigest,
     });
   }
-  const scored = scoreCandidateSessions(sessions.map((session) => ({
-    ...session,
-    turns: session.turns.map(() => ({ eligible: true, active: true, sealed: "hard" })),
-  })));
-  const sessionByKey = new Map(sessions.map((session) => [session.sessionKey, session]));
-  const ordered = scored.selected.map((score) => ({ ...sessionByKey.get(score.sessionKey), ...score }));
   return deepFreeze({
     databaseUuid: snapshot.databaseUuid,
     snapshotSeq: snapshot.snapshotSeq,
@@ -634,8 +723,8 @@ async function collectOnce({ reader, request, scope, evaluatedAt, signal }) {
     request,
     requestDigest,
     resultSetDigest,
-    sessions: ordered,
-    rejected: [...rejected, ...scored.rejected],
+    sessions,
+    rejected,
   });
 }
 

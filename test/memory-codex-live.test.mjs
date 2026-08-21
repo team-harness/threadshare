@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -8,6 +8,7 @@ import {
   executeMemoryMcp,
   parseMemoryInvocation,
 } from "../src/memory-command.mjs";
+import { serializeMemoryEntry } from "../src/memory-format.mjs";
 import { createMemoryCommandFixture } from "./helpers/memory-command-e2e.mjs";
 
 function requiredEnvironment(name) {
@@ -31,7 +32,7 @@ function extractionInvocation(repository, overrides = {}) {
   });
 }
 
-test("real Codex CLI passes conformance and completes extraction plus adjudication", {
+test("real Codex CLI completes extraction, adjudication, consolidation, review, and assembly", {
   timeout: 600_000,
 }, async (t) => {
   const fixture = await createMemoryCommandFixture(t, {
@@ -103,6 +104,133 @@ test("real Codex CLI passes conformance and completes extraction plus adjudicati
   assert.equal(adjudicated.delivered.length, 1);
   assert.equal(adjudicated.delivered[0].taskKind, "adjudication");
   assert.equal(adjudicated.delivered[0].adjudication, "applied");
+
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    liveOptions,
+  );
+  const approvedEntry = serializeMemoryEntry({
+    frontmatter: {
+      id: "release-verification",
+      type: "work_method",
+      status: "approved",
+      priority: 80,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: "release-workflow",
+      occurred: [],
+      evidence: { commits: [], paths: ["package.json"] },
+      superseded_by: null,
+    },
+    body: [
+      "Before every npm release, run npm run test:release and require it to pass.",
+      "This durable repository method belongs in the reusable release-workflow scene.",
+      "It prevents publishing artifacts that have not passed the release verification suite.",
+      "",
+    ].join("\n"),
+  });
+  const entriesDirectory = path.join(fixture.repository, ".threadshare", "memory", "entries");
+  await mkdir(entriesDirectory, { recursive: true });
+  await writeFile(path.join(entriesDirectory, "release-verification.md"), approvedEntry);
+
+  const consolidationPreview = await executeMemoryMcp("consolidate-preview", {
+    runner: "codex",
+    model: codexModel,
+    endpoint: codexEndpoint,
+  }, {
+    ...liveOptions,
+    repository: fixture.repository,
+  });
+  assert.equal(consolidationPreview.authorized, false);
+  assert.equal(consolidationPreview.entryCount, 1);
+  assert.equal(consolidationPreview.plans.length, 1);
+  assert.equal(consolidationPreview.plans[0].taskKind, "consolidation");
+  assert.equal(consolidationPreview.plans[0].provider, "openai");
+  assert.equal(consolidationPreview.plans[0].model, codexModel);
+  assert.equal(consolidationPreview.plans[0].endpoint, codexEndpoint);
+  assert.doesNotMatch(JSON.stringify(consolidationPreview), /Before every npm release/u,
+    "MCP preview must not expose approved memory content");
+
+  const consolidated = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "codex",
+      "approve-plan": consolidationPreview.plans[0].planDigest,
+      format: "json",
+    }),
+    liveOptions,
+  );
+  assert.equal(consolidated.status, "pending_review",
+    "real Codex must return a non-empty, host-valid consolidation patch");
+  assert.match(consolidated.candidateId, /^patch-consolidate-/u);
+
+  let reviewedOperations = 0;
+  const reviewed = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], {
+      repository: fixture.repository,
+      kind: "consolidation",
+      format: "text",
+    }),
+    {
+      ...liveOptions,
+      async confirmStatement(item) {
+        assert.equal(item.candidateKind, "consolidation-patch");
+        assert.match(item.payload.reviewStatements[0].text, /\+\+\+ proposed/u);
+        reviewedOperations += 1;
+        return true;
+      },
+    },
+  );
+  assert.ok(reviewedOperations > 0);
+  assert.notEqual(reviewed.plan, null);
+
+  const promoted = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "promote"], {
+      repository: fixture.repository,
+      plan: reviewed.plan.planId,
+      format: "json",
+    }),
+    liveOptions,
+  );
+  assert.equal(promoted.status, "applied");
+  assert.ok(promoted.appliedFiles.some((file) =>
+    file.startsWith(".threadshare/memory/scenes/") && file.endsWith(".md")),
+  "real consolidation must materialize at least one L2 scene");
+  const sceneNames = (await readdir(path.join(
+    fixture.repository, ".threadshare", "memory", "scenes",
+  ))).filter((name) => name.endsWith(".md"));
+  assert.ok(sceneNames.length > 0);
+  const sceneText = await readFile(path.join(
+    fixture.repository, ".threadshare", "memory", "scenes", sceneNames[0],
+  ), "utf8");
+  assert.match(sceneText, /\nheat: 1\n/u, "host must calculate first-use scene heat");
+
+  const assembled = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "assemble"], {
+      repository: fixture.repository,
+      provider: "codex",
+    }),
+    liveOptions,
+  );
+  assert.equal(assembled.target, "AGENTS.md");
+  assert.ok(assembled.scenes > 0);
+  const agentsText = await readFile(path.join(fixture.repository, "AGENTS.md"), "utf8");
+  assert.match(agentsText, /<!-- BEGIN THREADSHARE MEMORY/u);
+  assert.match(agentsText, /\.threadshare\/memory\/scenes\//u);
+
+  const noDelta = await executeMemoryMcp("consolidate-preview", {
+    runner: "codex",
+    model: codexModel,
+    endpoint: codexEndpoint,
+  }, {
+    ...liveOptions,
+    repository: fixture.repository,
+  });
+  assert.deepEqual(noDelta.plans, []);
+  assert.equal(noDelta.entryCount, 0);
 
   const conformance = JSON.parse(await readFile(path.join(
     fixture.options.paths.stateDirectory,

@@ -131,9 +131,13 @@ const MESSAGE_TYPES = new Set([
 export const MEMORY_OPS = Object.freeze([
   "open",
   "bind-repository",
+  "list-memory-files",
+  "read-memory-file",
   "plan-tasks",
   "claim-task",
   "submit-extraction",
+  "submit-consolidation",
+  "consolidation-baseline",
   "recall",
   "submit-adjudication",
   "sync-approved",
@@ -2268,6 +2272,7 @@ function assertInsightsEvidenceV2(message, validatedPayloadByteLength = null) {
 const RECIPE_NAMES = new Set([
   "capability-contexts@1", "failure-chains@1", "file-workflow-signals@1",
   "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1",
+  "extraction-candidates@1",
 ]);
 
 function assertRecipeWindow(value, label) {
@@ -2281,7 +2286,7 @@ function assertRecipeWindow(value, label) {
 
 function assertRecipeFilters(value, label) {
   assertExactKeys(value, label, [
-    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "turnKeys", "eventKinds", "text", "bucket",
   ]);
   for (const field of ["providers", "eventKinds"]) {
     assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
@@ -2291,6 +2296,8 @@ function assertRecipeFilters(value, label) {
     assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
       (item, itemLabel) => assertHex64(item, itemLabel));
   }
+  assertBoundedSortedArray(value.turnKeys, `${label}.turnKeys`, 200,
+    (item, itemLabel) => assertHex64(item, itemLabel));
   if (value.text !== null) {
     assertBoundedString(value.text, `${label}.text`, 8 * 1_024, { allowEmpty: false });
   }
@@ -2311,8 +2318,19 @@ function assertRecipeRequest(request, label) {
     assertRecipeWindow(request.comparisonWindow, `${label}.comparisonWindow`);
   }
   assertRecipeFilters(request.filters, `${label}.filters`);
-  assertSafeInteger(request.limit, `${label}.limit`, { min: 1, max: 50 });
+  assertSafeInteger(request.limit, `${label}.limit`, {
+    min: 1,
+    max: request.name === "extraction-candidates@1" ? 66 : 50,
+  });
   assertBoolean(request.allowDegraded, `${label}.allowDegraded`);
+  if (request.name === "extraction-candidates@1") {
+    if (request.filters.turnKeys.length === 0 || request.filters.projectKeys.length === 0 ||
+        request.filters.sessionKeys.length !== 0 || request.allowDegraded) {
+      throw invalidFrame(`${label} extraction candidate scope is invalid`);
+    }
+  } else if (request.filters.turnKeys.length !== 0) {
+    throw invalidFrame(`${label}.filters.turnKeys is not supported by this recipe`);
+  }
   assertCanonicalTimestamp(request.evaluatedAt, `${label}.evaluatedAt`);
   if (Buffer.byteLength(canonicalJson(request), "utf8") > MAX_DEEP_QUERY_REQUEST_BYTES) {
     throw invalidFrame(`${label} exceeds 64 KiB`);
@@ -2805,6 +2823,36 @@ function assertSessionTimelineItem(item, label, expectedOrdinal) {
   assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
 }
 
+function assertExtractionCandidateItem(item, label) {
+  assertExactKeys(item, label, [
+    "sessionKey", "eligibleTurnCount", "directDeliveryEdgeCount",
+    "observedDeliveryEdgeCount", "recoveredFailureChainCount",
+    "mainCapabilityInvocationCount", "hasConclusiveFinalAnswer", "contributions",
+    "score", "evidence",
+  ]);
+  assertHex64(item.sessionKey, `${label}.sessionKey`);
+  for (const field of [
+    "eligibleTurnCount", "directDeliveryEdgeCount", "observedDeliveryEdgeCount",
+    "recoveredFailureChainCount", "mainCapabilityInvocationCount", "score",
+  ]) {
+    assertDecimal(item[field], `${label}.${field}`);
+  }
+  assertBoolean(item.hasConclusiveFinalAnswer, `${label}.hasConclusiveFinalAnswer`);
+  assertRecipeDecimalFields(item.contributions, `${label}.contributions`, [
+    "directDelivery", "observedDelivery", "recoveredFailureChains",
+    "capabilityDensity", "conclusiveFinalAnswer",
+  ]);
+  const contributionTotal = Object.values(item.contributions)
+    .reduce((total, value) => total + BigInt(value), 0n);
+  if (contributionTotal !== BigInt(item.score)) {
+    throw invalidFrame(`${label}.score does not equal its declared contributions`);
+  }
+  if (item.evidence?.sessionKey !== item.sessionKey) {
+    throw invalidFrame(`${label}.evidence does not bind the candidate Session`);
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "session" });
+}
+
 function assertRecipeItem(name, item, label, index) {
   if (name === "capability-contexts@1") return assertCapabilityContextItem(item, label);
   if (name === "failure-chains@1") return assertFailureChainItem(item, label);
@@ -2812,6 +2860,7 @@ function assertRecipeItem(name, item, label, index) {
   if (name === "activity-shifts@1") return assertActivityShiftItem(item, label);
   if (name === "token-hotspots@1") return assertTokenHotspotItem(item, label);
   if (name === "solution-recall@1") return assertSolutionRecallItem(item, label);
+  if (name === "extraction-candidates@1") return assertExtractionCandidateItem(item, label);
   return assertSessionTimelineItem(item, label, index);
 }
 
@@ -2831,8 +2880,9 @@ function assertRecipeResponse(response, label) {
     assertRecipeWindow(response.comparisonWindow, `${label}.comparisonWindow`);
   }
   assertCanonicalTimestamp(response.evaluatedAt, `${label}.evaluatedAt`);
-  if (!Array.isArray(response.items) || response.items.length > 50) {
-    throw invalidFrame(`${label}.items exceeds 50 items`);
+  const maximumItems = response.name === "extraction-candidates@1" ? 66 : 50;
+  if (!Array.isArray(response.items) || response.items.length > maximumItems) {
+    throw invalidFrame(`${label}.items exceeds ${maximumItems} items`);
   }
   for (let index = 0; index < response.items.length; index += 1) {
     assertRecipeItem(response.name, response.items[index], `${label}.items[${index}]`, index);

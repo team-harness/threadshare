@@ -12,6 +12,7 @@ import {
   MEMORY_AUTHORIZATION_MANIFEST_FORMAT,
   MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT,
   MEMORY_CONSOLIDATION_PATCH_FORMAT,
+  MEMORY_CONSOLIDATION_TASK_FORMAT,
   MEMORY_CONTRACT_FORMATS,
   MEMORY_DECIMAL_PATTERN,
   MEMORY_EVIDENCE_ASSESSMENT_FORMAT,
@@ -32,6 +33,7 @@ import {
   computePlanDigest,
   computeRunnerInputDigest,
   consolidationPatchSchema,
+  consolidationTaskSchema,
   evidenceAssessmentSchema,
   extractionTaskSchema,
   memoryDigestHex,
@@ -264,15 +266,80 @@ function consolidationPatch() {
   return {
     format: MEMORY_CONSOLIDATION_PATCH_FORMAT,
     taskId: "task-0003",
-    binding: adjudicationBinding(),
+    binding: consolidationBinding(),
     operations: [{
+      operationId: "op-merge-release",
       op: "merge",
       target: "scene",
       name: "release-workflow",
       newContent: "# Release workflow\nConsolidated notes.",
       basedOnEntryIds: ["release-workflow-notes"],
       mergeSources: ["release-steps"],
+      rationale: "The two scenes describe one reusable release workflow.",
     }],
+  };
+}
+
+function consolidationBinding() {
+  return {
+    databaseUuid: "11111111-2222-4333-8444-555555555555",
+    memoryStateUuid: "66666666-7777-4888-9999-aaaaaaaaaaaa",
+    owner: { repositoryKey: HEX("1"), worktreeKey: HEX("2") },
+    approvedProjection: {
+      generation: 7,
+      analyzerVersion: "memory-approved@1",
+      coverage: "complete",
+      sourceTreeDigest: HEX("3"),
+    },
+    entrySetDigest: HEX("4"),
+    entryRevisions: [{ entryId: "release-workflow-notes", revision: 2, contentDigest: HEX("5") }],
+    sceneIndexDigest: HEX("6"),
+    sceneRevisions: [{ name: "release-steps", contentDigest: HEX("7"), heat: 3 }],
+    doctrineDigest: HEX("8"),
+    replay: { mode: "incremental", afterSuccessfulRunId: null },
+    promptVersion: "memory-consolidation@1",
+    schemaVersion: MEMORY_CONSOLIDATION_TASK_FORMAT,
+    policyVersion: "consolidation-policy@1",
+  };
+}
+
+function consolidationTask() {
+  return {
+    format: MEMORY_CONSOLIDATION_TASK_FORMAT,
+    taskId: "task-0003",
+    lease: { holder: "cli-1234", expiresAt: 1766200000000 },
+    binding: consolidationBinding(),
+    entries: [{
+      entryId: "release-workflow-notes",
+      revision: 2,
+      contentDigest: HEX("5"),
+      type: "work_method",
+      scene: "release-workflow",
+      priority: 70,
+      confidence: "high",
+      body: "Run release verification before publishing.",
+    }],
+    scenes: [{
+      name: "release-steps",
+      contentDigest: HEX("7"),
+      heat: 3,
+      content: "# Release steps\n\nExisting scene body.",
+    }],
+    doctrine: { contentDigest: HEX("8"), content: "# Team doctrine\n\nVerify releases." },
+    policy: {
+      maxScenes: 15,
+      mergePreferredAt: 12,
+      createForbiddenAt: 14,
+      dueEntryCount: 20,
+      heatAlgorithm: "scene-heat@1",
+    },
+    contract: {
+      patchSchema: MEMORY_CONSOLIDATION_PATCH_FORMAT,
+      prompts: {
+        promptVersion: "memory-consolidation@1",
+        consolidation: "Consolidate approved memory.",
+      },
+    },
   };
 }
 
@@ -287,6 +354,7 @@ function promotionPlan() {
       targetPath: ".threadshare/memory/entries/release-workflow-notes.md",
       targetBlobHash: null,
       sanitizedContentDigest: HEX("2"),
+      operation: "write",
     }],
     policyVersion: "promotion-policy@1",
     diff: "--- a/.threadshare/memory/entries/release-workflow-notes.md\n+++ b/...",
@@ -367,11 +435,24 @@ const CONTRACT_CASES = [
     schemaFile: "threadshare-memory-adjudication-result.v1.schema.json",
   },
   {
+    name: "consolidation task",
+    schema: consolidationTaskSchema,
+    sample: consolidationTask,
+    invalid: (value) => ({
+      ...value,
+      binding: {
+        ...value.binding,
+        approvedProjection: { ...value.binding.approvedProjection, coverage: "partial" },
+      },
+    }),
+    schemaFile: "threadshare-memory-consolidation-task.v1.schema.json",
+  },
+  {
     name: "consolidation patch",
     schema: consolidationPatchSchema,
     sample: consolidationPatch,
     invalid: (value) => ({ ...value, operations: [{ ...value.operations[0], target: "entry" }] }),
-    schemaFile: null,
+    schemaFile: "threadshare-memory-consolidation-patch.v1.schema.json",
   },
   {
     name: "promotion plan",
@@ -387,8 +468,8 @@ const CONTRACT_CASES = [
 
 test("every contract format has exactly one schema and case", () => {
   const formats = Object.keys(MEMORY_CONTRACT_FORMATS);
-  assert.equal(formats.length, 11);
-  assert.equal(CONTRACT_CASES.length, 11);
+  assert.equal(formats.length, 12);
+  assert.equal(CONTRACT_CASES.length, 12);
   for (const format of formats) {
     assert.match(format, /^threadshare-memory-[a-z0-9-]+@v1$/);
   }
@@ -440,6 +521,7 @@ test("validation patterns pin the documented shapes", () => {
   assert.match("release-workflow", MEMORY_SLUG_PATTERN);
   assert.doesNotMatch("Release-Workflow", MEMORY_SLUG_PATTERN);
   assert.doesNotMatch("-release", MEMORY_SLUG_PATTERN);
+  assert.doesNotMatch("release-", MEMORY_SLUG_PATTERN);
   assert.doesNotMatch(`a${"b".repeat(64)}`, MEMORY_SLUG_PATTERN);
 });
 
@@ -570,14 +652,40 @@ async function loadJsonSchemaValidators() {
   return validators;
 }
 
-test("all seven memory JSON Schema files compile under ajv 2020-12", async () => {
+test("all nine memory JSON Schema files compile under ajv 2020-12", async () => {
   const validators = await loadJsonSchemaValidators();
-  assert.equal(validators.size, 7);
+  assert.equal(validators.size, 9);
   for (const [, { document }] of validators) {
     assert.equal(document.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.equal(document.additionalProperties, false);
     assert.match(document.$id, /^https:\/\/threadshare\.team-harness\.com\/schema\/threadshare-memory-/);
   }
+});
+
+test("promotion plan delete binds a present blob and carries no content digest", async () => {
+  const value = promotionPlan();
+  const deletion = {
+    ...value,
+    perFile: [{
+      targetPath: ".threadshare/memory/scenes/release-steps.md",
+      targetBlobHash: "a".repeat(40),
+      sanitizedContentDigest: null,
+      operation: "delete",
+    }],
+  };
+  assert.deepEqual(promotionPlanSchema.parse(deletion), deletion);
+  assert.throws(() => promotionPlanSchema.parse({
+    ...deletion,
+    perFile: [{ ...deletion.perFile[0], targetBlobHash: null }],
+  }));
+  assert.throws(() => promotionPlanSchema.parse({
+    ...deletion,
+    perFile: [{ ...deletion.perFile[0], sanitizedContentDigest: HEX("a") }],
+  }));
+
+  const validators = await loadJsonSchemaValidators();
+  const { validate } = validators.get("promotion plan");
+  assert.equal(validate(deletion), true, JSON.stringify(validate.errors));
 });
 
 test("zod-valid samples also satisfy the JSON Schema representation", async () => {

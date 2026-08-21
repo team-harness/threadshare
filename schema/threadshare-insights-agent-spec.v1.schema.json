@@ -70,6 +70,7 @@
             "token-hotspots@1",
             "solution-recall@1",
             "session-timeline@1",
+            "extraction-candidates@1",
             "delivery-trace@1"
           ]
         },

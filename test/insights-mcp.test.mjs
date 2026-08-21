@@ -55,6 +55,7 @@ test("Insights MCP exposes Agent discovery and three deep read tools over newlin
     "threadshare_memory_search",
     "threadshare_memory_status",
     "threadshare_memory_extract_preview",
+    "threadshare_memory_consolidate_preview",
   ]);
   assert.equal(byId.get(2).result.tools.every((tool) =>
     tool.annotations.openWorldHint === false), true);
@@ -108,6 +109,18 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
         },
       },
     },
+    {
+      jsonrpc: "2.0", id: 5, method: "tools/call",
+      params: {
+        name: "threadshare_memory_consolidate_preview",
+        arguments: {
+          runner: "codex",
+          model: "gpt-5.6-sol",
+          endpoint: "https://api.openai.com/v1",
+          ifDue: true,
+        },
+      },
+    },
   ], {
     async memoryExecute(action, args) {
       calls.push({ action, args });
@@ -127,7 +140,7 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
         promotions: { generated: 0, approved: 0, applied: 0, voided: 0 },
         extraction: { entrypoint: "cli", note: "no transcript here" },
       };
-      return {
+      if (action === "extract-preview") return {
         format: "threadshare-memory-extraction-preview@v1",
         authorized: false,
         plans: [{
@@ -142,6 +155,21 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
         manifestDigest: null,
         selection: { matchedSessions: 1, rejectedSessions: 0, pendingChunks: 1 },
       };
+      return {
+        format: "threadshare-memory-consolidation-preview@v1",
+        authorized: false,
+        plans: [{
+          planDigest: "c".repeat(64),
+          taskKind: "consolidation",
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          endpoint: "https://api.openai.com/v1",
+          bytesToSend: 1024,
+          authorization: "pending",
+        }],
+        entryCount: 20,
+        pendingRunId: null,
+      };
     },
   });
   const byId = new Map(responses.map((response) => [response.id, response]));
@@ -150,6 +178,7 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
     "threadshare_memory_search",
     "threadshare_memory_status",
     "threadshare_memory_extract_preview",
+    "threadshare_memory_consolidate_preview",
   ]);
   assert.equal(memoryTools[0].annotations.readOnlyHint, true);
   assert.equal(memoryTools[1].annotations.readOnlyHint, true);
@@ -172,7 +201,12 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
   assert.equal(byId.get(4).result.structuredContent.authorized, false);
   assert.equal(byId.get(4).result.structuredContent.plans[0].authorization, "pending");
   assert.equal(JSON.stringify(byId.get(4).result).includes("release tests must stay private"), false);
-  assert.deepEqual(calls.map((call) => call.action), ["search", "status", "extract-preview"]);
+  assert.equal(byId.get(5).result.structuredContent.authorized, false);
+  assert.equal(byId.get(5).result.structuredContent.entryCount, 20);
+  assert.equal(JSON.stringify(byId.get(5).result).includes("Run the release"), false);
+  assert.deepEqual(calls.map((call) => call.action), [
+    "search", "status", "extract-preview", "consolidate-preview",
+  ]);
   assert.deepEqual(calls[0].args, { query: "release tests", limit: 5 });
   assert.deepEqual(calls[2].args, {
     runner: "codex",
@@ -180,6 +214,12 @@ test("Memory MCP exposes read-only recall plus pending-only extraction without t
     endpoint: "https://api.openai.com/v1",
     request,
     limit: 2,
+  });
+  assert.deepEqual(calls[3].args, {
+    runner: "codex",
+    model: "gpt-5.6-sol",
+    endpoint: "https://api.openai.com/v1",
+    ifDue: true,
   });
 });
 

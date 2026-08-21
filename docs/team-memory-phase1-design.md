@@ -1,6 +1,6 @@
 # Team Memory Phase 1 详细技术设计
 
-状态：Implemented / Accepted（Phase 1 完成；上游规格为 [team-memory-proposal.md](./team-memory-proposal.md) rev7；Phase 2 未启动）
+状态：Implemented / Accepted（Phase 1 完成；上游规格为 [team-memory-proposal.md](./team-memory-proposal.md) rev8；Phase 2 已实现，见 [team-memory-phase2-design.md](./team-memory-phase2-design.md)）
 日期：2026-08-21
 范围：提案 §8 Phase 1 的实现级设计——模块拆分、数据定义、协议、接口签名、测试计划与阶段推进顺序
 
@@ -244,11 +244,11 @@ MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 genera
 | CLI/状态流 | `test/memory-command.test.mjs` | init/status/MCP pending preview/lint/review→promote 的确定性状态流；test double 仅提供可控输出，并证明错误 Adjudication task binding 在提交前拒绝；promote 后 blob 漂移 plan 作废且不产生 git 历史 |
 | 协议专项 | `test/memory-acceptance.test.mjs` | 隐私 grep、跨 chunk 去重、manifest 局部失效等确定性协议语义；不声明模型 Runner 已验收 |
 | 真实 Runner 完成门 | `test/memory-codex-live.test.mjs` / `npm run test:memory-codex-live` | **真实 Codex CLI**：deny-all conformance → L1 CandidateDraftBatch → AdjudicationResult；校验签名指纹、无新增源 Session、一次性 home/conformance 目录清理。需显式 binary/model/endpoint 环境，普通单测不包含且不能跳过冒充通过 |
-| 发布包 | `test/release-automation.test.mjs` + 固定工具链 `npm pack --dry-run --ignore-scripts --json` | Node 22.22.3 / npm 12.0.2；精确 92 文件，当前压缩包 353,195 bytes，受 352 KiB 硬上限约束；平台包仍为精确 4 文件 |
+| 发布包 | `test/release-automation.test.mjs` + 固定工具链 `npm pack --dry-run --ignore-scripts --json` | Node 22.22.3 / npm 12.0.2；Phase 2 最终候选为精确 95 文件、368,751 bytes compressed、1,721,713 bytes unpacked；受 368 KiB / 1.75 MiB 硬上限约束，平台包仍为精确 4 文件 |
 
 ## 7. 阶段推进与 review 节奏
 
-Phase 1 的 Stage 2–8 已完成。收尾门为：相关 Node/Rust 测试 → `test:memory-codex-live` 真实 Runner → `code-deep review` → 全量发布/Skill 校验。只有这些门全部通过，才允许开始 Phase 2。
+Phase 1 的 Stage 2–8 与收尾门均已完成，随后才进入 Phase 2。Phase 2 不改写本文档的历史验收；当前实现、新安全边界与最终验收证据统一记录在 [team-memory-phase2-design.md](./team-memory-phase2-design.md)。
 
 ## 8. 接线参照（代码勘察结论，2026-08-20）
 
@@ -261,7 +261,7 @@ Phase 1 的 Stage 2–8 已完成。收尾门为：相关 Node/Rust 测试 → `
 - **git 先例**：`resolveGitRepository`（`insights-repository-source.mjs:413-446`）**已提供 common dir / worktree root / device / inode 解析**，memory-repository 直接复用；沙箱 env 两套模板（execFile 有界 buffer / spawn 流式 spool）。
 - **文件读取先例**：`insights-intent-source.mjs:156-209` 的安全读取骨架（realpath 双向前缀 + O_NOFOLLOW + 读前后 bigint stat 比对 TOCTOU + 1MiB 上限 + ENOENT 降级）为 memory 文件读取模板；**运行时无 YAML**（yaml 仅 devDependency、markdown-it 的唯一使用者不在发布白名单）——印证 DEV-2 手写 frontmatter。
 - **测试落点**：需要引擎二进制的 Node 测试进 `test:insights-engine` 组（先 cargo build；`test/helpers/insights-e2e.mjs` 提供二进制路径与跳过闸门，要求 Node ≥ 22.5）；纯 Node 测试进 `test:cli`；npm scripts 的测试文件列表是**硬编码枚举**，新文件必须显式追加。Rust 集成测试模板 `tests/insights_overview.rs:1-60`；crash 注入用 `THREADSHARE_INSIGHTS_TEST_CRASH_AT` failpoint（`storage.rs:13-48`）。
-- **发布白名单三份手抄副本**：`package.json`（src 逐文件、schema 整目录）、`scripts/verify-release.mjs`（90 条扁平清单 + 336KiB/1.625MiB 门限，逐位精确比对）、`test/release-automation.test.mjs`；`AGENTS.md` 的精确文件数与压缩门限同步——已在 Stage 8 完成。
+- **发布白名单三份手抄副本**：`package.json`（src 逐文件、schema 整目录）、`scripts/verify-release.mjs`（95 条扁平清单 + 368KiB/1.75MiB 门限，逐位精确比对）、`test/release-automation.test.mjs`；`AGENTS.md` 的精确文件数与压缩门限同步——Stage 8 建立，Phase 2 随新增协议与模块更新。
 
 ## 9. 契约字段定稿（Stage 2 实现依据）
 

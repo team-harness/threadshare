@@ -245,15 +245,26 @@ threadshare memory extract --runner claude --approve-plan <extraction-digest>
 threadshare memory extract --runner claude --approve-plan <adjudication-digest>
 threadshare memory review
 threadshare memory promote --plan <plan-id>
+# 再次精确批准，把 approved L1 归纳成 L2/L3：
+threadshare memory consolidate --runner claude
+threadshare memory consolidate --runner claude --approve-plan <consolidation-digest>
+threadshare memory review --kind consolidation
+threadshare memory promote --plan <plan-id>
 threadshare memory assemble --provider claude
+threadshare memory assemble --provider codex
 ```
 
 每个 runner 阶段除模型连接外均为 deny-all；只有用户批准该阶段的精确 digest 与字节摘要后，Threadshare
 才发送 transcript。`review` 要求真实 TTY 并逐条确认生成的 statement；非交互调用只能查看待审内容，
 不能批准。`promote` 只把净化后的正文写入 `.threadshare/memory/` 并刷新 approved 搜索投影，不会
-stage、commit 或 push。团队成员从 Git 拉取记忆后运行 `assemble`，即可同时刷新 provider 上下文块与
-本机搜索投影。筛选命中超过 200 个 Turn 时会拒绝，不会静默取前缀；选中的完整 Turn 会注入有界
-Delivery Trace 证据，并在候选提交前复核精确 source binding。无关 snapshot 推进不会让计划失效。
+stage、commit 或 push。归纳默认只处理基线后新增或变化的 approved L1；`--if-due` 使用 20 条触发门，
+`--full` 可在空 Patch 或可疑基线后重放全部 approved L1。团队成员从 Git 拉取记忆后，分别对实际使用的
+provider 运行 `assemble`，即可刷新 `CLAUDE.md` 或 `AGENTS.md` 的生成块与本机搜索投影。MCP 的
+`threadshare_memory_extract_preview` 和 `threadshare_memory_consolidate_preview` 都只能创建 0600 pending
+artifact，不能授权、启动 Runner 或返回对话/记忆正文。筛选命中超过 200 个 Turn 时会拒绝，不会静默取
+前缀；唯一的会话评分实现位于 Insights `extraction-candidates@1` Recipe，它强制 eligible、active、
+`hard-sealed` 与完整 Delivery Trace coverage，并在候选提交前复核精确 source binding。无关 snapshot
+推进不会让计划失效。
 
 ### 使用其他 Threadshare 服务端
 

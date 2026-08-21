@@ -209,11 +209,38 @@ function fakeReader(snapshotSeq = "7", options = {}) {
     async deliveryTrace() {
       return traceResponse(snapshotSeq);
     },
-    async recipe() {
+    async recipe(request) {
+      assert.equal(request.name, "extraction-candidates@1");
+      assert.deepEqual(request.filters.turnKeys, [...TURN_KEYS].sort());
+      assert.deepEqual(request.filters.sessionKeys, []);
+      assert.equal(request.limit, 66);
+      assert.equal(request.allowDegraded, false);
       return {
+        name: "extraction-candidates@1",
         databaseUuid: DATABASE_UUID,
-        snapshotSeq,
-        items: [{ status: "resolved" }],
+        snapshotSeq: options.recipeSnapshotSeq ?? snapshotSeq,
+        items: options.candidateItems ?? [{
+          sessionKey: SESSION_KEY,
+          eligibleTurnCount: "3",
+          directDeliveryEdgeCount: "1",
+          observedDeliveryEdgeCount: "0",
+          recoveredFailureChainCount: "1",
+          mainCapabilityInvocationCount: "0",
+          hasConclusiveFinalAnswer: true,
+          contributions: {
+            directDelivery: "40",
+            observedDelivery: "0",
+            recoveredFailureChains: "15",
+            capabilityDensity: "0",
+            conclusiveFinalAnswer: "5",
+          },
+          score: "60",
+          evidence: {
+            kind: "session",
+            sessionKey: SESSION_KEY,
+            revision: "9".repeat(64),
+          },
+        }],
         totalItemCount: "1",
         truncated: false,
       };
@@ -317,8 +344,9 @@ test("automatic selection restores complete Turns and injects commit/path Delive
     ["commit", "path"],
   );
   assert.equal(selection.sessions[0].deliveryEdges[0].pointer.commitHash, COMMIT_HASH);
-  assert.equal(selection.sessions[0].directDeliveryEdges, 2);
+  assert.equal(selection.sessions[0].directDeliveryEdges, 1);
   assert.equal(selection.sessions[0].recoveredFailureChains, 1);
+  assert.equal(selection.sessions[0].score, 60);
 
   const advanced = await collectMemoryInsightsSelection({ ...input, reader: fakeReader("8") });
   assert.equal(advanced.snapshotSeq, "8");

@@ -2,7 +2,7 @@
  * Team Memory CLI orchestration (Stage 7). Wires the completed lower modules
  * (memory-repository / memory-format / memory-lint / memory-state-client /
  * memory-extraction / memory-runner) into the user-facing `threadshare memory`
- * command group and the two read-only MCP tools.
+ * command group, its read-only MCP tools, and its two pending-only previews.
  *
  * Design references: docs/team-memory-phase1-design.md §5 (CLI surface), §8
  * (wiring), DEV-1/DEV-3; docs/team-memory-proposal.md §6.5 (review->promote),
@@ -37,10 +37,18 @@ import {
   adjudicationTaskSchema,
   authorizationManifestSchema,
   candidateDraftBatchSchema,
+  consolidationPatchSchema,
+  consolidationTaskSchema,
   extractionTaskSchema,
+  memoryDigestHex,
   restrictedExtractionRunnerSchema,
   runnerExecutionPlanSchema,
 } from "./memory-contracts.mjs";
+import {
+  buildConsolidationTask,
+  consolidationFilesFromOperations,
+  materializeConsolidationPatch,
+} from "./memory-consolidation.mjs";
 import {
   buildAdjudicationTask,
   buildEvidenceCatalog,
@@ -63,16 +71,20 @@ import {
   memoryAuthorize,
   memoryClaimTask,
   memoryConfirmStatement,
+  memoryConsolidationBaseline,
+  memoryListFiles,
   memoryOpen,
   memoryPlanTasks,
   memoryPromotionApply,
   memoryPromotionApprove,
   memoryPromotionPlan,
   memoryRecall,
+  memoryReadFile,
   memoryReviewQueue,
   memorySearch,
   memoryStatus,
   memorySubmitAdjudication,
+  memorySubmitConsolidation,
   memorySubmitExtraction,
   memorySyncApproved,
   MEMORY_MAX_SYNC_ENTRIES,
@@ -96,7 +108,8 @@ import {
 
 const DIAGNOSTIC_CODE_SET = new Set(DIAGNOSTIC_CODES);
 const MEMORY_ACTIONS = Object.freeze([
-  "init", "status", "lint", "extract", "review", "promote", "assemble", "reverify-runner",
+  "init", "status", "lint", "extract", "consolidate", "review", "promote", "assemble",
+  "reverify-runner",
 ]);
 const MEMORY_ROOT = ".threadshare/memory";
 const MEMORY_SUBDIRS = Object.freeze(["entries", "scenes", "skills"]);
@@ -221,16 +234,35 @@ export function parseMemoryInvocation(positionals, options) {
       if (provider === undefined) {
         throw memoryDiagnostic(
           "TS_USAGE_OPTION_DEPENDENCY",
-          "memory assemble requires --provider claude.",
-          "Run `threadshare memory assemble --provider claude`.",
+          "memory assemble requires --provider <claude|codex>.",
+          "Run `threadshare memory assemble --provider codex` or choose claude.",
+        );
+      }
+      if (provider !== "claude" && provider !== "codex") {
+        throw memoryDiagnostic(
+          "TS_USAGE_INVALID_VALUE",
+          "memory assemble --provider must be claude or codex.",
+          "Choose the provider context file to update.",
         );
       }
       return { action, repository: options.repository, provider };
     }
     case "review":
-      assertAllowedOptions(action, options, ["format", "repository"]);
+      assertAllowedOptions(action, options, ["format", "repository", "kind"]);
       if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
-      return { action, repository: options.repository, format: parseFormat(action, options) };
+      if (options.kind !== undefined && options.kind !== "entry" && options.kind !== "consolidation") {
+        throw memoryDiagnostic(
+          "TS_USAGE_INVALID_VALUE",
+          "memory review --kind must be entry or consolidation.",
+          "Use --kind consolidation to review generated scene/doctrine operations.",
+        );
+      }
+      return {
+        action,
+        repository: options.repository,
+        kind: options.kind ?? "entry",
+        format: parseFormat(action, options),
+      };
     case "promote": {
       assertAllowedOptions(action, options, ["plan", "repository", "format"]);
       if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
@@ -258,6 +290,47 @@ export function parseMemoryInvocation(positionals, options) {
         runnerEndpoint: options["runner-endpoint"],
         format: parseFormat(action, options),
       };
+    case "consolidate": {
+      assertAllowedOptions(action, options, [
+        "repository", "runner", "runner-model", "runner-endpoint", "approve-plan",
+        "if-due", "full", "format",
+      ]);
+      if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
+      if (options.full === true && options["if-due"] === true) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_CONFLICT",
+          "memory consolidate --full cannot be combined with --if-due.",
+          "Choose a full replay or the 20-entry due gate.",
+        );
+      }
+      if (options["approve-plan"] !== undefined &&
+          (options.full === true || options["if-due"] === true ||
+           options["runner-model"] !== undefined || options["runner-endpoint"] !== undefined)) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_CONFLICT",
+          "memory consolidate approval cannot change the pending task or runner settings.",
+          "Approve the stored plan using only --runner and --approve-plan.",
+        );
+      }
+      if ((options["runner-model"] === undefined) !== (options["runner-endpoint"] === undefined)) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_DEPENDENCY",
+          "--runner-model and --runner-endpoint must be supplied together.",
+          "Provide both exact Codex delivery settings, or neither when approving a stored plan.",
+        );
+      }
+      return {
+        action,
+        repository: options.repository,
+        runner: parseRunner(action, options),
+        runnerModel: options["runner-model"],
+        runnerEndpoint: options["runner-endpoint"],
+        approvePlan: options["approve-plan"],
+        ifDue: options["if-due"] === true,
+        full: options.full === true,
+        format: parseFormat(action, options),
+      };
+    }
     case "extract": {
       assertAllowedOptions(action, options, [
         "repository", "runner", "runner-model", "runner-endpoint", "approve-plan",
@@ -423,6 +496,22 @@ async function writeTextAtomic(directory, filename, text, mode = 0o644) {
   }
 }
 
+async function readTextNoFollow(filename, { missing = false } = {}) {
+  let handle;
+  try {
+    handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const info = await handle.stat();
+    if (!info.isFile()) unsafeMemoryPath(filename, "a regular file is required");
+    return { text: await handle.readFile("utf8"), mode: info.mode & 0o777 };
+  } catch (error) {
+    if (missing && error?.code === "ENOENT") return null;
+    if (error?.code === "ELOOP") unsafeMemoryPath(filename, "symbolic links are not allowed");
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
 /**
  * Open the shared machine origin secret, spawn an in-memory engine (no `--db`,
  * so insights.sqlite3 is never created or touched — design DEV-5), open the
@@ -501,11 +590,6 @@ function memoryInsightsReader(context, options) {
   return context.insightsReader;
 }
 
-function sameFileIdentity(left, right) {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs;
-}
-
 function approvedTreeDigest(entries) {
   return sha256Hex(canonicalJson({
     format: "threadshare-memory-source-tree@v1",
@@ -521,28 +605,16 @@ function partialApprovedScan(entries = []) {
   return { coverage: "partial", sourceTreeDigest: approvedTreeDigest(entries), entries: [] };
 }
 
-async function readApprovedEntry(entriesDir, name) {
-  const filename = path.join(entriesDir, name);
-  let handle;
+async function readApprovedEntry(context, name) {
+  const filename = `${MEMORY_ROOT}/entries/${name}`;
+  const { content: text } = await memoryReadFile(context.engine, {
+    ...context.owner,
+    collection: "entries",
+    name,
+  });
+  if (text === null) return null;
+  const bytes = Buffer.from(text, "utf8");
   try {
-    handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(MEMORY_MAX_TEXT_BYTES)) {
-      unsafeMemoryPath(filename, `approved entries must be regular files no larger than ${MEMORY_MAX_TEXT_BYTES} bytes`);
-    }
-    const bytes = await handle.readFile();
-    const after = await handle.stat({ bigint: true });
-    if (!sameFileIdentity(before, after)) return null;
-    const pathAfter = await lstat(filename, { bigint: true });
-    if (pathAfter.isSymbolicLink()) unsafeMemoryPath(filename, "symbolic links are not allowed");
-    if (!sameFileIdentity(after, pathAfter)) return null;
-
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      unsafeMemoryPath(filename, "approved entries must be valid UTF-8");
-    }
     const gate = lintEntryForPromotion(text);
     if (!gate.ok) {
       const codes = gate.findings.filter((finding) => finding.severity === "block")
@@ -565,7 +637,7 @@ async function readApprovedEntry(entriesDir, name) {
     }
     const contentDigest = sha256Hex(bytes);
     return {
-      path: `${MEMORY_ROOT}/entries/${name}`,
+      path: filename,
       contentDigest,
       projected: {
         entryId: parsed.frontmatter.id,
@@ -579,51 +651,29 @@ async function readApprovedEntry(entriesDir, name) {
     };
   } catch (error) {
     if (error?.code === "ENOENT") return null;
-    if (error?.code === "ELOOP") unsafeMemoryPath(filename, "symbolic links are not allowed");
     throw error;
-  } finally {
-    await handle?.close();
   }
 }
 
-async function scanApprovedEntries(rootRealpath) {
-  const entriesDir = path.join(rootRealpath, MEMORY_ROOT, "entries");
-  const directoryBefore = await lstat(entriesDir, { bigint: true }).catch((error) => {
-    if (error?.code === "ENOENT") return null;
-    throw error;
+async function scanApprovedEntries(context) {
+  const { names: namesBefore } = await memoryListFiles(context.engine, {
+    ...context.owner,
+    collection: "entries",
   });
-  if (directoryBefore === null) {
-    return { coverage: "complete", sourceTreeDigest: approvedTreeDigest([]), entries: [] };
-  }
-  if (directoryBefore.isSymbolicLink()) unsafeMemoryPath(entriesDir, "symbolic links are not allowed");
-  if (!directoryBefore.isDirectory()) unsafeMemoryPath(entriesDir, "a directory is required");
-  const namesBefore = (await readdir(entriesDir, { withFileTypes: true }))
-    .filter((entry) => entry.name.endsWith(".md"))
-    .sort((left, right) => left.name.localeCompare(right.name));
   if (namesBefore.length > MEMORY_MAX_SYNC_ENTRIES) {
-    unsafeMemoryPath(entriesDir, `approved entry count exceeds ${MEMORY_MAX_SYNC_ENTRIES}`);
+    unsafeMemoryPath(`${MEMORY_ROOT}/entries`, `approved entry count exceeds ${MEMORY_MAX_SYNC_ENTRIES}`);
   }
   const observed = [];
-  for (const directoryEntry of namesBefore) {
-    if (directoryEntry.isSymbolicLink()) {
-      unsafeMemoryPath(path.join(entriesDir, directoryEntry.name), "symbolic links are not allowed");
-    }
-    if (!directoryEntry.isFile()) {
-      unsafeMemoryPath(path.join(entriesDir, directoryEntry.name), "a regular file is required");
-    }
-    const entry = await readApprovedEntry(entriesDir, directoryEntry.name);
+  for (const name of namesBefore) {
+    const entry = await readApprovedEntry(context, name);
     if (entry === null) return partialApprovedScan(observed);
     observed.push(entry);
   }
-  const directoryAfter = await lstat(entriesDir, { bigint: true }).catch((error) => {
-    if (error?.code === "ENOENT") return null;
-    throw error;
+  const { names: namesAfter } = await memoryListFiles(context.engine, {
+    ...context.owner,
+    collection: "entries",
   });
-  if (directoryAfter === null || !sameFileIdentity(directoryBefore, directoryAfter)) {
-    return partialApprovedScan(observed);
-  }
-  const namesAfter = (await readdir(entriesDir)).filter((name) => name.endsWith(".md")).sort();
-  if (canonicalJson(namesAfter) !== canonicalJson(namesBefore.map((entry) => entry.name))) {
+  if (canonicalJson(namesAfter) !== canonicalJson(namesBefore)) {
     return partialApprovedScan(observed);
   }
   return {
@@ -633,7 +683,7 @@ async function scanApprovedEntries(rootRealpath) {
   };
 }
 
-async function syncApprovedProjection(context) {
+async function syncApprovedProjectionSnapshot(context) {
   const current = await memorySearch(context.engine, {
     ...context.owner,
     query: "threadshare",
@@ -641,7 +691,7 @@ async function syncApprovedProjection(context) {
   });
   let expectedGeneration = current.generation;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const scan = await scanApprovedEntries(context.rootRealpath);
+    const scan = await scanApprovedEntries(context);
     const result = await memorySyncApproved(context.engine, {
       ...context.owner,
       sourceTreeDigest: scan.sourceTreeDigest,
@@ -649,7 +699,7 @@ async function syncApprovedProjection(context) {
       expectedGeneration,
       entries: scan.entries,
     });
-    if (result.status === "synced") return result;
+    if (result.status === "synced") return { projection: result, scan };
     expectedGeneration = result.generation;
   }
   throw memoryDiagnostic(
@@ -657,6 +707,120 @@ async function syncApprovedProjection(context) {
     "Approved Team Memory changed concurrently during projection sync.",
     "Retry the same explicit memory command after repository writes finish.",
   );
+}
+
+async function syncApprovedProjection(context) {
+  return (await syncApprovedProjectionSnapshot(context)).projection;
+}
+
+async function readConsolidationSources(context) {
+  const scenes = [];
+  const { names: namesBefore } = await memoryListFiles(context.engine, {
+    ...context.owner,
+    collection: "scenes",
+  });
+  for (const filename of namesBefore) {
+    const name = filename.slice(0, -3);
+    const { content } = await memoryReadFile(context.engine, {
+      ...context.owner,
+      collection: "scenes",
+      name: filename,
+    });
+    if (content === null) {
+      throw memoryDiagnostic(
+        "TS_MEMORY_BINDING_DRIFT",
+        "A scene changed while consolidation sources were read.",
+        "Retry after repository writes finish.",
+      );
+    }
+    const parsed = parseSceneMeta(content);
+    scenes.push({
+      name,
+      contentDigest: sha256Hex(Buffer.from(content, "utf8")),
+      heat: parsed.meta.heat,
+      content,
+    });
+  }
+  const { names: namesAfter } = await memoryListFiles(context.engine, {
+    ...context.owner,
+    collection: "scenes",
+  });
+  if (canonicalJson(namesBefore) !== canonicalJson(namesAfter)) {
+    throw memoryDiagnostic(
+      "TS_MEMORY_BINDING_DRIFT",
+      "The scene set changed while consolidation sources were read.",
+      "Retry after repository writes finish.",
+    );
+  }
+  const { content: doctrineSource } = await memoryReadFile(context.engine, {
+    ...context.owner,
+    collection: "doctrine",
+    name: null,
+  });
+  let doctrine = null;
+  if (doctrineSource !== null) {
+    validateDoctrine(doctrineSource);
+    doctrine = {
+      contentDigest: sha256Hex(Buffer.from(doctrineSource, "utf8")),
+      content: doctrineSource,
+    };
+  }
+  return { scenes, doctrine };
+}
+
+function assertConsolidationSourcesMatch(binding, sources) {
+  const sceneRevisions = sources.scenes.map(({ name, contentDigest, heat }) => ({
+    name, contentDigest, heat,
+  }));
+  const doctrineDigest = sources.doctrine?.contentDigest ?? null;
+  if (canonicalJson(sceneRevisions) !== canonicalJson(binding?.sceneRevisions)
+      || memoryDigestHex(sceneRevisions) !== binding?.sceneIndexDigest
+      || doctrineDigest !== binding?.doctrineDigest) {
+    throw memoryDiagnostic(
+      "TS_MEMORY_BINDING_DRIFT",
+      "Scenes or doctrine changed after the consolidation patch was generated.",
+      "Discard or regenerate the consolidation patch before reviewing it.",
+    );
+  }
+}
+
+async function consolidationDatabaseUuid(context, options) {
+  const readConfig = options.readInsightsConfig ?? readExistingInsightsConfig;
+  const config = await readConfig({ paths: context.paths });
+  const scope = resolveMemoryInsightsScope({
+    config,
+    privacyContext: context.state.privacyContext,
+    rootRealpath: context.rootRealpath,
+    providers: [],
+    publicRepositoryIdentity: context.binding.publicRepositoryIdentity,
+  });
+  const response = await memoryInsightsReader(context, options).search({
+    query: "",
+    filters: {
+      providers: [],
+      projectKeys: scope.projectKeys,
+      observedAtOrAfterUnixMs: null,
+      observedBeforeUnixMs: null,
+      toolCapabilityKeys: [],
+      skillCapabilityKeys: [],
+      resultEvidence: [],
+      closureStates: ["hard-sealed"],
+      capabilityTerminalStates: [],
+    },
+    orderBy: "observed-desc",
+    limit: 1,
+    pathLimit: 0,
+    nowUnixMs: String(typeof options.now === "function" ? options.now() : Date.now()),
+    quiescenceSeconds: 300,
+  }, { signal: options.signal });
+  if (typeof response?.databaseUuid !== "string" || response.databaseUuid.length === 0) {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_ENGINE_PROTOCOL",
+      "Insights Search omitted the database identity needed for consolidation binding.",
+      "Run `threadshare insights sync`, then retry consolidation.",
+    );
+  }
+  return response.databaseUuid;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +937,81 @@ function reviewStatement(item, assessment) {
   };
 }
 
+async function consolidationReviewItem(context, item) {
+  const approved = await scanApprovedEntries(context);
+  const baseline = await memoryConsolidationBaseline(context.engine, context.owner);
+  if (approved.coverage !== "complete" ||
+      approved.sourceTreeDigest !== item.payload?.binding?.approvedProjection?.sourceTreeDigest ||
+      baseline.successfulRunId !== item.payload?.binding?.replay?.afterSuccessfulRunId) {
+    throw memoryDiagnostic(
+      "TS_MEMORY_BINDING_DRIFT",
+      "Approved L1 memory changed after the consolidation patch was generated.",
+      "Discard or regenerate the consolidation patch before reviewing it.",
+    );
+  }
+  const sources = await readConsolidationSources(context);
+  assertConsolidationSourcesMatch(item.payload?.binding, sources);
+  const sceneByName = new Map(sources.scenes.map((scene) => [scene.name, scene.content]));
+  const currentContent = (operation) => operation.target === "doctrine"
+    ? sources.doctrine?.content ?? null
+    : sceneByName.get(operation.name) ?? null;
+  const reviewTargetBlobHashes = new Map();
+  for (const file of consolidationFilesFromOperations(item.payload?.operations ?? [])) {
+    const name = path.basename(file.targetPath, ".md");
+    const content = file.targetPath === `${MEMORY_ROOT}/doctrine.md`
+      ? sources.doctrine?.content ?? null
+      : sceneByName.get(name) ?? null;
+    reviewTargetBlobHashes.set(
+      file.targetPath,
+      content === null ? null : gitBlobOid(Buffer.from(content, "utf8")),
+    );
+  }
+  const statements = [];
+  for (const statement of item.payload?.statements ?? []) {
+    const operation = statement.operation;
+    if (operation === null || typeof operation !== "object") continue;
+    const targetPath = operation.target === "doctrine"
+      ? `${MEMORY_ROOT}/doctrine.md`
+      : `${MEMORY_ROOT}/scenes/${operation.name}.md`;
+    const before = currentContent(operation) ?? "(file does not exist)";
+    const after = operation.op === "delete" ? "(file will be deleted)" : operation.newContent;
+    const mergeDeletes = operation.op === "merge"
+      ? operation.mergeSources
+          .filter((source) => source !== operation.name)
+          .flatMap((source) => [
+            `--- delete ${MEMORY_ROOT}/scenes/${source}.md`,
+            sceneByName.get(source) ?? "(file does not exist)",
+            "+++ deleted",
+            "(file will be deleted)",
+          ])
+      : [];
+    statements.push({
+      statementId: statement.statementId,
+      text: [
+        `${operation.op.toUpperCase()} ${operation.target} ${operation.name}`,
+        `Target: ${targetPath}`,
+        `Merge sources: ${operation.mergeSources.length > 0 ? operation.mergeSources.join(", ") : "none"}`,
+        `Rationale: ${operation.rationale}`,
+        "--- current",
+        before,
+        "+++ proposed",
+        after,
+        ...mergeDeletes,
+      ].join("\n"),
+      evidence: operation.basedOnEntryIds.map((entryId) => ({
+        kind: "approved-entry",
+        display: entryId,
+        excerpt: null,
+      })),
+    });
+  }
+  return {
+    ...item,
+    reviewTargetBlobHashes,
+    payload: { ...item.payload, reviewStatements: statements },
+  };
+}
+
 /** Create the human-only adapter used by `memory review` in a real TTY. */
 export function createMemoryReviewConfirmer({ input, output }) {
   if (input?.isTTY !== true || output?.isTTY !== true) return null;
@@ -856,12 +1095,18 @@ function sanitizedEntryFor(item, confirmedStatements) {
 async function runReview(invocation, options) {
   const context = await openMemoryContext(invocation, options);
   try {
-    const queue = await memoryReviewQueue(context.engine, context.owner);
+    const queue = await memoryReviewQueue(context.engine, {
+      ...context.owner,
+      kind: invocation.kind ?? "entry",
+    });
     const interactive = invocation.format !== "json" &&
       typeof options.confirmStatement === "function";
     const pending = [];
     const confirmedCandidates = [];
-    for (const item of queue.items) {
+    for (const queuedItem of queue.items) {
+      const item = queuedItem.candidateKind === "consolidation-patch"
+        ? await consolidationReviewItem(context, queuedItem)
+        : queuedItem;
       const confirmedStatements = [];
       let allConfirmed = item.assessments.length > 0;
       for (const assessment of item.assessments) {
@@ -916,6 +1161,36 @@ async function runReview(invocation, options) {
     const candidateIds = [];
     const rootRealpath = context.rootRealpath;
     for (const { item, confirmedStatements } of confirmedCandidates) {
+      if (item.candidateKind === "consolidation-patch") {
+        const files = consolidationFilesFromOperations(item.payload.operations ?? []);
+        for (const file of files) {
+          if (!item.reviewTargetBlobHashes?.has(file.targetPath)) {
+            throw memoryDiagnostic(
+              "TS_MEMORY_BINDING_DRIFT",
+              `Consolidation target ${file.targetPath} was not part of the reviewed snapshot.`,
+              "Discard or regenerate the consolidation patch.",
+            );
+          }
+          const targetBlobHash = item.reviewTargetBlobHashes.get(file.targetPath);
+          if (file.operation === "delete" && targetBlobHash === null) {
+            throw memoryDiagnostic(
+              "TS_MEMORY_BINDING_DRIFT",
+              `Consolidation delete target ${file.targetPath} no longer exists.`,
+              "Discard or regenerate the consolidation patch.",
+            );
+          }
+          perFile.push({
+            targetPath: file.targetPath,
+            operation: file.operation,
+            sanitizedContent: file.content === null
+              ? null
+              : Buffer.from(file.content, "utf8").toString("base64"),
+            targetBlobHash,
+          });
+        }
+        candidateIds.push(item.candidateId);
+        continue;
+      }
       const entry = sanitizedEntryFor(item, confirmedStatements);
       const gate = lintEntryForPromotion(entry.text);
       if (!gate.ok) {
@@ -931,6 +1206,7 @@ async function runReview(invocation, options) {
       }
       perFile.push({
         targetPath,
+        operation: "write",
         sanitizedContent: buffer.toString("base64"),
         targetBlobHash,
       });
@@ -1056,13 +1332,6 @@ async function runPromote(invocation, options) {
 // ---------------------------------------------------------------------------
 
 async function runAssemble(invocation, options) {
-  if (invocation.provider !== "claude") {
-    throw memoryDiagnostic(
-      "TS_USAGE_INVALID_VALUE",
-      `memory assemble does not implement provider "${invocation.provider}".`,
-      "Only --provider claude is implemented in Phase 1.",
-    );
-  }
   const context = await openMemoryContext(invocation, options);
   try {
     const cwd = context.rootRealpath;
@@ -1073,7 +1342,7 @@ async function runAssemble(invocation, options) {
     let doctrine = null;
     const doctrineFile = path.join(memoryRootAbs, "doctrine.md");
     if (await assertExistingPathKind(doctrineFile, "file")) {
-      const text = await readFile(doctrineFile, "utf8");
+      const { text } = await readTextNoFollow(doctrineFile);
       validateDoctrine(text);
       doctrine = text.trim();
     }
@@ -1085,10 +1354,17 @@ async function runAssemble(invocation, options) {
       for (const name of names) {
         const sceneFile = path.join(scenesDir, name);
         await assertExistingPathKind(sceneFile, "file");
-        const meta = parseSceneMeta(await readFile(sceneFile, "utf8"));
-        scenes.push({ name: name.replace(/\.md$/, ""), summary: meta.meta.summary });
+        const meta = parseSceneMeta((await readTextNoFollow(sceneFile)).text);
+        scenes.push({
+          name: name.replace(/\.md$/, ""),
+          summary: meta.meta.summary,
+          heat: meta.meta.heat,
+        });
       }
     }
+    scenes.sort((left, right) => right.heat - left.heat || left.name.localeCompare(right.name));
+    const omittedScenes = Math.max(0, scenes.length - 15);
+    const visibleScenes = scenes.slice(0, 15);
 
     const blockLines = [ASSEMBLE_BEGIN, ""];
     blockLines.push("## Team memory", "");
@@ -1097,33 +1373,36 @@ async function runAssemble(invocation, options) {
     } else {
       blockLines.push("_No approved team doctrine yet._", "");
     }
-    if (scenes.length > 0) {
+    if (visibleScenes.length > 0) {
       blockLines.push("### Scenes", "");
-      for (const scene of scenes) {
-        blockLines.push(`- ${MEMORY_ROOT}/scenes/${scene.name}.md — ${scene.summary}`);
+      for (const scene of visibleScenes) {
+        blockLines.push(
+          `- ${MEMORY_ROOT}/scenes/${scene.name}.md (heat ${scene.heat}) — ${scene.summary}`,
+        );
       }
+      if (omittedScenes > 0) blockLines.push(`- _${omittedScenes} additional scene(s) omitted._`);
       blockLines.push("");
     }
     blockLines.push(ASSEMBLE_END);
     const block = blockLines.join("\n");
 
     const approvedProjection = await syncApprovedProjection(context);
-    const claudeFile = path.join(cwd, "CLAUDE.md");
-    let existing = "";
-    const claudeInfo = await assertExistingPathKind(claudeFile, "file");
-    if (claudeInfo !== null) existing = await readFile(claudeFile, "utf8");
+    const targetName = invocation.provider === "codex" ? "AGENTS.md" : "CLAUDE.md";
+    const targetFile = path.join(cwd, targetName);
+    const target = await readTextNoFollow(targetFile, { missing: true });
+    const existing = target?.text ?? "";
     const next = spliceGeneratedBlock(existing, block);
     const changed = next !== existing;
     if (changed) {
-      const mode = claudeInfo === null ? 0o644 : claudeInfo.mode & 0o777;
-      await writeTextAtomic(cwd, "CLAUDE.md", next, mode);
+      await writeTextAtomic(cwd, targetName, next, target?.mode ?? 0o644);
     }
     return {
       action: "assemble",
-      provider: "claude",
-      target: "CLAUDE.md",
+      provider: invocation.provider,
+      target: targetName,
       doctrine: doctrine !== null,
-      scenes: scenes.length,
+      scenes: visibleScenes.length,
+      omittedScenes,
       changed,
       approvedProjection,
     };
@@ -1134,14 +1413,23 @@ async function runAssemble(invocation, options) {
 
 function spliceGeneratedBlock(existing, block) {
   const begin = existing.indexOf(ASSEMBLE_BEGIN);
-  if (begin === -1) {
+  const nextBegin = begin === -1 ? -1 : existing.indexOf(ASSEMBLE_BEGIN, begin + ASSEMBLE_BEGIN.length);
+  const endMarker = existing.indexOf(ASSEMBLE_END);
+  const nextEnd = endMarker === -1 ? -1 : existing.indexOf(ASSEMBLE_END, endMarker + ASSEMBLE_END.length);
+  if (begin === -1 && endMarker === -1) {
     const separator = existing.length === 0 || existing.endsWith("\n\n")
       ? ""
       : existing.endsWith("\n") ? "\n" : "\n\n";
     return `${existing}${separator}${block}\n`;
   }
-  const endMarker = existing.indexOf(ASSEMBLE_END, begin);
-  const end = endMarker === -1 ? existing.length : endMarker + ASSEMBLE_END.length;
+  if (begin === -1 || endMarker === -1 || nextBegin !== -1 || nextEnd !== -1 || begin >= endMarker) {
+    throw memoryDiagnostic(
+      "TS_OPERATION_FAILED",
+      "The provider context file has missing, duplicate, or out-of-order Threadshare memory markers.",
+      "Repair the single BEGIN/END marker pair without changing user content, then rerun assemble.",
+    );
+  }
+  const end = endMarker + ASSEMBLE_END.length;
   return `${existing.slice(0, begin)}${block}${existing.slice(end)}`;
 }
 
@@ -2166,6 +2454,336 @@ async function createExtractionPreview(context, invocation, request, limit, opti
   };
 }
 
+const CONSOLIDATION_DUE_ENTRY_COUNT = 20;
+
+function consolidationEntry(projected) {
+  return {
+    entryId: projected.entryId,
+    revision: projected.revision,
+    contentDigest: projected.contentDigest,
+    type: projected.frontmatter.type,
+    scene: projected.frontmatter.scene,
+    priority: projected.frontmatter.priority,
+    confidence: projected.frontmatter.confidence,
+    body: projected.bodyText,
+  };
+}
+
+async function currentConsolidationInput(context, options) {
+  const { projection, scan } = await syncApprovedProjectionSnapshot(context);
+  if (scan.coverage !== "complete" || projection.coverage !== "complete") {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_COVERAGE_INCOMPLETE",
+      "Approved Team Memory could not be scanned completely for consolidation.",
+      "Wait for repository writes to finish, then retry.",
+    );
+  }
+  const [databaseUuid, sources] = await Promise.all([
+    consolidationDatabaseUuid(context, options),
+    readConsolidationSources(context),
+  ]);
+  return {
+    databaseUuid,
+    approvedProjection: {
+      generation: projection.generation,
+      analyzerVersion: "memory-approved@1",
+      coverage: "complete",
+      sourceTreeDigest: scan.sourceTreeDigest,
+    },
+    entries: scan.entries.filter((entry) => entry.status === "approved").map(consolidationEntry),
+    ...sources,
+  };
+}
+
+function buildCurrentConsolidationTask(context, input, entries, replay) {
+  return buildConsolidationTask({
+    databaseUuid: input.databaseUuid,
+    memoryStateUuid: context.memoryStateUuid,
+    owner: context.owner,
+    approvedProjection: input.approvedProjection,
+    entries,
+    scenes: input.scenes,
+    doctrine: input.doctrine,
+    replay,
+    dueEntryCount: CONSOLIDATION_DUE_ENTRY_COUNT,
+  });
+}
+
+function consolidationCoverage(task) {
+  const coverage = task.entries.map((entry) => ({
+    sourceKind: "approved-entry",
+    opaqueSourceId: entry.entryId,
+    revision: entry.revision,
+    contentDigest: entry.contentDigest,
+    bytes: Buffer.byteLength(entry.body, "utf8"),
+    truncated: false,
+  }));
+  for (const scene of task.scenes) {
+    coverage.push({
+      sourceKind: "scene",
+      opaqueSourceId: scene.name,
+      revision: scene.heat,
+      contentDigest: scene.contentDigest,
+      bytes: Buffer.byteLength(scene.content, "utf8"),
+      truncated: false,
+    });
+  }
+  if (task.doctrine !== null) {
+    coverage.push({
+      sourceKind: "doctrine",
+      opaqueSourceId: "doctrine",
+      revision: null,
+      contentDigest: task.doctrine.contentDigest,
+      bytes: Buffer.byteLength(task.doctrine.content, "utf8"),
+      truncated: false,
+    });
+  }
+  coverage.push({
+    sourceKind: "prompt",
+    opaqueSourceId: task.binding.promptVersion,
+    revision: null,
+    contentDigest: sha256Hex(task.contract.prompts.consolidation),
+    bytes: Buffer.byteLength(task.contract.prompts.consolidation, "utf8"),
+    truncated: false,
+  });
+  return coverage;
+}
+
+async function createConsolidationPreview(context, invocation, options) {
+  const baseline = await memoryConsolidationBaseline(context.engine, context.owner);
+  if (baseline.pendingRunId !== null) {
+    return {
+      action: "consolidate",
+      authorized: false,
+      plans: [],
+      pendingRunId: baseline.pendingRunId,
+      note: "A consolidation patch is already awaiting review; review or discard it before creating another.",
+    };
+  }
+  const input = await currentConsolidationInput(context, options);
+  const baselineById = new Map(baseline.entries.map((entry) => [entry.entryId, entry]));
+  const selected = invocation.full
+    ? input.entries
+    : input.entries.filter((entry) => {
+        const previous = baselineById.get(entry.entryId);
+        return previous === undefined || previous.revision !== entry.revision ||
+          previous.contentDigest !== entry.contentDigest;
+      });
+  if (selected.length === 0) {
+    return {
+      action: "consolidate",
+      authorized: false,
+      plans: [],
+      entryCount: 0,
+      full: invocation.full,
+      note: "No new or changed approved L1 entries require consolidation.",
+    };
+  }
+  if (invocation.ifDue && selected.length < CONSOLIDATION_DUE_ENTRY_COUNT) {
+    return {
+      action: "consolidate",
+      authorized: false,
+      plans: [],
+      entryCount: selected.length,
+      dueAt: CONSOLIDATION_DUE_ENTRY_COUNT,
+      note: `Consolidation is not due: ${selected.length}/${CONSOLIDATION_DUE_ENTRY_COUNT} new or changed approved L1 entries.`,
+    };
+  }
+  const configuration = runnerConfiguration(invocation, options);
+  const task = buildCurrentConsolidationTask(context, input, selected, {
+    mode: invocation.full ? "full" : "incremental",
+    afterSuccessfulRunId: baseline.successfulRunId,
+  });
+  const stdinBytes = Buffer.from(canonicalJson(task), "utf8");
+  const plan = buildExecutionPlan({
+    taskKind: "consolidation",
+    taskId: task.taskId,
+    stdinBytes,
+    inputCoverage: consolidationCoverage(task),
+    profile: configuration.profile,
+    provider: configuration.provider,
+    model: configuration.model,
+    endpoint: configuration.endpoint,
+  });
+  const planned = await memoryPlanTasks(context.engine, {
+    ...context.owner,
+    chunks: [],
+    tasks: [{
+      taskId: task.taskId,
+      kind: "consolidation",
+      binding: task.binding,
+    }],
+  });
+  if (!planned.tasks[0]?.claimable) {
+    return {
+      action: "consolidate",
+      authorized: false,
+      plans: [],
+      entryCount: selected.length,
+      note: `Consolidation task ${task.taskId} is already claimed or submitted.`,
+    };
+  }
+  await persistPendingRunnerPlan(context, plan, stdinBytes, null, configuration.profile);
+  return {
+    action: "consolidate",
+    authorized: false,
+    plans: [summarizePlan(plan)],
+    entryCount: selected.length,
+    full: invocation.full,
+    note: "No memory content was delivered. Approve the exact plan digest in the CLI to run consolidation.",
+  };
+}
+
+async function revalidatePendingConsolidation(context, pending, options) {
+  if (pending.plan.taskKind !== "consolidation") {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_STATE_INVALID",
+      "The pending runner plan is not a consolidation task.",
+      "Generate a new plan with `threadshare memory consolidate`.",
+    );
+  }
+  let storedTask;
+  try {
+    storedTask = consolidationTaskSchema.parse(JSON.parse(pending.stdinBytes.toString("utf8")));
+  } catch (cause) {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_STATE_INVALID",
+      "The pending consolidation task failed contract validation.",
+      "Do not authorize it; regenerate the consolidation preview.",
+    );
+  }
+  const input = await currentConsolidationInput(context, options);
+  const baseline = await memoryConsolidationBaseline(context.engine, context.owner);
+  const currentById = new Map(input.entries.map((entry) => [entry.entryId, entry]));
+  const selected = storedTask.entries.map((entry) => currentById.get(entry.entryId)).filter(Boolean);
+  if (selected.length !== storedTask.entries.length) {
+    throw memoryDiagnostic(
+      "TS_MEMORY_BINDING_DRIFT",
+      "An approved L1 entry bound to the pending consolidation plan is no longer current.",
+      "Regenerate and approve a new consolidation plan.",
+    );
+  }
+  const currentTask = buildCurrentConsolidationTask(context, input, selected, {
+    mode: storedTask.binding.replay.mode,
+    afterSuccessfulRunId: baseline.successfulRunId,
+  });
+  if (canonicalJson(currentTask) !== canonicalJson(storedTask)) {
+    throw memoryDiagnostic(
+      "TS_MEMORY_BINDING_DRIFT",
+      "Approved entries, scenes, doctrine, owner, or projection changed after consolidation preview.",
+      "Regenerate and approve a new consolidation plan.",
+    );
+  }
+  return storedTask;
+}
+
+async function deliverPendingConsolidation(
+  context,
+  pending,
+  approvedPlan,
+  conformance,
+  options,
+) {
+  const task = await revalidatePendingConsolidation(context, pending, options);
+  await memoryPlanTasks(context.engine, {
+    ...context.owner,
+    chunks: [],
+    tasks: [{ taskId: task.taskId, kind: "consolidation", binding: task.binding }],
+  });
+  const claim = await memoryClaimTask(context.engine, {
+    taskId: task.taskId,
+    leaseHolder: "threadshare-memory-cli",
+    leaseMs: 300_000,
+  });
+  await recordRunnerAuthorization(context, approvedPlan, { via: "digest" });
+  const execution = await runExtractionRunner({
+    profile: pending.profile,
+    conformance,
+    plan: approvedPlan,
+    stdinBytes: pending.stdinBytes,
+    binaryPath: runnerBinaryPath(options, pending.profile),
+    signingKey: context.originSecret,
+    codexAuthPath: options.codexAuthPath,
+    tempRoot: options.runnerTempRoot,
+  });
+  let patch;
+  try {
+    patch = consolidationPatchSchema.parse(JSON.parse(execution.stdout));
+  } catch (cause) {
+    throw memoryDiagnostic(
+      "TS_INPUT_SCHEMA_INVALID",
+      "The consolidation runner did not return a valid ConsolidationPatch@v1.",
+      "Treat the runner result as failed and regenerate the plan.",
+    );
+  }
+  const runId = `run-${task.taskId}`;
+  const candidateId = patch.operations.length === 0 ? null : `patch-${task.taskId}`;
+  const materialized = materializeConsolidationPatch({ task, patch, candidateId, runId });
+  const accepted = await memorySubmitConsolidation(context.engine, {
+    taskId: task.taskId,
+    claimToken: claim.claimToken,
+    responseDigest: sha256Hex(canonicalJson(patch)),
+    runId,
+    candidateId,
+    operations: materialized.operations,
+    assessments: materialized.assessments,
+  });
+  return { accepted, materialized };
+}
+
+async function runConsolidate(invocation, options) {
+  const context = await openMemoryContext(invocation, options);
+  try {
+    if (invocation.approvePlan === undefined) {
+      return await createConsolidationPreview(context, invocation, options);
+    }
+    const pending = await loadPendingRunnerPlan(context, invocation.approvePlan);
+    if (pending === null) {
+      throw memoryDiagnostic(
+        "TS_INPUT_READ_FAILED",
+        `No pending consolidation plan matches ${invocation.approvePlan}.`,
+        "Run `threadshare memory consolidate --runner <provider>` to generate it first.",
+      );
+    }
+    assertPendingRunner(pending, invocation.runner);
+    if (pending.plan.taskKind !== "consolidation") {
+      throw memoryDiagnostic(
+        "TS_INPUT_SCHEMA_INVALID",
+        `Pending task ${pending.plan.taskId} is ${pending.plan.taskKind}, not consolidation.`,
+        "Approve this digest with the command that created it.",
+      );
+    }
+    const approvedPlan = approvePlan(pending.plan, { approvedDigest: invocation.approvePlan });
+    const conformance = await ensureConformance(
+      context,
+      pending.profile,
+      pending.profile.adapter,
+      options,
+    );
+    const { accepted } = await deliverPendingConsolidation(
+      context,
+      pending,
+      approvedPlan,
+      conformance,
+      options,
+    );
+    return {
+      action: "consolidate",
+      authorized: true,
+      taskId: accepted.taskId,
+      runId: accepted.runId,
+      status: accepted.status,
+      entryCount: accepted.entryCount,
+      candidateId: accepted.candidate?.candidateId ?? null,
+      note: accepted.status === "no_op"
+        ? `This run marked ${accepted.entryCount} approved L1 entries as consolidated with no changes.`
+        : "The patch is quarantined. Review every operation with `threadshare memory review --kind consolidation`.",
+    };
+  } finally {
+    await context.close();
+  }
+}
+
 async function runExtract(invocation, options) {
   const context = await openMemoryContext(invocation, options);
   try {
@@ -2285,6 +2903,7 @@ export async function executeMemoryCommand(invocation, options = {}) {
     case "assemble": return runAssemble(invocation, options);
     case "reverify-runner": return runReverifyRunner(invocation, options);
     case "extract": return runExtract(invocation, options);
+    case "consolidate": return runConsolidate(invocation, options);
     default:
       throw memoryDiagnostic("TS_USAGE_INVALID_VALUE", `Unknown memory action: ${invocation.action}.`,
         `Choose one of: ${MEMORY_ACTIONS.join(", ")}.`);
@@ -2312,6 +2931,10 @@ export function formatMemoryCommandResult(result, invocation) {
       line(lines, `  tasks:      pending ${result.tasks.pending}, claimed ${result.tasks.claimed}, submitted ${result.tasks.submitted}, stale ${result.tasks.stale}`);
       line(lines, `  candidates: draft ${result.candidates.draft}, quarantined ${result.candidates.quarantined}, promoted ${result.candidates.promoted}, discarded ${result.candidates.discarded}`);
       line(lines, `  promotions: generated ${result.promotions.generated}, approved ${result.promotions.approved}, applied ${result.promotions.applied}, voided ${result.promotions.voided}`);
+      line(lines, `  consolidation: pending review ${result.consolidations.pendingReview}, no-op ${result.consolidations.noOp}, applied ${result.consolidations.applied}, stale ${result.consolidations.stale}`);
+      if (result.consolidations.lastSuccessfulEntryCount > 0) {
+        line(lines, `  last baseline: ${result.consolidations.lastSuccessfulEntryCount} L1 entr${result.consolidations.lastSuccessfulEntryCount === 1 ? "y" : "ies"}${result.consolidations.lastSuccessfulNoOp ? " (no changes)" : ""}`);
+      }
       break;
     case "lint":
       if (result.files.length === 0) {
@@ -2330,7 +2953,7 @@ export function formatMemoryCommandResult(result, invocation) {
       if (result.plan) {
         line(lines, `Promotion plan ${result.plan.planId} (digest ${result.plan.planDigest.slice(0, 12)}…)`);
         for (const file of result.plan.files) {
-          line(lines, `  + ${file.targetPath} (${file.bytes} bytes)`);
+          line(lines, `  ${file.operation === "delete" ? "-" : "+"} ${file.targetPath} (${file.bytes} bytes)`);
         }
         line(lines, `Run \`threadshare memory promote --plan ${result.plan.planId}\`.`);
       } else {
@@ -2356,6 +2979,22 @@ export function formatMemoryCommandResult(result, invocation) {
       break;
     case "reverify-runner":
       line(lines, `Runner ${result.runner} (${result.profile}) passed conformance at ${result.passedAt}.`);
+      break;
+    case "consolidate":
+      if (!result.authorized) {
+        if (result.plans.length === 0) {
+          line(lines, result.note);
+        } else {
+          const plan = result.plans[0];
+          line(lines, `Pending consolidation plan ${plan.planDigest} (${result.entryCount} approved L1 entries, ${plan.bytesToSend} bytes).`);
+          line(lines, result.note);
+        }
+      } else {
+        line(lines, result.status === "no_op"
+          ? `Consolidation completed with no changes for ${result.entryCount} approved L1 entries.`
+          : `Consolidation patch ${result.candidateId} is awaiting operation review.`);
+        line(lines, result.note);
+      }
       break;
     case "extract":
       if (!result.authorized) {
@@ -2436,6 +3075,7 @@ export async function executeMemoryMcp(action, args, options = {}) {
           applied: status.promotions.applied,
           voided: status.promotions.voided,
         },
+        consolidations: status.consolidations,
         extraction: {
           entrypoint: "mcp-preview-cli-approval",
           note: "MCP can create pending extraction plans only. Use the CLI to approve each exact delivery digest; no transcript is ever returned here.",
@@ -2455,6 +3095,24 @@ export async function executeMemoryMcp(action, args, options = {}) {
         plans: preview.plans,
         manifestDigest: preview.manifestDigest,
         selection: preview.selection,
+        note: preview.note,
+      };
+    }
+    if (action === "consolidate-preview") {
+      const preview = await createConsolidationPreview(context, {
+        action: "consolidate",
+        runner: args.runner,
+        runnerModel: args.model,
+        runnerEndpoint: args.endpoint,
+        ifDue: args.ifDue === true,
+        full: args.full === true,
+      }, options);
+      return {
+        format: "threadshare-memory-consolidation-preview@v1",
+        authorized: false,
+        plans: preview.plans,
+        entryCount: preview.entryCount ?? 0,
+        pendingRunId: preview.pendingRunId ?? null,
         note: preview.note,
       };
     }

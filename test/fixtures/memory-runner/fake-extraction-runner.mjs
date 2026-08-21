@@ -6,11 +6,11 @@
 //   - `--version`: prints a stable version line and exits 0.
 //   - deny-all conformance probe (non-JSON stdin): reports refusals and touches
 //     nothing on the filesystem or network.
-//   - ExtractionTask@v1 / AdjudicationTask@v1 JSON stdin: emits the matching
-//     CandidateDraftBatch@v1 / AdjudicationResult@v1, echoing taskId + binding.
+//   - ExtractionTask@v1 / AdjudicationTask@v1 / ConsolidationTask@v1 JSON stdin:
+//     emits the matching contract while echoing taskId + binding.
 //
-// When FAKE_RUNNER_MARKER is set and this is not a `--version` probe, it writes
-// a marker file so a test can prove whether the process actually ran.
+// When FAKE_RUNNER_MARKER is set for a contract task, it writes a marker file
+// so a test can distinguish content delivery from a deny-all probe.
 import { writeFileSync } from "node:fs";
 import process from "node:process";
 
@@ -23,15 +23,15 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const input = Buffer.concat(chunks).toString("utf8");
 
-if (process.env.FAKE_RUNNER_MARKER) {
-  writeFileSync(process.env.FAKE_RUNNER_MARKER, "executed\n");
-}
-
 let task = null;
 try {
   task = JSON.parse(input);
 } catch {
   task = null;
+}
+
+if (process.env.FAKE_RUNNER_MARKER && typeof task?.format === "string") {
+  writeFileSync(process.env.FAKE_RUNNER_MARKER, "executed\n");
 }
 
 function refusalReport() {
@@ -89,6 +89,33 @@ if (task === null || typeof task !== "object") {
       targetIds: [],
       mergedFields: null,
     })),
+  };
+} else if (task.format === "threadshare-memory-consolidation-task@v1") {
+  const entryId = task.entries?.[0]?.entryId;
+  const forceNoOp = task.entries?.some((entry) =>
+    entry.body?.includes("THREADSHARE_TEST_EMPTY_PATCH"));
+  output = {
+    format: "threadshare-memory-consolidation-patch@v1",
+    taskId: task.taskId,
+    binding: task.binding,
+    operations: entryId && !forceNoOp ? [{
+      operationId: "consolidate-release-workflow",
+      op: task.scenes?.some((scene) => scene.name === "release-workflow") ? "update" : "create",
+      target: "scene",
+      name: "release-workflow",
+      newContent: [
+        "-----META-START-----",
+        "created: 2026-08-21",
+        "updated: 2026-08-21",
+        "summary: \"Release workflow\"",
+        "-----META-END-----",
+        "## Release workflow",
+        "Run the release verification suite before publishing.",
+      ].join("\n"),
+      basedOnEntryIds: [entryId],
+      mergeSources: [],
+      rationale: "Keep the approved release workflow reusable across future sessions.",
+    }] : [],
   };
 } else {
   output = refusalReport();

@@ -1,19 +1,28 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs2::FileExt;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use threadshare_insights_engine::memory_promotion::git_blob_oid_hex;
 use threadshare_insights_engine::memory_protocol::{
-    BindRepositoryRequest, ClaimTaskRequest, ConfirmStatementRequest, DiscardCandidateRequest,
-    MemorySearchRequest, MemoryStatusRequest, PlanTasksRequest, PromotionApplyRequest,
-    PromotionApproveRequest, PromotionPlanRequest, RecallRequest, SubmitAdjudicationRequest,
-    SubmitExtractionRequest, SyncApprovedRequest,
+    BindRepositoryRequest, ClaimTaskRequest, ConfirmStatementRequest, ConsolidationBaselineRequest,
+    DiscardCandidateRequest, ListMemoryFilesRequest, MemorySearchRequest, MemoryStatusRequest,
+    PlanTasksRequest, PromotionApplyRequest, PromotionApproveRequest, PromotionPlanRequest,
+    ReadMemoryFileRequest, RecallRequest, ReviewQueueRequest, SubmitAdjudicationRequest,
+    SubmitConsolidationRequest, SubmitExtractionRequest, SyncApprovedRequest,
 };
-use threadshare_insights_engine::memory_state::{MEMORY_STATE_SCHEMA_VERSION, MemoryStorage};
+use threadshare_insights_engine::memory_state::{
+    MEMORY_STATE_RELATIVE_PATH, MEMORY_STATE_SCHEMA_VERSION, MemoryStorage,
+};
+use threadshare_insights_engine::try_canonical_json;
 
 static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
 const REPO: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const TREE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+const RELEASE_SCENE: &str = "-----META-START-----\ncreated: 2026-08-01\nupdated: 2026-08-20\nsummary: \"release\"\nheat: 1\n-----META-END-----\n# Release\n\nOld guidance.\n";
 
 fn temp_state_dir(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -27,6 +36,32 @@ fn temp_state_dir(label: &str) -> PathBuf {
 
 fn hex64(character: char) -> String {
     character.to_string().repeat(64)
+}
+
+fn canonical_digest(value: &Value) -> String {
+    hex::encode(Sha256::digest(
+        try_canonical_json(value).unwrap().as_bytes(),
+    ))
+}
+
+fn promotion_staging_artifact(
+    parent: &std::path::Path,
+    plan_id: &str,
+    target_path: &str,
+    direction: &str,
+    suffix: &str,
+) -> PathBuf {
+    let mut token = Sha256::new();
+    token.update(plan_id.as_bytes());
+    token.update([0]);
+    token.update(target_path.as_bytes());
+    token.update([0]);
+    token.update(direction.as_bytes());
+    parent.join(format!(
+        ".threadshare-promotion-{}.{}",
+        hex::encode(token.finalize()),
+        suffix
+    ))
 }
 
 fn request<T: serde::de::DeserializeOwned>(value: Value) -> T {
@@ -178,6 +213,15 @@ fn sync_request(
     expected_generation: i64,
     entries: &[(&str, &str)],
 ) -> SyncApprovedRequest {
+    sync_request_with_digest(&hex64(digest_char), coverage, expected_generation, entries)
+}
+
+fn sync_request_with_digest(
+    source_tree_digest: &str,
+    coverage: &str,
+    expected_generation: i64,
+    entries: &[(&str, &str)],
+) -> SyncApprovedRequest {
     let entry_values: Vec<Value> = entries
         .iter()
         .map(|(entry_id, text)| {
@@ -195,13 +239,216 @@ fn sync_request(
     let value: SyncApprovedRequest = request(json!({
         "repositoryKey": REPO,
         "worktreeKey": TREE,
-        "sourceTreeDigest": hex64(digest_char),
+        "sourceTreeDigest": source_tree_digest,
         "coverage": coverage,
         "expectedGeneration": expected_generation,
         "entries": entry_values,
     }));
     value.validate().unwrap();
     value
+}
+
+fn consolidation_binding(storage: &MemoryStorage, source_tree_digest: &str) -> Value {
+    consolidation_binding_for(
+        storage,
+        1,
+        source_tree_digest,
+        &[("entry-1", 1, hex64('9'))],
+    )
+}
+
+fn consolidation_binding_for(
+    storage: &MemoryStorage,
+    generation: i64,
+    source_tree_digest: &str,
+    entries: &[(&str, i64, String)],
+) -> Value {
+    let baseline: ConsolidationBaselineRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+    }));
+    let after_successful_run_id =
+        storage.consolidation_baseline(&baseline).unwrap()["successfulRunId"].clone();
+    let entry_revisions = Value::Array(
+        entries
+            .iter()
+            .map(|(entry_id, revision, content_digest)| {
+                json!({
+                    "entryId": entry_id,
+                    "revision": revision,
+                    "contentDigest": content_digest,
+                })
+            })
+            .collect(),
+    );
+    let scene_revisions = json!([{
+        "name": "release",
+        "contentDigest": hex::encode(Sha256::digest(RELEASE_SCENE.as_bytes())),
+        "heat": 1,
+    }]);
+    json!({
+        "databaseUuid": "database-1",
+        "memoryStateUuid": storage.memory_state_uuid().unwrap(),
+        "owner": { "repositoryKey": REPO, "worktreeKey": TREE },
+        "approvedProjection": {
+            "generation": generation,
+            "analyzerVersion": "memory-approved@1",
+            "coverage": "complete",
+            "sourceTreeDigest": source_tree_digest,
+        },
+        "entrySetDigest": canonical_digest(&entry_revisions),
+        "entryRevisions": entry_revisions,
+        "sceneIndexDigest": canonical_digest(&scene_revisions),
+        "sceneRevisions": scene_revisions,
+        "doctrineDigest": null,
+        "replay": {
+            "mode": "incremental",
+            "afterSuccessfulRunId": after_successful_run_id,
+        },
+        "promptVersion": "memory-prompts@1",
+        "schemaVersion": "threadshare-memory-consolidation-task@v1",
+        "policyVersion": "consolidation-policy@1",
+    })
+}
+
+fn prepare_consolidation_worktree(storage: &mut MemoryStorage, label: &str) -> PathBuf {
+    let worktree = temp_state_dir(label);
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(
+        worktree.join(".threadshare/memory/scenes/release.md"),
+        RELEASE_SCENE,
+    )
+    .unwrap();
+    bind_worktree(storage, &worktree);
+    worktree
+}
+
+fn write_approved_entry_tree(worktree: &std::path::Path, entries: &[(&str, &str)]) -> String {
+    let entries_dir = worktree.join(".threadshare/memory/entries");
+    std::fs::create_dir_all(&entries_dir).unwrap();
+    for entry in std::fs::read_dir(&entries_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) == Some("md") {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let mut digests = entries
+        .iter()
+        .map(|(entry_id, content)| {
+            let name = format!("{entry_id}.md");
+            std::fs::write(entries_dir.join(&name), content).unwrap();
+            json!({
+                "path": format!(".threadshare/memory/entries/{name}"),
+                "contentDigest": hex::encode(Sha256::digest(content.as_bytes())),
+            })
+        })
+        .collect::<Vec<_>>();
+    digests.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap()
+            .cmp(right["path"].as_str().unwrap())
+    });
+    canonical_digest(&json!({
+        "format": "threadshare-memory-source-tree@v1",
+        "entries": digests,
+    }))
+}
+
+fn materialized_update(heat: i64) -> Value {
+    json!({
+        "operationId": "op-release",
+        "op": "update",
+        "target": "scene",
+        "name": "release",
+        "newContent": format!(
+            "-----META-START-----\ncreated: 2026-08-01\nupdated: 2026-08-21\nsummary: \"release\"\nheat: {heat}\n-----META-END-----\n# Release\n\nRun verification.\n"
+        ),
+        "basedOnEntryIds": ["entry-1"],
+        "mergeSources": [],
+        "rationale": "Fold the approved release guidance into the existing scene.",
+    })
+}
+
+fn consolidation_submit(
+    task_id: &str,
+    claim_token: &str,
+    run_id: &str,
+    operation: Option<Value>,
+) -> SubmitConsolidationRequest {
+    let (candidate_id, operations, assessments) = match operation {
+        Some(operation) => {
+            let statement_digest = canonical_digest(&operation);
+            let citations_digest = canonical_digest(&json!([{
+                "entryId": "entry-1",
+                "revision": 1,
+                "contentDigest": hex64('9'),
+            }]));
+            (
+                Value::String(format!("candidate-{run_id}")),
+                json!([operation]),
+                json!([{
+                    "candidateId": format!("candidate-{run_id}"),
+                    "statementId": "op-release",
+                    "citationsDigest": citations_digest,
+                    "provenanceStrength": "contextual",
+                    "limitations": [
+                        "generated-consolidation-content",
+                        "source-approved-memory-only",
+                    ],
+                    "claimSupport": "unverified",
+                    "assessedBy": "deterministic",
+                    "statementTextDigest": statement_digest,
+                    "revision": 1,
+                }]),
+            )
+        }
+        None => (Value::Null, json!([]), json!([])),
+    };
+    let value: SubmitConsolidationRequest = request(json!({
+        "taskId": task_id,
+        "claimToken": claim_token,
+        "responseDigest": canonical_digest(&json!({ "run": run_id })),
+        "runId": run_id,
+        "candidateId": candidate_id,
+        "operations": operations,
+        "assessments": assessments,
+    }));
+    value.validate().unwrap();
+    value
+}
+
+fn submit_consolidation_task(
+    storage: &mut MemoryStorage,
+    task_id: &str,
+    run_id: &str,
+    binding: Value,
+    operation: Option<Value>,
+    now_unix_ms: i64,
+) -> (SubmitConsolidationRequest, Value) {
+    let plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": task_id,
+            "kind": "consolidation",
+            "binding": binding,
+        }],
+    }));
+    storage.plan_tasks(&plan, now_unix_ms).unwrap();
+    let token = claim(
+        storage,
+        task_id,
+        "holder-consolidation",
+        60_000,
+        now_unix_ms + 1,
+    );
+    let submit = consolidation_submit(task_id, &token, run_id, operation);
+    let outcome = storage
+        .submit_consolidation(&submit, now_unix_ms + 2)
+        .unwrap();
+    (submit, outcome)
 }
 
 #[test]
@@ -235,6 +482,253 @@ fn opens_and_migrates_idempotently_with_owner_only_permissions() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+}
+
+fn create_v1_database(path: &std::path::Path, include_required_tables: bool) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE memory_state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO memory_state_meta(key,value) VALUES
+               ('schema_version','1'),
+               ('memoryStateUuid','00000000-0000-4000-8000-000000000001');
+             CREATE TABLE promotion_files (
+               plan_id TEXT NOT NULL, target_path TEXT NOT NULL,
+               target_blob_hash TEXT, sanitized_content BLOB NOT NULL,
+               sanitized_digest BLOB NOT NULL, applied INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (plan_id,target_path)
+             );",
+        )
+        .unwrap();
+    if include_required_tables {
+        connection
+            .execute_batch(
+                "CREATE TABLE candidates (
+                   candidate_id TEXT PRIMARY KEY,
+                   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
+                   chunk_ref TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                   content_digest BLOB NOT NULL, payload_json TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'draft',
+                   adjudication TEXT NOT NULL DEFAULT 'pending', updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE promotion_journal (
+                   plan_id TEXT PRIMARY KEY, repository_key BLOB NOT NULL,
+                   worktree_key BLOB NOT NULL, plan_canonical_json TEXT NOT NULL,
+                   plan_digest BLOB NOT NULL, candidate_ids_json TEXT NOT NULL,
+                   assessment_digest BLOB NOT NULL, policy_version TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'generated', updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO candidates(
+                   candidate_id,repository_key,worktree_key,chunk_ref,revision,
+                   content_digest,payload_json,status,adjudication,updated_at
+                 ) VALUES (
+                   'candidate-v1',zeroblob(32),zeroblob(32),'chunk-v1',1,
+                   zeroblob(32),'{}','quarantined','store',1
+                 );
+                 INSERT INTO promotion_journal(
+                   plan_id,repository_key,worktree_key,plan_canonical_json,plan_digest,
+                   candidate_ids_json,assessment_digest,policy_version,status,updated_at
+                 ) VALUES
+                   ('plan-pending',zeroblob(32),zeroblob(32),'{}',zeroblob(32),'[]',
+                    zeroblob(32),'policy@1','applying',1),
+                   ('plan-applied',zeroblob(32),zeroblob(32),'{}',zeroblob(32),'[]',
+                    zeroblob(32),'policy@1','applied',2);",
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO promotion_files(
+               plan_id,target_path,target_blob_hash,sanitized_content,sanitized_digest,applied
+             ) VALUES ('plan-pending','.threadshare/memory/scenes/a.md',?1,?2,?3,0)",
+            params!["a".repeat(40), b"new-a".as_slice(), vec![0xa1_u8; 32]],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO promotion_files(
+               plan_id,target_path,target_blob_hash,sanitized_content,sanitized_digest,applied
+             ) VALUES ('plan-applied','.threadshare/memory/scenes/b.md',?1,?2,?3,1)",
+            params!["b".repeat(40), b"new-b".as_slice(), vec![0xb1_u8; 32]],
+        )
+        .unwrap();
+}
+
+#[test]
+fn migrates_v1_partial_promotions_as_legacy_write_only_without_losing_progress() {
+    let state_dir = temp_state_dir("migrate-v1-partial");
+    let database_path = state_dir.join(MEMORY_STATE_RELATIVE_PATH);
+    create_v1_database(&database_path, true);
+
+    let storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    assert_eq!(
+        storage.schema_version().unwrap(),
+        MEMORY_STATE_SCHEMA_VERSION
+    );
+    drop(storage);
+
+    let connection = Connection::open(&database_path).unwrap();
+    let files = connection
+        .prepare(
+            "SELECT target_path,operation,intent_state,originally_present,
+                    rollback_content,legacy_write_only,applied,sanitized_content
+             FROM promotion_files ORDER BY target_path",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Vec<u8>>(7)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].0, ".threadshare/memory/scenes/a.md");
+    assert_eq!(
+        (&files[0].1, &files[0].2),
+        (&"write".to_owned(), &"pending".to_owned())
+    );
+    assert_eq!(files[0].3, None);
+    assert_eq!(files[0].4, None);
+    assert_eq!((files[0].5, files[0].6), (1, 0));
+    assert_eq!(files[0].7, b"new-a");
+    assert_eq!(
+        (&files[1].1, &files[1].2),
+        (&"write".to_owned(), &"applied".to_owned())
+    );
+    assert_eq!((files[1].5, files[1].6), (1, 1));
+    let phases = connection
+        .prepare("SELECT plan_id,mutation_phase FROM promotion_journal ORDER BY plan_id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        phases,
+        vec![
+            ("plan-applied".to_owned(), "done".to_owned()),
+            ("plan-pending".to_owned(), "mutating".to_owned())
+        ]
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT candidate_kind FROM candidates WHERE candidate_id='candidate-v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "entry"
+    );
+}
+
+#[test]
+fn legacy_write_only_recovery_artifacts_keep_the_plan_nonterminal() {
+    let state_dir = temp_state_dir("migrate-v1-recovery-artifact");
+    let worktree = temp_state_dir("migrate-v1-recovery-worktree");
+    let database_path = state_dir.join(MEMORY_STATE_RELATIVE_PATH);
+    create_v1_database(&database_path, true);
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+
+    let target_path = ".threadshare/memory/scenes/a.md";
+    let target = worktree.join(target_path);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"legacy old").unwrap();
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE promotion_journal SET repository_key=?1, worktree_key=?2
+             WHERE plan_id='plan-pending'",
+            params![vec![0x11_u8; 32], vec![0x22_u8; 32]],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE promotion_files SET target_blob_hash=?1
+             WHERE plan_id='plan-pending' AND target_path=?2",
+            params![git_blob_oid_hex(b"legacy old"), target_path],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut token = Sha256::new();
+    token.update(b"plan-pending");
+    token.update([0]);
+    token.update(target_path.as_bytes());
+    token.update([0]);
+    token.update(b"forward");
+    let hold = target.parent().unwrap().join(format!(
+        ".threadshare-promotion-{}.hold",
+        hex::encode(token.finalize())
+    ));
+    std::fs::write(&hold, b"legacy old").unwrap();
+
+    let error = storage
+        .promotion_apply(&apply_request("plan-pending", &worktree), 20_000)
+        .unwrap_err();
+    assert_eq!(error.code, "TS_MEMORY_ROLLBACK_REQUIRED");
+    assert_eq!(std::fs::read(&target).unwrap(), b"legacy old");
+    assert_eq!(std::fs::read(&hold).unwrap(), b"legacy old");
+    let connection = Connection::open(&database_path).unwrap();
+    let state: (String, String) = connection
+        .query_row(
+            "SELECT status, mutation_phase FROM promotion_journal
+             WHERE plan_id='plan-pending'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("applying".to_owned(), "mutating".to_owned()));
+}
+
+#[test]
+fn failed_v1_migration_rolls_back_to_a_complete_v1_database() {
+    let state_dir = temp_state_dir("migrate-v1-rollback");
+    let database_path = state_dir.join(MEMORY_STATE_RELATIVE_PATH);
+    create_v1_database(&database_path, false);
+    assert!(MemoryStorage::open_state_dir(&state_dir).is_err());
+
+    let connection = Connection::open(&database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM memory_state_meta WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM promotion_files", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='promotion_files_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -357,6 +851,778 @@ fn submit_extraction_is_idempotent_and_audits_digest_conflicts() {
         .query_row("SELECT COUNT(*) FROM submissions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(submissions, 1);
+}
+
+#[test]
+fn consolidation_submit_is_transactional_kind_filtered_and_digest_bound() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-submit");
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let binding = consolidation_binding(&storage, &source_tree_digest);
+    let plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-consolidate-1",
+            "kind": "consolidation",
+            "chunkRef": null,
+            "draftBatchRef": null,
+            "binding": binding,
+            "authorizationPlanDigest": null,
+        }],
+    }));
+    storage.plan_tasks(&plan, 1_000).unwrap();
+    let token = claim(
+        &mut storage,
+        "task-consolidate-1",
+        "holder-c",
+        60_000,
+        10_000,
+    );
+    let submit = consolidation_submit(
+        "task-consolidate-1",
+        &token,
+        "run-1",
+        Some(materialized_update(2)),
+    );
+    let outcome = storage.submit_consolidation(&submit, 10_100).unwrap();
+    assert_eq!(outcome["status"], "pending_review");
+    assert_eq!(outcome["candidate"]["status"], "quarantined");
+    assert_eq!(outcome["entryCount"], 1);
+    assert_eq!(outcome["idempotent"], false);
+    assert_eq!(
+        storage.submit_consolidation(&submit, 10_200).unwrap()["idempotent"],
+        true
+    );
+
+    let entry_queue: ReviewQueueRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "kind": "entry",
+    }));
+    assert!(storage.review_queue(&entry_queue).unwrap().items.is_empty());
+    let consolidation_queue: ReviewQueueRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "kind": "consolidation",
+    }));
+    let queue = storage.review_queue(&consolidation_queue).unwrap();
+    assert_eq!(queue.items.len(), 1);
+    assert_eq!(queue.items[0].candidate_kind, "consolidation-patch");
+    assert_eq!(queue.items[0].assessments.len(), 1);
+    assert_eq!(
+        queue.items[0].payload["statements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let baseline: ConsolidationBaselineRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+    }));
+    let baseline = storage.consolidation_baseline(&baseline).unwrap();
+    assert_eq!(baseline["successfulRunId"], Value::Null);
+    assert_eq!(baseline["pendingRunId"], "run-1");
+}
+
+#[test]
+fn consolidation_submit_rejects_host_heat_forgery_and_projection_drift() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-drift");
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let binding = consolidation_binding(&storage, &source_tree_digest);
+    for (task_id, binding) in [("task-bad-heat", binding.clone()), ("task-drift", binding)] {
+        let plan: PlanTasksRequest = request(json!({
+            "repositoryKey": REPO,
+            "worktreeKey": TREE,
+            "chunks": [],
+            "tasks": [{
+                "taskId": task_id,
+                "kind": "consolidation",
+                "binding": binding,
+            }],
+        }));
+        storage.plan_tasks(&plan, 1_000).unwrap();
+    }
+    let token = claim(&mut storage, "task-bad-heat", "holder-c", 60_000, 10_000);
+    let forged = consolidation_submit(
+        "task-bad-heat",
+        &token,
+        "run-bad-heat",
+        Some(materialized_update(999)),
+    );
+    assert_eq!(
+        storage
+            .submit_consolidation(&forged, 10_100)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_CONSOLIDATION_INVALID"
+    );
+
+    let changed_source_tree_digest =
+        write_approved_entry_tree(&worktree, &[("entry-1", "Changed approved content.")]);
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &changed_source_tree_digest,
+            "complete",
+            1,
+            &[("entry-1", "Changed approved content.")],
+        ))
+        .unwrap();
+    let token = claim(&mut storage, "task-drift", "holder-c", 60_000, 11_000);
+    let stale = consolidation_submit(
+        "task-drift",
+        &token,
+        "run-drift",
+        Some(materialized_update(2)),
+    );
+    assert_eq!(
+        storage
+            .submit_consolidation(&stale, 11_100)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+}
+
+#[test]
+fn consolidation_submit_rejects_changed_or_unexpected_scene_files() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-source-drift");
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-source-drift",
+            "kind": "consolidation",
+            "binding": consolidation_binding(&storage, &source_tree_digest),
+        }],
+    }));
+    storage.plan_tasks(&plan, 1_000).unwrap();
+    let token = claim(
+        &mut storage,
+        "task-source-drift",
+        "holder-c",
+        60_000,
+        10_000,
+    );
+    let submit = consolidation_submit(
+        "task-source-drift",
+        &token,
+        "run-source-drift",
+        Some(materialized_update(2)),
+    );
+
+    let release = worktree.join(".threadshare/memory/scenes/release.md");
+    std::fs::write(
+        &release,
+        RELEASE_SCENE.replace("Old guidance.", "Changed guidance."),
+    )
+    .unwrap();
+    assert_eq!(
+        storage
+            .submit_consolidation(&submit, 10_100)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+
+    std::fs::write(&release, RELEASE_SCENE).unwrap();
+    std::fs::write(
+        worktree.join(".threadshare/memory/scenes/unexpected.md"),
+        RELEASE_SCENE,
+    )
+    .unwrap();
+    assert_eq!(
+        storage
+            .submit_consolidation(&submit, 10_200)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+}
+
+#[test]
+fn empty_consolidation_patch_advances_a_visible_replayable_baseline() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-no-op");
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let binding = consolidation_binding(&storage, &source_tree_digest);
+    let plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-no-op",
+            "kind": "consolidation",
+            "binding": binding,
+        }],
+    }));
+    storage.plan_tasks(&plan, 1_000).unwrap();
+    let token = claim(&mut storage, "task-no-op", "holder-c", 60_000, 10_000);
+    let submit = consolidation_submit("task-no-op", &token, "run-no-op", None);
+    let outcome = storage.submit_consolidation(&submit, 10_100).unwrap();
+    assert_eq!(outcome["status"], "no_op");
+    assert_eq!(outcome["candidate"], Value::Null);
+    assert_eq!(outcome["entryCount"], 1);
+
+    let baseline: ConsolidationBaselineRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+    }));
+    let baseline = storage.consolidation_baseline(&baseline).unwrap();
+    assert_eq!(baseline["successfulRunId"], "run-no-op");
+    assert_eq!(baseline["lastSuccessfulNoOp"], true);
+    assert_eq!(baseline["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(baseline["entries"][0]["entryId"], "entry-1");
+}
+
+#[test]
+fn incremental_consolidation_baseline_retains_entries_from_every_successful_run() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-baseline");
+    let first_source_tree_digest =
+        write_approved_entry_tree(&worktree, &[("entry-1", "First approved entry.")]);
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &first_source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "First approved entry.")],
+        ))
+        .unwrap();
+    let first_plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-baseline-first",
+            "kind": "consolidation",
+            "binding": consolidation_binding(&storage, &first_source_tree_digest),
+        }],
+    }));
+    storage.plan_tasks(&first_plan, 1_000).unwrap();
+    let first_token = claim(
+        &mut storage,
+        "task-baseline-first",
+        "holder-c",
+        60_000,
+        10_000,
+    );
+    storage
+        .submit_consolidation(
+            &consolidation_submit(
+                "task-baseline-first",
+                &first_token,
+                "run-baseline-first",
+                None,
+            ),
+            10_100,
+        )
+        .unwrap();
+
+    let second_source_tree_digest =
+        write_approved_entry_tree(&worktree, &[("entry-2", "Second approved entry.")]);
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &second_source_tree_digest,
+            "complete",
+            1,
+            &[("entry-2", "Second approved entry.")],
+        ))
+        .unwrap();
+    let second_binding = consolidation_binding_for(
+        &storage,
+        2,
+        &second_source_tree_digest,
+        &[("entry-2", 1, hex64('9'))],
+    );
+    let second_plan: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-baseline-second",
+            "kind": "consolidation",
+            "binding": second_binding,
+        }],
+    }));
+    storage.plan_tasks(&second_plan, 11_000).unwrap();
+    let second_token = claim(
+        &mut storage,
+        "task-baseline-second",
+        "holder-c",
+        60_000,
+        20_000,
+    );
+    storage
+        .submit_consolidation(
+            &consolidation_submit(
+                "task-baseline-second",
+                &second_token,
+                "run-baseline-second",
+                None,
+            ),
+            20_100,
+        )
+        .unwrap();
+
+    let baseline: ConsolidationBaselineRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+    }));
+    let baseline = storage.consolidation_baseline(&baseline).unwrap();
+    assert_eq!(baseline["successfulRunId"], "run-baseline-second");
+    assert_eq!(
+        baseline["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["entryId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["entry-1", "entry-2"]
+    );
+}
+
+#[test]
+fn consolidation_replay_epoch_is_revalidated_before_plan_and_apply() {
+    let worktree = temp_state_dir("consolidation-replay-epoch-worktree");
+    let state_dir = temp_state_dir("consolidation-replay-epoch-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(
+        worktree.join(".threadshare/memory/scenes/release.md"),
+        RELEASE_SCENE,
+    )
+    .unwrap();
+
+    let first_binding = consolidation_binding(&storage, &source_tree_digest);
+    let (first_submit, first_outcome) = submit_consolidation_task(
+        &mut storage,
+        "task-replay-plan",
+        "run-replay-plan",
+        first_binding,
+        Some(materialized_update(2)),
+        10_000,
+    );
+    let first_candidate = first_outcome["candidate"]["candidateId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_assessment = &first_submit.assessments[0];
+    let first_confirmation: ConfirmStatementRequest = request(json!({
+        "candidateId": first_candidate,
+        "statementId": first_assessment.statement_id,
+        "statementTextDigest": first_assessment.statement_text_digest,
+        "citationsDigest": first_assessment.citations_digest,
+    }));
+    storage.confirm_statement(&first_confirmation).unwrap();
+    let first_content = first_submit.operations[0]
+        .new_content
+        .as_ref()
+        .unwrap()
+        .as_bytes();
+    let first_promotion = promotion_plan_request(
+        &[&first_candidate],
+        json!([{
+            "targetPath": ".threadshare/memory/scenes/release.md",
+            "operation": "write",
+            "sanitizedContent": base64(first_content),
+            "targetBlobHash": git_blob_oid_hex(RELEASE_SCENE.as_bytes()),
+        }]),
+    );
+
+    let no_op_binding = consolidation_binding(&storage, &source_tree_digest);
+    submit_consolidation_task(
+        &mut storage,
+        "task-replay-baseline-1",
+        "run-replay-baseline-1",
+        no_op_binding,
+        None,
+        11_000,
+    );
+    assert_eq!(
+        storage
+            .promotion_plan(&first_promotion, 12_000)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+
+    let second_binding = consolidation_binding(&storage, &source_tree_digest);
+    let (second_submit, second_outcome) = submit_consolidation_task(
+        &mut storage,
+        "task-replay-apply",
+        "run-replay-apply",
+        second_binding,
+        Some(materialized_update(2)),
+        13_000,
+    );
+    let second_candidate = second_outcome["candidate"]["candidateId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_assessment = &second_submit.assessments[0];
+    let second_confirmation: ConfirmStatementRequest = request(json!({
+        "candidateId": second_candidate,
+        "statementId": second_assessment.statement_id,
+        "statementTextDigest": second_assessment.statement_text_digest,
+        "citationsDigest": second_assessment.citations_digest,
+    }));
+    storage.confirm_statement(&second_confirmation).unwrap();
+    let second_content = second_submit.operations[0]
+        .new_content
+        .as_ref()
+        .unwrap()
+        .as_bytes();
+    let second_promotion = promotion_plan_request(
+        &[&second_candidate],
+        json!([{
+            "targetPath": ".threadshare/memory/scenes/release.md",
+            "operation": "write",
+            "sanitizedContent": base64(second_content),
+            "targetBlobHash": git_blob_oid_hex(RELEASE_SCENE.as_bytes()),
+        }]),
+    );
+    let planned = storage.promotion_plan(&second_promotion, 14_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            14_100,
+        )
+        .unwrap();
+
+    let second_no_op_binding = consolidation_binding(&storage, &source_tree_digest);
+    submit_consolidation_task(
+        &mut storage,
+        "task-replay-baseline-2",
+        "run-replay-baseline-2",
+        second_no_op_binding,
+        None,
+        15_000,
+    );
+    let outcome = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 16_000)
+        .unwrap();
+    assert_eq!(outcome["status"], "voided");
+    assert_eq!(
+        std::fs::read(worktree.join(".threadshare/memory/scenes/release.md")).unwrap(),
+        RELEASE_SCENE.as_bytes()
+    );
+}
+
+#[test]
+fn confirmed_consolidation_promotes_exact_materialized_bytes_and_advances_baseline() {
+    let worktree = temp_state_dir("consolidation-promotion-worktree");
+    let state_dir = temp_state_dir("consolidation-promotion-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let current = RELEASE_SCENE.as_bytes();
+    let target_path = ".threadshare/memory/scenes/release.md";
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(worktree.join(target_path), current).unwrap();
+
+    let binding = consolidation_binding(&storage, &source_tree_digest);
+    let plan_task: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-consolidation-promote",
+            "kind": "consolidation",
+            "binding": binding,
+        }],
+    }));
+    storage.plan_tasks(&plan_task, 1_000).unwrap();
+    let token = claim(
+        &mut storage,
+        "task-consolidation-promote",
+        "holder-c",
+        60_000,
+        10_000,
+    );
+    let submit = consolidation_submit(
+        "task-consolidation-promote",
+        &token,
+        "run-promote",
+        Some(materialized_update(2)),
+    );
+    let submitted = storage.submit_consolidation(&submit, 10_100).unwrap();
+    let candidate_id = submitted["candidate"]["candidateId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let content = submit.operations[0]
+        .new_content
+        .as_ref()
+        .unwrap()
+        .as_bytes();
+    let promotion = promotion_plan_request(
+        &[&candidate_id],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(content),
+            "targetBlobHash": git_blob_oid_hex(current),
+        }]),
+    );
+    assert_eq!(
+        storage.promotion_plan(&promotion, 20_000).unwrap_err().code,
+        "TS_MEMORY_UNVERIFIED_CLAIM"
+    );
+    let assessment = &submit.assessments[0];
+    let confirmation: ConfirmStatementRequest = request(json!({
+        "candidateId": candidate_id,
+        "statementId": assessment.statement_id,
+        "statementTextDigest": assessment.statement_text_digest,
+        "citationsDigest": assessment.citations_digest,
+    }));
+    storage.confirm_statement(&confirmation).unwrap();
+
+    let drifted_current = RELEASE_SCENE.replace("Old guidance.", "Changed after review.");
+    std::fs::write(worktree.join(target_path), &drifted_current).unwrap();
+    let drifted_plan = promotion_plan_request(
+        &[&candidate_id],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(content),
+            "targetBlobHash": git_blob_oid_hex(drifted_current.as_bytes()),
+        }]),
+    );
+    assert_eq!(
+        storage
+            .promotion_plan(&drifted_plan, 20_025)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+    std::fs::write(worktree.join(target_path), current).unwrap();
+
+    let approved_entry = worktree.join(".threadshare/memory/entries/entry-1.md");
+    std::fs::write(&approved_entry, "Changed after patch submission.").unwrap();
+    assert_eq!(
+        storage.promotion_plan(&promotion, 20_030).unwrap_err().code,
+        "TS_MEMORY_BINDING_DRIFT"
+    );
+    std::fs::write(&approved_entry, "Run verification before publishing.").unwrap();
+
+    let tampered = promotion_plan_request(
+        &[&candidate_id],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(b"tampered bytes\n"),
+            "targetBlobHash": git_blob_oid_hex(current),
+        }]),
+    );
+    assert_eq!(
+        storage.promotion_plan(&tampered, 20_050).unwrap_err().code,
+        "TS_MEMORY_CONSOLIDATION_INVALID"
+    );
+
+    let planned = storage.promotion_plan(&promotion, 20_100).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_200,
+        )
+        .unwrap();
+    let applied = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_300)
+        .unwrap();
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(std::fs::read(worktree.join(target_path)).unwrap(), content);
+
+    let baseline: ConsolidationBaselineRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+    }));
+    let baseline = storage.consolidation_baseline(&baseline).unwrap();
+    assert_eq!(baseline["successfulRunId"], "run-promote");
+    assert_eq!(baseline["lastSuccessfulNoOp"], false);
+    assert_eq!(baseline["pendingRunId"], Value::Null);
+}
+
+#[test]
+fn consolidation_apply_voids_when_approved_entry_drifts_after_plan() {
+    let worktree = temp_state_dir("consolidation-apply-source-drift-worktree");
+    let state_dir = temp_state_dir("consolidation-apply-source-drift-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    let source_tree_digest = write_approved_entry_tree(
+        &worktree,
+        &[("entry-1", "Run verification before publishing.")],
+    );
+    storage
+        .sync_approved(&sync_request_with_digest(
+            &source_tree_digest,
+            "complete",
+            0,
+            &[("entry-1", "Run verification before publishing.")],
+        ))
+        .unwrap();
+    let target_path = ".threadshare/memory/scenes/release.md";
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(worktree.join(target_path), RELEASE_SCENE).unwrap();
+
+    let plan_task: PlanTasksRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "chunks": [],
+        "tasks": [{
+            "taskId": "task-apply-source-drift",
+            "kind": "consolidation",
+            "binding": consolidation_binding(&storage, &source_tree_digest),
+        }],
+    }));
+    storage.plan_tasks(&plan_task, 1_000).unwrap();
+    let token = claim(
+        &mut storage,
+        "task-apply-source-drift",
+        "holder-c",
+        60_000,
+        10_000,
+    );
+    let submit = consolidation_submit(
+        "task-apply-source-drift",
+        &token,
+        "run-apply-source-drift",
+        Some(materialized_update(2)),
+    );
+    let submitted = storage.submit_consolidation(&submit, 10_100).unwrap();
+    let candidate_id = submitted["candidate"]["candidateId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assessment = &submit.assessments[0];
+    let confirmation: ConfirmStatementRequest = request(json!({
+        "candidateId": candidate_id,
+        "statementId": assessment.statement_id,
+        "statementTextDigest": assessment.statement_text_digest,
+        "citationsDigest": assessment.citations_digest,
+    }));
+    storage.confirm_statement(&confirmation).unwrap();
+    let content = submit.operations[0]
+        .new_content
+        .as_ref()
+        .unwrap()
+        .as_bytes();
+    let promotion = promotion_plan_request(
+        &[&candidate_id],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(content),
+            "targetBlobHash": git_blob_oid_hex(RELEASE_SCENE.as_bytes()),
+        }]),
+    );
+    let planned = storage.promotion_plan(&promotion, 20_100).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_200,
+        )
+        .unwrap();
+
+    std::fs::write(
+        worktree.join(".threadshare/memory/entries/entry-1.md"),
+        "Changed after promotion planning.",
+    )
+    .unwrap();
+    let voided = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_300)
+        .unwrap();
+    assert_eq!(voided["status"], "voided");
+    assert_eq!(voided["driftedPath"], ".threadshare/memory");
+    assert_eq!(
+        std::fs::read(worktree.join(target_path)).unwrap(),
+        RELEASE_SCENE.as_bytes()
+    );
+    let queue: ReviewQueueRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "kind": "consolidation",
+    }));
+    assert!(storage.review_queue(&queue).unwrap().items.is_empty());
+    assert_eq!(status_counts(&storage)["consolidations"]["stale"], 1);
 }
 
 #[test]
@@ -871,6 +2137,64 @@ fn bind_repository_upserts_and_never_echoes_the_realpath() {
     assert_eq!(outcome.status, "inactive");
 }
 
+#[cfg(unix)]
+#[test]
+fn host_memory_reads_reject_symlinked_parent_components_for_every_collection() {
+    for symlink_parent in [".threadshare", ".threadshare/memory"] {
+        let worktree = temp_state_dir(&format!("host-read-{symlink_parent:?}"));
+        let outside = temp_state_dir(&format!("host-read-outside-{symlink_parent:?}"));
+        let outside_memory = outside.join(".threadshare/memory");
+        std::fs::create_dir_all(outside_memory.join("entries")).unwrap();
+        std::fs::create_dir_all(outside_memory.join("scenes")).unwrap();
+        std::fs::write(outside_memory.join("entries/secret.md"), "outside entry").unwrap();
+        std::fs::write(outside_memory.join("scenes/secret.md"), "outside scene").unwrap();
+        std::fs::write(outside_memory.join("doctrine.md"), "outside doctrine").unwrap();
+
+        if symlink_parent == ".threadshare" {
+            std::os::unix::fs::symlink(outside.join(".threadshare"), worktree.join(".threadshare"))
+                .unwrap();
+        } else {
+            std::fs::create_dir_all(worktree.join(".threadshare")).unwrap();
+            std::os::unix::fs::symlink(&outside_memory, worktree.join(".threadshare/memory"))
+                .unwrap();
+        }
+
+        let mut storage = MemoryStorage::open_in_memory().unwrap();
+        bind_worktree(&mut storage, &worktree);
+        for collection in ["entries", "scenes"] {
+            let list: ListMemoryFilesRequest = request(json!({
+                "repositoryKey": REPO,
+                "worktreeKey": TREE,
+                "collection": collection,
+            }));
+            assert_eq!(
+                storage.list_memory_files(&list).unwrap_err().code,
+                "TS_MEMORY_BINDING_DRIFT"
+            );
+            let read: ReadMemoryFileRequest = request(json!({
+                "repositoryKey": REPO,
+                "worktreeKey": TREE,
+                "collection": collection,
+                "name": "secret.md",
+            }));
+            assert_eq!(
+                storage.read_memory_file(&read).unwrap_err().code,
+                "TS_MEMORY_BINDING_DRIFT"
+            );
+        }
+        let doctrine: ReadMemoryFileRequest = request(json!({
+            "repositoryKey": REPO,
+            "worktreeKey": TREE,
+            "collection": "doctrine",
+            "name": null,
+        }));
+        assert_eq!(
+            storage.read_memory_file(&doctrine).unwrap_err().code,
+            "TS_MEMORY_BINDING_DRIFT"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stage 4c: confirmation, discard, and the promotion state machine.
 // ---------------------------------------------------------------------------
@@ -1080,6 +2404,126 @@ fn confirm_statement_rejects_digest_drift_and_confirms_matches() {
     assert_eq!(confirmed["assessedBy"], "human");
     assert_eq!(confirmed["revision"], 2);
     assert!(storage.promotion_plan(&plan, 20_100).is_ok());
+}
+
+#[test]
+fn promotion_rejects_unknown_policy_and_voids_assessment_drift_before_mutation() {
+    let worktree = temp_state_dir("promotion-assessment-drift-worktree");
+    let state_dir = temp_state_dir("promotion-assessment-drift-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/entries")).unwrap();
+    quarantine_candidate(
+        &mut storage,
+        "assessment-drift",
+        "cand-assessment-drift",
+        "release checklist",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/entries/assessment-drift.md";
+    let mut unsupported = promotion_plan_request(
+        &["cand-assessment-drift"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(b"approved bytes\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    unsupported.policy_version = "sanitize@future".to_owned();
+    assert_eq!(
+        storage
+            .promotion_plan(&unsupported, 20_000)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_REQUEST_INVALID"
+    );
+
+    let plan = promotion_plan_request(
+        &["cand-assessment-drift"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(b"approved bytes\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_100).unwrap();
+    storage
+        .confirm_statement(&confirm_request("cand-assessment-drift", '8', '7'))
+        .unwrap();
+    let plan_id = planned["planId"].as_str().unwrap();
+    storage
+        .promotion_approve(
+            &approve_request(plan_id, planned["planDigest"].as_str().unwrap()),
+            20_200,
+        )
+        .unwrap();
+    let outcome = storage
+        .promotion_apply(&apply_request(plan_id, &worktree), 20_300)
+        .unwrap();
+    assert_eq!(outcome["status"], "voided");
+    assert!(!worktree.join(target_path).exists());
+    assert_eq!(status_counts(&storage)["promotions"]["voided"], 1);
+}
+
+#[test]
+fn approved_promotion_blocks_candidate_mutation_until_apply_finishes() {
+    let worktree = temp_state_dir("promotion-candidate-lock-worktree");
+    let state_dir = temp_state_dir("promotion-candidate-lock-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/entries")).unwrap();
+    quarantine_candidate(
+        &mut storage,
+        "candidate-lock",
+        "cand-candidate-lock",
+        "release checklist",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/entries/candidate-lock.md";
+    let plan = promotion_plan_request(
+        &["cand-candidate-lock"],
+        json!([{
+            "targetPath": target_path,
+            "sanitizedContent": base64(b"locked plan bytes\n"),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap();
+    storage
+        .promotion_approve(
+            &approve_request(plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .confirm_statement(&confirm_request("cand-candidate-lock", '8', '7'))
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_CANDIDATE_STALE"
+    );
+    let discard: DiscardCandidateRequest = request(json!({
+        "candidateId": "cand-candidate-lock",
+        "expectedRevision": 1,
+    }));
+    assert_eq!(
+        storage
+            .discard_candidate(&discard, 20_200)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_CANDIDATE_STALE"
+    );
+
+    let outcome = storage
+        .promotion_apply(&apply_request(plan_id, &worktree), 20_300)
+        .unwrap();
+    assert_eq!(outcome["status"], "applied");
+    assert_eq!(
+        std::fs::read(worktree.join(target_path)).unwrap(),
+        b"locked plan bytes\n"
+    );
 }
 
 #[test]
@@ -1391,6 +2835,41 @@ fn promotion_apply_fails_closed_on_symlinked_path_segments() {
 }
 
 #[test]
+fn promotion_apply_refuses_a_second_process_owner_before_reading_the_plan() {
+    let worktree = temp_state_dir("promotion-owner-worktree");
+    let state_dir = temp_state_dir("promotion-owner-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    let mut lock_name = storage.database_path().unwrap().as_os_str().to_os_string();
+    lock_name.push("-promotion.lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(PathBuf::from(lock_name))
+        .unwrap();
+    FileExt::try_lock_exclusive(&lock).unwrap();
+
+    assert_eq!(
+        storage
+            .promotion_apply(&apply_request("missing-plan", &worktree), 20_000)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_STATE_INVALID"
+    );
+
+    FileExt::unlock(&lock).unwrap();
+    drop(lock);
+    assert_eq!(
+        storage
+            .promotion_apply(&apply_request("missing-plan", &worktree), 20_100)
+            .unwrap_err()
+            .code,
+        "TS_MEMORY_PLAN_NOT_FOUND"
+    );
+}
+
+#[test]
 fn promotion_apply_resumes_idempotently_after_a_partial_crash() {
     let worktree = temp_state_dir("promotion-resume-worktree");
     let state_dir = temp_state_dir("promotion-resume-state");
@@ -1422,8 +2901,8 @@ fn promotion_apply_resumes_idempotently_after_a_partial_crash() {
         .promotion_approve(&approve_request(&plan_id, &plan_digest), 20_100)
         .unwrap();
 
-    // Simulate a crash mid-apply: the first file was written and journaled
-    // (`applied=1`), the plan was left in `applying`.
+    // Simulate a v2 crash mid-apply: precheck saw both files absent, the first
+    // write completed and its progress committed, and the second is pending.
     std::fs::create_dir_all(worktree.join(".threadshare/memory/entries")).unwrap();
     std::fs::write(
         worktree.join(".threadshare/memory/entries/a-first.md"),
@@ -1433,13 +2912,21 @@ fn promotion_apply_resumes_idempotently_after_a_partial_crash() {
     let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
     tweak
         .execute(
-            "UPDATE promotion_journal SET status='applying' WHERE plan_id=?1",
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
             rusqlite::params![&plan_id],
         )
         .unwrap();
     tweak
         .execute(
-            "UPDATE promotion_files SET applied=1
+            "UPDATE promotion_files SET originally_present=0, intent_state='pending', applied=0
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET intent_state='applied', applied=1
              WHERE plan_id=?1 AND target_path='.threadshare/memory/entries/a-first.md'",
             rusqlite::params![&plan_id],
         )
@@ -1476,6 +2963,512 @@ fn promotion_apply_resumes_idempotently_after_a_partial_crash() {
     assert_eq!(counts["candidates"]["promoted"], 1);
     assert_eq!(counts["promotions"]["applied"], 1);
     assert_eq!(counts["promotions"]["applying"], 0);
+}
+
+#[test]
+fn promotion_write_resumes_after_displacement_before_install() {
+    let worktree = temp_state_dir("promotion-write-displacement-worktree");
+    let state_dir = temp_state_dir("promotion-write-displacement-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "write-resume",
+        "cand-write-resume",
+        "write resume scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/current.md";
+    let original = b"old scene bytes\n";
+    let replacement = b"new scene bytes\n";
+    let target = worktree.join(target_path);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, original).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-write-resume"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(replacement),
+            "targetBlobHash": git_blob_oid_hex(original),
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='intent', applied=0 WHERE plan_id=?3",
+            rusqlite::params![
+                original.as_slice(),
+                Sha256::digest(original).to_vec(),
+                &plan_id
+            ],
+        )
+        .unwrap();
+    drop(tweak);
+    let hold = promotion_staging_artifact(
+        target.parent().unwrap(),
+        &plan_id,
+        target_path,
+        "forward",
+        "hold",
+    );
+    std::fs::rename(&target, &hold).unwrap();
+
+    let applied = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(std::fs::read(&target).unwrap(), replacement);
+    assert!(!hold.exists());
+}
+
+#[test]
+fn promotion_rollback_resumes_after_displacement_before_restore() {
+    let worktree = temp_state_dir("promotion-rollback-displacement-worktree");
+    let state_dir = temp_state_dir("promotion-rollback-displacement-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "rollback-resume",
+        "cand-rollback-resume",
+        "rollback resume scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/current.md";
+    let original = b"old scene bytes\n";
+    let replacement = b"new scene bytes\n";
+    let target = worktree.join(target_path);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, replacement).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-rollback-resume"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(replacement),
+            "targetBlobHash": git_blob_oid_hex(original),
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='rolling_back'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='applied', applied=1 WHERE plan_id=?3",
+            rusqlite::params![
+                original.as_slice(),
+                Sha256::digest(original).to_vec(),
+                &plan_id
+            ],
+        )
+        .unwrap();
+    drop(tweak);
+    let hold = promotion_staging_artifact(
+        target.parent().unwrap(),
+        &plan_id,
+        target_path,
+        "rollback",
+        "hold",
+    );
+    std::fs::rename(&target, &hold).unwrap();
+
+    let voided = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(voided["status"], "voided");
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert!(!hold.exists());
+}
+
+#[test]
+fn pending_promotion_never_accepts_a_coincidentally_exact_external_write() {
+    let worktree = temp_state_dir("promotion-pending-exact-worktree");
+    let state_dir = temp_state_dir("promotion-pending-exact-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "pending-exact",
+        "cand-pending-exact",
+        "pending exact scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/current.md";
+    let original = b"old scene bytes\n";
+    let replacement = b"new scene bytes\n";
+    let target = worktree.join(target_path);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, original).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-pending-exact"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(replacement),
+            "targetBlobHash": git_blob_oid_hex(original),
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='pending', applied=0 WHERE plan_id=?3",
+            rusqlite::params![
+                original.as_slice(),
+                Sha256::digest(original).to_vec(),
+                &plan_id
+            ],
+        )
+        .unwrap();
+    drop(tweak);
+    std::fs::write(&target, replacement).unwrap();
+
+    let voided = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(voided["status"], "voided");
+    assert_eq!(std::fs::read(&target).unwrap(), replacement);
+}
+
+#[test]
+fn applied_new_file_deleted_externally_is_not_recreated() {
+    let worktree = temp_state_dir("promotion-applied-delete-worktree");
+    let state_dir = temp_state_dir("promotion-applied-delete-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "applied-delete",
+        "cand-applied-delete",
+        "applied delete scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/new.md";
+    let replacement = b"new scene bytes\n";
+    let target = worktree.join(target_path);
+    let plan = promotion_plan_request(
+        &["cand-applied-delete"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "write",
+            "sanitizedContent": base64(replacement),
+            "targetBlobHash": null,
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=0, rollback_content=NULL,
+               rollback_digest=NULL, intent_state='applied', applied=1 WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    drop(tweak);
+    assert!(!target.exists());
+
+    let voided = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(voided["status"], "voided");
+    assert!(!target.exists());
+}
+
+#[test]
+fn promotion_delete_applies_with_blob_cas_and_clears_rollback_bytes() {
+    let worktree = temp_state_dir("promotion-delete-worktree");
+    let state_dir = temp_state_dir("promotion-delete-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "del",
+        "cand-delete",
+        "delete scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/obsolete.md";
+    let original = b"obsolete scene bytes\n";
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(worktree.join(target_path), original).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-delete"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "delete",
+            "sanitizedContent": null,
+            "targetBlobHash": git_blob_oid_hex(original),
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    assert_eq!(planned["files"][0]["operation"], "delete");
+    assert_eq!(planned["files"][0]["sanitizedDigest"], Value::Null);
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+    let applied = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(applied["status"], "applied");
+    assert!(!worktree.join(target_path).exists());
+
+    let audit = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    let terminal: (String, String, Option<Vec<u8>>, Option<Vec<u8>>) = audit
+        .query_row(
+            "SELECT j.mutation_phase, f.intent_state, f.rollback_content, f.rollback_digest
+             FROM promotion_journal j JOIN promotion_files f ON f.plan_id=j.plan_id
+             WHERE j.plan_id=?1",
+            rusqlite::params![&plan_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(terminal.0, "done");
+    assert_eq!(terminal.1, "applied");
+    assert!(terminal.2.is_none() && terminal.3.is_none());
+}
+
+#[test]
+fn promotion_delete_recovers_when_unlink_completed_before_progress_commit() {
+    let worktree = temp_state_dir("promotion-delete-resume-worktree");
+    let state_dir = temp_state_dir("promotion-delete-resume-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "del-resume",
+        "cand-delete",
+        "delete scene",
+        "typed-fact",
+    );
+    let target_path = ".threadshare/memory/scenes/obsolete.md";
+    let original = b"obsolete scene bytes\n";
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(worktree.join(target_path), original).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-delete"],
+        json!([{
+            "targetPath": target_path,
+            "operation": "delete",
+            "sanitizedContent": null,
+            "targetBlobHash": git_blob_oid_hex(original),
+        }]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    // Crash window: precheck + intent committed, unlink succeeded, progress did not.
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='intent', applied=0 WHERE plan_id=?3",
+            rusqlite::params![
+                original.as_slice(),
+                Sha256::digest(original).to_vec(),
+                &plan_id
+            ],
+        )
+        .unwrap();
+    drop(tweak);
+    std::fs::remove_file(worktree.join(target_path)).unwrap();
+
+    let applied = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(applied["status"], "applied");
+    assert!(!worktree.join(target_path).exists());
+}
+
+#[test]
+fn promotion_rolls_back_prior_writes_before_voiding_on_later_drift() {
+    let worktree = temp_state_dir("promotion-rollback-worktree");
+    let state_dir = temp_state_dir("promotion-rollback-state");
+    let mut storage = MemoryStorage::open_state_dir(&state_dir).unwrap();
+    bind_worktree(&mut storage, &worktree);
+    quarantine_candidate(
+        &mut storage,
+        "rollback",
+        "cand-rollback",
+        "rollback patch",
+        "typed-fact",
+    );
+    let write_path = ".threadshare/memory/scenes/current.md";
+    let delete_path = ".threadshare/memory/scenes/obsolete.md";
+    let old_write = b"old current bytes\n";
+    let new_write = b"new current bytes\n";
+    let old_delete = b"old obsolete bytes\n";
+    let third_party = b"third party edit\n";
+    std::fs::create_dir_all(worktree.join(".threadshare/memory/scenes")).unwrap();
+    std::fs::write(worktree.join(write_path), old_write).unwrap();
+    std::fs::write(worktree.join(delete_path), old_delete).unwrap();
+    let plan = promotion_plan_request(
+        &["cand-rollback"],
+        json!([
+            {
+                "targetPath": write_path,
+                "operation": "write",
+                "sanitizedContent": base64(new_write),
+                "targetBlobHash": git_blob_oid_hex(old_write),
+            },
+            {
+                "targetPath": delete_path,
+                "operation": "delete",
+                "sanitizedContent": null,
+                "targetBlobHash": git_blob_oid_hex(old_delete),
+            },
+        ]),
+    );
+    let planned = storage.promotion_plan(&plan, 20_000).unwrap();
+    let plan_id = planned["planId"].as_str().unwrap().to_owned();
+    storage
+        .promotion_approve(
+            &approve_request(&plan_id, planned["planDigest"].as_str().unwrap()),
+            20_100,
+        )
+        .unwrap();
+
+    // Simulate precheck, then the first write + progress. The delete target is
+    // changed externally before its mutation, forcing rollback of the write.
+    let tweak = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_journal SET status='applying', mutation_phase='mutating'
+             WHERE plan_id=?1",
+            rusqlite::params![&plan_id],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='applied', applied=1
+             WHERE plan_id=?3 AND target_path=?4",
+            rusqlite::params![
+                old_write.as_slice(),
+                Sha256::digest(old_write).to_vec(),
+                &plan_id,
+                write_path
+            ],
+        )
+        .unwrap();
+    tweak
+        .execute(
+            "UPDATE promotion_files SET originally_present=1, rollback_content=?1,
+               rollback_digest=?2, intent_state='pending', applied=0
+             WHERE plan_id=?3 AND target_path=?4",
+            rusqlite::params![
+                old_delete.as_slice(),
+                Sha256::digest(old_delete).to_vec(),
+                &plan_id,
+                delete_path
+            ],
+        )
+        .unwrap();
+    drop(tweak);
+    std::fs::write(worktree.join(write_path), new_write).unwrap();
+    std::fs::write(worktree.join(delete_path), third_party).unwrap();
+
+    let voided = storage
+        .promotion_apply(&apply_request(&plan_id, &worktree), 20_200)
+        .unwrap();
+    assert_eq!(voided["status"], "voided");
+    assert_eq!(voided["driftedPath"], delete_path);
+    assert_eq!(std::fs::read(worktree.join(write_path)).unwrap(), old_write);
+    assert_eq!(
+        std::fs::read(worktree.join(delete_path)).unwrap(),
+        third_party
+    );
+
+    let audit = rusqlite::Connection::open(storage.database_path().unwrap()).unwrap();
+    let retained: i64 = audit
+        .query_row(
+            "SELECT COUNT(*) FROM promotion_files
+             WHERE plan_id=?1 AND (rollback_content IS NOT NULL OR rollback_digest IS NOT NULL)",
+            rusqlite::params![&plan_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 0);
 }
 
 #[test]

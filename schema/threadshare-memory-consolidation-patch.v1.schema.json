@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-consolidation-patch.v1.schema.json",
+  "title": "Threadshare Memory Consolidation Patch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "taskId", "binding", "operations"],
+  "properties": {
+    "format": { "const": "threadshare-memory-consolidation-patch@v1" },
+    "taskId": { "$ref": "#/$defs/identifier" },
+    "binding": { "$ref": "threadshare-memory-consolidation-task.v1.schema.json#/$defs/consolidationBinding" },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "op", "target", "name", "newContent", "basedOnEntryIds", "mergeSources", "rationale"],
+        "properties": {
+          "operationId": { "$ref": "#/$defs/identifier" },
+          "op": { "enum": ["create", "update", "merge", "delete"] },
+          "target": { "enum": ["scene", "doctrine"] },
+          "name": { "$ref": "#/$defs/slug" },
+          "newContent": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+          "basedOnEntryIds": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+          "mergeSources": { "type": "array", "items": { "$ref": "#/$defs/slug" } },
+          "rationale": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" }
+  }
+}

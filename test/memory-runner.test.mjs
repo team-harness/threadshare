@@ -15,6 +15,7 @@ import {
 } from "../src/memory-contracts.mjs";
 import {
   ADJUDICATION_PROMPT,
+  CONSOLIDATION_PROMPT,
   EXTRACTION_PROMPT,
   MEMORY_PROMPTS,
   PROMPT_VERSION,
@@ -951,6 +952,7 @@ test("prompts are versioned and carry the contract vocabulary", () => {
   assert.equal(MEMORY_PROMPTS.version, PROMPT_VERSION);
   assert.equal(MEMORY_PROMPTS.extraction, EXTRACTION_PROMPT);
   assert.equal(MEMORY_PROMPTS.adjudication, ADJUDICATION_PROMPT);
+  assert.equal(MEMORY_PROMPTS.consolidation, CONSOLIDATION_PROMPT);
   assert.equal(MEMORY_PROMPTS.transcriptPreamble, TRANSCRIPT_PREAMBLE);
 });
 
@@ -975,6 +977,19 @@ test("adjudication prompt states the AdjudicationResult contract", () => {
   assert.match(ADJUDICATION_PROMPT, /unified/i);
   assert.match(ADJUDICATION_PROMPT, /many-to-many/i);
   assert.match(ADJUDICATION_PROMPT, /union/i);
+});
+
+test("consolidation prompt emits a declarative patch and never assigns heat", () => {
+  assert.ok(CONSOLIDATION_PROMPT.includes("threadshare-memory-consolidation-patch@v1"));
+  for (const action of ["create", "update", "merge", "delete"]) {
+    assert.ok(CONSOLIDATION_PROMPT.includes(action), `missing operation ${action}`);
+  }
+  for (const field of ["operationId", "basedOnEntryIds", "mergeSources", "rationale"]) {
+    assert.ok(CONSOLIDATION_PROMPT.includes(field), `missing field ${field}`);
+  }
+  assert.match(CONSOLIDATION_PROMPT, /must not output or suggest heat/i);
+  assert.match(CONSOLIDATION_PROMPT, /no tools/i);
+  assert.match(CONSOLIDATION_PROMPT, /empty operations/i);
 });
 
 test("transcript preamble defends against role capture", () => {

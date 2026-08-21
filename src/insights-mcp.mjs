@@ -17,6 +17,7 @@ const TOOL_NAMES = Object.freeze([
   "threadshare_memory_search",
   "threadshare_memory_status",
   "threadshare_memory_extract_preview",
+  "threadshare_memory_consolidate_preview",
 ]);
 
 function plainObject(value) {
@@ -83,7 +84,7 @@ async function toolCatalog() {
             enum: [
               "capability-contexts@1", "failure-chains@1", "file-workflow-signals@1",
               "activity-shifts@1", "token-hotspots@1", "solution-recall@1",
-              "session-timeline@1", "delivery-trace@1",
+              "session-timeline@1", "extraction-candidates@1", "delivery-trace@1",
             ],
           },
           request: recipe,
@@ -147,6 +148,39 @@ async function toolCatalog() {
         openWorldHint: false,
       },
     },
+    {
+      name: TOOL_NAMES[7],
+      title: "Preview local Team Memory consolidation",
+      description: "Create one private pending L2/L3 consolidation plan. Never authorizes delivery, starts a runner, or returns approved-memory, scene, or doctrine text.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["runner"],
+        properties: {
+          runner: { enum: ["claude", "codex"] },
+          model: { type: "string", minLength: 1, maxLength: 200 },
+          endpoint: { type: "string", format: "uri", pattern: "^https://" },
+          ifDue: { type: "boolean", default: false },
+          full: { type: "boolean", default: false },
+        },
+        allOf: [{
+          if: { properties: { runner: { const: "codex" } }, required: ["runner"] },
+          then: { required: ["model", "endpoint"] },
+        }, {
+          not: {
+            properties: { ifDue: { const: true }, full: { const: true } },
+            required: ["ifDue", "full"],
+          },
+        }],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
   ]);
 }
 
@@ -160,7 +194,7 @@ function memoryToolError(error, action) {
   const value = {
     code,
     problem: sanitizeDiagnosticProblem(error instanceof Error ? error.message : String(error)),
-    next: `Run \`threadshare memory ${action === "extract-preview" ? "extract" : action} --help\` and retry.`,
+    next: `Run \`threadshare memory ${action.endsWith("-preview") ? action.slice(0, -8) : action} --help\` and retry.`,
   };
   return {
     content: [{ type: "text", text: JSON.stringify(value) }],
@@ -241,6 +275,23 @@ function toolInvocation(name, args) {
       ), { code: "TS_INSIGHTS_REQUEST_INVALID" });
     }
     return { memory: { action: "extract-preview", args } };
+  }
+  if (name === TOOL_NAMES[7]) {
+    if (!exactKeys(args, ["runner", "model", "endpoint", "ifDue", "full"]) ||
+        (args.runner !== "claude" && args.runner !== "codex") ||
+        (Object.hasOwn(args, "model") &&
+         (typeof args.model !== "string" || args.model.length === 0 || args.model.length > 200)) ||
+        (Object.hasOwn(args, "endpoint") && typeof args.endpoint !== "string") ||
+        (Object.hasOwn(args, "ifDue") && typeof args.ifDue !== "boolean") ||
+        (Object.hasOwn(args, "full") && typeof args.full !== "boolean") ||
+        (args.ifDue === true && args.full === true) ||
+        (args.runner === "codex" &&
+         (typeof args.model !== "string" || typeof args.endpoint !== "string"))) {
+      throw Object.assign(new Error(
+        "memory consolidation preview requires a runner, optional due/full mode, and explicit Codex model/HTTPS endpoint",
+      ), { code: "TS_INSIGHTS_REQUEST_INVALID" });
+    }
+    return { memory: { action: "consolidate-preview", args } };
   }
   return null;
 }
@@ -346,7 +397,9 @@ export function createInsightsMcpServer(options = {}) {
           ? "search"
           : message.params.name === TOOL_NAMES[5]
             ? "status"
-            : message.params.name === TOOL_NAMES[6] ? "extract-preview" : null;
+            : message.params.name === TOOL_NAMES[6]
+              ? "extract-preview"
+              : message.params.name === TOOL_NAMES[7] ? "consolidate-preview" : null;
         return {
           jsonrpc: "2.0", id: message.id,
           result: memoryAction === null

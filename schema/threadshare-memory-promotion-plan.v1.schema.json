@@ -20,8 +20,26 @@
         "properties": {
           "targetPath": { "type": "string", "minLength": 1 },
           "targetBlobHash": { "oneOf": [{ "$ref": "#/$defs/hex40" }, { "type": "null" }] },
-          "sanitizedContentDigest": { "$ref": "#/$defs/hex64" }
-        }
+          "sanitizedContentDigest": { "oneOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+          "operation": { "enum": ["write", "delete"], "default": "write" }
+        },
+        "allOf": [{
+          "if": {
+            "required": ["operation"],
+            "properties": { "operation": { "const": "delete" } }
+          },
+          "then": {
+            "properties": {
+              "targetBlobHash": { "$ref": "#/$defs/hex40" },
+              "sanitizedContentDigest": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "sanitizedContentDigest": { "$ref": "#/$defs/hex64" }
+            }
+          }
+        }]
       }
     },
     "policyVersion": { "type": "string", "minLength": 1 },

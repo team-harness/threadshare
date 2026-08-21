@@ -291,5 +291,30 @@
         "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
       }
     }
+  },
+  {
+    "name": "extraction-candidates@1",
+    "item": {
+      "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "eligibleTurnCount": "3",
+      "directDeliveryEdgeCount": "1",
+      "observedDeliveryEdgeCount": "1",
+      "recoveredFailureChainCount": "1",
+      "mainCapabilityInvocationCount": "2",
+      "hasConclusiveFinalAnswer": true,
+      "contributions": {
+        "directDelivery": "40",
+        "observedDelivery": "25",
+        "recoveredFailureChains": "15",
+        "capabilityDensity": "7",
+        "conclusiveFinalAnswer": "5"
+      },
+      "score": "92",
+      "evidence": {
+        "kind": "session",
+        "sessionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
   }
 ]

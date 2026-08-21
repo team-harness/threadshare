@@ -144,6 +144,39 @@ const bindRepositoryRequest = z.object({
   status: z.enum(["active", "inactive"]).default("active"),
 }).strict();
 
+const memoryFileCollection = z.enum(["entries", "scenes", "doctrine"]);
+const memoryFileName = identifier.refine(
+  (value) => value.endsWith(".md") && value !== ".md" &&
+    !value.includes("/") && !value.includes("\\"),
+  { message: "expected one Markdown filename without path separators" },
+);
+
+const listMemoryFilesRequest = z.object({
+  ...ownerFields,
+  collection: memoryFileCollection.refine((value) => value !== "doctrine", {
+    message: "doctrine is a single file and cannot be listed",
+  }),
+}).strict();
+
+const readMemoryFileRequest = z.object({
+  ...ownerFields,
+  collection: memoryFileCollection,
+  name: memoryFileName.nullable().default(null),
+}).strict().superRefine((request, context) => {
+  const valid = request.collection === "doctrine"
+    ? request.name === null
+    : request.name !== null;
+  if (!valid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: request.collection === "doctrine"
+        ? "doctrine reads must omit name"
+        : "entries and scenes reads require name",
+      path: ["name"],
+    });
+  }
+});
+
 const planTasksRequest = z.object({
   ...ownerFields,
   chunks: z.array(z.object({
@@ -233,6 +266,78 @@ const submitExtractionRequest = z.object({
     }
   }
 });
+
+const consolidationOperation = z.object({
+  operationId: identifier,
+  op: z.enum(["create", "update", "merge", "delete"]),
+  target: z.enum(["scene", "doctrine"]),
+  name: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/),
+  newContent: boundedText.nullable(),
+  basedOnEntryIds: z.array(identifier),
+  mergeSources: z.array(identifier),
+  rationale: boundedText.refine((value) => value.length > 0, {
+    message: "rationale must not be empty",
+  }),
+}).strict();
+
+const assessmentInput = z.object({
+  candidateId: identifier,
+  statementId: identifier,
+  citationsDigest: hex64,
+  provenanceStrength,
+  limitations: z.array(boundedText),
+  claimSupport,
+  assessedBy,
+  statementTextDigest: hex64,
+  revision: positiveInteger,
+}).strict();
+
+const submitConsolidationRequest = z.object({
+  taskId: identifier,
+  claimToken: identifier,
+  responseDigest: hex64,
+  runId: identifier,
+  candidateId: identifier.nullable(),
+  operations: z.array(consolidationOperation).max(MEMORY_MAX_PAYLOAD_ITEMS),
+  assessments: z.array(assessmentInput).max(MEMORY_MAX_PAYLOAD_ITEMS),
+}).strict().superRefine((request, context) => {
+  if ((request.operations.length === 0) !== (request.candidateId === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "candidateId must be null exactly when operations is empty",
+      path: ["candidateId"],
+    });
+  }
+  if (request.operations.length !== request.assessments.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "every consolidation operation must have exactly one assessment",
+      path: ["assessments"],
+    });
+  }
+  const operationIds = new Set();
+  for (const operation of request.operations) {
+    if (operationIds.has(operation.operationId)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "operationId must be unique",
+        path: ["operations"] });
+    }
+    operationIds.add(operation.operationId);
+  }
+  const statementIds = new Set();
+  for (const [index, assessment] of request.assessments.entries()) {
+    if (assessment.candidateId !== request.candidateId || !operationIds.has(assessment.statementId)
+      || statementIds.has(assessment.statementId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "assessment must uniquely bind one operation and the request candidate",
+        path: ["assessments", index],
+      });
+    }
+    statementIds.add(assessment.statementId);
+  }
+});
+
+const consolidationBaselineRequest = z.object({ ...ownerFields }).strict();
 
 const recallRequest = z.object({
   ...ownerFields,
@@ -380,6 +485,7 @@ const searchRequest = z.object({
 const reviewQueueRequest = z.object({
   ...ownerFields,
   limit: positiveInteger.max(200).default(50),
+  kind: z.enum(["entry", "consolidation"]).default("entry"),
 }).strict();
 
 const statusRequest = z.object({ ...ownerFields }).strict();
@@ -402,7 +508,8 @@ const promotionPlanRequest = z.object({
   policyVersion: identifier,
   perFile: z.array(z.object({
     targetPath,
-    sanitizedContent: base64Content,
+    operation: z.enum(["write", "delete"]).default("write"),
+    sanitizedContent: base64Content.nullable(),
     targetBlobHash: hex40.nullable(),
   }).strict()).min(1).max(MEMORY_MAX_PLAN_FILES),
 }).strict().superRefine((request, context) => {
@@ -428,7 +535,18 @@ const promotionPlanRequest = z.object({
       });
     }
     targetPaths.add(file.targetPath);
-    totalBytes += Buffer.from(file.sanitizedContent, "base64").length;
+    if (file.operation === "write") {
+      if (file.sanitizedContent === null) {
+        context.addIssue({ code: z.ZodIssueCode.custom,
+          message: "write files require sanitizedContent", path: ["perFile", index] });
+      } else {
+        totalBytes += Buffer.from(file.sanitizedContent, "base64").length;
+      }
+    } else if (file.sanitizedContent !== null || file.targetBlobHash === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom,
+        message: "delete files require null content and a target blob",
+        path: ["perFile", index] });
+    }
   }
   if (totalBytes > MEMORY_MAX_PLAN_TOTAL_BYTES) {
     context.addIssue({
@@ -470,7 +588,7 @@ const openResult = z.object({
   memoryStateUuid: uuidString,
   // The Node RESULT contract only knows schema version 1; a different version is
   // an incompatible engine and must be rejected rather than silently accepted.
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
 }).strict();
 
 const bindRepositoryResult = z.object({
@@ -478,6 +596,14 @@ const bindRepositoryResult = z.object({
   publicRepositoryIdentity: nonEmptyString.nullable(),
   memoryRoot: nonEmptyString,
   status: z.enum(["active", "inactive"]),
+}).strict();
+
+const listMemoryFilesResult = z.object({
+  names: z.array(memoryFileName).max(MEMORY_MAX_SYNC_ENTRIES),
+}).strict();
+
+const readMemoryFileResult = z.object({
+  content: boundedText.nullable(),
 }).strict();
 
 const planTasksResult = z.object({
@@ -524,6 +650,27 @@ const submitExtractionResult = z.object({
   idempotent: z.boolean(),
   candidates: z.array(candidateState),
   candidateGeneration: nonNegativeInteger,
+}).strict();
+
+const submitConsolidationResult = z.object({
+  taskId: identifier,
+  runId: identifier,
+  status: z.enum(["pending_review", "no_op"]),
+  idempotent: z.boolean(),
+  candidate: candidateState.nullable(),
+  candidateGeneration: nonNegativeInteger,
+  entryCount: nonNegativeInteger,
+}).strict();
+
+const consolidationBaselineResult = z.object({
+  successfulRunId: identifier.nullable(),
+  entries: z.array(z.object({
+    entryId: identifier,
+    revision: positiveInteger,
+    contentDigest: hex64,
+  }).strict()),
+  pendingRunId: identifier.nullable(),
+  lastSuccessfulNoOp: z.boolean(),
 }).strict();
 
 const recallResult = z.object({
@@ -616,6 +763,7 @@ const searchResult = z.object({
 const reviewQueueResult = z.object({
   items: z.array(z.object({
     candidateId: identifier,
+    candidateKind: z.enum(["entry", "consolidation-patch"]),
     chunkRef: identifier,
     revision: positiveInteger,
     contentDigest: hex64,
@@ -660,6 +808,14 @@ const statusResult = z.object({
     voided: nonNegativeInteger,
     applyingPlanIds: z.array(identifier),
   }).strict(),
+  consolidations: z.object({
+    pendingReview: nonNegativeInteger,
+    noOp: nonNegativeInteger,
+    applied: nonNegativeInteger,
+    stale: nonNegativeInteger,
+    lastSuccessfulEntryCount: nonNegativeInteger,
+    lastSuccessfulNoOp: z.boolean(),
+  }).strict(),
 }).strict();
 
 const confirmStatementResult = z.discriminatedUnion("status", [
@@ -701,7 +857,8 @@ const promotionPlanResult = z.object({
   files: z.array(z.object({
     targetPath,
     targetBlobHash: hex40.nullable(),
-    sanitizedDigest: hex64,
+    operation: z.enum(["write", "delete"]),
+    sanitizedDigest: hex64.nullable(),
     bytes: nonNegativeInteger,
   }).strict()).min(1),
 }).strict();
@@ -743,9 +900,15 @@ const authorizeResult = z.object({
 const OP_SPECS = Object.freeze({
   "open": { request: openRequest, result: openResult },
   "bind-repository": { request: bindRepositoryRequest, result: bindRepositoryResult },
+  "list-memory-files": { request: listMemoryFilesRequest, result: listMemoryFilesResult },
+  "read-memory-file": { request: readMemoryFileRequest, result: readMemoryFileResult },
   "plan-tasks": { request: planTasksRequest, result: planTasksResult },
   "claim-task": { request: claimTaskRequest, result: claimTaskResult },
   "submit-extraction": { request: submitExtractionRequest, result: submitExtractionResult },
+  "submit-consolidation": { request: submitConsolidationRequest,
+    result: submitConsolidationResult },
+  "consolidation-baseline": { request: consolidationBaselineRequest,
+    result: consolidationBaselineResult },
   "recall": { request: recallRequest, result: recallResult },
   "submit-adjudication": { request: submitAdjudicationRequest, result: submitAdjudicationResult },
   "sync-approved": { request: syncApprovedRequest, result: syncApprovedResult },
@@ -806,6 +969,14 @@ export function memoryBindRepository(engine, input, options = {}) {
   return runMemoryOp(engine, "bind-repository", input, options);
 }
 
+export function memoryListFiles(engine, input, options = {}) {
+  return runMemoryOp(engine, "list-memory-files", input, options);
+}
+
+export function memoryReadFile(engine, input, options = {}) {
+  return runMemoryOp(engine, "read-memory-file", input, options);
+}
+
 export function memoryPlanTasks(engine, input, options = {}) {
   return runMemoryOp(engine, "plan-tasks", input, options);
 }
@@ -816,6 +987,14 @@ export function memoryClaimTask(engine, input, options = {}) {
 
 export function memorySubmitExtraction(engine, input, options = {}) {
   return runMemoryOp(engine, "submit-extraction", input, options);
+}
+
+export function memorySubmitConsolidation(engine, input, options = {}) {
+  return runMemoryOp(engine, "submit-consolidation", input, options);
+}
+
+export function memoryConsolidationBaseline(engine, input, options = {}) {
+  return runMemoryOp(engine, "consolidation-baseline", input, options);
 }
 
 export function memoryRecall(engine, input, options = {}) {

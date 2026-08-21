@@ -19,7 +19,7 @@
         "additionalProperties": false,
         "required": ["sourceKind", "opaqueSourceId", "revision", "contentDigest", "bytes", "truncated"],
         "properties": {
-          "sourceKind": { "enum": ["transcript", "draft", "candidate-pool", "scene-index", "prompt"] },
+          "sourceKind": { "enum": ["transcript", "draft", "candidate-pool", "approved-entry", "scene", "doctrine", "scene-index", "prompt"] },
           "opaqueSourceId": { "type": "string", "minLength": 1 },
           "revision": { "oneOf": [{ "$ref": "#/$defs/nonNegativeInteger" }, { "type": "null" }] },
           "contentDigest": { "$ref": "#/$defs/hex64" },

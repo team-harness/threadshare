@@ -253,10 +253,16 @@ threadshare memory extract --runner claude --approve-plan <extraction-digest>
 threadshare memory extract --runner claude --approve-plan <adjudication-digest>
 threadshare memory review
 threadshare memory promote --plan <plan-id>
+# Consolidate approved L1 entries into L2/L3 using another exact approval:
+threadshare memory consolidate --runner claude
+threadshare memory consolidate --runner claude --approve-plan <consolidation-digest>
+threadshare memory review --kind consolidation
+threadshare memory promote --plan <plan-id>
 threadshare memory assemble --provider claude
+threadshare memory assemble --provider codex
 ```
 
-Codex is also a restricted Phase 1 runner. A new Codex preview binds the exact model and HTTPS
+Codex is also a restricted extraction, adjudication, and consolidation runner. A new Codex preview binds the exact model and HTTPS
 endpoint; later approval reuses that private stored profile and cannot override it:
 
 ```bash
@@ -266,22 +272,29 @@ threadshare memory extract --runner codex \
   --request memory-filter.json
 threadshare memory extract --runner codex --approve-plan <extraction-digest>
 threadshare memory extract --runner codex --approve-plan <adjudication-digest>
+threadshare memory consolidate --runner codex \
+  --runner-model <model> \
+  --runner-endpoint <https-url>
+threadshare memory consolidate --runner codex --approve-plan <consolidation-digest>
 ```
 
-Agents may create the same pending-only preview with `threadshare_memory_extract_preview` over the
-local Insights MCP server. That tool can write the private pending artifact, but it cannot approve a
-digest, start either runner stage, or return transcript bytes. `threadshare_memory_search` and
-`threadshare_memory_status` remain read-only.
+Agents may create pending-only previews with `threadshare_memory_extract_preview` and
+`threadshare_memory_consolidate_preview` over the local Insights MCP server. These tools can write a
+private pending artifact, but cannot approve a digest, start a runner, or return transcript or memory
+content. `threadshare_memory_search` and `threadshare_memory_status` remain read-only.
 
 Each runner stage is deny-all except for its model connection and receives transcript bytes only after
 the user approves that stage's exact digest and byte summary. `review` requires a real TTY and confirms
 every generated statement; non-interactive callers can inspect pending work but cannot approve it.
-The selector rejects requests matching more than 200 Turns instead of silently taking a prefix. It
-reads complete selected Turns, injects bounded Delivery Trace evidence, and revalidates the exact
-source binding before candidate submission; unrelated snapshot advances do not invalidate a plan.
-`promote` writes only sanitized content below `.threadshare/memory/`, refreshes the approved search
-projection, and never stages, commits, or pushes. After a teammate pulls approved memory from Git, run
-`assemble` to refresh both the provider context block and local search projection.
+The selector rejects requests matching more than 200 Turns instead of silently taking a prefix. The
+Insights `extraction-candidates@1` Recipe is the only implementation of session scoring; it enforces
+eligible, active, `hard-sealed` Turns and complete Delivery Trace coverage. Threadshare reads complete
+selected Turns and revalidates the exact source binding before candidate submission; unrelated snapshot
+advances do not invalidate a plan. Consolidation is incremental; use `--if-due` for the 20-entry trigger
+or `--full` to replay all approved L1 after an empty or suspect baseline. `promote` applies one reviewed,
+recoverable write/delete journal below `.threadshare/memory/`, refreshes the approved search projection,
+and never stages, commits, or pushes. After a teammate pulls approved memory from Git, run `assemble`
+for each provider context file in use.
 
 ### Use Another Threadshare Server
 

@@ -8,25 +8,35 @@
 //! pragma/WAL sequence as the Insights store, and protected with 0600
 //! permissions on Unix. Wire shapes are documented in `memory_protocol.rs`.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
+
 use crate::memory_promotion::{
-    PromotionFsError, decode_base64, git_blob_oid_hex, read_worktree_file, write_worktree_file,
+    ConditionalMutationOutcome, ExpectedWorktreeValue, PromotionFsError,
+    cleanup_worktree_mutation_artifacts, conditional_replace_worktree_file, decode_base64,
+    git_blob_oid_hex, list_worktree_directory, read_worktree_file,
 };
 use crate::memory_protocol::{
     AdjudicationDraftOutcome, ApprovedProjectionWire, AuthorizeRequest, BindRepositoryOutcome,
     BindRepositoryRequest, CandidateCountsWire, CandidateProjectionWire, CandidateStateWire,
     ChunkCountsWire, ClaimTaskOutcome, ClaimTaskRequest, ConfirmStatementRequest,
-    DiscardCandidateRequest, MemorySearchRequest, MemoryStatusOutcome, MemoryStatusRequest,
-    PlanTasksOutcome, PlanTasksRequest, PlannedTaskStateWire, PoolItemWire, PromotionApplyRequest,
-    PromotionApproveRequest, PromotionCountsWire, PromotionPlanRequest, RecallHitWire,
-    RecallOutcome, RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire,
-    ReviewQueueOutcome, ReviewQueueRequest, SearchItemWire, SearchOutcome,
-    SubmitAdjudicationRequest, SubmitExtractionOutcome, SubmitExtractionRequest,
+    ConsolidationBaselineRequest, ConsolidationCountsWire, ConsolidationOperationInput,
+    DiscardCandidateRequest, ListMemoryFilesRequest, MAX_TEXT_BYTES, MemorySearchRequest,
+    MemoryStatusOutcome, MemoryStatusRequest, PlanTasksOutcome, PlanTasksRequest,
+    PlannedTaskStateWire, PoolItemWire, PromotionApplyRequest, PromotionApproveRequest,
+    PromotionCountsWire, PromotionPlanRequest, ReadMemoryFileRequest, RecallHitWire, RecallOutcome,
+    RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire, ReviewQueueOutcome,
+    ReviewQueueRequest, SearchItemWire, SearchOutcome, SubmitAdjudicationRequest,
+    SubmitConsolidationRequest, SubmitExtractionOutcome, SubmitExtractionRequest,
     SyncApprovedRequest, TaskCountsWire, TaskLeaseWire, TaskWire,
 };
 use crate::storage::{
@@ -36,7 +46,7 @@ use crate::storage::{
 use crate::try_canonical_json;
 
 /// Current memory-state schema version, stored in `memory_state_meta`.
-pub const MEMORY_STATE_SCHEMA_VERSION: u32 = 1;
+pub const MEMORY_STATE_SCHEMA_VERSION: u32 = 2;
 
 /// Versioned recall algorithm identifier (proposal §6.4, design §4).
 pub const RECALL_ALGORITHM_VERSION: &str = "recall-rrf@1";
@@ -53,6 +63,10 @@ pub const MEMORY_STATE_RELATIVE_PATH: &str = "memory/memory-state.sqlite3";
 /// `format` self-identifier of the canonical promotion plan document
 /// persisted in `promotion_journal.plan_canonical_json` (design §9).
 pub const PROMOTION_PLAN_FORMAT: &str = "threadshare-memory-promotion-plan@v1";
+
+/// Promotion policy implemented by this engine build. A plan bound to another
+/// policy must be regenerated instead of being interpreted under new rules.
+pub const PROMOTION_POLICY_VERSION: &str = "sanitize@1";
 
 const MAX_SUMMARY_CHARS: usize = 240;
 const FTS_MAX_TOKENS: usize = 32;
@@ -120,9 +134,15 @@ impl From<crate::storage::StorageError> for MemoryError {
     }
 }
 
-/// Schema exactly as specified by design §2 (DDL v1, rev2), with
-/// `IF NOT EXISTS` added so re-opening the database is an idempotent migration.
-const MEMORY_STATE_SCHEMA: &str = "
+const MEMORY_STATE_META_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS memory_state_meta (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+";
+
+/// Fresh v2 schema. Existing v1 databases use `migrate_v1_to_v2` instead of
+/// running this DDL ahead of version inspection.
+const MEMORY_STATE_SCHEMA_V2: &str = "
 CREATE TABLE IF NOT EXISTS memory_state_meta (
   key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
@@ -166,6 +186,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
   chunk_ref TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
   content_digest BLOB NOT NULL, payload_json TEXT NOT NULL,
+  candidate_kind TEXT NOT NULL DEFAULT 'entry'
+    CHECK(candidate_kind IN ('entry','consolidation-patch')),
   status TEXT NOT NULL DEFAULT 'draft',
   adjudication TEXT NOT NULL DEFAULT 'pending',
   updated_at INTEGER NOT NULL
@@ -220,21 +242,76 @@ CREATE TABLE IF NOT EXISTS promotion_journal (
   candidate_ids_json TEXT NOT NULL, assessment_digest BLOB NOT NULL,
   policy_version TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'generated',
+  mutation_phase TEXT NOT NULL DEFAULT 'precheck'
+    CHECK(mutation_phase IN ('precheck','mutating','rolling_back','done')),
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS promotion_files (
   plan_id TEXT NOT NULL, target_path TEXT NOT NULL,
   target_blob_hash TEXT,
-  sanitized_content BLOB NOT NULL, sanitized_digest BLOB NOT NULL,
+  operation TEXT NOT NULL DEFAULT 'write' CHECK(operation IN ('write','delete')),
+  sanitized_content BLOB, sanitized_digest BLOB,
+  intent_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK(intent_state IN ('pending','intent','applied','rolled_back')),
+  originally_present INTEGER CHECK(originally_present IN (0,1)),
+  rollback_content BLOB, rollback_digest BLOB,
+  legacy_write_only INTEGER NOT NULL DEFAULT 0 CHECK(legacy_write_only IN (0,1)),
   applied INTEGER NOT NULL DEFAULT 0,
+  CHECK(
+    (operation='write' AND sanitized_content IS NOT NULL AND sanitized_digest IS NOT NULL)
+    OR (operation='delete' AND sanitized_content IS NULL AND sanitized_digest IS NULL)
+  ),
+  CHECK(
+    (rollback_content IS NULL AND rollback_digest IS NULL)
+    OR (rollback_content IS NOT NULL AND rollback_digest IS NOT NULL)
+  ),
   PRIMARY KEY (plan_id, target_path)
 );
+CREATE TABLE IF NOT EXISTS consolidation_runs (
+  run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
+  repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
+  binding_json TEXT NOT NULL, entry_set_digest BLOB NOT NULL,
+  candidate_id TEXT UNIQUE, status TEXT NOT NULL
+    CHECK(status IN ('pending_review','no_op','applied','stale')),
+  entry_count INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS consolidation_run_entries (
+  run_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+  revision INTEGER NOT NULL, content_digest BLOB NOT NULL,
+  PRIMARY KEY (run_id, entry_id)
+);
+CREATE INDEX IF NOT EXISTS consolidation_runs_owner_status
+  ON consolidation_runs(repository_key, worktree_key, status, updated_at, run_id);
 CREATE TABLE IF NOT EXISTS authorization_log (
   plan_digest BLOB NOT NULL, task_id TEXT, runner_input_digest BLOB,
   input_coverage_digest BLOB, provider TEXT, model TEXT, endpoint TEXT,
   bytes INTEGER, decided_at INTEGER NOT NULL,
   via TEXT NOT NULL,
   manifest_digest BLOB
+);
+";
+
+const PROMOTION_FILES_V2_SCHEMA: &str = "
+CREATE TABLE promotion_files (
+  plan_id TEXT NOT NULL, target_path TEXT NOT NULL,
+  target_blob_hash TEXT,
+  operation TEXT NOT NULL DEFAULT 'write' CHECK(operation IN ('write','delete')),
+  sanitized_content BLOB, sanitized_digest BLOB,
+  intent_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK(intent_state IN ('pending','intent','applied','rolled_back')),
+  originally_present INTEGER CHECK(originally_present IN (0,1)),
+  rollback_content BLOB, rollback_digest BLOB,
+  legacy_write_only INTEGER NOT NULL DEFAULT 0 CHECK(legacy_write_only IN (0,1)),
+  applied INTEGER NOT NULL DEFAULT 0,
+  CHECK(
+    (operation='write' AND sanitized_content IS NOT NULL AND sanitized_digest IS NOT NULL)
+    OR (operation='delete' AND sanitized_content IS NULL AND sanitized_digest IS NULL)
+  ),
+  CHECK(
+    (rollback_content IS NULL AND rollback_digest IS NULL)
+    OR (rollback_content IS NOT NULL AND rollback_digest IS NOT NULL)
+  ),
+  PRIMARY KEY (plan_id, target_path)
 );
 ";
 
@@ -284,6 +361,84 @@ fn canonical_digest_hex(value: &Value) -> Result<String, MemoryError> {
 
 fn parse_json(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
+}
+
+fn promotion_file_fingerprint(connection: &Connection, table: &str) -> Result<String, MemoryError> {
+    let sql = format!(
+        "SELECT plan_id, target_path, target_blob_hash, sanitized_content,
+                sanitized_digest, applied FROM {table} ORDER BY plan_id, target_path"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok(serde_json::json!({
+            "planId": row.get::<_, String>(0)?,
+            "targetPath": row.get::<_, String>(1)?,
+            "targetBlobHash": row.get::<_, Option<String>>(2)?,
+            "sanitizedContent": hex::encode(row.get::<_, Vec<u8>>(3)?),
+            "sanitizedDigest": hex::encode(row.get::<_, Vec<u8>>(4)?),
+            "applied": row.get::<_, i64>(5)?,
+        }))
+    })?;
+    let values = rows.collect::<Result<Vec<_>, _>>()?;
+    canonical_digest_hex(&Value::Array(values))
+}
+
+fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<(), MemoryError> {
+    let before_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM promotion_files", [], |row| row.get(0))?;
+    let before_fingerprint = promotion_file_fingerprint(transaction, "promotion_files")?;
+    transaction.execute_batch("ALTER TABLE promotion_files RENAME TO promotion_files_v1;")?;
+    transaction.execute_batch(PROMOTION_FILES_V2_SCHEMA)?;
+    transaction.execute_batch(
+        "INSERT INTO promotion_files(
+           plan_id, target_path, target_blob_hash, operation,
+           sanitized_content, sanitized_digest, intent_state,
+           originally_present, rollback_content, rollback_digest,
+           legacy_write_only, applied)
+         SELECT plan_id, target_path, target_blob_hash, 'write',
+                sanitized_content, sanitized_digest,
+                CASE WHEN applied=1 THEN 'applied' ELSE 'pending' END,
+                NULL, NULL, NULL, 1, applied
+         FROM promotion_files_v1;
+         DROP TABLE promotion_files_v1;
+         ALTER TABLE candidates ADD COLUMN candidate_kind TEXT NOT NULL DEFAULT 'entry'
+           CHECK(candidate_kind IN ('entry','consolidation-patch'));
+         ALTER TABLE promotion_journal ADD COLUMN mutation_phase TEXT NOT NULL DEFAULT 'precheck'
+           CHECK(mutation_phase IN ('precheck','mutating','rolling_back','done'));
+         UPDATE promotion_journal SET mutation_phase = CASE
+           WHEN status IN ('applied','voided') THEN 'done'
+           WHEN status='applying' THEN 'mutating'
+           ELSE 'precheck' END;
+         CREATE TABLE consolidation_runs (
+           run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
+           repository_key BLOB NOT NULL, worktree_key BLOB NOT NULL,
+           binding_json TEXT NOT NULL, entry_set_digest BLOB NOT NULL,
+           candidate_id TEXT UNIQUE, status TEXT NOT NULL
+             CHECK(status IN ('pending_review','no_op','applied','stale')),
+           entry_count INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE consolidation_run_entries (
+           run_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+           revision INTEGER NOT NULL, content_digest BLOB NOT NULL,
+           PRIMARY KEY (run_id, entry_id)
+         );
+         CREATE INDEX consolidation_runs_owner_status
+           ON consolidation_runs(repository_key, worktree_key, status, updated_at, run_id);",
+    )?;
+    let after_count: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM promotion_files", [], |row| row.get(0))?;
+    let after_fingerprint = promotion_file_fingerprint(transaction, "promotion_files")?;
+    if before_count != after_count || before_fingerprint != after_fingerprint {
+        return Err(MemoryError::new(
+            "TS_MEMORY_STATE_CORRUPT",
+            "v1 to v2 promotion file migration did not preserve all rows",
+        ));
+    }
+    transaction.execute(
+        "UPDATE memory_state_meta SET value=?1 WHERE key='schema_version'",
+        [MEMORY_STATE_SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
 }
 
 fn summarize(text: &str) -> String {
@@ -472,6 +627,882 @@ fn record_submission(
         params![task_id, response_digest, canonical(outcome)?, now_unix_ms],
     )?;
     Ok(())
+}
+
+const CONSOLIDATION_HEAT_MAX: i64 = 2_147_483_647;
+const CONSOLIDATION_MAX_SCENES: usize = 15;
+const CONSOLIDATION_MERGE_PREFERRED_AT: usize = 12;
+const CONSOLIDATION_CREATE_FORBIDDEN_AT: usize = 14;
+
+#[derive(Clone)]
+struct BoundEntryRevision {
+    entry_id: String,
+    revision: i64,
+    content_digest: Vec<u8>,
+}
+
+fn consolidation_invalid(message: impl Into<String>) -> MemoryError {
+    MemoryError::new("TS_MEMORY_CONSOLIDATION_INVALID", message)
+}
+
+fn binding_drift(message: impl Into<String>) -> MemoryError {
+    MemoryError::new("TS_MEMORY_BINDING_DRIFT", message)
+}
+
+fn required_object<'a>(
+    value: &'a Value,
+    key: &str,
+) -> Result<&'a serde_json::Map<String, Value>, MemoryError> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .ok_or_else(|| binding_drift(format!("consolidation binding.{key} is missing or invalid")))
+}
+
+fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, MemoryError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_drift(format!("consolidation binding.{key} is missing or invalid")))
+}
+
+fn bound_source_file(root: &Path, path: &str) -> Result<Option<Vec<u8>>, MemoryError> {
+    let segments = path.split('/').collect::<Vec<_>>();
+    read_worktree_file(root, &segments).map_err(|error| match error {
+        PromotionFsError::Symlink => binding_drift(format!(
+            "consolidation source {path} contains a symbolic link"
+        )),
+        PromotionFsError::Io(error) => MemoryError::failed(format!(
+            "consolidation source {path} could not be read safely: {error}"
+        )),
+    })
+}
+
+fn bound_digest(value: &Value, label: &str) -> Result<Vec<u8>, MemoryError> {
+    value
+        .as_str()
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .and_then(|digest| hex::decode(digest).ok())
+        .ok_or_else(|| binding_drift(format!("{label} is invalid")))
+}
+
+fn approved_source_tree_digest(root: &Path) -> Result<String, MemoryError> {
+    let list_names = || {
+        list_worktree_directory(root, &[".threadshare", "memory", "entries"])
+            .map_err(|error| match error {
+                PromotionFsError::Symlink => {
+                    binding_drift("the approved-entry directory contains a symbolic link")
+                }
+                PromotionFsError::Io(error) => MemoryError::failed(format!(
+                    "the approved-entry directory could not be listed safely: {error}"
+                )),
+            })
+            .map(|names| {
+                names
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|name| name.ends_with(".md"))
+                    .collect::<Vec<_>>()
+            })
+    };
+    let names = list_names()?;
+    if names.len() > 4096 {
+        return Err(binding_drift("the approved-entry file count exceeds 4096"));
+    }
+    let mut entries = Vec::with_capacity(names.len());
+    for name in &names {
+        let path = format!(".threadshare/memory/entries/{name}");
+        let bytes = bound_source_file(root, &path)?
+            .ok_or_else(|| binding_drift("an approved-entry file changed during validation"))?;
+        if bytes.len() > MAX_TEXT_BYTES {
+            return Err(binding_drift("an approved-entry file exceeds 64 KiB"));
+        }
+        entries.push(serde_json::json!({
+            "path": path,
+            "contentDigest": hex::encode(Sha256::digest(&bytes)),
+        }));
+    }
+    if list_names()? != names {
+        return Err(binding_drift(
+            "the approved-entry file set changed during validation",
+        ));
+    }
+    canonical_digest_hex(&serde_json::json!({
+        "format": "threadshare-memory-source-tree@v1",
+        "entries": entries,
+    }))
+}
+
+fn validate_bound_consolidation_sources(root: &Path, binding: &Value) -> Result<(), MemoryError> {
+    let projection = required_object(binding, "approvedProjection")?;
+    let expected_source_tree_digest = projection
+        .get("sourceTreeDigest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_drift("approvedProjection.sourceTreeDigest is invalid"))?;
+    if approved_source_tree_digest(root)? != expected_source_tree_digest {
+        return Err(binding_drift(
+            "the approved-entry source tree changed after consolidation task assembly",
+        ));
+    }
+    let scene_values = binding
+        .get("sceneRevisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| binding_drift("sceneRevisions is invalid"))?;
+    let expected_names = scene_values
+        .iter()
+        .map(|value| {
+            value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| format!("{name}.md"))
+                .ok_or_else(|| binding_drift("sceneRevisions[].name is invalid"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let actual_names = list_worktree_directory(root, &[".threadshare", "memory", "scenes"])
+        .map_err(|error| match error {
+            PromotionFsError::Symlink => {
+                binding_drift("the bound scene directory contains a symbolic link")
+            }
+            PromotionFsError::Io(error) => MemoryError::failed(format!(
+                "the bound scene directory could not be listed safely: {error}"
+            )),
+        })?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| name.ends_with(".md"))
+        .collect::<Vec<_>>();
+    if actual_names != expected_names {
+        return Err(binding_drift(
+            "the scene file set changed after consolidation task assembly",
+        ));
+    }
+    for value in scene_values {
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| binding_drift("sceneRevisions[].name is invalid"))?;
+        let expected_digest = bound_digest(
+            value.get("contentDigest").unwrap_or(&Value::Null),
+            "sceneRevisions[].contentDigest",
+        )?;
+        let expected_heat = value
+            .get("heat")
+            .and_then(Value::as_i64)
+            .filter(|heat| (1..=CONSOLIDATION_HEAT_MAX).contains(heat))
+            .ok_or_else(|| binding_drift("sceneRevisions[].heat is invalid"))?;
+        let path = format!(".threadshare/memory/scenes/{name}.md");
+        let bytes = bound_source_file(root, &path)?
+            .ok_or_else(|| binding_drift(format!("bound scene {name} is missing")))?;
+        if Sha256::digest(&bytes).as_slice() != expected_digest {
+            return Err(binding_drift(format!("bound scene {name} changed")));
+        }
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| binding_drift(format!("bound scene {name} is not UTF-8")))?;
+        let heat = validate_materialized_scene(content)
+            .map_err(|_| binding_drift(format!("bound scene {name} is invalid")))?;
+        if heat != expected_heat {
+            return Err(binding_drift(format!("bound scene {name} heat changed")));
+        }
+    }
+
+    let doctrine = bound_source_file(root, ".threadshare/memory/doctrine.md")?;
+    match binding.get("doctrineDigest") {
+        Some(Value::Null) if doctrine.is_none() => {}
+        Some(Value::String(_)) => {
+            let expected = bound_digest(
+                binding.get("doctrineDigest").unwrap_or(&Value::Null),
+                "doctrineDigest",
+            )?;
+            let bytes =
+                doctrine.ok_or_else(|| binding_drift("the bound doctrine file is missing"))?;
+            if Sha256::digest(&bytes).as_slice() != expected {
+                return Err(binding_drift("the bound doctrine file changed"));
+            }
+            let content = std::str::from_utf8(&bytes)
+                .map_err(|_| binding_drift("the bound doctrine file is not UTF-8"))?;
+            validate_materialized_doctrine(content)
+                .map_err(|_| binding_drift("the bound doctrine file is invalid"))?;
+        }
+        Some(Value::Null) => {
+            return Err(binding_drift(
+                "a doctrine file appeared after consolidation task assembly",
+            ));
+        }
+        _ => return Err(binding_drift("doctrineDigest is invalid")),
+    }
+    Ok(())
+}
+
+fn validate_consolidation_candidate_sources(
+    connection: &Connection,
+    root: &Path,
+    candidate_ids: &[String],
+) -> Result<(), MemoryError> {
+    for candidate_id in candidate_ids {
+        let row: Option<(String, String, Vec<u8>, Vec<u8>)> = connection
+            .query_row(
+                "SELECT candidate_kind, payload_json, repository_key, worktree_key
+                 FROM candidates WHERE candidate_id=?1",
+                params![candidate_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((candidate_kind, payload_json, repository_key, worktree_key)) = row else {
+            continue;
+        };
+        if candidate_kind == "consolidation-patch" {
+            let payload = parse_json(&payload_json);
+            let binding = payload
+                .get("binding")
+                .ok_or_else(|| binding_drift("consolidation candidate binding is missing"))?;
+            validate_consolidation_replay_epoch(
+                connection,
+                binding,
+                &repository_key,
+                &worktree_key,
+            )?;
+            validate_bound_consolidation_sources(root, binding)?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let Ok(year) = value[0..4].parse::<u32>() else {
+        return false;
+    };
+    let Ok(month) = value[5..7].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = value[8..10].parse::<u32>() else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
+}
+
+fn normalize_consolidation_text(value: &str) -> Result<String, MemoryError> {
+    if value.starts_with('\u{feff}') {
+        return Err(consolidation_invalid(
+            "consolidation content contains a BOM",
+        ));
+    }
+    let lf = value.replace("\r\n", "\n");
+    if lf.contains('\r') {
+        return Err(consolidation_invalid(
+            "consolidation content contains a bare carriage return",
+        ));
+    }
+    Ok(lf
+        .split('\n')
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn validate_materialized_scene(content: &str) -> Result<i64, MemoryError> {
+    if normalize_consolidation_text(content)? != content {
+        return Err(consolidation_invalid(
+            "scene content is not in normalized canonical form",
+        ));
+    }
+    let lines = content.split('\n').collect::<Vec<_>>();
+    if lines.len() < 6
+        || lines[0] != "-----META-START-----"
+        || lines[5] != "-----META-END-----"
+        || !lines[1].starts_with("created: ")
+        || !lines[2].starts_with("updated: ")
+        || !lines[3].starts_with("summary: ")
+        || !lines[4].starts_with("heat: ")
+    {
+        return Err(consolidation_invalid(
+            "scene content does not use canonical META field order",
+        ));
+    }
+    if !valid_iso_date(&lines[1][9..]) || !valid_iso_date(&lines[2][9..]) {
+        return Err(consolidation_invalid(
+            "scene dates must be valid YYYY-MM-DD dates",
+        ));
+    }
+    let summary: String = serde_json::from_str(&lines[3][9..])
+        .map_err(|_| consolidation_invalid("scene summary must be a canonical JSON string"))?;
+    if summary.is_empty() || summary.chars().count() > 40 {
+        return Err(consolidation_invalid(
+            "scene summary must contain between 1 and 40 code points",
+        ));
+    }
+    let heat = lines[4][6..]
+        .parse::<i64>()
+        .map_err(|_| consolidation_invalid("scene heat must be an integer"))?;
+    if !(1..=CONSOLIDATION_HEAT_MAX).contains(&heat) {
+        return Err(consolidation_invalid(
+            "scene heat is outside the supported range",
+        ));
+    }
+    let body = lines[6..].join("\n");
+    if body.chars().count() > 1500 {
+        return Err(consolidation_invalid("scene body exceeds 1500 code points"));
+    }
+    Ok(heat)
+}
+
+fn validate_materialized_doctrine(content: &str) -> Result<(), MemoryError> {
+    if normalize_consolidation_text(content)? != content {
+        return Err(consolidation_invalid(
+            "doctrine content is not in normalized canonical form",
+        ));
+    }
+    if content.is_empty() || content.chars().count() > 1200 {
+        return Err(consolidation_invalid(
+            "doctrine must contain between 1 and 1200 code points",
+        ));
+    }
+    Ok(())
+}
+
+fn rationale_states_cannot_fit(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    let cannot = lower.contains("cannot") || lower.contains("can't") || lower.contains("unable to");
+    let fit = lower.contains("fit")
+        || lower.contains("merge")
+        || lower.contains("fold")
+        || lower.contains("incorporat");
+    (cannot && fit)
+        || ((value.contains("无法") || value.contains("不能"))
+            && (value.contains("并入") || value.contains("合并") || value.contains("纳入")))
+}
+
+fn checked_heat_add(left: i64, right: i64) -> Result<i64, MemoryError> {
+    left.checked_add(right)
+        .filter(|value| *value <= CONSOLIDATION_HEAT_MAX)
+        .ok_or_else(|| consolidation_invalid("scene heat overflowed"))
+}
+
+fn validate_consolidation_replay_epoch(
+    connection: &Connection,
+    binding: &Value,
+    repository_key: &[u8],
+    worktree_key: &[u8],
+) -> Result<(), MemoryError> {
+    let replay = required_object(binding, "replay")?;
+    if !matches!(
+        replay.get("mode").and_then(Value::as_str),
+        Some("incremental" | "full")
+    ) {
+        return Err(binding_drift("consolidation replay mode is invalid"));
+    }
+    let bound_after_run = match replay.get("afterSuccessfulRunId") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 256 => {
+            Some(value.as_str())
+        }
+        _ => return Err(binding_drift("consolidation replay epoch is invalid")),
+    };
+    let current_after_run: Option<String> = connection
+        .query_row(
+            "SELECT run_id FROM consolidation_runs
+             WHERE repository_key=?1 AND worktree_key=?2
+               AND status IN ('no_op','applied')
+             ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+            params![repository_key, worktree_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current_after_run.as_deref() != bound_after_run {
+        return Err(binding_drift(
+            "the successful consolidation baseline advanced after task assembly",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_consolidation_binding(
+    connection: &Connection,
+    task: &TaskRow,
+    operations: &[ConsolidationOperationInput],
+) -> Result<Vec<BoundEntryRevision>, MemoryError> {
+    let binding = parse_json(&task.binding_json);
+    let owner = required_object(&binding, "owner")?;
+    let repository_key = owner
+        .get("repositoryKey")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_drift("consolidation binding owner is invalid"))?;
+    let worktree_key = owner
+        .get("worktreeKey")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_drift("consolidation binding owner is invalid"))?;
+    if hex_blob(repository_key)? != task.repository_key
+        || hex_blob(worktree_key)? != task.worktree_key
+    {
+        return Err(binding_drift("consolidation owner changed"));
+    }
+    let root_realpath: Option<String> = connection
+        .query_row(
+            "SELECT root_realpath FROM repository_bindings
+             WHERE repository_key=?1 AND worktree_key=?2 AND status='active'",
+            params![&task.repository_key, &task.worktree_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let root_realpath = root_realpath
+        .ok_or_else(|| binding_drift("the consolidation owner has no active repository binding"))?;
+    if required_string(&binding, "memoryStateUuid")?
+        != connection.query_row(
+            "SELECT value FROM memory_state_meta WHERE key='memoryStateUuid'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?
+    {
+        return Err(binding_drift("memory-state UUID changed"));
+    }
+    if required_string(&binding, "schemaVersion")? != "threadshare-memory-consolidation-task@v1" {
+        return Err(binding_drift("consolidation schema version is unsupported"));
+    }
+
+    validate_consolidation_replay_epoch(
+        connection,
+        &binding,
+        &task.repository_key,
+        &task.worktree_key,
+    )?;
+
+    let projection = required_object(&binding, "approvedProjection")?;
+    let expected_generation = projection
+        .get("generation")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| binding_drift("approved projection generation is invalid"))?;
+    let expected_source_digest = projection
+        .get("sourceTreeDigest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| binding_drift("approved projection source digest is invalid"))?;
+    if projection.get("coverage").and_then(Value::as_str) != Some("complete") {
+        return Err(binding_drift(
+            "approved projection coverage is not complete",
+        ));
+    }
+    let current_projection: Option<(i64, Vec<u8>, String)> = connection
+        .query_row(
+            "SELECT generation, source_tree_digest, coverage FROM approved_projection
+             WHERE repository_key=?1 AND worktree_key=?2",
+            params![&task.repository_key, &task.worktree_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((generation, source_digest, coverage)) = current_projection else {
+        return Err(binding_drift("approved projection no longer exists"));
+    };
+    if generation != expected_generation
+        || hex::encode(source_digest) != expected_source_digest
+        || coverage != "complete"
+    {
+        return Err(binding_drift(
+            "approved projection changed after task assembly",
+        ));
+    }
+
+    let entry_values = binding
+        .get("entryRevisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| binding_drift("entryRevisions is invalid"))?;
+    if canonical_digest_hex(&Value::Array(entry_values.clone()))?
+        != required_string(&binding, "entrySetDigest")?
+    {
+        return Err(binding_drift(
+            "entry-set digest does not match entryRevisions",
+        ));
+    }
+    let mut entries = Vec::new();
+    let mut previous_entry_id: Option<&str> = None;
+    for value in entry_values {
+        let object = value
+            .as_object()
+            .ok_or_else(|| binding_drift("entryRevisions contains a non-object"))?;
+        let entry_id = object
+            .get("entryId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| binding_drift("entryRevisions[].entryId is invalid"))?;
+        if previous_entry_id.is_some_and(|previous| previous >= entry_id) {
+            return Err(binding_drift(
+                "entryRevisions must be unique and sorted by entryId",
+            ));
+        }
+        previous_entry_id = Some(entry_id);
+        let revision = object
+            .get("revision")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| binding_drift("entryRevisions[].revision is invalid"))?;
+        let content_digest = hex_blob(
+            object
+                .get("contentDigest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| binding_drift("entryRevisions[].contentDigest is invalid"))?,
+        )?;
+        let current: Option<(i64, Vec<u8>)> = connection
+            .query_row(
+                "SELECT revision, content_digest FROM approved_entries
+                 WHERE entry_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                params![entry_id, &task.repository_key, &task.worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if current.as_ref() != Some(&(revision, content_digest.clone())) {
+            return Err(binding_drift(format!("approved entry {entry_id} changed")));
+        }
+        entries.push(BoundEntryRevision {
+            entry_id: entry_id.to_owned(),
+            revision,
+            content_digest,
+        });
+    }
+
+    let scene_values = binding
+        .get("sceneRevisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| binding_drift("sceneRevisions is invalid"))?;
+    if canonical_digest_hex(&Value::Array(scene_values.clone()))?
+        != required_string(&binding, "sceneIndexDigest")?
+    {
+        return Err(binding_drift(
+            "scene-index digest does not match sceneRevisions",
+        ));
+    }
+    let mut scenes = HashMap::new();
+    let mut previous_scene_name: Option<&str> = None;
+    for value in scene_values {
+        let object = value
+            .as_object()
+            .ok_or_else(|| binding_drift("sceneRevisions contains a non-object"))?;
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| binding_drift("sceneRevisions[].name is invalid"))?;
+        if previous_scene_name.is_some_and(|previous| previous >= name) {
+            return Err(binding_drift(
+                "sceneRevisions must be unique and sorted by name",
+            ));
+        }
+        previous_scene_name = Some(name);
+        let heat = object
+            .get("heat")
+            .and_then(Value::as_i64)
+            .filter(|heat| (1..=CONSOLIDATION_HEAT_MAX).contains(heat))
+            .ok_or_else(|| binding_drift("sceneRevisions[].heat is invalid"))?;
+        scenes.insert(name.to_owned(), heat);
+    }
+    validate_bound_consolidation_sources(Path::new(&root_realpath), &binding)?;
+    validate_consolidation_operations(&binding, operations, &entries, &scenes)?;
+    Ok(entries)
+}
+
+fn validate_consolidation_operations(
+    binding: &Value,
+    operations: &[ConsolidationOperationInput],
+    entries: &[BoundEntryRevision],
+    scenes: &HashMap<String, i64>,
+) -> Result<(), MemoryError> {
+    let entry_ids = entries
+        .iter()
+        .map(|entry| entry.entry_id.as_str())
+        .collect::<HashSet<_>>();
+    let doctrine_present = !binding.get("doctrineDigest").is_none_or(Value::is_null);
+    let mut operation_ids = HashSet::new();
+    let mut primary_paths: HashMap<String, &str> = HashMap::new();
+    let mut merge_sources: HashMap<String, &str> = HashMap::new();
+    let mut doctrine_count = 0usize;
+    let mut create_count = 0usize;
+
+    for operation in operations {
+        if !operation_ids.insert(operation.operation_id.as_str()) {
+            return Err(consolidation_invalid("operationId values must be unique"));
+        }
+        let path = if operation.target == "doctrine" {
+            ".threadshare/memory/doctrine.md".to_owned()
+        } else {
+            format!(".threadshare/memory/scenes/{}.md", operation.name)
+        };
+        if primary_paths
+            .insert(path.clone(), operation.operation_id.as_str())
+            .is_some()
+        {
+            return Err(consolidation_invalid(format!(
+                "multiple operations target {path}"
+            )));
+        }
+        let mut based_on = HashSet::new();
+        for entry_id in &operation.based_on_entry_ids {
+            if !entry_ids.contains(entry_id.as_str()) {
+                return Err(consolidation_invalid(format!(
+                    "operation {} references unknown entry {entry_id}",
+                    operation.operation_id
+                )));
+            }
+            if !based_on.insert(entry_id) {
+                return Err(consolidation_invalid("basedOnEntryIds contains duplicates"));
+            }
+        }
+        let writes = operation.op != "delete";
+        if writes && (operation.new_content.is_none() || operation.based_on_entry_ids.is_empty()) {
+            return Err(consolidation_invalid(
+                "create/update/merge require content and at least one entry",
+            ));
+        }
+        if !writes && operation.new_content.is_some() {
+            return Err(consolidation_invalid("delete requires null newContent"));
+        }
+
+        if operation.target == "doctrine" {
+            doctrine_count += 1;
+            if operation.name != "doctrine"
+                || operation.op == "merge"
+                || !operation.merge_sources.is_empty()
+            {
+                return Err(consolidation_invalid("doctrine operation shape is invalid"));
+            }
+            if (operation.op == "create") == doctrine_present {
+                return Err(consolidation_invalid(
+                    "doctrine create/update/delete target state is invalid",
+                ));
+            }
+            if writes {
+                validate_materialized_doctrine(operation.new_content.as_deref().unwrap())?;
+            }
+            continue;
+        }
+
+        if operation.op == "create" {
+            create_count += 1;
+            if scenes.contains_key(&operation.name) {
+                return Err(consolidation_invalid("create target already exists"));
+            }
+        } else if matches!(operation.op.as_str(), "update" | "delete")
+            && !scenes.contains_key(&operation.name)
+        {
+            return Err(consolidation_invalid("update/delete target does not exist"));
+        }
+        if operation.op != "merge" && !operation.merge_sources.is_empty() {
+            return Err(consolidation_invalid("only merge may contain mergeSources"));
+        }
+
+        let expected_heat = match operation.op.as_str() {
+            "create" => Some(1),
+            "update" => Some(checked_heat_add(scenes[&operation.name], 1)?),
+            "merge" => {
+                if operation.merge_sources.len() < 2 {
+                    return Err(consolidation_invalid("merge requires at least two sources"));
+                }
+                let mut unique_sources = HashSet::new();
+                let mut heat = 1;
+                for source in &operation.merge_sources {
+                    let scene = scenes.get(source).ok_or_else(|| {
+                        consolidation_invalid(format!("merge source {source} does not exist"))
+                    })?;
+                    if !unique_sources.insert(source) {
+                        return Err(consolidation_invalid("mergeSources contains duplicates"));
+                    }
+                    heat = checked_heat_add(heat, *scene)?;
+                    let source_path = format!(".threadshare/memory/scenes/{source}.md");
+                    if merge_sources
+                        .insert(source_path, operation.operation_id.as_str())
+                        .is_some()
+                    {
+                        return Err(consolidation_invalid("a scene is used by multiple merges"));
+                    }
+                }
+                if scenes.contains_key(&operation.name)
+                    && !operation.merge_sources.contains(&operation.name)
+                {
+                    return Err(consolidation_invalid(
+                        "an existing merge target must be one of the merge sources",
+                    ));
+                }
+                Some(heat)
+            }
+            "delete" => None,
+            _ => return Err(consolidation_invalid("unknown operation")),
+        };
+        if let Some(expected_heat) = expected_heat {
+            let actual_heat =
+                validate_materialized_scene(operation.new_content.as_deref().unwrap())?;
+            if actual_heat != expected_heat {
+                return Err(consolidation_invalid(format!(
+                    "operation {} has heat {actual_heat}, expected {expected_heat}",
+                    operation.operation_id
+                )));
+            }
+        }
+    }
+    if doctrine_count > 1 || create_count > 1 {
+        return Err(consolidation_invalid(
+            "a patch may contain at most one doctrine operation and one scene create",
+        ));
+    }
+    for (source_path, owner) in merge_sources {
+        if primary_paths
+            .get(&source_path)
+            .is_some_and(|primary| *primary != owner)
+        {
+            return Err(consolidation_invalid(
+                "a merge source is changed by another operation",
+            ));
+        }
+    }
+
+    let mut final_scenes = scenes.keys().cloned().collect::<HashSet<_>>();
+    for operation in operations
+        .iter()
+        .filter(|operation| operation.target == "scene")
+    {
+        match operation.op.as_str() {
+            "create" => {
+                final_scenes.insert(operation.name.clone());
+            }
+            "delete" => {
+                final_scenes.remove(&operation.name);
+            }
+            "merge" => {
+                for source in &operation.merge_sources {
+                    final_scenes.remove(source);
+                }
+                final_scenes.insert(operation.name.clone());
+            }
+            _ => {}
+        }
+    }
+    if scenes.len() >= CONSOLIDATION_CREATE_FORBIDDEN_AT && create_count > 0 {
+        return Err(consolidation_invalid(
+            "scene creation is forbidden at this capacity",
+        ));
+    }
+    if scenes.len() >= CONSOLIDATION_MERGE_PREFERRED_AT {
+        for operation in operations
+            .iter()
+            .filter(|operation| operation.op == "create")
+        {
+            if !rationale_states_cannot_fit(&operation.rationale) {
+                return Err(consolidation_invalid(
+                    "scene creation must explain why it cannot fit an existing scene",
+                ));
+            }
+        }
+    }
+    if final_scenes.len() > CONSOLIDATION_MAX_SCENES
+        || (scenes.len() >= CONSOLIDATION_MAX_SCENES
+            && (final_scenes.len() >= CONSOLIDATION_MAX_SCENES
+                || !operations
+                    .iter()
+                    .any(|operation| matches!(operation.op.as_str(), "merge" | "delete"))))
+    {
+        return Err(consolidation_invalid(
+            "patch does not satisfy scene capacity policy",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_consolidation_assessments(
+    request: &SubmitConsolidationRequest,
+    entries: &[BoundEntryRevision],
+) -> Result<(), MemoryError> {
+    let entry_by_id = entries
+        .iter()
+        .map(|entry| (entry.entry_id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let assessment_by_statement = request
+        .assessments
+        .iter()
+        .map(|assessment| (assessment.statement_id.as_str(), assessment))
+        .collect::<HashMap<_, _>>();
+    if assessment_by_statement.len() != request.operations.len() {
+        return Err(consolidation_invalid(
+            "operations and assessments must be one-to-one",
+        ));
+    }
+    for operation in &request.operations {
+        let assessment = assessment_by_statement
+            .get(operation.operation_id.as_str())
+            .ok_or_else(|| consolidation_invalid("operation has no assessment"))?;
+        let operation_value = serde_json::to_value(operation)
+            .map_err(|error| MemoryError::failed(error.to_string()))?;
+        if canonical_digest_hex(&operation_value)? != assessment.statement_text_digest {
+            return Err(consolidation_invalid(
+                "assessment statementTextDigest does not bind the materialized operation",
+            ));
+        }
+        let mut entry_ids = operation.based_on_entry_ids.clone();
+        entry_ids.sort();
+        let citations = entry_ids
+            .into_iter()
+            .map(|entry_id| {
+                let entry = entry_by_id[entry_id.as_str()];
+                serde_json::json!({
+                    "entryId": entry.entry_id,
+                    "revision": entry.revision,
+                    "contentDigest": hex::encode(&entry.content_digest),
+                })
+            })
+            .collect::<Vec<_>>();
+        if canonical_digest_hex(&Value::Array(citations))? != assessment.citations_digest
+            || assessment.provenance_strength != "contextual"
+            || assessment.claim_support != "unverified"
+            || assessment.assessed_by != "deterministic"
+            || assessment.revision != 1
+            || assessment.limitations
+                != [
+                    "generated-consolidation-content",
+                    "source-approved-memory-only",
+                ]
+        {
+            return Err(consolidation_invalid(
+                "assessment does not match the deterministic consolidation evidence policy",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_consolidation_payload(
+    run_id: &str,
+    binding: &Value,
+    operations: &[ConsolidationOperationInput],
+) -> Result<Value, MemoryError> {
+    let operation_values = operations
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MemoryError::failed(error.to_string()))?;
+    let statements = operations
+        .iter()
+        .zip(operation_values.iter())
+        .map(|(operation, value)| {
+            serde_json::json!({
+                "statementId": operation.operation_id,
+                "operation": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "candidateKind": "consolidation-patch",
+        "runId": run_id,
+        "binding": binding,
+        "operations": operation_values,
+        "statements": statements,
+    }))
 }
 
 struct RecallComputation {
@@ -791,7 +1822,7 @@ impl MemoryStorage {
     }
 
     fn configure(
-        connection: Connection,
+        mut connection: Connection,
         database_path: Option<PathBuf>,
     ) -> Result<Self, MemoryError> {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -814,16 +1845,47 @@ impl MemoryStorage {
             }
             connection.execute_batch("PRAGMA wal_autocheckpoint=0;")?;
         }
-        connection.execute_batch(MEMORY_STATE_SCHEMA)?;
-        let candidate = new_memory_state_uuid(&connection)?;
-        connection.execute(
-            "INSERT OR IGNORE INTO memory_state_meta(key, value) VALUES ('memoryStateUuid', ?1)",
-            [candidate],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO memory_state_meta(key, value) VALUES ('schema_version', ?1)",
-            [MEMORY_STATE_SCHEMA_VERSION.to_string()],
-        )?;
+        connection.execute_batch(MEMORY_STATE_META_SCHEMA)?;
+        let stored_version: Option<String> = connection
+            .query_row(
+                "SELECT value FROM memory_state_meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match stored_version.as_deref() {
+            None => {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                transaction.execute_batch(MEMORY_STATE_SCHEMA_V2)?;
+                let candidate = new_memory_state_uuid(&transaction)?;
+                transaction.execute(
+                    "INSERT INTO memory_state_meta(key, value) VALUES ('memoryStateUuid', ?1)",
+                    [candidate],
+                )?;
+                transaction.execute(
+                    "INSERT INTO memory_state_meta(key, value) VALUES ('schema_version', ?1)",
+                    [MEMORY_STATE_SCHEMA_VERSION.to_string()],
+                )?;
+                transaction.commit()?;
+            }
+            Some("1") => {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                migrate_v1_to_v2(&transaction)?;
+                transaction.commit()?;
+            }
+            Some("2") => {}
+            Some(other) => {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!("unsupported memory-state schema version {other}"),
+                ));
+            }
+        }
+        // Idempotently ensure every recognized-v2 object exists only after the
+        // version decision/migration has committed.
+        connection.execute_batch(MEMORY_STATE_SCHEMA_V2)?;
         let storage = Self {
             connection,
             database_path,
@@ -875,6 +1937,39 @@ impl MemoryStorage {
 
     pub fn state_dir(&self) -> Option<&Path> {
         self.state_dir.as_deref()
+    }
+
+    fn acquire_promotion_apply_lock(&self) -> Result<Option<File>, MemoryError> {
+        let Some(database_path) = &self.database_path else {
+            return Ok(None);
+        };
+        let lock_path = sqlite_sidecar_path(database_path, "-promotion.lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(&lock_path).map_err(|error| {
+            MemoryError::failed(format!(
+                "the promotion apply lock could not be opened: {error}"
+            ))
+        })?;
+        if !file.metadata()?.is_file() {
+            return Err(MemoryError::failed(
+                "the promotion apply lock is not a regular file",
+            ));
+        }
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(MemoryError::new(
+                "TS_MEMORY_PLAN_STATE_INVALID",
+                "another promotion apply is active; retry after it finishes",
+            )),
+            Err(error) => Err(MemoryError::failed(format!(
+                "the promotion apply lock could not be acquired: {error}"
+            ))),
+        }
     }
 
     /// WAL maintenance after every successful write transaction. The
@@ -967,6 +2062,97 @@ impl MemoryStorage {
             memory_root: request.memory_root.clone(),
             status: request.status.clone(),
         })
+    }
+
+    fn active_memory_root(
+        &self,
+        repository_key: &str,
+        worktree_key: &str,
+    ) -> Result<PathBuf, MemoryError> {
+        let repository_key = hex_blob(repository_key)?;
+        let worktree_key = hex_blob(worktree_key)?;
+        let row: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT root_realpath, memory_root FROM repository_bindings
+                 WHERE repository_key=?1 AND worktree_key=?2 AND status='active'",
+                params![repository_key, worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (root_realpath, memory_root) = row.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_BINDING_NOT_FOUND",
+                "the owner has no active repository binding",
+            )
+        })?;
+        if memory_root != ".threadshare/memory" {
+            return Err(MemoryError::new(
+                "TS_MEMORY_STATE_CORRUPT",
+                "the repository binding has an unsupported memory root",
+            ));
+        }
+        Ok(PathBuf::from(root_realpath))
+    }
+
+    /// Host-only descriptor-relative directory listing. This op is not
+    /// exposed through MCP and never grants the Runner a filesystem tool.
+    pub fn list_memory_files(
+        &self,
+        request: &ListMemoryFilesRequest,
+    ) -> Result<Value, MemoryError> {
+        let root = self.active_memory_root(&request.repository_key, &request.worktree_key)?;
+        let segments = [".threadshare", "memory", request.collection.as_str()];
+        let mut names = list_worktree_directory(&root, &segments)
+            .map_err(|error| match error {
+                PromotionFsError::Symlink => {
+                    binding_drift("the requested memory directory contains a symbolic link")
+                }
+                PromotionFsError::Io(error) => MemoryError::failed(format!(
+                    "the requested memory directory could not be listed safely: {error}"
+                )),
+            })?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| name.ends_with(".md"))
+            .collect::<Vec<_>>();
+        names.sort();
+        if names.len() > 4096 {
+            return Err(binding_drift(
+                "the requested memory directory exceeds 4096 files",
+            ));
+        }
+        Ok(serde_json::json!({ "names": names }))
+    }
+
+    /// Host-only descriptor-relative read constrained to the three public
+    /// Team Memory collections. Every path component is opened no-follow.
+    pub fn read_memory_file(&self, request: &ReadMemoryFileRequest) -> Result<Value, MemoryError> {
+        let root = self.active_memory_root(&request.repository_key, &request.worktree_key)?;
+        let mut segments = vec![".threadshare", "memory", request.collection.as_str()];
+        if let Some(name) = request.name.as_deref() {
+            segments.push(name);
+        } else {
+            segments.pop();
+            segments.push("doctrine.md");
+        }
+        let bytes = read_worktree_file(&root, &segments).map_err(|error| match error {
+            PromotionFsError::Symlink => {
+                binding_drift("the requested memory file path contains a symbolic link")
+            }
+            PromotionFsError::Io(error) => MemoryError::failed(format!(
+                "the requested memory file could not be read safely: {error}"
+            )),
+        })?;
+        let Some(bytes) = bytes else {
+            return Ok(serde_json::json!({ "content": null }));
+        };
+        if bytes.len() > MAX_TEXT_BYTES {
+            return Err(binding_drift("the requested memory file exceeds 64 KiB"));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| binding_drift("the requested memory file is not valid UTF-8"))?;
+        Ok(serde_json::json!({ "content": content }))
     }
 
     /// `plan-tasks`: batch-inserts pending chunks and tasks, skipping rows
@@ -1271,6 +2457,246 @@ impl MemoryStorage {
         Ok(outcome)
     }
 
+    /// `submit-consolidation`: lease/submission CAS, authoritative binding and
+    /// policy validation, full run entry-set persistence, and either a visible
+    /// no-op baseline or one quarantined consolidation candidate.
+    pub fn submit_consolidation(
+        &mut self,
+        request: &SubmitConsolidationRequest,
+        now_unix_ms: i64,
+    ) -> Result<Value, MemoryError> {
+        let response_digest = hex_blob(&request.response_digest)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = read_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            MemoryError::new("TS_MEMORY_TASK_NOT_FOUND", "the task does not exist")
+        })?;
+        if task.kind != "consolidation" {
+            return Err(MemoryError::invalid("the task is not a consolidation task"));
+        }
+        match submit_gate(
+            &transaction,
+            &task,
+            &request.claim_token,
+            &response_digest,
+            now_unix_ms,
+        ) {
+            Ok(SubmitGate::Idempotent(mut outcome)) => {
+                transaction.commit()?;
+                self.maintain_wal_after_commit()?;
+                outcome["idempotent"] = Value::Bool(true);
+                return Ok(outcome);
+            }
+            Ok(SubmitGate::Proceed) => {}
+            Err(error) => {
+                if error.code == "TS_MEMORY_SUBMISSION_CONFLICT" {
+                    transaction.commit()?;
+                    self.maintain_wal_after_commit()?;
+                }
+                return Err(error);
+            }
+        }
+
+        let entries = validate_consolidation_binding(&transaction, &task, &request.operations)?;
+        validate_consolidation_assessments(request, &entries)?;
+        let binding = parse_json(&task.binding_json);
+        let entry_set_digest = hex_blob(required_string(&binding, "entrySetDigest")?)?;
+        let candidate_payload = if request.operations.is_empty() {
+            None
+        } else {
+            Some(build_consolidation_payload(
+                &request.run_id,
+                &binding,
+                &request.operations,
+            )?)
+        };
+        transaction.execute(
+            "INSERT INTO consolidation_runs(
+               run_id, task_id, repository_key, worktree_key, binding_json,
+               entry_set_digest, candidate_id, status, entry_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                &request.run_id,
+                &task.task_id,
+                &task.repository_key,
+                &task.worktree_key,
+                &task.binding_json,
+                entry_set_digest,
+                &request.candidate_id,
+                if request.operations.is_empty() {
+                    "no_op"
+                } else {
+                    "pending_review"
+                },
+                entries.len() as i64,
+                now_unix_ms,
+            ],
+        )?;
+        for entry in &entries {
+            transaction.execute(
+                "INSERT INTO consolidation_run_entries(run_id, entry_id, revision, content_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &request.run_id,
+                    &entry.entry_id,
+                    entry.revision,
+                    &entry.content_digest
+                ],
+            )?;
+        }
+
+        let candidate = if let (Some(candidate_id), Some(payload)) =
+            (request.candidate_id.as_ref(), candidate_payload.as_ref())
+        {
+            let payload_json = canonical(payload)?;
+            let content_digest = Sha256::digest(payload_json.as_bytes()).to_vec();
+            transaction.execute(
+                "INSERT INTO candidates(
+                   candidate_id, repository_key, worktree_key, chunk_ref, revision,
+                   content_digest, payload_json, candidate_kind, status, adjudication, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 'consolidation-patch',
+                   'quarantined', 'applied', ?7)",
+                params![
+                    candidate_id,
+                    &task.repository_key,
+                    &task.worktree_key,
+                    &request.run_id,
+                    &content_digest,
+                    payload_json,
+                    now_unix_ms,
+                ],
+            )?;
+            for assessment in &request.assessments {
+                transaction.execute(
+                    "INSERT INTO assessments(
+                       candidate_id, statement_id, citations_digest, provenance_strength,
+                       limitations_json, claim_support, assessed_by, statement_text_digest,
+                       revision)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        &assessment.candidate_id,
+                        &assessment.statement_id,
+                        hex_blob(&assessment.citations_digest)?,
+                        &assessment.provenance_strength,
+                        canonical(&serde_json::json!(&assessment.limitations))?,
+                        &assessment.claim_support,
+                        &assessment.assessed_by,
+                        hex_blob(&assessment.statement_text_digest)?,
+                        assessment.revision,
+                    ],
+                )?;
+            }
+            Some(CandidateStateWire {
+                candidate_id: candidate_id.clone(),
+                revision: 1,
+                content_digest: hex::encode(content_digest),
+                status: "quarantined".to_owned(),
+            })
+        } else {
+            None
+        };
+        let candidate_generation = if candidate.is_some() {
+            bump_candidate_generation(&transaction, &task.repository_key, &task.worktree_key)?
+        } else {
+            read_candidate_projection(&transaction, &task.repository_key, &task.worktree_key)?
+                .generation
+        };
+        transaction.execute(
+            "UPDATE tasks SET status='submitted' WHERE task_id=?1",
+            params![&task.task_id],
+        )?;
+        let outcome = serde_json::json!({
+            "taskId": task.task_id,
+            "runId": request.run_id,
+            "status": if candidate.is_some() { "pending_review" } else { "no_op" },
+            "idempotent": false,
+            "candidate": candidate,
+            "candidateGeneration": candidate_generation,
+            "entryCount": entries.len(),
+        });
+        record_submission(
+            &transaction,
+            &request.task_id,
+            &response_digest,
+            &outcome,
+            now_unix_ms,
+        )?;
+        transaction.commit()?;
+        self.maintain_wal_after_commit()?;
+        Ok(outcome)
+    }
+
+    /// Successful baseline for incremental task assembly. Pending/stale runs
+    /// never advance this result; `--full` callers intentionally ignore it.
+    pub fn consolidation_baseline(
+        &self,
+        request: &ConsolidationBaselineRequest,
+    ) -> Result<Value, MemoryError> {
+        let repository_key = hex_blob(&request.repository_key)?;
+        let worktree_key = hex_blob(&request.worktree_key)?;
+        let successful: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT run_id, status FROM consolidation_runs
+                 WHERE repository_key=?1 AND worktree_key=?2
+                   AND status IN ('no_op','applied')
+                 ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                params![&repository_key, &worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let pending_run_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM consolidation_runs
+                 WHERE repository_key=?1 AND worktree_key=?2 AND status='pending_review'
+                 ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                params![&repository_key, &worktree_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut entries = Vec::new();
+        if successful.is_some() {
+            let mut statement = self.connection.prepare(
+                "SELECT e.entry_id, e.revision, e.content_digest
+                 FROM consolidation_run_entries e
+                 JOIN consolidation_runs r ON r.run_id=e.run_id
+                 WHERE r.repository_key=?1 AND r.worktree_key=?2
+                   AND r.status IN ('no_op','applied')
+                 ORDER BY r.updated_at, r.run_id, e.entry_id",
+            )?;
+            let rows = statement.query_map(params![&repository_key, &worktree_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?;
+            let mut latest = BTreeMap::new();
+            for row in rows {
+                let (entry_id, revision, content_digest) = row?;
+                latest.insert(entry_id, (revision, content_digest));
+            }
+            entries = latest
+                .into_iter()
+                .map(|(entry_id, (revision, content_digest))| {
+                    serde_json::json!({
+                        "entryId": entry_id,
+                        "revision": revision,
+                        "contentDigest": hex::encode(content_digest),
+                    })
+                })
+                .collect();
+        }
+        Ok(serde_json::json!({
+            "successfulRunId": successful.as_ref().map(|(run_id, _)| run_id),
+            "entries": entries,
+            "pendingRunId": pending_run_id,
+            "lastSuccessfulNoOp": successful.as_ref().is_some_and(|(_, status)| status == "no_op"),
+        }))
+    }
+
     /// `recall` (read-only): dual-FTS BM25 + `recall-rrf@1` fusion with
     /// deterministic digests.
     pub fn recall(&self, request: &RecallRequest) -> Result<RecallOutcome, MemoryError> {
@@ -1409,6 +2835,7 @@ impl MemoryStorage {
                                 actual: recall.outcome.result_set_digest.clone(),
                             });
                         }
+                        require_candidate_mutable(&transaction, &target.id)?;
                         let target_rowid: i64 = transaction.query_row(
                             "SELECT rowid FROM candidates
                              WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
@@ -1776,27 +3203,40 @@ impl MemoryStorage {
     ) -> Result<ReviewQueueOutcome, MemoryError> {
         let repository_key = hex_blob(&request.repository_key)?;
         let worktree_key = hex_blob(&request.worktree_key)?;
+        let candidate_kind = if request.kind == "consolidation" {
+            "consolidation-patch"
+        } else {
+            "entry"
+        };
         let mut statement = self.connection.prepare(
-            "SELECT candidate_id, chunk_ref, revision, content_digest, payload_json
+            "SELECT candidate_id, candidate_kind, chunk_ref, revision, content_digest, payload_json
              FROM candidates
              WHERE repository_key=?1 AND worktree_key=?2 AND status='quarantined'
-             ORDER BY candidate_id LIMIT ?3",
+               AND candidate_kind=?3
+             ORDER BY candidate_id LIMIT ?4",
         )?;
         let rows = statement.query_map(
-            params![&repository_key, &worktree_key, i64::from(request.limit)],
+            params![
+                &repository_key,
+                &worktree_key,
+                candidate_kind,
+                i64::from(request.limit)
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )?;
         let mut items = Vec::new();
         for row in rows {
-            let (candidate_id, chunk_ref, revision, content_digest, payload_json) = row?;
+            let (candidate_id, candidate_kind, chunk_ref, revision, content_digest, payload_json) =
+                row?;
             let mut assessments = Vec::new();
             let mut assessment_statement = self.connection.prepare(
                 "SELECT statement_id, citations_digest, provenance_strength, limitations_json,
@@ -1847,6 +3287,7 @@ impl MemoryStorage {
             }
             items.push(ReviewItemWire {
                 candidate_id,
+                candidate_kind,
                 chunk_ref,
                 revision,
                 content_digest: hex::encode(content_digest),
@@ -1895,6 +3336,29 @@ impl MemoryStorage {
             voided: count("promotion_journal", "voided")?,
             applying_plan_ids,
         };
+        let last_successful: Option<(i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT entry_count, status FROM consolidation_runs
+                 WHERE repository_key=?1 AND worktree_key=?2
+                   AND status IN ('no_op','applied')
+                 ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                params![&repository_key, &worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let consolidations = ConsolidationCountsWire {
+            pending_review: count("consolidation_runs", "pending_review")?,
+            no_op: count("consolidation_runs", "no_op")?,
+            applied: count("consolidation_runs", "applied")?,
+            stale: count("consolidation_runs", "stale")?,
+            last_successful_entry_count: last_successful
+                .as_ref()
+                .map_or(0, |(entry_count, _)| *entry_count),
+            last_successful_no_op: last_successful
+                .as_ref()
+                .is_some_and(|(_, status)| status == "no_op"),
+        };
         Ok(MemoryStatusOutcome {
             chunks: ChunkCountsWire {
                 pending: count("chunks", "pending")?,
@@ -1915,6 +3379,7 @@ impl MemoryStorage {
                 discarded: count("candidates", "discarded")?,
             },
             promotions,
+            consolidations,
         })
     }
 }
@@ -1924,15 +3389,62 @@ type CandidateRow = (i64, i64, String, Vec<u8>, Vec<u8>);
 
 /// `(target_path, target_blob_hash, sanitized_content, sanitized_digest)` of
 /// one `promotion-plan` file before insertion.
-type PlanFileRow = (String, Option<String>, Vec<u8>, Vec<u8>);
+type PlanFileRow = (
+    String,
+    Option<String>,
+    String,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 /// One `promotion_files` row loaded for `promotion-apply`.
 struct PromotionFileRow {
     target_path: String,
     target_blob_hash: Option<String>,
-    sanitized_content: Vec<u8>,
-    sanitized_digest: Vec<u8>,
-    applied: i64,
+    operation: String,
+    sanitized_content: Option<Vec<u8>>,
+    sanitized_digest: Option<Vec<u8>>,
+    intent_state: String,
+    originally_present: Option<i64>,
+    rollback_content: Option<Vec<u8>>,
+    rollback_digest: Option<Vec<u8>>,
+    legacy_write_only: i64,
+}
+
+struct ConsolidationPromotionFile {
+    operation: String,
+    content: Option<Vec<u8>>,
+}
+
+struct PromotionApplyJournalRow {
+    repository_key: Vec<u8>,
+    worktree_key: Vec<u8>,
+    candidate_ids_json: String,
+    assessment_digest: Vec<u8>,
+    policy_version: String,
+    status: String,
+    mutation_phase: String,
+}
+
+struct PromotionCandidateSnapshot {
+    candidate_id: String,
+    candidate_kind: String,
+    payload: Value,
+    statement_digests: HashMap<String, Vec<u8>>,
+}
+
+struct PromotionSnapshot {
+    candidates: Vec<PromotionCandidateSnapshot>,
+    assessment_digest: Vec<u8>,
+}
+
+struct PromotionRecoveryContext<'a> {
+    plan_id: &'a str,
+    root: &'a Path,
+    repository_key: &'a [u8],
+    worktree_key: &'a [u8],
+    candidate_ids: &'a [String],
+    now_unix_ms: i64,
 }
 
 fn read_promotion_files(
@@ -1940,21 +3452,141 @@ fn read_promotion_files(
     plan_id: &str,
 ) -> Result<Vec<PromotionFileRow>, MemoryError> {
     let mut statement = connection.prepare(
-        "SELECT target_path, target_blob_hash, sanitized_content, sanitized_digest, applied
-         FROM promotion_files WHERE plan_id=?1 ORDER BY target_path",
+        "SELECT target_path, target_blob_hash, operation, sanitized_content, sanitized_digest,
+                intent_state, originally_present, rollback_content, rollback_digest,
+                legacy_write_only
+         FROM promotion_files WHERE plan_id=?1
+         ORDER BY CASE operation WHEN 'write' THEN 0 ELSE 1 END, target_path",
     )?;
     let rows = statement
         .query_map(params![plan_id], |row| {
             Ok(PromotionFileRow {
                 target_path: row.get(0)?,
                 target_blob_hash: row.get(1)?,
-                sanitized_content: row.get(2)?,
-                sanitized_digest: row.get(3)?,
-                applied: row.get(4)?,
+                operation: row.get(2)?,
+                sanitized_content: row.get(3)?,
+                sanitized_digest: row.get(4)?,
+                intent_state: row.get(5)?,
+                originally_present: row.get(6)?,
+                rollback_content: row.get(7)?,
+                rollback_digest: row.get(8)?,
+                legacy_write_only: row.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn promotion_staging_token(plan_id: &str, target_path: &str, direction: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(plan_id.as_bytes());
+    digest.update([0]);
+    digest.update(target_path.as_bytes());
+    digest.update([0]);
+    digest.update(direction.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn forward_expected(file: &PromotionFileRow) -> Result<ExpectedWorktreeValue<'_>, MemoryError> {
+    if file.legacy_write_only == 1 {
+        return Ok(match file.target_blob_hash.as_deref() {
+            Some(hash) => ExpectedWorktreeValue::GitBlob(hash),
+            None => ExpectedWorktreeValue::Missing,
+        });
+    }
+    match file.originally_present {
+        Some(1) => file
+            .rollback_content
+            .as_deref()
+            .map(ExpectedWorktreeValue::Bytes)
+            .ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!("rollback bytes for {} are missing", file.target_path),
+                )
+            }),
+        Some(0) => Ok(ExpectedWorktreeValue::Missing),
+        _ => Err(MemoryError::new(
+            "TS_MEMORY_STATE_CORRUPT",
+            format!(
+                "promotion journal for {} was not prechecked",
+                file.target_path
+            ),
+        )),
+    }
+}
+
+fn forward_replacement(file: &PromotionFileRow) -> Result<Option<&[u8]>, MemoryError> {
+    match file.operation.as_str() {
+        "write" => file.sanitized_content.as_deref().map(Some).ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_STATE_CORRUPT",
+                format!("write bytes for {} are missing", file.target_path),
+            )
+        }),
+        "delete" => Ok(None),
+        _ => Err(MemoryError::new(
+            "TS_MEMORY_STATE_CORRUPT",
+            "promotion file has an invalid operation",
+        )),
+    }
+}
+
+fn rollback_expected(file: &PromotionFileRow) -> Result<ExpectedWorktreeValue<'_>, MemoryError> {
+    match file.operation.as_str() {
+        "write" => file
+            .sanitized_content
+            .as_deref()
+            .map(ExpectedWorktreeValue::Bytes)
+            .ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!("write bytes for {} are missing", file.target_path),
+                )
+            }),
+        "delete" => Ok(ExpectedWorktreeValue::Missing),
+        _ => Err(MemoryError::new(
+            "TS_MEMORY_STATE_CORRUPT",
+            "promotion file has an invalid operation",
+        )),
+    }
+}
+
+fn rollback_replacement(file: &PromotionFileRow) -> Result<Option<&[u8]>, MemoryError> {
+    match file.originally_present {
+        Some(1) => file.rollback_content.as_deref().map(Some).ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_ROLLBACK_REQUIRED",
+                format!("rollback bytes for {} are missing", file.target_path),
+            )
+        }),
+        Some(0) => Ok(None),
+        _ => Err(MemoryError::new(
+            "TS_MEMORY_ROLLBACK_REQUIRED",
+            format!("rollback journal for {} is incomplete", file.target_path),
+        )),
+    }
+}
+
+fn recovery_required(target_path: &str, staging_name: &str) -> MemoryError {
+    MemoryError::new(
+        "TS_MEMORY_ROLLBACK_REQUIRED",
+        format!(
+            "promotion stopped at {target_path}; concurrent bytes were preserved in {staging_name} and require manual recovery"
+        ),
+    )
+}
+
+fn promotion_artifact_error(target_path: &str, error: PromotionFsError) -> MemoryError {
+    match error {
+        PromotionFsError::Symlink => MemoryError::new(
+            "TS_MEMORY_BINDING_DRIFT",
+            format!("promotion artifact path for {target_path} contains a symlink"),
+        ),
+        PromotionFsError::Io(error) => MemoryError::failed(format!(
+            "promotion artifact operation failed for {target_path}: {error}"
+        )),
+    }
 }
 
 fn candidate_ids_from_json(candidate_ids_json: &str) -> Vec<String> {
@@ -1965,6 +3597,293 @@ fn candidate_ids_from_json(candidate_ids_json: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn candidate_has_active_promotion(
+    connection: &Connection,
+    candidate_id: &str,
+) -> Result<bool, MemoryError> {
+    let mut statement = connection.prepare(
+        "SELECT candidate_ids_json FROM promotion_journal
+         WHERE status IN ('approved','applying')",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        if candidate_ids_from_json(&row?)
+            .iter()
+            .any(|id| id == candidate_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn require_candidate_mutable(
+    connection: &Connection,
+    candidate_id: &str,
+) -> Result<(), MemoryError> {
+    if candidate_has_active_promotion(connection, candidate_id)? {
+        return Err(MemoryError::new(
+            "TS_MEMORY_CANDIDATE_STALE",
+            format!("candidate {candidate_id} is bound to an approved or applying promotion plan"),
+        ));
+    }
+    Ok(())
+}
+
+fn promotion_snapshot(
+    connection: &Connection,
+    candidate_ids: &[String],
+    repository_key: &[u8],
+    worktree_key: &[u8],
+) -> Result<PromotionSnapshot, MemoryError> {
+    let mut assessment_documents: Vec<(String, String, Value)> = Vec::new();
+    let mut candidates = Vec::with_capacity(candidate_ids.len());
+    for candidate_id in candidate_ids {
+        let row: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT status, payload_json, candidate_kind FROM candidates
+                 WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                params![candidate_id, repository_key, worktree_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (status, payload_json, candidate_kind) = row.ok_or_else(|| {
+            MemoryError::new(
+                "TS_MEMORY_CANDIDATE_NOT_FOUND",
+                format!("candidate {candidate_id} does not exist for this owner"),
+            )
+        })?;
+        if status != "quarantined" {
+            return Err(MemoryError::new(
+                "TS_MEMORY_CANDIDATE_STALE",
+                format!("candidate {candidate_id} is {status}, not quarantined"),
+            ));
+        }
+
+        let mut assessed_statement_ids = Vec::new();
+        let mut statement_digests = HashMap::new();
+        let mut statement = connection.prepare(
+            "SELECT statement_id, citations_digest, provenance_strength, limitations_json,
+                    claim_support, assessed_by, statement_text_digest, revision
+             FROM assessments WHERE candidate_id=?1 ORDER BY statement_id",
+        )?;
+        let rows = statement.query_map(params![candidate_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        for row in rows {
+            let (
+                statement_id,
+                citations_digest,
+                provenance_strength,
+                limitations_json,
+                claim_support,
+                assessed_by,
+                statement_text_digest,
+                revision,
+            ) = row?;
+            if !matches!(claim_support.as_str(), "typed-fact" | "human-confirmed") {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_UNVERIFIED_CLAIM",
+                    format!(
+                        "candidate {candidate_id} statement {statement_id} is {claim_support}; \
+                         confirm every statement before planning a promotion"
+                    ),
+                ));
+            }
+            let document = serde_json::json!({
+                "candidateId": candidate_id,
+                "statementId": statement_id,
+                "citationsDigest": hex::encode(citations_digest),
+                "provenanceStrength": provenance_strength,
+                "limitations": parse_json(&limitations_json),
+                "claimSupport": claim_support,
+                "assessedBy": assessed_by,
+                "statementTextDigest": hex::encode(&statement_text_digest),
+                "revision": revision,
+            });
+            assessed_statement_ids.push(statement_id.clone());
+            statement_digests.insert(statement_id.clone(), statement_text_digest);
+            assessment_documents.push((candidate_id.clone(), statement_id, document));
+        }
+        drop(statement);
+
+        let payload = parse_json(&payload_json);
+        if let Some(statements) = payload.get("statements").and_then(Value::as_array) {
+            for statement in statements {
+                if let Some(statement_id) = statement.get("statementId").and_then(Value::as_str)
+                    && !assessed_statement_ids.iter().any(|id| id == statement_id)
+                {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_UNVERIFIED_CLAIM",
+                        format!(
+                            "candidate {candidate_id} statement {statement_id} has no \
+                             assessment and cannot be promoted"
+                        ),
+                    ));
+                }
+            }
+        }
+        candidates.push(PromotionCandidateSnapshot {
+            candidate_id: candidate_id.clone(),
+            candidate_kind,
+            payload,
+            statement_digests,
+        });
+    }
+
+    assessment_documents
+        .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let assessment_digest = hex_blob(&canonical_digest_hex(&Value::Array(
+        assessment_documents
+            .into_iter()
+            .map(|(_, _, document)| document)
+            .collect(),
+    ))?)?;
+    Ok(PromotionSnapshot {
+        candidates,
+        assessment_digest,
+    })
+}
+
+fn consolidation_candidate_files(
+    candidate_id: &str,
+    payload: &Value,
+    assessment_digests: &HashMap<String, Vec<u8>>,
+) -> Result<BTreeMap<String, ConsolidationPromotionFile>, MemoryError> {
+    if payload.get("candidateKind").and_then(Value::as_str) != Some("consolidation-patch") {
+        return Err(consolidation_invalid(
+            "consolidation candidate payload has the wrong candidateKind",
+        ));
+    }
+    let operations = payload
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| consolidation_invalid("consolidation candidate has no operations"))?;
+    let statements = payload
+        .get("statements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| consolidation_invalid("consolidation candidate has no statements"))?;
+    if operations.is_empty()
+        || operations.len() != statements.len()
+        || operations.len() != assessment_digests.len()
+    {
+        return Err(MemoryError::new(
+            "TS_MEMORY_UNVERIFIED_CLAIM",
+            format!(
+                "candidate {candidate_id} operations, statements, and assessments are not one-to-one"
+            ),
+        ));
+    }
+    let statements_by_id = statements
+        .iter()
+        .filter_map(|statement| {
+            Some((
+                statement.get("statementId")?.as_str()?,
+                statement.get("operation")?,
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    if statements_by_id.len() != statements.len() {
+        return Err(MemoryError::new(
+            "TS_MEMORY_UNVERIFIED_CLAIM",
+            format!("candidate {candidate_id} contains malformed or duplicate statements"),
+        ));
+    }
+    let mut files = BTreeMap::new();
+    for operation_value in operations {
+        let operation: ConsolidationOperationInput =
+            serde_json::from_value(operation_value.clone()).map_err(|_| {
+                consolidation_invalid("consolidation candidate contains an invalid operation")
+            })?;
+        let statement_operation = statements_by_id
+            .get(operation.operation_id.as_str())
+            .ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_UNVERIFIED_CLAIM",
+                    format!(
+                        "candidate {candidate_id} operation {} has no statement",
+                        operation.operation_id
+                    ),
+                )
+            })?;
+        if canonical(statement_operation)? != canonical(operation_value)? {
+            return Err(MemoryError::new(
+                "TS_MEMORY_UNVERIFIED_CLAIM",
+                format!(
+                    "candidate {candidate_id} statement {} does not bind its operation",
+                    operation.operation_id
+                ),
+            ));
+        }
+        let expected_digest = Sha256::digest(canonical(operation_value)?.as_bytes()).to_vec();
+        if assessment_digests.get(&operation.operation_id) != Some(&expected_digest) {
+            return Err(MemoryError::new(
+                "TS_MEMORY_UNVERIFIED_CLAIM",
+                format!(
+                    "candidate {candidate_id} statement {} digest does not bind its operation",
+                    operation.operation_id
+                ),
+            ));
+        }
+        let target_path = if operation.target == "doctrine" {
+            ".threadshare/memory/doctrine.md".to_owned()
+        } else {
+            format!(".threadshare/memory/scenes/{}.md", operation.name)
+        };
+        let primary = if operation.op == "delete" {
+            ConsolidationPromotionFile {
+                operation: "delete".to_owned(),
+                content: None,
+            }
+        } else {
+            ConsolidationPromotionFile {
+                operation: "write".to_owned(),
+                content: operation
+                    .new_content
+                    .as_ref()
+                    .map(|content| content.as_bytes().to_vec()),
+            }
+        };
+        if files.insert(target_path, primary).is_some() {
+            return Err(consolidation_invalid(
+                "consolidation candidate derives duplicate target paths",
+            ));
+        }
+        if operation.op == "merge" {
+            for source in &operation.merge_sources {
+                if source == &operation.name {
+                    continue;
+                }
+                let source_path = format!(".threadshare/memory/scenes/{source}.md");
+                if files
+                    .insert(
+                        source_path,
+                        ConsolidationPromotionFile {
+                            operation: "delete".to_owned(),
+                            content: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(consolidation_invalid(
+                        "consolidation merge derives duplicate target paths",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// Stage 4c ops: statement confirmation, candidate discard, and the
@@ -1981,6 +3900,7 @@ impl MemoryStorage {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_candidate_mutable(&transaction, &request.candidate_id)?;
         let row: Option<(Vec<u8>, Vec<u8>, i64)> = transaction
             .query_row(
                 "SELECT statement_text_digest, citations_digest, revision
@@ -2035,6 +3955,7 @@ impl MemoryStorage {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_candidate_mutable(&transaction, &request.candidate_id)?;
         let row: Option<CandidateRow> = transaction
             .query_row(
                 "SELECT rowid, revision, status, repository_key, worktree_key
@@ -2078,6 +3999,11 @@ impl MemoryStorage {
             params![now_unix_ms, rowid],
         )?;
         transaction.execute("DELETE FROM candidate_fts WHERE rowid=?1", params![rowid])?;
+        transaction.execute(
+            "UPDATE consolidation_runs SET status='stale', updated_at=?1
+             WHERE candidate_id=?2 AND status='pending_review'",
+            params![now_unix_ms, &request.candidate_id],
+        )?;
         let generation = bump_candidate_generation(&transaction, &repository_key, &worktree_key)?;
         transaction.commit()?;
         self.maintain_wal_after_commit()?;
@@ -2097,132 +4023,79 @@ impl MemoryStorage {
         request: &PromotionPlanRequest,
         now_unix_ms: i64,
     ) -> Result<Value, MemoryError> {
+        if request.policy_version != PROMOTION_POLICY_VERSION {
+            return Err(MemoryError::invalid(format!(
+                "policyVersion must be {PROMOTION_POLICY_VERSION}"
+            )));
+        }
         let repository_key = hex_blob(&request.owner.repository_key)?;
         let worktree_key = hex_blob(&request.owner.worktree_key)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let memory_root: Option<String> = transaction
+        let binding_row: Option<(String, String)> = transaction
             .query_row(
-                "SELECT memory_root FROM repository_bindings
+                "SELECT memory_root, root_realpath FROM repository_bindings
                  WHERE repository_key=?1 AND worktree_key=?2",
                 params![&repository_key, &worktree_key],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let memory_root = memory_root.ok_or_else(|| {
+        let (memory_root, root_realpath) = binding_row.ok_or_else(|| {
             MemoryError::new(
                 "TS_MEMORY_BINDING_NOT_FOUND",
                 "the owner has no repository binding; run bind-repository first",
             )
         })?;
 
-        let mut assessment_documents: Vec<(String, String, Value)> = Vec::new();
-        for candidate_id in &request.candidate_ids {
-            let row: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT status, payload_json FROM candidates
-                     WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
-                    params![candidate_id, &repository_key, &worktree_key],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            let (status, payload_json) = row.ok_or_else(|| {
-                MemoryError::new(
-                    "TS_MEMORY_CANDIDATE_NOT_FOUND",
-                    format!("candidate {candidate_id} does not exist for this owner"),
-                )
-            })?;
-            if status != "quarantined" {
-                return Err(MemoryError::new(
-                    "TS_MEMORY_CANDIDATE_STALE",
-                    format!("candidate {candidate_id} is {status}, not quarantined"),
-                ));
-            }
-            let mut assessed_statement_ids: Vec<String> = Vec::new();
-            let mut statement = transaction.prepare(
-                "SELECT statement_id, citations_digest, provenance_strength, limitations_json,
-                        claim_support, assessed_by, statement_text_digest, revision
-                 FROM assessments WHERE candidate_id=?1 ORDER BY statement_id",
-            )?;
-            let rows = statement.query_map(params![candidate_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            })?;
-            for row in rows {
-                let (
-                    statement_id,
-                    citations_digest,
-                    provenance_strength,
-                    limitations_json,
-                    claim_support,
-                    assessed_by,
-                    statement_text_digest,
-                    revision,
-                ) = row?;
-                if !matches!(claim_support.as_str(), "typed-fact" | "human-confirmed") {
-                    return Err(MemoryError::new(
-                        "TS_MEMORY_UNVERIFIED_CLAIM",
-                        format!(
-                            "candidate {candidate_id} statement {statement_id} is {claim_support}; \
-                             confirm every statement before planning a promotion"
-                        ),
-                    ));
-                }
-                let document = serde_json::json!({
-                    "candidateId": candidate_id,
-                    "statementId": statement_id,
-                    "citationsDigest": hex::encode(citations_digest),
-                    "provenanceStrength": provenance_strength,
-                    "limitations": parse_json(&limitations_json),
-                    "claimSupport": claim_support,
-                    "assessedBy": assessed_by,
-                    "statementTextDigest": hex::encode(statement_text_digest),
-                    "revision": revision,
-                });
-                assessed_statement_ids.push(statement_id.clone());
-                assessment_documents.push((candidate_id.clone(), statement_id, document));
-            }
-            drop(statement);
-            if let Some(statements) = parse_json(&payload_json)
-                .get("statements")
-                .and_then(Value::as_array)
-            {
-                for statement in statements {
-                    if let Some(statement_id) = statement.get("statementId").and_then(Value::as_str)
-                        && !assessed_statement_ids.iter().any(|id| id == statement_id)
-                    {
-                        return Err(MemoryError::new(
-                            "TS_MEMORY_UNVERIFIED_CLAIM",
-                            format!(
-                                "candidate {candidate_id} statement {statement_id} has no \
-                                 assessment and cannot be promoted"
-                            ),
-                        ));
-                    }
-                }
+        let snapshot = promotion_snapshot(
+            &transaction,
+            &request.candidate_ids,
+            &repository_key,
+            &worktree_key,
+        )?;
+        let candidate_kinds = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.candidate_kind.clone())
+            .collect::<Vec<_>>();
+        let mut consolidation_files = None;
+        for candidate in &snapshot.candidates {
+            if candidate.candidate_kind == "consolidation-patch" {
+                let binding = candidate
+                    .payload
+                    .get("binding")
+                    .ok_or_else(|| binding_drift("consolidation candidate binding is missing"))?;
+                validate_consolidation_replay_epoch(
+                    &transaction,
+                    binding,
+                    &repository_key,
+                    &worktree_key,
+                )?;
+                validate_bound_consolidation_sources(Path::new(&root_realpath), binding)?;
+                consolidation_files = Some(consolidation_candidate_files(
+                    &candidate.candidate_id,
+                    &candidate.payload,
+                    &candidate.statement_digests,
+                )?);
             }
         }
-        assessment_documents
-            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        let assessment_digest_hex = canonical_digest_hex(&Value::Array(
-            assessment_documents
-                .into_iter()
-                .map(|(_, _, document)| document)
-                .collect(),
-        ))?;
+        let consolidation_plan = match candidate_kinds.as_slice() {
+            [kind] if kind == "consolidation-patch" => true,
+            kinds if kinds.iter().all(|kind| kind == "entry") => false,
+            _ => {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_CANDIDATE_KIND_MISMATCH",
+                    "a promotion plan must contain only entry candidates, or exactly one consolidation candidate",
+                ));
+            }
+        };
+        let assessment_digest_hex = hex::encode(&snapshot.assessment_digest);
 
         let memory_root_prefix = format!("{memory_root}/");
         let mut per_file_documents = Vec::new();
         let mut file_rows: Vec<PlanFileRow> = Vec::new();
+        let mut supplied_paths = HashSet::new();
         for file in &request.per_file {
             if !file.target_path.starts_with(&memory_root_prefix) {
                 return Err(MemoryError::new(
@@ -2233,20 +4106,81 @@ impl MemoryStorage {
                     ),
                 ));
             }
-            let content = decode_base64(&file.sanitized_content).ok_or_else(|| {
-                MemoryError::invalid("perFile[].sanitizedContent must be strict padded base64")
-            })?;
-            let sanitized_digest = Sha256::digest(&content).to_vec();
+            supplied_paths.insert(file.target_path.clone());
+            let content = file
+                .sanitized_content
+                .as_deref()
+                .map(|encoded| {
+                    decode_base64(encoded).ok_or_else(|| {
+                        MemoryError::invalid(
+                            "perFile[].sanitizedContent must be strict padded base64",
+                        )
+                    })
+                })
+                .transpose()?;
+            let sanitized_digest = content
+                .as_deref()
+                .map(|content| Sha256::digest(content).to_vec());
+            if consolidation_plan {
+                let derived = consolidation_files
+                    .as_ref()
+                    .and_then(|files| files.get(&file.target_path))
+                    .ok_or_else(|| {
+                        consolidation_invalid(format!(
+                            "promotion file {} is not derived from the confirmed patch",
+                            file.target_path
+                        ))
+                    })?;
+                if derived.operation != file.operation || derived.content != content {
+                    return Err(consolidation_invalid(format!(
+                        "promotion file {} differs from the confirmed patch",
+                        file.target_path
+                    )));
+                }
+                let segments = file.target_path.split('/').collect::<Vec<_>>();
+                let current =
+                    read_worktree_file(Path::new(&root_realpath), &segments).map_err(|error| {
+                        match error {
+                            PromotionFsError::Symlink => MemoryError::new(
+                                "TS_MEMORY_TARGET_PATH_INVALID",
+                                format!("promotion target {} contains a symlink", file.target_path),
+                            ),
+                            PromotionFsError::Io(error) => MemoryError::failed(format!(
+                                "promotion plan could not read {}: {error}",
+                                file.target_path
+                            )),
+                        }
+                    })?;
+                let observed_blob = current.as_deref().map(git_blob_oid_hex);
+                if observed_blob != file.target_blob_hash {
+                    return Err(binding_drift(format!(
+                        "promotion target {} changed before plan creation",
+                        file.target_path
+                    )));
+                }
+            }
             per_file_documents.push(serde_json::json!({
                 "targetPath": file.target_path,
                 "targetBlobHash": file.target_blob_hash,
-                "sanitizedContentDigest": hex::encode(&sanitized_digest),
+                "sanitizedContentDigest": sanitized_digest.as_ref().map(hex::encode),
+                "operation": file.operation,
             }));
             file_rows.push((
                 file.target_path.clone(),
                 file.target_blob_hash.clone(),
+                file.operation.clone(),
                 content,
                 sanitized_digest,
+            ));
+        }
+        if consolidation_plan
+            && consolidation_files.as_ref().is_none_or(|files| {
+                files.len() != supplied_paths.len()
+                    || !files.keys().all(|path| supplied_paths.contains(path))
+            })
+        {
+            return Err(consolidation_invalid(
+                "promotion plan does not contain every file derived from the confirmed patch",
             ));
         }
 
@@ -2284,16 +4218,17 @@ impl MemoryStorage {
             ],
         )?;
         let mut files = Vec::new();
-        for (target_path, target_blob_hash, content, sanitized_digest) in file_rows {
+        for (target_path, target_blob_hash, operation, content, sanitized_digest) in file_rows {
             transaction.execute(
                 "INSERT INTO promotion_files(
-                   plan_id, target_path, target_blob_hash, sanitized_content, sanitized_digest,
-                   applied)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                   plan_id, target_path, target_blob_hash, operation, sanitized_content,
+                   sanitized_digest, applied)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
                 params![
                     plan_id,
                     target_path,
                     target_blob_hash,
+                    operation,
                     content,
                     sanitized_digest
                 ],
@@ -2301,8 +4236,9 @@ impl MemoryStorage {
             files.push(serde_json::json!({
                 "targetPath": target_path,
                 "targetBlobHash": target_blob_hash,
-                "sanitizedDigest": hex::encode(&sanitized_digest),
-                "bytes": content.len(),
+                "operation": operation,
+                "sanitizedDigest": sanitized_digest.as_ref().map(hex::encode),
+                "bytes": content.as_ref().map_or(0, Vec::len),
             }));
         }
         transaction.commit()?;
@@ -2380,69 +4316,372 @@ impl MemoryStorage {
         }))
     }
 
-    fn void_plan(
-        &mut self,
-        plan_id: &str,
-        drifted_path: &str,
+    fn close_consolidation_as_stale(
+        transaction: &Transaction<'_>,
+        candidate_ids: &[String],
+        repository_key: &[u8],
+        worktree_key: &[u8],
         now_unix_ms: i64,
+    ) -> Result<bool, MemoryError> {
+        let mut changed = false;
+        for candidate_id in candidate_ids {
+            let row: Option<(i64, String, String)> = transaction
+                .query_row(
+                    "SELECT rowid, candidate_kind, status FROM candidates
+                     WHERE candidate_id=?1 AND repository_key=?2 AND worktree_key=?3",
+                    params![candidate_id, repository_key, worktree_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((rowid, candidate_kind, status)) = row else {
+                continue;
+            };
+            if candidate_kind == "consolidation-patch"
+                && matches!(status.as_str(), "draft" | "quarantined")
+            {
+                transaction.execute(
+                    "UPDATE candidates SET status='discarded', revision=revision+1,
+                       updated_at=?1 WHERE rowid=?2",
+                    params![now_unix_ms, rowid],
+                )?;
+                transaction.execute(
+                    "UPDATE consolidation_runs SET status='stale', updated_at=?1
+                     WHERE candidate_id=?2 AND status='pending_review'",
+                    params![now_unix_ms, candidate_id],
+                )?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    fn void_promotion(
+        &mut self,
+        context: &PromotionRecoveryContext<'_>,
+        drifted_path: &str,
+        discard_consolidation: bool,
     ) -> Result<Value, MemoryError> {
-        self.connection.execute(
-            "UPDATE promotion_journal SET status='voided', updated_at=?1 WHERE plan_id=?2",
-            params![now_unix_ms, plan_id],
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let discarded = discard_consolidation
+            && Self::close_consolidation_as_stale(
+                &transaction,
+                context.candidate_ids,
+                context.repository_key,
+                context.worktree_key,
+                context.now_unix_ms,
+            )?;
+        if discarded {
+            bump_candidate_generation(&transaction, context.repository_key, context.worktree_key)?;
+        }
+        let changed = transaction.execute(
+            "UPDATE promotion_journal SET status='voided', mutation_phase='done', updated_at=?1
+             WHERE plan_id=?2 AND status IN ('approved','applying')",
+            params![context.now_unix_ms, context.plan_id],
         )?;
+        if changed != 1 {
+            return Err(MemoryError::new(
+                "TS_MEMORY_PLAN_STATE_INVALID",
+                "the promotion plan changed before it could be voided",
+            ));
+        }
+        transaction.execute(
+            "UPDATE promotion_files SET rollback_content=NULL, rollback_digest=NULL
+             WHERE plan_id=?1",
+            params![context.plan_id],
+        )?;
+        transaction.commit()?;
         self.maintain_wal_after_commit()?;
         Ok(serde_json::json!({
-            "planId": plan_id,
+            "planId": context.plan_id,
             "status": "voided",
             "driftedPath": drifted_path,
         }))
     }
 
-    /// `promotion-apply` (design §2 tx-promotion): owner re-resolution, the
-    /// engine-computed git blob OID CAS per file, no-follow writes of the
-    /// approved bytes, per-file `applied` progress for crash recovery, and
-    /// the closing transaction that promotes the candidates out of the
-    /// recall pool.
+    fn start_rollback(&mut self, plan_id: &str, now_unix_ms: i64) -> Result<(), MemoryError> {
+        let changed = self.connection.execute(
+            "UPDATE promotion_journal SET mutation_phase='rolling_back', updated_at=?1
+             WHERE plan_id=?2 AND status='applying'",
+            params![now_unix_ms, plan_id],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::new(
+                "TS_MEMORY_PLAN_STATE_INVALID",
+                "the promotion plan changed before rollback could start",
+            ));
+        }
+        self.maintain_wal_after_commit()?;
+        Ok(())
+    }
+
+    fn rollback_promotion(
+        &mut self,
+        context: &PromotionRecoveryContext<'_>,
+        drifted_path: &str,
+    ) -> Result<Value, MemoryError> {
+        let mut files = read_promotion_files(&self.connection, context.plan_id)?;
+        files.reverse();
+        for file in files {
+            if file.legacy_write_only == 1 || file.intent_state == "pending" {
+                continue;
+            }
+            if !matches!(
+                file.intent_state.as_str(),
+                "intent" | "applied" | "rolled_back"
+            ) {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!(
+                        "promotion file {} has invalid rollback progress {}",
+                        file.target_path, file.intent_state
+                    ),
+                ));
+            }
+            let segments = file.target_path.split('/').collect::<Vec<_>>();
+            let classify = |value: Option<&[u8]>| -> Result<(bool, bool), MemoryError> {
+                let old_matches = match file.originally_present {
+                    Some(1) => value.is_some_and(|bytes| {
+                        file.rollback_digest
+                            .as_deref()
+                            .is_some_and(|digest| Sha256::digest(bytes).as_slice() == digest)
+                    }),
+                    Some(0) => value.is_none(),
+                    _ => {
+                        return Err(MemoryError::new(
+                            "TS_MEMORY_ROLLBACK_REQUIRED",
+                            format!("rollback journal for {} is incomplete", file.target_path),
+                        ));
+                    }
+                };
+                let new_matches = match file.operation.as_str() {
+                    "write" => value.is_some_and(|bytes| {
+                        file.sanitized_digest
+                            .as_deref()
+                            .is_some_and(|digest| Sha256::digest(bytes).as_slice() == digest)
+                    }),
+                    "delete" => value.is_none(),
+                    _ => false,
+                };
+                Ok((old_matches, new_matches))
+            };
+            let mut current = read_worktree_file(context.root, &segments).map_err(|error| {
+                MemoryError::new(
+                    "TS_MEMORY_ROLLBACK_REQUIRED",
+                    format!(
+                        "rollback could not inspect {} without risking external data: {error}",
+                        file.target_path
+                    ),
+                )
+            })?;
+            let (mut old_matches, new_matches) = classify(current.as_deref())?;
+            if !old_matches && !new_matches && file.intent_state == "intent" {
+                let token = promotion_staging_token(context.plan_id, &file.target_path, "forward");
+                match conditional_replace_worktree_file(
+                    context.root,
+                    &segments,
+                    forward_expected(&file)?,
+                    forward_replacement(&file)?,
+                    &token,
+                )
+                .map_err(|error| {
+                    MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!(
+                            "rollback could not resolve the forward intent for {}: {error}",
+                            file.target_path
+                        ),
+                    )
+                })? {
+                    ConditionalMutationOutcome::Applied => {}
+                    ConditionalMutationOutcome::Drift => {
+                        return Err(MemoryError::new(
+                            "TS_MEMORY_ROLLBACK_REQUIRED",
+                            format!(
+                                "rollback stopped at {} because a concurrent edit was preserved",
+                                file.target_path
+                            ),
+                        ));
+                    }
+                    ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                        return Err(recovery_required(&file.target_path, &staging_name));
+                    }
+                }
+                current = read_worktree_file(context.root, &segments).map_err(|error| {
+                    MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!(
+                            "rollback could not inspect the resolved forward intent for {}: {error}",
+                            file.target_path
+                        ),
+                    )
+                })?;
+                old_matches = classify(current.as_deref())?.0;
+            }
+            if !old_matches {
+                let expected = rollback_expected(&file)?;
+                let replacement = rollback_replacement(&file)?;
+                let token = promotion_staging_token(context.plan_id, &file.target_path, "rollback");
+                match conditional_replace_worktree_file(
+                    context.root,
+                    &segments,
+                    expected,
+                    replacement,
+                    &token,
+                )
+                .map_err(|error| {
+                    MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!("rollback could not restore {}: {error}", file.target_path),
+                    )
+                })? {
+                    ConditionalMutationOutcome::Applied => {}
+                    ConditionalMutationOutcome::Drift => {
+                        return Err(MemoryError::new(
+                            "TS_MEMORY_ROLLBACK_REQUIRED",
+                            format!(
+                                "rollback stopped at {} because a concurrent edit was preserved",
+                                file.target_path
+                            ),
+                        ));
+                    }
+                    ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                        return Err(recovery_required(&file.target_path, &staging_name));
+                    }
+                }
+                current = read_worktree_file(context.root, &segments).map_err(|error| {
+                    MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!("rollback could not verify {}: {error}", file.target_path),
+                    )
+                })?;
+                old_matches = match file.originally_present {
+                    Some(1) => current.as_deref().is_some_and(|bytes| {
+                        file.rollback_digest
+                            .as_deref()
+                            .is_some_and(|digest| Sha256::digest(bytes).as_slice() == digest)
+                    }),
+                    Some(0) => current.is_none(),
+                    _ => false,
+                };
+                if !old_matches {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!(
+                            "rollback stopped at {} because the restored value changed concurrently",
+                            file.target_path
+                        ),
+                    ));
+                }
+            }
+            self.connection.execute(
+                "UPDATE promotion_files SET intent_state='rolled_back', applied=0
+                 WHERE plan_id=?1 AND target_path=?2",
+                params![context.plan_id, &file.target_path],
+            )?;
+            for (direction, expected, replacement) in [
+                (
+                    "forward",
+                    forward_expected(&file)?,
+                    forward_replacement(&file)?,
+                ),
+                (
+                    "rollback",
+                    rollback_expected(&file)?,
+                    rollback_replacement(&file)?,
+                ),
+            ] {
+                let token = promotion_staging_token(context.plan_id, &file.target_path, direction);
+                match cleanup_worktree_mutation_artifacts(
+                    context.root,
+                    &segments,
+                    expected,
+                    replacement,
+                    &token,
+                )
+                .map_err(|error| {
+                    MemoryError::new(
+                        "TS_MEMORY_ROLLBACK_REQUIRED",
+                        format!(
+                            "rollback could not clean recoverable state for {}: {error}",
+                            file.target_path
+                        ),
+                    )
+                })? {
+                    ConditionalMutationOutcome::Applied => {}
+                    ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                        return Err(recovery_required(&file.target_path, &staging_name));
+                    }
+                    ConditionalMutationOutcome::Drift => unreachable!(),
+                }
+            }
+        }
+        self.void_promotion(context, drifted_path, true)
+    }
+
+    /// `promotion-apply`: full precheck CAS, write-ahead per-file intent,
+    /// writes-before-deletes mutation, and phase-aware forward/rollback crash
+    /// recovery. Filesystem and SQLite commits are deliberately bridged by
+    /// the persisted intent plus old/new/missing classification.
     pub fn promotion_apply(
         &mut self,
         request: &PromotionApplyRequest,
         now_unix_ms: i64,
     ) -> Result<Value, MemoryError> {
-        // Phase 1: journal gate + owner re-resolution, then mark `applying`.
-        let (repository_key, worktree_key, candidate_ids, root_realpath, was_applied) = {
+        let _apply_lock = self.acquire_promotion_apply_lock()?;
+        let (
+            repository_key,
+            worktree_key,
+            candidate_ids,
+            assessment_digest,
+            policy_version,
+            root_realpath,
+            status,
+            mut phase,
+        ) = {
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let row: Option<(Vec<u8>, Vec<u8>, String, String)> = transaction
+            let row: Option<PromotionApplyJournalRow> = transaction
                 .query_row(
-                    "SELECT repository_key, worktree_key, candidate_ids_json, status
+                    "SELECT repository_key, worktree_key, candidate_ids_json, assessment_digest,
+                            policy_version, status, mutation_phase
                      FROM promotion_journal WHERE plan_id=?1",
                     params![&request.plan_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| {
+                        Ok(PromotionApplyJournalRow {
+                            repository_key: row.get(0)?,
+                            worktree_key: row.get(1)?,
+                            candidate_ids_json: row.get(2)?,
+                            assessment_digest: row.get(3)?,
+                            policy_version: row.get(4)?,
+                            status: row.get(5)?,
+                            mutation_phase: row.get(6)?,
+                        })
+                    },
                 )
                 .optional()?;
-            let (repository_key, worktree_key, candidate_ids_json, status) =
-                row.ok_or_else(|| {
-                    MemoryError::new(
-                        "TS_MEMORY_PLAN_NOT_FOUND",
-                        "the promotion plan does not exist",
-                    )
-                })?;
-            let was_applied = match status.as_str() {
-                "approved" | "applying" => false,
-                "applied" => true,
+            let row = row.ok_or_else(|| {
+                MemoryError::new(
+                    "TS_MEMORY_PLAN_NOT_FOUND",
+                    "the promotion plan does not exist",
+                )
+            })?;
+            match row.status.as_str() {
+                "approved" | "applying" | "applied" => {}
                 other => {
                     return Err(MemoryError::new(
                         "TS_MEMORY_PLAN_STATE_INVALID",
                         format!("the plan is {other} and cannot be applied"),
                     ));
                 }
-            };
+            }
             let root_realpath: Option<String> = transaction
                 .query_row(
                     "SELECT root_realpath FROM repository_bindings
                      WHERE repository_key=?1 AND worktree_key=?2",
-                    params![&repository_key, &worktree_key],
+                    params![&row.repository_key, &row.worktree_key],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -2458,25 +4697,29 @@ impl MemoryStorage {
                     "ownerRootRealpath does not match the bound worktree root",
                 ));
             }
-            if !was_applied {
-                transaction.execute(
-                    "UPDATE promotion_journal SET status='applying', updated_at=?1
-                     WHERE plan_id=?2",
-                    params![now_unix_ms, &request.plan_id],
-                )?;
-            }
             transaction.commit()?;
             (
-                repository_key,
-                worktree_key,
-                candidate_ids_from_json(&candidate_ids_json),
+                row.repository_key,
+                row.worktree_key,
+                candidate_ids_from_json(&row.candidate_ids_json),
+                row.assessment_digest,
+                row.policy_version,
                 root_realpath,
-                was_applied,
+                row.status,
+                row.mutation_phase,
             )
         };
-        self.maintain_wal_after_commit()?;
-        let files = read_promotion_files(&self.connection, &request.plan_id)?;
-        if was_applied {
+        let root = PathBuf::from(&root_realpath);
+        let recovery = PromotionRecoveryContext {
+            plan_id: &request.plan_id,
+            root: &root,
+            repository_key: &repository_key,
+            worktree_key: &worktree_key,
+            candidate_ids: &candidate_ids,
+            now_unix_ms,
+        };
+        if status == "applied" {
+            let files = read_promotion_files(&self.connection, &request.plan_id)?;
             let candidates =
                 self.promoted_candidate_states(&candidate_ids, &repository_key, &worktree_key)?;
             let generation =
@@ -2495,63 +4738,331 @@ impl MemoryStorage {
             }));
         }
 
-        // Phase 2: per-file blob CAS + no-follow write, with `applied`
-        // progress persisted after each file for idempotent resume.
-        let root = PathBuf::from(&root_realpath);
-        let mut applied_files = Vec::new();
-        for file in &files {
-            let segments: Vec<&str> = file.target_path.split('/').collect();
-            let current = match read_worktree_file(&root, &segments) {
-                Ok(current) => current,
-                Err(PromotionFsError::Symlink) => {
-                    return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+        if status == "approved" {
+            let files = read_promotion_files(&self.connection, &request.plan_id)?;
+            let legacy_write_only = files.iter().all(|file| file.legacy_write_only == 1);
+            if !legacy_write_only {
+                if policy_version != PROMOTION_POLICY_VERSION {
+                    return self.void_promotion(&recovery, ".threadshare/memory", false);
                 }
-                Err(PromotionFsError::Io(error)) => {
-                    return Err(MemoryError::failed(format!(
-                        "promotion apply could not read {}: {error}",
-                        file.target_path
-                    )));
+                match promotion_snapshot(
+                    &self.connection,
+                    &candidate_ids,
+                    &repository_key,
+                    &worktree_key,
+                ) {
+                    Ok(snapshot) if snapshot.assessment_digest == assessment_digest => {}
+                    Ok(_) => {
+                        return self.void_promotion(&recovery, ".threadshare/memory", false);
+                    }
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "TS_MEMORY_CANDIDATE_NOT_FOUND"
+                                | "TS_MEMORY_CANDIDATE_STALE"
+                                | "TS_MEMORY_UNVERIFIED_CLAIM"
+                        ) =>
+                    {
+                        return self.void_promotion(&recovery, ".threadshare/memory", false);
+                    }
+                    Err(error) => return Err(error),
                 }
-            };
-            let current_digest = current
-                .as_deref()
-                .map(|bytes| Sha256::digest(bytes).to_vec());
-            let already_exact = current_digest.as_deref() == Some(file.sanitized_digest.as_slice());
-            if file.applied == 1 {
-                if already_exact {
-                    applied_files.push(file.target_path.clone());
-                    continue;
-                }
-                // Applied earlier but the content drifted afterwards.
-                return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
             }
-            if !already_exact {
-                let observed_blob = current.as_deref().map(git_blob_oid_hex);
-                if observed_blob.as_deref() != file.target_blob_hash.as_deref() {
-                    return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+            if let Err(error) =
+                validate_consolidation_candidate_sources(&self.connection, &root, &candidate_ids)
+            {
+                if error.code == "TS_MEMORY_BINDING_DRIFT" {
+                    return self.void_promotion(&recovery, ".threadshare/memory", true);
                 }
-                match write_worktree_file(&root, &segments, &file.sanitized_content) {
-                    Ok(()) => {}
+                return Err(error);
+            }
+            if phase != "precheck" {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_PLAN_STATE_INVALID",
+                    "an approved plan has an invalid mutation phase",
+                ));
+            }
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for file in &files {
+                let segments = file.target_path.split('/').collect::<Vec<_>>();
+                let current = match read_worktree_file(&root, &segments) {
+                    Ok(current) => current,
                     Err(PromotionFsError::Symlink) => {
-                        return self.void_plan(&request.plan_id, &file.target_path, now_unix_ms);
+                        drop(transaction);
+                        return self.void_promotion(&recovery, &file.target_path, true);
                     }
                     Err(PromotionFsError::Io(error)) => {
                         return Err(MemoryError::failed(format!(
-                            "promotion apply could not write {}: {error}",
+                            "promotion precheck could not read {}: {error}",
                             file.target_path
                         )));
                     }
+                };
+                let observed_blob = current.as_deref().map(git_blob_oid_hex);
+                if observed_blob.as_deref() != file.target_blob_hash.as_deref() {
+                    drop(transaction);
+                    return self.void_promotion(&recovery, &file.target_path, true);
+                }
+                let rollback_digest = current
+                    .as_deref()
+                    .map(|bytes| Sha256::digest(bytes).to_vec());
+                transaction.execute(
+                    "UPDATE promotion_files SET originally_present=?1, rollback_content=?2,
+                       rollback_digest=?3, intent_state='pending', applied=0
+                     WHERE plan_id=?4 AND target_path=?5",
+                    params![
+                        i64::from(current.is_some()),
+                        current,
+                        rollback_digest,
+                        &request.plan_id,
+                        &file.target_path,
+                    ],
+                )?;
+            }
+            let changed = transaction.execute(
+                "UPDATE promotion_journal SET status='applying', mutation_phase='mutating',
+                   updated_at=?1
+                 WHERE plan_id=?2 AND status='approved' AND mutation_phase='precheck'",
+                params![now_unix_ms, &request.plan_id],
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_PLAN_STATE_INVALID",
+                    "the promotion plan changed during precheck",
+                ));
+            }
+            transaction.commit()?;
+            self.maintain_wal_after_commit()?;
+            phase = "mutating".to_owned();
+        }
+
+        if phase == "rolling_back" {
+            let drifted_path = read_promotion_files(&self.connection, &request.plan_id)?
+                .first()
+                .map(|file| file.target_path.clone())
+                .unwrap_or_else(|| ".threadshare/memory".to_owned());
+            return self.rollback_promotion(&recovery, &drifted_path);
+        }
+        if phase != "mutating" {
+            return Err(MemoryError::new(
+                "TS_MEMORY_PLAN_STATE_INVALID",
+                format!("the applying plan is in unexpected phase {phase}"),
+            ));
+        }
+
+        let files = read_promotion_files(&self.connection, &request.plan_id)?;
+        let mut applied_files = Vec::new();
+        for file in &files {
+            let intent_started = file.intent_state == "intent";
+            let progress_applied = file.intent_state == "applied";
+            if !matches!(file.intent_state.as_str(), "pending" | "intent" | "applied") {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!(
+                        "promotion file {} has invalid forward progress {}",
+                        file.target_path, file.intent_state
+                    ),
+                ));
+            }
+            let segments: Vec<&str> = file.target_path.split('/').collect();
+            let current = match read_worktree_file(&root, &segments) {
+                Ok(current) => current,
+                Err(error) => {
+                    self.start_rollback(&request.plan_id, now_unix_ms)?;
+                    return self
+                        .rollback_promotion(&recovery, &file.target_path)
+                        .map_err(|rollback_error| {
+                            MemoryError::new(
+                                rollback_error.code,
+                                format!(
+                                    "promotion read failed at {} ({error}); {rollback_error}",
+                                    file.target_path
+                                ),
+                            )
+                        });
+                }
+            };
+            let old_matches = current.as_deref().map(git_blob_oid_hex).as_deref()
+                == file.target_blob_hash.as_deref();
+            let new_matches = match file.operation.as_str() {
+                "write" => current.as_deref().is_some_and(|bytes| {
+                    file.sanitized_digest
+                        .as_deref()
+                        .is_some_and(|digest| Sha256::digest(bytes).as_slice() == digest)
+                }),
+                "delete" => current.is_none(),
+                _ => false,
+            };
+
+            let expected = forward_expected(file)?;
+            let replacement = forward_replacement(file)?;
+            let staging_token =
+                promotion_staging_token(&request.plan_id, &file.target_path, "forward");
+
+            if file.legacy_write_only == 1 {
+                if new_matches && (intent_started || progress_applied) {
+                    self.connection.execute(
+                        "UPDATE promotion_files SET intent_state='applied', applied=1
+                         WHERE plan_id=?1 AND target_path=?2",
+                        params![&request.plan_id, &file.target_path],
+                    )?;
+                    match cleanup_worktree_mutation_artifacts(
+                        &root,
+                        &segments,
+                        expected,
+                        replacement,
+                        &staging_token,
+                    )
+                    .map_err(|error| promotion_artifact_error(&file.target_path, error))?
+                    {
+                        ConditionalMutationOutcome::Applied => {}
+                        ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                            return Err(recovery_required(&file.target_path, &staging_name));
+                        }
+                        ConditionalMutationOutcome::Drift => unreachable!(),
+                    }
+                    applied_files.push(file.target_path.clone());
+                    continue;
+                }
+                if progress_applied || (!old_matches && !intent_started) {
+                    return self.void_promotion(&recovery, &file.target_path, false);
+                }
+            } else if file.originally_present.is_none() {
+                return Err(MemoryError::new(
+                    "TS_MEMORY_STATE_CORRUPT",
+                    format!(
+                        "promotion journal for {} was not prechecked",
+                        file.target_path
+                    ),
+                ));
+            } else if new_matches && (intent_started || progress_applied) {
+                self.connection.execute(
+                    "UPDATE promotion_files SET intent_state='applied', applied=1
+                     WHERE plan_id=?1 AND target_path=?2",
+                    params![&request.plan_id, &file.target_path],
+                )?;
+                match cleanup_worktree_mutation_artifacts(
+                    &root,
+                    &segments,
+                    expected,
+                    replacement,
+                    &staging_token,
+                )
+                .map_err(|error| promotion_artifact_error(&file.target_path, error))?
+                {
+                    ConditionalMutationOutcome::Applied => {}
+                    ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                        return Err(recovery_required(&file.target_path, &staging_name));
+                    }
+                    ConditionalMutationOutcome::Drift => unreachable!(),
+                }
+                applied_files.push(file.target_path.clone());
+                continue;
+            } else if progress_applied || (!old_matches && !intent_started) {
+                self.start_rollback(&request.plan_id, now_unix_ms)?;
+                return self.rollback_promotion(&recovery, &file.target_path);
+            }
+
+            if !intent_started {
+                let changed = self.connection.execute(
+                    "UPDATE promotion_files SET intent_state='intent'
+                     WHERE plan_id=?1 AND target_path=?2 AND intent_state='pending'",
+                    params![&request.plan_id, &file.target_path],
+                )?;
+                if changed != 1 {
+                    return Err(MemoryError::new(
+                        "TS_MEMORY_PLAN_STATE_INVALID",
+                        format!(
+                            "promotion intent for {} changed before mutation",
+                            file.target_path
+                        ),
+                    ));
+                }
+                self.maintain_wal_after_commit()?;
+            }
+            let mutation = conditional_replace_worktree_file(
+                &root,
+                &segments,
+                expected,
+                replacement,
+                &staging_token,
+            );
+            match mutation {
+                Ok(ConditionalMutationOutcome::Applied) => {}
+                Ok(ConditionalMutationOutcome::Drift) => {
+                    if file.legacy_write_only == 1 {
+                        return self.void_promotion(&recovery, &file.target_path, false);
+                    }
+                    self.connection.execute(
+                        "UPDATE promotion_files SET intent_state='pending'
+                         WHERE plan_id=?1 AND target_path=?2 AND intent_state='intent'",
+                        params![&request.plan_id, &file.target_path],
+                    )?;
+                    self.start_rollback(&request.plan_id, now_unix_ms)?;
+                    return self.rollback_promotion(&recovery, &file.target_path);
+                }
+                Ok(ConditionalMutationOutcome::RecoveryRequired { staging_name }) => {
+                    if file.legacy_write_only == 1 {
+                        return Err(recovery_required(&file.target_path, &staging_name));
+                    }
+                    self.start_rollback(&request.plan_id, now_unix_ms)?;
+                    return Err(recovery_required(&file.target_path, &staging_name));
+                }
+                Err(error) => {
+                    if file.legacy_write_only == 1 {
+                        return Err(promotion_artifact_error(&file.target_path, error));
+                    }
+                    self.start_rollback(&request.plan_id, now_unix_ms)?;
+                    return self.rollback_promotion(&recovery, &file.target_path);
                 }
             }
+            let after = read_worktree_file(&root, &segments).map_err(|error| {
+                MemoryError::failed(format!(
+                    "promotion could not verify {} after mutation: {error}",
+                    file.target_path
+                ))
+            })?;
+            let after_matches = match file.operation.as_str() {
+                "write" => after.as_deref() == replacement,
+                "delete" => after.is_none(),
+                _ => false,
+            };
+            if !after_matches {
+                if file.legacy_write_only == 1 {
+                    let staging_name = format!(
+                        ".threadshare-promotion-{}.hold",
+                        promotion_staging_token(&request.plan_id, &file.target_path, "forward")
+                    );
+                    return Err(recovery_required(&file.target_path, &staging_name));
+                }
+                self.start_rollback(&request.plan_id, now_unix_ms)?;
+                return self.rollback_promotion(&recovery, &file.target_path);
+            }
             self.connection.execute(
-                "UPDATE promotion_files SET applied=1 WHERE plan_id=?1 AND target_path=?2",
+                "UPDATE promotion_files SET intent_state='applied', applied=1
+                 WHERE plan_id=?1 AND target_path=?2",
                 params![&request.plan_id, &file.target_path],
             )?;
+            match cleanup_worktree_mutation_artifacts(
+                &root,
+                &segments,
+                expected,
+                replacement,
+                &staging_token,
+            )
+            .map_err(|error| promotion_artifact_error(&file.target_path, error))?
+            {
+                ConditionalMutationOutcome::Applied => {}
+                ConditionalMutationOutcome::RecoveryRequired { staging_name } => {
+                    return Err(recovery_required(&file.target_path, &staging_name));
+                }
+                ConditionalMutationOutcome::Drift => unreachable!(),
+            }
             applied_files.push(file.target_path.clone());
         }
 
-        // Phase 3: closing transaction — journal `applied`, candidates
-        // `promoted` (+revision, out of FTS), generation bump.
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2581,6 +5092,11 @@ impl MemoryStorage {
                     )?;
                     transaction
                         .execute("DELETE FROM candidate_fts WHERE rowid=?1", params![rowid])?;
+                    transaction.execute(
+                        "UPDATE consolidation_runs SET status='applied', updated_at=?1
+                         WHERE candidate_id=?2 AND status='pending_review'",
+                        params![now_unix_ms, candidate_id],
+                    )?;
                     revision + 1
                 }
                 other => {
@@ -2597,9 +5113,21 @@ impl MemoryStorage {
             }));
         }
         let generation = bump_candidate_generation(&transaction, &repository_key, &worktree_key)?;
-        transaction.execute(
-            "UPDATE promotion_journal SET status='applied', updated_at=?1 WHERE plan_id=?2",
+        let changed = transaction.execute(
+            "UPDATE promotion_journal SET status='applied', mutation_phase='done', updated_at=?1
+             WHERE plan_id=?2 AND status='applying' AND mutation_phase='mutating'",
             params![now_unix_ms, &request.plan_id],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::new(
+                "TS_MEMORY_PLAN_STATE_INVALID",
+                "the promotion plan changed before finalization",
+            ));
+        }
+        transaction.execute(
+            "UPDATE promotion_files SET rollback_content=NULL, rollback_digest=NULL
+             WHERE plan_id=?1",
+            params![&request.plan_id],
         )?;
         transaction.commit()?;
         self.maintain_wal_after_commit()?;
@@ -2701,6 +5229,47 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         directory.join("memory-state.sqlite3")
+    }
+
+    #[test]
+    fn unicode_normalization_vectors_match_the_javascript_host() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../test/fixtures/memory-consolidation-unicode-vectors.v1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture["format"],
+            "threadshare-memory-consolidation-unicode-vectors@v1"
+        );
+        for vector in fixture["vectors"].as_array().unwrap() {
+            let name = vector["name"].as_str().unwrap();
+            let input = vector["input"]["unit"]
+                .as_str()
+                .unwrap()
+                .repeat(vector["input"]["repeat"].as_u64().unwrap() as usize);
+            let expected = vector["normalized"]["unit"]
+                .as_str()
+                .unwrap()
+                .repeat(vector["normalized"]["repeat"].as_u64().unwrap() as usize);
+            let normalized = normalize_consolidation_text(&input).unwrap();
+            assert_eq!(normalized, expected, "{name}");
+            let count = normalized.chars().count();
+            assert_eq!(
+                count as u64,
+                vector["codePointCount"].as_u64().unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                hex::encode(Sha256::digest(normalized.as_bytes())),
+                vector["sha256"].as_str().unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                count <= vector["maxCodePoints"].as_u64().unwrap() as usize,
+                vector["accepted"].as_bool().unwrap(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

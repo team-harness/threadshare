@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { appendFile, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -15,7 +15,7 @@ import {
   parseMemoryInvocation,
 } from "../src/memory-command.mjs";
 import { executeInsightsCommand, parseInsightsInvocation } from "../src/insights-command.mjs";
-import { parseMemoryEntry } from "../src/memory-format.mjs";
+import { parseMemoryEntry, serializeMemoryEntry } from "../src/memory-format.mjs";
 import { INSIGHTS_E2E_ENGINE, INSIGHTS_E2E_SKIP } from "./helpers/insights-e2e.mjs";
 import {
   createMemoryCommandFixture,
@@ -70,16 +70,49 @@ test("memory init, status, lint, and assemble form an idempotent repository work
     "## Release",
     "Run the release verification suite.",
   ].join("\n"));
+  await writeFile(path.join(memoryRoot, "scenes", "lower-heat.md"), [
+    "-----META-START-----",
+    "created: 2026-08-21",
+    "updated: 2026-08-21",
+    "summary: Lower priority context",
+    "heat: 1",
+    "-----META-END-----",
+    "## Context",
+    "Read this after release guidance.",
+  ].join("\n"));
   const nested = path.join(fixture.repository, "src", "nested");
   await mkdir(nested, { recursive: true });
   const assembleInvocation = parseMemoryInvocation(["memory", "assemble"], { provider: "claude" });
   const assembled = await executeMemoryCommand(assembleInvocation, { ...fixture.options, cwd: nested });
   assert.equal(assembled.changed, true);
-  assert.match(await readFile(path.join(fixture.repository, "CLAUDE.md"), "utf8"),
-    /\.threadshare\/memory\/scenes\/release\.md — Release verification/);
+  const claudeText = await readFile(path.join(fixture.repository, "CLAUDE.md"), "utf8");
+  assert.match(claudeText,
+    /\.threadshare\/memory\/scenes\/release\.md \(heat 3\) — Release verification/);
+  assert.ok(claudeText.indexOf("release.md") < claudeText.indexOf("lower-heat.md"));
   const assembledAgain = await executeMemoryCommand(assembleInvocation, { ...fixture.options, cwd: nested });
   assert.equal(assembledAgain.changed, false);
   assert.equal(assembledAgain.approvedProjection.unchanged, true);
+
+  await writeFile(path.join(fixture.repository, "AGENTS.md"), "# User instructions\n\nKeep this byte-for-byte.\n");
+  const codexAssembled = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "assemble"], { provider: "codex" }),
+    { ...fixture.options, cwd: nested },
+  );
+  assert.equal(codexAssembled.target, "AGENTS.md");
+  const agentsText = await readFile(path.join(fixture.repository, "AGENTS.md"), "utf8");
+  assert.ok(agentsText.startsWith("# User instructions\n\nKeep this byte-for-byte.\n"));
+  assert.equal(await readFile(path.join(fixture.repository, "CLAUDE.md"), "utf8"), claudeText);
+
+  const malformed = `${agentsText}\n<!-- BEGIN THREADSHARE MEMORY (generated; do not edit by hand) -->\n`;
+  await writeFile(path.join(fixture.repository, "AGENTS.md"), malformed);
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "assemble"], { provider: "codex" }),
+      { ...fixture.options, cwd: nested },
+    ),
+    (error) => error.code === "TS_OPERATION_FAILED" && /marker/.test(error.message),
+  );
+  assert.equal(await readFile(path.join(fixture.repository, "AGENTS.md"), "utf8"), malformed);
 
   const leakingEntry = path.join(memoryRoot, "entries", "leaking-entry.md");
   await writeFile(leakingEntry, "token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n");
@@ -113,6 +146,326 @@ test("memory init refuses an existing symlink in the public memory path", {
       !error.message.includes(fixture.repository),
   );
   assert.deepEqual(await readdir(outside), []);
+});
+
+test("memory consolidate is pending-only, human-reviewed, promotable, and replayable with --full", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const entryText = serializeMemoryEntry({
+    frontmatter: {
+      id: "release-verification",
+      type: "work_method",
+      status: "approved",
+      priority: 80,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: null,
+      occurred: [],
+      evidence: { commits: [], paths: ["package.json"] },
+      superseded_by: null,
+    },
+    body: "Run the release verification suite before publishing.\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "release-verification.md",
+  ), entryText);
+
+  const preview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(preview.authorized, false);
+  assert.equal(preview.entryCount, 1);
+  assert.equal(preview.plans.length, 1);
+  assert.equal(preview.plans[0].taskKind, "consolidation");
+
+  const consolidated = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      "approve-plan": preview.plans[0].planDigest,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(consolidated.status, "pending_review");
+  assert.match(consolidated.candidateId, /^patch-consolidate-/u);
+
+  const entryFile = path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "release-verification.md",
+  );
+  await writeFile(entryFile, entryText.replace(
+    "Run the release verification suite before publishing.",
+    "Changed after consolidation submission.",
+  ));
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "review"], {
+        repository: fixture.repository,
+        kind: "consolidation",
+      }),
+      { ...fixture.options, confirmStatement: async () => true },
+    ),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(entryFile, entryText);
+
+  const unexpectedScene = path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "scenes",
+    "unexpected.md",
+  );
+  await writeFile(unexpectedScene, [
+    "-----META-START-----",
+    "created: 2026-08-21",
+    "updated: 2026-08-21",
+    "summary: \"unexpected\"",
+    "heat: 1",
+    "-----META-END-----",
+    "# Unexpected",
+    "",
+  ].join("\n"));
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "review"], {
+        repository: fixture.repository,
+        kind: "consolidation",
+      }),
+      { ...fixture.options, confirmStatement: async () => true },
+    ),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await unlink(unexpectedScene);
+
+  let reviewedText = "";
+  const reviewed = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], {
+      repository: fixture.repository,
+      kind: "consolidation",
+      format: "text",
+    }),
+    {
+      ...fixture.options,
+      async confirmStatement(item) {
+        assert.equal(item.candidateKind, "consolidation-patch");
+        reviewedText = item.payload.reviewStatements[0].text;
+        return true;
+      },
+    },
+  );
+  assert.match(reviewedText, /CREATE scene release-workflow/u);
+  assert.match(reviewedText, /\+\+\+ proposed/u);
+  assert.notEqual(reviewed.plan, null);
+
+  const promoted = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "promote"], {
+      repository: fixture.repository,
+      plan: reviewed.plan.planId,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(promoted.status, "applied");
+  const scene = await readFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "scenes",
+    "release-workflow.md",
+  ), "utf8");
+  assert.match(scene, /heat: 1/u);
+
+  const noDelta = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.deepEqual(noDelta.plans, []);
+  assert.equal(noDelta.entryCount, 0);
+
+  const replay = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      full: true,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(replay.entryCount, 1);
+  assert.equal(replay.plans.length, 1);
+});
+
+test("memory consolidate --full replays the same approved set after an empty patch", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const entryText = serializeMemoryEntry({
+    frontmatter: {
+      id: "empty-consolidation",
+      type: "work_method",
+      status: "approved",
+      priority: 50,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: null,
+      occurred: [],
+      evidence: { commits: [], paths: [] },
+      superseded_by: null,
+    },
+    body: "THREADSHARE_TEST_EMPTY_PATCH\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "empty-consolidation.md",
+  ), entryText);
+
+  const firstPreview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  const first = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      "approve-plan": firstPreview.plans[0].planDigest,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(first.status, "no_op");
+
+  const replayPreview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      full: true,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(replayPreview.plans.length, 1);
+  assert.notEqual(replayPreview.plans[0].taskId, firstPreview.plans[0].taskId);
+  const replayed = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      "approve-plan": replayPreview.plans[0].planDigest,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(replayed.status, "no_op");
+});
+
+test("memory consolidation never sends content through a symlinked parent", {
+  skip: INSIGHTS_E2E_SKIP || process.platform === "win32",
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const entryText = serializeMemoryEntry({
+    frontmatter: {
+      id: "symlink-secret",
+      type: "work_method",
+      status: "approved",
+      priority: 50,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: null,
+      occurred: [],
+      evidence: { commits: [], paths: [] },
+      superseded_by: null,
+    },
+    body: "This content must never cross a symlinked parent.\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "symlink-secret.md",
+  ), entryText);
+  const preview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+    }),
+    fixture.options,
+  );
+
+  const realThreadshare = path.join(fixture.directory, "outside-threadshare");
+  await rename(path.join(fixture.repository, ".threadshare"), realThreadshare);
+  await symlink(realThreadshare, path.join(fixture.repository, ".threadshare"));
+  const marker = path.join(fixture.directory, "runner-executed");
+  const previousMarker = process.env.FAKE_RUNNER_MARKER;
+  process.env.FAKE_RUNNER_MARKER = marker;
+  t.after(() => {
+    if (previousMarker === undefined) delete process.env.FAKE_RUNNER_MARKER;
+    else process.env.FAKE_RUNNER_MARKER = previousMarker;
+  });
+
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "consolidate"], {
+        repository: fixture.repository,
+        runner: "claude",
+        "approve-plan": preview.plans[0].planDigest,
+        format: "json",
+      }),
+      fixture.options,
+    ),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await assert.rejects(stat(marker), (error) => error.code === "ENOENT");
 });
 
 test("memory review shows statement evidence and limitations before confirmation", async () => {

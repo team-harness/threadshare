@@ -7,7 +7,7 @@ import { canonicalJson } from "./canonical-json.mjs";
 export const MEMORY_HEX64_PATTERN = /^[0-9a-f]{64}$/;
 export const MEMORY_HEX40_PATTERN = /^[0-9a-f]{40}$/;
 export const MEMORY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-export const MEMORY_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const MEMORY_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 export const MEMORY_DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 export const MEMORY_REPOSITORY_BINDING_FORMAT = "threadshare-memory-repository-binding@v1";
@@ -20,6 +20,7 @@ export const MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT = "threadshare-memory-candidate
 export const MEMORY_EVIDENCE_ASSESSMENT_FORMAT = "threadshare-memory-evidence-assessment@v1";
 export const MEMORY_ADJUDICATION_TASK_FORMAT = "threadshare-memory-adjudication-task@v1";
 export const MEMORY_ADJUDICATION_RESULT_FORMAT = "threadshare-memory-adjudication-result@v1";
+export const MEMORY_CONSOLIDATION_TASK_FORMAT = "threadshare-memory-consolidation-task@v1";
 export const MEMORY_CONSOLIDATION_PATCH_FORMAT = "threadshare-memory-consolidation-patch@v1";
 export const MEMORY_PROMOTION_PLAN_FORMAT = "threadshare-memory-promotion-plan@v1";
 
@@ -88,7 +89,10 @@ export const runnerExecutionPlanSchema = z.object({
   runnerInputDigest: hex64,
   inputCoverageDigest: hex64,
   inputCoverage: z.array(z.object({
-    sourceKind: z.enum(["transcript", "draft", "candidate-pool", "scene-index", "prompt"]),
+    sourceKind: z.enum([
+      "transcript", "draft", "candidate-pool", "approved-entry", "scene", "doctrine",
+      "scene-index", "prompt",
+    ]),
     opaqueSourceId: nonEmptyString,
     revision: nonNegativeInteger.nullable(),
     contentDigest: hex64,
@@ -298,19 +302,126 @@ export const adjudicationResultSchema = z.object({
   }).strict()),
 }).strict();
 
+const consolidationBindingSchema = z.object({
+  databaseUuid: nonEmptyString,
+  memoryStateUuid: nonEmptyString,
+  owner: ownerKeysSchema,
+  approvedProjection: z.object({
+    generation: nonNegativeInteger,
+    analyzerVersion: nonEmptyString,
+    coverage: z.literal("complete"),
+    sourceTreeDigest: hex64,
+  }).strict(),
+  entrySetDigest: hex64,
+  entryRevisions: z.array(z.object({
+    entryId: identifier,
+    revision: positiveInteger,
+    contentDigest: hex64,
+  }).strict()),
+  sceneIndexDigest: hex64,
+  sceneRevisions: z.array(z.object({
+    name: slug,
+    contentDigest: hex64,
+    heat: positiveInteger,
+  }).strict()),
+  doctrineDigest: hex64.nullable(),
+  replay: z.object({
+    mode: z.enum(["incremental", "full"]),
+    afterSuccessfulRunId: identifier.nullable(),
+  }).strict(),
+  promptVersion: nonEmptyString,
+  schemaVersion: z.literal(MEMORY_CONSOLIDATION_TASK_FORMAT),
+  policyVersion: nonEmptyString,
+}).strict();
+
+export const consolidationTaskSchema = z.object({
+  format: z.literal(MEMORY_CONSOLIDATION_TASK_FORMAT),
+  taskId: identifier,
+  lease: leaseSchema,
+  binding: consolidationBindingSchema,
+  entries: z.array(z.object({
+    entryId: identifier,
+    revision: positiveInteger,
+    contentDigest: hex64,
+    type: candidateTypeSchema,
+    scene: sceneName.nullable(),
+    priority: priorityInteger,
+    confidence: z.enum(["high", "medium", "low"]),
+    body: nonEmptyString,
+  }).strict()),
+  scenes: z.array(z.object({
+    name: slug,
+    contentDigest: hex64,
+    heat: positiveInteger,
+    content: nonEmptyString,
+  }).strict()),
+  doctrine: z.object({
+    contentDigest: hex64,
+    content: nonEmptyString,
+  }).strict().nullable(),
+  policy: z.object({
+    maxScenes: z.literal(15),
+    mergePreferredAt: z.literal(12),
+    createForbiddenAt: z.literal(14),
+    dueEntryCount: positiveInteger,
+    heatAlgorithm: z.literal("scene-heat@1"),
+  }).strict(),
+  contract: z.object({
+    patchSchema: z.literal(MEMORY_CONSOLIDATION_PATCH_FORMAT),
+    prompts: z.object({
+      promptVersion: nonEmptyString,
+      consolidation: nonEmptyString,
+    }).strict(),
+  }).strict(),
+}).strict();
+
 export const consolidationPatchSchema = z.object({
   format: z.literal(MEMORY_CONSOLIDATION_PATCH_FORMAT),
   taskId: identifier,
-  binding: adjudicationBindingSchema,
+  binding: consolidationBindingSchema,
   operations: z.array(z.object({
+    operationId: identifier,
     op: z.enum(["create", "update", "merge", "delete"]),
     target: z.enum(["scene", "doctrine"]),
     name: slug,
     newContent: z.string().nullable(),
-    basedOnEntryIds: z.array(slug),
+    basedOnEntryIds: z.array(identifier),
     mergeSources: z.array(slug),
+    rationale: nonEmptyString,
   }).strict()),
 }).strict();
+
+const promotionPlanFileSchema = z.object({
+  targetPath: nonEmptyString,
+  targetBlobHash: hex40.nullable(),
+  sanitizedContentDigest: hex64.nullable(),
+  operation: z.enum(["write", "delete"]).optional(),
+}).strict().superRefine((file, context) => {
+  const operation = file.operation ?? "write";
+  if (operation === "write" && file.sanitizedContentDigest === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sanitizedContentDigest"],
+      message: "write files require a sanitized content digest",
+    });
+  }
+  if (operation === "delete") {
+    if (file.sanitizedContentDigest !== null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sanitizedContentDigest"],
+        message: "delete files must not carry a sanitized content digest",
+      });
+    }
+    if (file.targetBlobHash === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetBlobHash"],
+        message: "delete files require an existing target blob hash",
+      });
+    }
+  }
+});
 
 export const promotionPlanSchema = z.object({
   format: z.literal(MEMORY_PROMOTION_PLAN_FORMAT),
@@ -318,11 +429,7 @@ export const promotionPlanSchema = z.object({
   owner: repositoryBindingSchema,
   candidateIds: z.array(identifier),
   assessmentDigest: hex64,
-  perFile: z.array(z.object({
-    targetPath: nonEmptyString,
-    targetBlobHash: hex40.nullable(),
-    sanitizedContentDigest: hex64,
-  }).strict()),
+  perFile: z.array(promotionPlanFileSchema),
   policyVersion: nonEmptyString,
   diff: z.string(),
 }).strict();
@@ -337,6 +444,7 @@ export const MEMORY_CONTRACT_FORMATS = Object.freeze({
   [MEMORY_EVIDENCE_ASSESSMENT_FORMAT]: evidenceAssessmentSchema,
   [MEMORY_ADJUDICATION_TASK_FORMAT]: adjudicationTaskSchema,
   [MEMORY_ADJUDICATION_RESULT_FORMAT]: adjudicationResultSchema,
+  [MEMORY_CONSOLIDATION_TASK_FORMAT]: consolidationTaskSchema,
   [MEMORY_CONSOLIDATION_PATCH_FORMAT]: consolidationPatchSchema,
   [MEMORY_PROMOTION_PLAN_FORMAT]: promotionPlanSchema,
 });

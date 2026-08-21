@@ -2,7 +2,7 @@
 //! per-op payload schemas (design doc `docs/team-memory-phase1-design.md` §3, DEV-4).
 //!
 //! This documentation block is the **normative wire schema** for the memory ops.
-//! The Node side (`memory-contracts.mjs` zod schemas) must match it exactly.
+//! The Node side (`memory-state-client.mjs` zod schemas) must match it exactly.
 //!
 //! # Envelope
 //!
@@ -44,7 +44,7 @@
 //! (0600, WAL). Idempotent for the same `stateDir`; a different `stateDir` while
 //! open is rejected.
 //! - request: `{ "stateDir": "<absolute path>" }`
-//! - result: `{ "memoryStateUuid": "<uuid v4>", "schemaVersion": 1 }`
+//! - result: `{ "memoryStateUuid": "<uuid v4>", "schemaVersion": 2 }`
 //!
 //! ## `bind-repository`
 //! Upserts `repository_bindings`. `rootRealpath` enters the database only and is
@@ -57,6 +57,25 @@
 //! - result: `{ "repositoryKey": hex64, "worktreeKey": hex64,
 //!   "publicRepositoryIdentity": string|null, "memoryRoot": string,
 //!   "status": string }`
+//!
+//! ## `list-memory-files`
+//! Host-only, read-only listing for `entries` or `scenes`. The active owner
+//! binding is resolved inside Rust and every directory component is opened
+//! descriptor-relative with no-follow semantics. This op is not exposed by
+//! MCP and is never available to a Runner.
+//! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64,
+//!   "collection": "entries"|"scenes" }`
+//! - result: `{ "names": ["<single markdown filename>"] }`
+//!
+//! ## `read-memory-file`
+//! Host-only, read-only access to one approved entry, scene, or doctrine file.
+//! Every path component is opened no-follow; missing files return null, and
+//! content must be valid UTF-8 no larger than 64 KiB. This op is not exposed
+//! by MCP and is never available to a Runner.
+//! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64,
+//!   "collection": "entries"|"scenes", "name": "<markdown filename>" }`
+//!   or `{ ..., "collection": "doctrine", "name": null }`
+//! - result: `{ "content": string|null }`
 //!
 //! ## `plan-tasks`
 //! Batch-inserts pending chunks and tasks. Existing `chunkRef` / `taskId` rows
@@ -116,6 +135,33 @@
 //!   "candidates": [{ "candidateId": string, "revision": int,
 //!     "contentDigest": hex64, "status": string }],
 //!   "candidateGeneration": int }`
+//!
+//! ## `submit-consolidation`
+//! Single transaction: lease/submission CAS; approved projection, the complete
+//! descriptor-read approved-entry source tree, complete scene directory,
+//! doctrine, replay epoch, owner, schema, and policy binding CAS;
+//! deterministic operation/heat/assessment validation; then a persisted run
+//! plus either no candidate for an empty patch or one quarantined
+//! `consolidation-patch` candidate. Every operation has exactly one assessment
+//! whose `statementTextDigest` binds the host-materialized canonical operation.
+//! - request: `{ "taskId": string, "claimToken": string,
+//!   "responseDigest": hex64, "runId": string, "candidateId": string|null,
+//!   "operations": [ConsolidationOperation], "assessments": [Assessment] }`
+//! - result: `{ "taskId": string, "runId": string,
+//!   "status": "pending_review"|"no_op", "idempotent": bool,
+//!   "candidate": CandidateState|null, "candidateGeneration": int,
+//!   "entryCount": int }`
+//!
+//! ## `consolidation-baseline`
+//! Read-only successful incremental baseline. Pending/stale runs never advance
+//! it. A `--full` caller ignores the returned entries but binds
+//! `successfulRunId` as its replay epoch, so an unchanged source set after a
+//! successful empty patch still produces a new claimable task.
+//! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64 }`
+//! - result: `{ "successfulRunId": string|null,
+//!   "entries": [{ "entryId": string, "revision": int,
+//!     "contentDigest": hex64 }], "pendingRunId": string|null,
+//!   "lastSuccessfulNoOp": bool }`
 //!
 //! ## `recall`
 //! Read-only. For each draft, takes `3×k` BM25 hits from `approved_fts` and
@@ -221,8 +267,10 @@
 //! ## `review-queue`
 //! Read-only: quarantined candidates plus their assessments.
 //! - request: `{ "repositoryKey": hex64, "worktreeKey": hex64,
-//!   "limit": int (1..=200, default 50) }`
-//! - result: `{ "items": [{ "candidateId": string, "chunkRef": string,
+//!   "limit": int (1..=200, default 50),
+//!   "kind": "entry"|"consolidation" (default "entry") }`
+//! - result: `{ "items": [{ "candidateId": string,
+//!   "candidateKind": "entry"|"consolidation-patch", "chunkRef": string,
 //!   "revision": int, "contentDigest": hex64, "payload": object,
 //!   "assessments": [{ "statementId": string, "citationsDigest": hex64,
 //!     "provenanceStrength": string, "limitations": [string],
@@ -240,7 +288,10 @@
 //!   "submitted": int, "stale": int }, "candidates": { "draft": int,
 //!   "quarantined": int, "promoted": int, "discarded": int },
 //!   "promotions": { "generated": int, "approved": int, "applying": int,
-//!   "applied": int, "voided": int, "applyingPlanIds": [string] } }`
+//!   "applied": int, "voided": int, "applyingPlanIds": [string] },
+//!   "consolidations": { "pendingReview": int, "noOp": int,
+//!   "applied": int, "stale": int, "lastSuccessfulEntryCount": int,
+//!   "lastSuccessfulNoOp": bool } }`
 //!
 //! # Ops (Stage 4c)
 //!
@@ -282,6 +333,7 @@
 //! binding's `memoryRoot` (`TS_MEMORY_TARGET_PATH_INVALID`).
 //! `sanitizedContent` is strict base64 of the exact sanitized bytes
 //! (per file ≤ 1 MiB decoded, ≤ 128 files, ≤ 8 MiB total). The engine
+//! accepts only the policy implemented by this build (`sanitize@1`). It
 //! computes `assessmentDigest` (canonical digest of the related assessment
 //! rows ordered by `(candidateId, statementId)`), stores the sanitized bytes
 //! in `promotion_files` with `sanitizedDigest = sha256(bytes)`, writes the
@@ -290,17 +342,21 @@
 //! plan document `{ format: "threadshare-memory-promotion-plan@v1", planId,
 //! owner: { repositoryKey, worktreeKey, memoryRoot }, candidateIds,
 //! policyVersion, assessmentDigest, perFile: [{ targetPath, targetBlobHash,
-//! sanitizedContentDigest }] }`.
+//! sanitizedContentDigest, operation }] }`. Consolidation plans additionally
+//! revalidate the complete descriptor-read approved-entry source tree, scene
+//! directory, doctrine, and replay epoch before creation.
 //! - request: `{ "owner": { "repositoryKey": hex64, "worktreeKey": hex64 },
 //!   "candidateIds": [string] (1..=512, unique), "policyVersion": string,
-//!   "perFile": [{ "targetPath": string, "sanitizedContent": base64,
-//!     "targetBlobHash": hex40|null }] (1..=128, unique targetPath) }`
+//!   "perFile": [{ "targetPath": string, "operation": "write"|"delete",
+//!     "sanitizedContent": base64|null, "targetBlobHash": hex40|null }]
+//!   (1..=128, unique targetPath; operation defaults to write) }`
 //! - result: `{ "planId": uuid, "planDigest": hex64, "status": "generated",
 //!   "owner": { "repositoryKey": hex64, "worktreeKey": hex64,
 //!   "memoryRoot": string }, "candidateIds": [string],
 //!   "policyVersion": string, "assessmentDigest": hex64,
 //!   "files": [{ "targetPath": string, "targetBlobHash": hex40|null,
-//!     "sanitizedDigest": hex64, "bytes": int }] }`
+//!     "operation": "write"|"delete", "sanitizedDigest": hex64|null,
+//!     "bytes": int }] }`
 //!
 //! ## `promotion-approve`
 //! The explicit, digest-bound user approval (`generated → approved`). The
@@ -313,24 +369,34 @@
 //!   "status": "approved", "idempotent": bool }`
 //!
 //! ## `promotion-apply`
-//! `approved → applying → applied | voided`. The plan owner is re-resolved:
+//! `approved → applying → applied | voided`. The engine first acquires a
+//! database-adjacent cross-process exclusive apply lock; contention fails
+//! closed. State transitions, rollback/void, and finalization use expected
+//! status/phase CAS. While a plan is approved or applying, its candidates
+//! cannot be confirmed, discarded, or consumed by adjudication. Before any
+//! filesystem mutation the engine recomputes candidate/assessment state and
+//! compares the stored `assessmentDigest` and `policyVersion`. The plan owner
+//! is then re-resolved:
 //! `ownerRootRealpath` must equal `repository_bindings.root_realpath`
-//! (`TS_MEMORY_OWNER_MISMATCH`). Per file (ordered by `targetPath`) the
+//! (`TS_MEMORY_OWNER_MISMATCH`). Consolidation first revalidates the complete
+//! descriptor-read approved-entry source tree, scene directory, doctrine, and
+//! replay epoch. Per file the
 //! engine itself reads the current worktree bytes through the no-follow
 //! traversal and computes the git blob OID (`sha1("blob {len}\0"+bytes)`;
 //! missing file → expected `targetBlobHash` null). Any mismatch with the
-//! plan's recorded hash, any symlink path component, or content drift on an
-//! already-applied file voids the plan and returns the structured `"voided"`
-//! result with the drifted path. A passing file is written with the exact
-//! `promotion_files` bytes (per-segment `openat` + `O_NOFOLLOW` +
-//! `O_DIRECTORY`, temp file + atomic rename) and marked `applied=1`. After
-//! all files, a closing transaction marks the journal `applied` and moves the
+//! plan's recorded hash or any symlink path component voids before mutation.
+//! Precheck stores rollback bytes and write-ahead intent. Mutation completes
+//! all writes before deletes; each action is descriptor-relative and no-follow.
+//! Crashes between filesystem mutation and progress commit are recognized from
+//! old/new/missing state and continue forward. Unexpected third-party drift
+//! enters resumable rollback and never overwrites a third value. After all
+//! files, a closing transaction clears rollback bytes, marks the journal
+//! `applied`, and moves the
 //! plan candidates `quarantined → promoted` with `revision+1`, removes their
 //! `candidate_fts` rows (they leave the recall pool), and advances
-//! `candidate_projection.generation`. Crash recovery: a plan left in
-//! `applying` (reported by `status`) may be re-applied; files whose current
-//! content digest already equals `sanitizedDigest` are skipped idempotently,
-//! and an `applied` plan replays with `"idempotent": true`. `generated` and
+//! `candidate_projection.generation`. A plan left in `applying` (reported by
+//! `status`) may be re-applied, and an `applied` plan replays with
+//! `"idempotent": true`. `generated` and
 //! `voided` plans are rejected with `TS_MEMORY_PLAN_STATE_INVALID`.
 //! - request: `{ "planId": string, "ownerRootRealpath": "<absolute path>" }`
 //! - result (applied): `{ "planId": string, "status": "applied",
@@ -355,13 +421,17 @@ use serde_json::Value;
 
 use crate::memory_state::{MemoryError, MemoryStorage};
 
-/// Stage 4a + 4c op names (`MEMORY_COMMAND.op`), lowercase kebab-case per design §3.
-pub const MEMORY_OPS: [&str; 17] = [
+/// Phase 1 + Phase 2 op names (`MEMORY_COMMAND.op`), lowercase kebab-case.
+pub const MEMORY_OPS: [&str; 21] = [
     "open",
     "bind-repository",
+    "list-memory-files",
+    "read-memory-file",
     "plan-tasks",
     "claim-task",
     "submit-extraction",
+    "submit-consolidation",
+    "consolidation-baseline",
     "recall",
     "submit-adjudication",
     "sync-approved",
@@ -380,7 +450,7 @@ pub fn is_memory_op(op: &str) -> bool {
     MEMORY_OPS.contains(&op)
 }
 
-const MAX_TEXT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PAYLOAD_ITEMS: usize = 512;
 const MAX_PLAN_FILES: usize = 128;
 const MAX_PLAN_FILE_BYTES: usize = 1024 * 1024;
@@ -500,6 +570,62 @@ impl BindRepositoryRequest {
             matches!(self.status.as_str(), "active" | "inactive"),
             "status must be active or inactive",
         )
+    }
+}
+
+fn valid_memory_file_collection(value: &str) -> Result<(), String> {
+    require(
+        matches!(value, "entries" | "scenes" | "doctrine"),
+        "collection must be entries, scenes, or doctrine",
+    )
+}
+
+fn valid_memory_file_name(value: &str) -> Result<(), String> {
+    valid_identifier(value, "name")?;
+    require(
+        value.ends_with(".md") && value != ".md" && !value.contains('/') && !value.contains('\\'),
+        "name must be one Markdown filename without path separators",
+    )
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListMemoryFilesRequest {
+    pub repository_key: String,
+    pub worktree_key: String,
+    pub collection: String,
+}
+
+impl ListMemoryFilesRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        owner_fields(&self.repository_key, &self.worktree_key)?;
+        valid_memory_file_collection(&self.collection)?;
+        require(
+            self.collection != "doctrine",
+            "doctrine is a single file and cannot be listed",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadMemoryFileRequest {
+    pub repository_key: String,
+    pub worktree_key: String,
+    pub collection: String,
+    pub name: Option<String>,
+}
+
+impl ReadMemoryFileRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        owner_fields(&self.repository_key, &self.worktree_key)?;
+        valid_memory_file_collection(&self.collection)?;
+        match (self.collection.as_str(), self.name.as_deref()) {
+            ("doctrine", None) => Ok(()),
+            ("entries" | "scenes", Some(name)) => valid_memory_file_name(name),
+            ("doctrine", Some(_)) => Err("doctrine reads must omit name".to_owned()),
+            _ => Err("entries and scenes reads require name".to_owned()),
+        }
     }
 }
 
@@ -645,6 +771,133 @@ pub struct SubmitExtractionRequest {
     pub drafts: Vec<ExtractionDraftInput>,
     pub evidence_refs: Vec<EvidenceRefInput>,
     pub assessments: Vec<AssessmentInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsolidationOperationInput {
+    pub operation_id: String,
+    pub op: String,
+    pub target: String,
+    pub name: String,
+    pub new_content: Option<String>,
+    pub based_on_entry_ids: Vec<String>,
+    pub merge_sources: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmitConsolidationRequest {
+    pub task_id: String,
+    pub claim_token: String,
+    pub response_digest: String,
+    pub run_id: String,
+    pub candidate_id: Option<String>,
+    pub operations: Vec<ConsolidationOperationInput>,
+    pub assessments: Vec<AssessmentInput>,
+}
+
+impl SubmitConsolidationRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.task_id, "taskId")?;
+        valid_identifier(&self.claim_token, "claimToken")?;
+        valid_hex64(&self.response_digest, "responseDigest")?;
+        valid_identifier(&self.run_id, "runId")?;
+        require(
+            self.operations.len() <= MAX_PAYLOAD_ITEMS
+                && self.assessments.len() <= MAX_PAYLOAD_ITEMS,
+            "submit-consolidation batches are limited to 512 operations",
+        )?;
+        require(
+            self.operations.is_empty() == self.candidate_id.is_none(),
+            "candidateId must be null exactly when operations is empty",
+        )?;
+        if let Some(candidate_id) = &self.candidate_id {
+            valid_identifier(candidate_id, "candidateId")?;
+        }
+        require(
+            self.assessments.len() == self.operations.len(),
+            "every consolidation operation must have exactly one assessment",
+        )?;
+        let mut operation_ids = Vec::new();
+        for operation in &self.operations {
+            valid_identifier(&operation.operation_id, "operations[].operationId")?;
+            require(
+                !operation_ids.contains(&operation.operation_id.as_str()),
+                "operations[].operationId must be unique",
+            )?;
+            operation_ids.push(operation.operation_id.as_str());
+            require(
+                matches!(
+                    operation.op.as_str(),
+                    "create" | "update" | "merge" | "delete"
+                ),
+                "operations[].op is invalid",
+            )?;
+            require(
+                matches!(operation.target.as_str(), "scene" | "doctrine"),
+                "operations[].target is invalid",
+            )?;
+            require(
+                !operation.name.is_empty()
+                    && operation.name.len() <= 64
+                    && operation.name.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || (byte == b'-' && index > 0)
+                    })
+                    && !operation.name.ends_with('-'),
+                "operations[].name must be a lowercase slug",
+            )?;
+            if let Some(content) = &operation.new_content {
+                valid_text(content, "operations[].newContent")?;
+            }
+            for entry_id in &operation.based_on_entry_ids {
+                valid_identifier(entry_id, "operations[].basedOnEntryIds[]")?;
+            }
+            for source in &operation.merge_sources {
+                valid_identifier(source, "operations[].mergeSources[]")?;
+            }
+            valid_text(&operation.rationale, "operations[].rationale")?;
+            require(
+                !operation.rationale.is_empty(),
+                "operations[].rationale must not be empty",
+            )?;
+        }
+        let candidate_id = self.candidate_id.as_deref();
+        let mut statement_ids = Vec::new();
+        for assessment in &self.assessments {
+            require(
+                Some(assessment.candidate_id.as_str()) == candidate_id,
+                "assessments[].candidateId must equal candidateId",
+            )?;
+            validate_assessment(assessment)?;
+            require(
+                operation_ids.contains(&assessment.statement_id.as_str()),
+                "assessments[].statementId must reference an operation",
+            )?;
+            require(
+                !statement_ids.contains(&assessment.statement_id.as_str()),
+                "assessments[].statementId must be unique",
+            )?;
+            statement_ids.push(assessment.statement_id.as_str());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConsolidationBaselineRequest {
+    pub repository_key: String,
+    pub worktree_key: String,
+}
+
+impl ConsolidationBaselineRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        owner_fields(&self.repository_key, &self.worktree_key)
+    }
 }
 
 impl SubmitExtractionRequest {
@@ -983,10 +1236,16 @@ pub struct ReviewQueueRequest {
     pub worktree_key: String,
     #[serde(default = "default_review_limit")]
     pub limit: u16,
+    #[serde(default = "default_review_kind")]
+    pub kind: String,
 }
 
 fn default_review_limit() -> u16 {
     50
+}
+
+fn default_review_kind() -> String {
+    "entry".to_owned()
 }
 
 impl ReviewQueueRequest {
@@ -995,6 +1254,10 @@ impl ReviewQueueRequest {
         require(
             (1..=200).contains(&self.limit),
             "limit must be between 1 and 200",
+        )?;
+        require(
+            matches!(self.kind.as_str(), "entry" | "consolidation"),
+            "kind must be entry or consolidation",
         )
     }
 }
@@ -1088,8 +1351,14 @@ pub struct PromotionOwnerInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PromotionFileInput {
     pub target_path: String,
-    pub sanitized_content: String,
+    #[serde(default = "default_promotion_operation")]
+    pub operation: String,
+    pub sanitized_content: Option<String>,
     pub target_blob_hash: Option<String>,
+}
+
+fn default_promotion_operation() -> String {
+    "write".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1131,15 +1400,37 @@ impl PromotionPlanRequest {
                 "perFile[].targetPath must be unique",
             )?;
             target_paths.push(file.target_path.as_str());
-            let bytes = crate::memory_promotion::decode_base64(&file.sanitized_content)
-                .ok_or_else(|| {
-                    "perFile[].sanitizedContent must be strict padded base64".to_owned()
-                })?;
             require(
-                bytes.len() <= MAX_PLAN_FILE_BYTES,
-                "perFile[].sanitizedContent exceeds 1 MiB decoded",
+                matches!(file.operation.as_str(), "write" | "delete"),
+                "perFile[].operation must be write or delete",
             )?;
-            total_bytes += bytes.len();
+            match file.operation.as_str() {
+                "write" => {
+                    let encoded = file.sanitized_content.as_deref().ok_or_else(|| {
+                        "write files require perFile[].sanitizedContent".to_owned()
+                    })?;
+                    let bytes =
+                        crate::memory_promotion::decode_base64(encoded).ok_or_else(|| {
+                            "perFile[].sanitizedContent must be strict padded base64".to_owned()
+                        })?;
+                    require(
+                        bytes.len() <= MAX_PLAN_FILE_BYTES,
+                        "perFile[].sanitizedContent exceeds 1 MiB decoded",
+                    )?;
+                    total_bytes += bytes.len();
+                }
+                "delete" => {
+                    require(
+                        file.sanitized_content.is_none(),
+                        "delete files must not carry perFile[].sanitizedContent",
+                    )?;
+                    require(
+                        file.target_blob_hash.is_some(),
+                        "delete files require perFile[].targetBlobHash",
+                    )?;
+                }
+                _ => unreachable!(),
+            }
             if let Some(blob_hash) = &file.target_blob_hash {
                 require(
                     is_hex40(blob_hash),
@@ -1429,6 +1720,7 @@ pub struct ReviewAssessmentWire {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewItemWire {
     pub candidate_id: String,
+    pub candidate_kind: String,
     pub chunk_ref: String,
     pub revision: i64,
     pub content_digest: String,
@@ -1482,11 +1774,23 @@ pub struct PromotionCountsWire {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConsolidationCountsWire {
+    pub pending_review: i64,
+    pub no_op: i64,
+    pub applied: i64,
+    pub stale: i64,
+    pub last_successful_entry_count: i64,
+    pub last_successful_no_op: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemoryStatusOutcome {
     pub chunks: ChunkCountsWire,
     pub tasks: TaskCountsWire,
     pub candidates: CandidateCountsWire,
     pub promotions: PromotionCountsWire,
+    pub consolidations: ConsolidationCountsWire,
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,9 +1810,13 @@ pub fn validate_command_payload(op: &str, payload: &Value) -> Result<(), String>
     match op {
         "open" => parse(payload, OpenRequest::validate),
         "bind-repository" => parse(payload, BindRepositoryRequest::validate),
+        "list-memory-files" => parse(payload, ListMemoryFilesRequest::validate),
+        "read-memory-file" => parse(payload, ReadMemoryFileRequest::validate),
         "plan-tasks" => parse(payload, PlanTasksRequest::validate),
         "claim-task" => parse(payload, ClaimTaskRequest::validate),
         "submit-extraction" => parse(payload, SubmitExtractionRequest::validate),
+        "submit-consolidation" => parse(payload, SubmitConsolidationRequest::validate),
+        "consolidation-baseline" => parse(payload, ConsolidationBaselineRequest::validate),
         "recall" => parse(payload, RecallRequest::validate),
         "submit-adjudication" => parse(payload, SubmitAdjudicationRequest::validate),
         "sync-approved" => parse(payload, SyncApprovedRequest::validate),
@@ -1590,6 +1898,16 @@ pub fn handle_memory_command(
             request.validate().map_err(MemoryError::invalid)?;
             to_wire(&storage.bind_repository(&request)?)
         }
+        "list-memory-files" => {
+            let request: ListMemoryFilesRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.list_memory_files(&request)
+        }
+        "read-memory-file" => {
+            let request: ReadMemoryFileRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.read_memory_file(&request)
+        }
         "plan-tasks" => {
             let request: PlanTasksRequest = parse_request(payload)?;
             request.validate().map_err(MemoryError::invalid)?;
@@ -1604,6 +1922,16 @@ pub fn handle_memory_command(
             let request: SubmitExtractionRequest = parse_request(payload)?;
             request.validate().map_err(MemoryError::invalid)?;
             to_wire(&storage.submit_extraction(&request, now_unix_ms)?)
+        }
+        "submit-consolidation" => {
+            let request: SubmitConsolidationRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.submit_consolidation(&request, now_unix_ms)
+        }
+        "consolidation-baseline" => {
+            let request: ConsolidationBaselineRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            storage.consolidation_baseline(&request)
         }
         "recall" => {
             let request: RecallRequest = parse_request(payload)?;

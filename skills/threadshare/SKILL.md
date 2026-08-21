@@ -126,12 +126,23 @@ again. MCP never performs this approval step.
 
 Extraction and adjudication are separate network deliveries. Approval of the extraction digest never
 authorizes the adjudication digest printed afterward; obtain a second explicit approval. Never use an
-internal callback, JSON mode, or a non-TTY process to confirm generated statements. A person runs
-`threadshare memory review` in a real TTY, reviews statement evidence and limitations, and then decides
-whether to run the printed `memory promote --plan <plan-id>` command. Promotion changes only the
-worktree and approved local projection; it never stages, commits, or pushes. After pulling approved
-memory from Git, run `threadshare memory assemble --provider claude` to refresh the generated provider
-block and local approved projection.
+internal callback, JSON mode, or a non-TTY process to confirm generated statements. Candidate session
+scoring belongs only to the Insights `extraction-candidates@1` Recipe; require complete coverage and do
+not recreate its weights or rank sessions in the Agent.
+
+Consolidate approved L1 entries with `threadshare memory consolidate --runner <claude|codex>`. With
+Codex, provide model and endpoint only when creating the preview. `threadshare_memory_consolidate_preview`
+is the MCP equivalent and remains pending-only: it must never approve, start a Runner, or return L1,
+scene, or doctrine content. Use `--if-due` for the 20-entry trigger; use `--full` only when the user wants
+to replay every approved L1 instead of the successful incremental baseline. Approving a consolidation
+digest can produce either a visible no-op baseline or a quarantined patch.
+
+A person runs `threadshare memory review` for L1 candidates or `threadshare memory review --kind
+consolidation` for every L2/L3 operation, then decides whether to run the printed `memory promote --plan
+<plan-id>` command. Promotion changes only the worktree and approved local projection; it never stages,
+commits, or pushes. After pulling approved memory from Git, run `threadshare memory assemble --provider
+claude` and/or `--provider codex` to refresh the generated `CLAUDE.md` / `AGENTS.md` block and local
+approved projection.
 
 ## Choose A Start Turn
 

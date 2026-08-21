@@ -6,7 +6,6 @@
 // wiring can pass real insights adapters.
 //
 // Responsibilities:
-//   - session selection scoring (§6.1) with visible gate rejections;
 //   - chunking of whole consecutive Turns under a byte budget with lossless
 //     user/assistant text and declared tool-payload excerpting (§6.2, design §4);
 //   - deterministic `<<past-*>>` transcript serialization (role-capture defense);
@@ -62,89 +61,6 @@ function sha256Hex(bytes) {
 
 function byteLength(text) {
   return Buffer.byteLength(text, "utf8");
-}
-
-// ---------------------------------------------------------------------------
-// §6.1 selection scoring
-// ---------------------------------------------------------------------------
-
-/**
- * Per-signal weights (proposal §6.1 ordering: delivery direct/observed edges carry
- * the highest weight, then recovered failure chains, then tool density, then a
- * conclusive final answer). `toolDensity` is the maximum contribution of the
- * density signal: points = min(round(toolInvocations * toolDensity / eligibleTurns),
- * toolDensity), so it saturates below the recovered-failure-chain weight.
- */
-export const SESSION_SCORE_WEIGHTS = Object.freeze({
-  deliveryDirect: 40,
-  deliveryObserved: 25,
-  recoveredFailureChain: 15,
-  toolDensity: 10,
-  conclusiveFinalAnswer: 5,
-});
-
-function eligibleTurnCount(session) {
-  const turns = Array.isArray(session.turns) ? session.turns : [];
-  let count = 0;
-  for (const turn of turns) {
-    if (turn && turn.eligible !== false && turn.active !== false && turn.sealed === "hard") {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-/**
- * Score candidate sessions deterministically. Gates (proposal §6.1): main scope,
- * not excluded, and at least 3 eligible + active + hard-sealed turns. Returns
- * `{ selected, rejected }` with per-signal contributions and gate reason codes.
- */
-export function scoreCandidateSessions(sessions) {
-  if (!Array.isArray(sessions)) {
-    throw new MemoryExtractionError("sessions must be an array", "invalid-sessions");
-  }
-  const selected = [];
-  const rejected = [];
-  for (const session of sessions) {
-    if (!session || typeof session.sessionKey !== "string" || session.sessionKey.length === 0) {
-      throw new MemoryExtractionError("session requires a sessionKey", "invalid-session");
-    }
-    const eligibleTurns = eligibleTurnCount(session);
-    const reasons = [];
-    if ((session.scope ?? "main") !== "main") reasons.push("not-main-scope");
-    if (session.excluded === true) reasons.push("excluded");
-    if (eligibleTurns < 3) reasons.push("insufficient-eligible-turns");
-    if (reasons.length > 0) {
-      rejected.push({ sessionKey: session.sessionKey, eligibleTurns, reasons });
-      continue;
-    }
-    const weights = SESSION_SCORE_WEIGHTS;
-    const toolInvocations = session.toolInvocations ?? 0;
-    const signals = {
-      deliveryDirect: (session.directDeliveryEdges ?? 0) * weights.deliveryDirect,
-      deliveryObserved: (session.observedDeliveryEdges ?? 0) * weights.deliveryObserved,
-      recoveredFailureChain: (session.recoveredFailureChains ?? 0) * weights.recoveredFailureChain,
-      toolDensity: Math.min(
-        Math.round((toolInvocations * weights.toolDensity) / eligibleTurns),
-        weights.toolDensity,
-      ),
-      conclusiveFinalAnswer: session.conclusiveFinalAnswer === true
-        ? weights.conclusiveFinalAnswer
-        : 0,
-    };
-    const score = signals.deliveryDirect + signals.deliveryObserved
-      + signals.recoveredFailureChain + signals.toolDensity + signals.conclusiveFinalAnswer;
-    selected.push({ sessionKey: session.sessionKey, score, eligibleTurns, signals });
-  }
-  selected.sort((left, right) =>
-    right.score - left.score
-    || (left.sessionKey < right.sessionKey ? -1 : left.sessionKey > right.sessionKey ? 1 : 0));
-  return { selected, rejected };
-}
-
-/** Convenience: score sessions provided by an injected sources interface. */
-export async function listScoredSessions({ sources }) {
-  return scoreCandidateSessions(await sources.listCandidateSessions());
 }
 
 // ---------------------------------------------------------------------------

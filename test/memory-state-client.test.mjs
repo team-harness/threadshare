@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,12 +14,14 @@ import {
   memoryClaimTask,
   memoryConfirmStatement,
   memoryDiscardCandidate,
+  memoryListFiles,
   memoryOpen,
   memoryPlanTasks,
   memoryPromotionApply,
   memoryPromotionApprove,
   memoryPromotionPlan,
   memoryRecall,
+  memoryReadFile,
   memoryReviewQueue,
   memorySearch,
   memoryStatus,
@@ -142,7 +144,7 @@ test("memory ops run end-to-end against a real engine", {
   // open is idempotent for the same stateDir and rejects a different one.
   const opened = await memoryOpen(client, { stateDir });
   assert.match(opened.memoryStateUuid, UUID_PATTERN);
-  assert.equal(opened.schemaVersion, 1);
+  assert.equal(opened.schemaVersion, 2);
   assert.deepEqual(await memoryOpen(client, { stateDir }), opened);
   await assert.rejects(
     memoryOpen(client, { stateDir: path.join(directory, "other-state") }),
@@ -166,6 +168,39 @@ test("memory ops run end-to-end against a real engine", {
     memoryRoot: ".threadshare/memory",
     status: "active",
   });
+
+  await mkdir(path.join(directory, ".threadshare", "memory", "entries"), { recursive: true });
+  await mkdir(path.join(directory, ".threadshare", "memory", "scenes"), { recursive: true });
+  await writeFile(path.join(directory, ".threadshare", "memory", "entries", "entry-a.md"),
+    "approved entry\n");
+  await writeFile(path.join(directory, ".threadshare", "memory", "scenes", "scene-a.md"),
+    "scene content\n");
+  await writeFile(path.join(directory, ".threadshare", "memory", "doctrine.md"),
+    "doctrine content\n");
+  assert.deepEqual(await memoryListFiles(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    collection: "entries",
+  }), { names: ["entry-a.md"] });
+  assert.deepEqual(await memoryReadFile(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    collection: "entries",
+    name: "entry-a.md",
+  }), { content: "approved entry\n" });
+  assert.deepEqual(await memoryReadFile(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    collection: "doctrine",
+  }), { content: "doctrine content\n" });
+  await assert.rejects(
+    memoryListFiles(client, {
+      repositoryKey: REPOSITORY_KEY,
+      worktreeKey: WORKTREE_KEY,
+      collection: "doctrine",
+    }),
+    (error) => error.code === "TS_MEMORY_REQUEST_INVALID",
+  );
 
   // plan-tasks is idempotent per chunkRef/taskId.
   const plan = {
@@ -434,6 +469,14 @@ test("memory ops run end-to-end against a real engine", {
       candidates: { draft: 1, quarantined: 1, promoted: 0, discarded: 0 },
       promotions: { generated: 0, approved: 0, applying: 0, applied: 0, voided: 0,
         applyingPlanIds: [] },
+      consolidations: {
+        pendingReview: 0,
+        noOp: 0,
+        applied: 0,
+        stale: 0,
+        lastSuccessfulEntryCount: 0,
+        lastSuccessfulNoOp: false,
+      },
     },
   );
 
@@ -513,6 +556,7 @@ test("memory ops run end-to-end against a real engine", {
   assert.deepEqual(planned.files, [{
     targetPath,
     targetBlobHash: null,
+    operation: "write",
     sanitizedDigest: createHash("sha256").update(sanitizedContent).digest("hex"),
     bytes: sanitizedContent.length,
   }]);
@@ -618,6 +662,14 @@ test("memory ops run end-to-end against a real engine", {
       candidates: { draft: 0, quarantined: 0, promoted: 1, discarded: 1 },
       promotions: { generated: 0, approved: 0, applying: 0, applied: 1, voided: 0,
         applyingPlanIds: [] },
+      consolidations: {
+        pendingReview: 0,
+        noOp: 0,
+        applied: 0,
+        stale: 0,
+        lastSuccessfulEntryCount: 0,
+        lastSuccessfulNoOp: false,
+      },
     },
   );
 
@@ -714,11 +766,11 @@ function stubEngine(result) {
 const V4_UUID = "6f9619ff-8b86-4d11-b42d-00c04fc964ff";
 const OPEN_INPUT = { stateDir: "/tmp/threadshare-open" };
 
-test("open RESULT pins schemaVersion to literal 1", async () => {
-  const valid = { memoryStateUuid: V4_UUID, schemaVersion: 1 };
+test("open RESULT pins schemaVersion to literal 2", async () => {
+  const valid = { memoryStateUuid: V4_UUID, schemaVersion: 2 };
   assert.deepEqual(await memoryOpen(stubEngine(valid), OPEN_INPUT), valid);
   await assert.rejects(
-    memoryOpen(stubEngine({ memoryStateUuid: V4_UUID, schemaVersion: 2 }), OPEN_INPUT),
+    memoryOpen(stubEngine({ memoryStateUuid: V4_UUID, schemaVersion: 1 }), OPEN_INPUT),
     (error) => error instanceof MemoryStateClientError &&
       error.code === "TS_MEMORY_RESULT_INVALID",
   );
@@ -728,7 +780,7 @@ test("open RESULT rejects UUIDs that are not v4", async () => {
   // Wrong version nibble (position 14: "1" instead of "4").
   await assert.rejects(
     memoryOpen(
-      stubEngine({ memoryStateUuid: "6f9619ff-8b86-1d11-b42d-00c04fc964ff", schemaVersion: 1 }),
+      stubEngine({ memoryStateUuid: "6f9619ff-8b86-1d11-b42d-00c04fc964ff", schemaVersion: 2 }),
       OPEN_INPUT,
     ),
     (error) => error instanceof MemoryStateClientError &&
@@ -737,7 +789,7 @@ test("open RESULT rejects UUIDs that are not v4", async () => {
   // Wrong variant nibble (position 19: "c" is not in [89ab]).
   await assert.rejects(
     memoryOpen(
-      stubEngine({ memoryStateUuid: "6f9619ff-8b86-4d11-c42d-00c04fc964ff", schemaVersion: 1 }),
+      stubEngine({ memoryStateUuid: "6f9619ff-8b86-4d11-c42d-00c04fc964ff", schemaVersion: 2 }),
       OPEN_INPUT,
     ),
     (error) => error instanceof MemoryStateClientError &&
@@ -746,7 +798,7 @@ test("open RESULT rejects UUIDs that are not v4", async () => {
   // Uppercase hex is not the lowercase v4 shape the engine emits.
   await assert.rejects(
     memoryOpen(
-      stubEngine({ memoryStateUuid: V4_UUID.toUpperCase(), schemaVersion: 1 }),
+      stubEngine({ memoryStateUuid: V4_UUID.toUpperCase(), schemaVersion: 2 }),
       OPEN_INPUT,
     ),
     (error) => error instanceof MemoryStateClientError &&

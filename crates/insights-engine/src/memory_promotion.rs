@@ -28,6 +28,32 @@ pub enum PromotionFsError {
     Io(std::io::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalMutationOutcome {
+    Applied,
+    Drift,
+    RecoveryRequired { staging_name: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExpectedWorktreeValue<'a> {
+    Missing,
+    Bytes(&'a [u8]),
+    GitBlob(&'a str),
+}
+
+impl ExpectedWorktreeValue<'_> {
+    fn matches(self, value: Option<&[u8]>) -> bool {
+        match self {
+            Self::Missing => value.is_none(),
+            Self::Bytes(expected) => value == Some(expected),
+            Self::GitBlob(expected) => {
+                value.is_some_and(|bytes| git_blob_oid_hex(bytes) == expected)
+            }
+        }
+    }
+}
+
 impl fmt::Display for PromotionFsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -109,6 +135,16 @@ pub fn read_worktree_file(
     imp::read_worktree_file(root, segments)
 }
 
+/// Lists one directory below `root` through the same no-follow descriptor
+/// traversal as promotion reads. `Ok(None)` means a directory in the path is
+/// absent. Returned names are UTF-8 and sorted bytewise.
+pub fn list_worktree_directory(
+    root: &Path,
+    segments: &[&str],
+) -> Result<Option<Vec<String>>, PromotionFsError> {
+    imp::list_worktree_directory(root, segments)
+}
+
 /// Writes exactly `bytes` to `segments` below `root`: no-follow traversal,
 /// missing directories created, same-directory temporary file, atomic rename.
 pub fn write_worktree_file(
@@ -119,10 +155,49 @@ pub fn write_worktree_file(
     imp::write_worktree_file(root, segments, bytes)
 }
 
+/// Deletes one regular file below `root` using the same descriptor-relative,
+/// no-follow traversal as reads/writes. Returns `Ok(false)` when the target is
+/// already absent; symlink and non-regular targets fail closed.
+pub fn delete_worktree_file(root: &Path, segments: &[&str]) -> Result<bool, PromotionFsError> {
+    imp::delete_worktree_file(root, segments)
+}
+
+/// Replaces or removes a worktree file without clobbering a value that raced
+/// with the caller's CAS check. The deterministic token binds recoverable,
+/// same-directory artifacts to the already-persisted promotion intent.
+pub fn conditional_replace_worktree_file(
+    root: &Path,
+    segments: &[&str],
+    expected: ExpectedWorktreeValue<'_>,
+    replacement: Option<&[u8]>,
+    staging_token: &str,
+) -> Result<ConditionalMutationOutcome, PromotionFsError> {
+    imp::conditional_replace_worktree_file(
+        root,
+        segments,
+        expected,
+        replacement,
+        staging_token,
+        || {},
+    )
+}
+
+/// Removes recoverable artifacts only after their bytes still match the
+/// journal-bound old/new values.
+pub fn cleanup_worktree_mutation_artifacts(
+    root: &Path,
+    segments: &[&str],
+    expected: ExpectedWorktreeValue<'_>,
+    replacement: Option<&[u8]>,
+    staging_token: &str,
+) -> Result<ConditionalMutationOutcome, PromotionFsError> {
+    imp::cleanup_worktree_mutation_artifacts(root, segments, expected, replacement, staging_token)
+}
+
 #[cfg(unix)]
 mod imp {
-    use super::PromotionFsError;
-    use std::ffi::CString;
+    use super::{ConditionalMutationOutcome, ExpectedWorktreeValue, PromotionFsError};
+    use std::ffi::{CStr, CString};
     use std::fs::File;
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -130,7 +205,7 @@ mod imp {
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+    pub(super) static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
     fn io_error(error: std::io::Error) -> PromotionFsError {
         PromotionFsError::Io(error)
@@ -177,6 +252,142 @@ mod imp {
             return Err(std::io::Error::last_os_error());
         }
         Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn staging_names(token: &str) -> Result<(CString, CString), PromotionFsError> {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(io_error(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "promotion staging token must be 64 hexadecimal characters",
+            )));
+        }
+        Ok((
+            segment_cstring(&format!(".threadshare-promotion-{token}.hold"))?,
+            segment_cstring(&format!(".threadshare-promotion-{token}.new"))?,
+        ))
+    }
+
+    fn read_regular_at(parent: &File, name: &CString) -> Result<Option<Vec<u8>>, PromotionFsError> {
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut file = match openat(parent, name, flags, 0) {
+            Ok(file) => file,
+            Err(error) if is_symlink_errno(&error) => return Err(PromotionFsError::Symlink),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        };
+        if !file.metadata().map_err(io_error)?.is_file() {
+            return Err(io_error(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "the promotion path exists but is not a regular file",
+            )));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(io_error)?;
+        Ok(Some(bytes))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn rename_noreplace(
+        parent: &File,
+        source: &CString,
+        target: &CString,
+    ) -> Result<(), std::io::Error> {
+        let outcome = unsafe {
+            libc::renameat2(
+                parent.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if outcome == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn rename_noreplace(
+        parent: &File,
+        source: &CString,
+        target: &CString,
+    ) -> Result<(), std::io::Error> {
+        let outcome = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if outcome == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    fn rename_noreplace(
+        _parent: &File,
+        _source: &CString,
+        _target: &CString,
+    ) -> Result<(), std::io::Error> {
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable on this platform",
+        ))
+    }
+
+    fn create_replacement(
+        parent: &File,
+        name: &CString,
+        bytes: &[u8],
+    ) -> Result<(), PromotionFsError> {
+        if let Some(existing) = read_regular_at(parent, name)? {
+            return if existing == bytes {
+                Ok(())
+            } else {
+                Err(io_error(std::io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "promotion replacement staging file contains unexpected bytes",
+                )))
+            };
+        }
+        let flags =
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut file = openat(parent, name, flags, 0o600).map_err(io_error)?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(io_error)
+    }
+
+    fn remove_known_artifact(
+        parent: &File,
+        name: &CString,
+        expected: &[u8],
+    ) -> Result<ConditionalMutationOutcome, PromotionFsError> {
+        let Some(bytes) = read_regular_at(parent, name)? else {
+            return Ok(ConditionalMutationOutcome::Applied);
+        };
+        if bytes != expected {
+            return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                staging_name: name.to_string_lossy().into_owned(),
+            });
+        }
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io_error(std::io::Error::last_os_error()));
+        }
+        parent.sync_all().map_err(io_error)?;
+        Ok(ConditionalMutationOutcome::Applied)
     }
 
     fn open_root(root: &Path) -> Result<File, PromotionFsError> {
@@ -249,6 +460,100 @@ mod imp {
             }
         }
         Ok(Some(directory))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        unsafe { libc::__error() }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
+    pub(super) fn list_worktree_directory(
+        root: &Path,
+        segments: &[&str],
+    ) -> Result<Option<Vec<String>>, PromotionFsError> {
+        let mut directory = open_root(root)?;
+        for segment in segments {
+            match descend(&directory, segment, false)? {
+                Some(next) => directory = next,
+                None => return Ok(None),
+            }
+        }
+        let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(io_error(std::io::Error::last_os_error()));
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe { libc::close(duplicate) };
+            return Err(io_error(error));
+        }
+
+        let mut names = Vec::new();
+        let mut read_error = None;
+        loop {
+            unsafe { *errno_location() = 0 };
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let errno = unsafe { *errno_location() };
+                if errno != 0 {
+                    read_error = Some(std::io::Error::from_raw_os_error(errno));
+                }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if matches!(name, b"." | b"..") {
+                continue;
+            }
+            let name = match std::str::from_utf8(name) {
+                Ok(name) => name.to_owned(),
+                Err(_) => {
+                    read_error = Some(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "directory entry is not valid UTF-8",
+                    ));
+                    break;
+                }
+            };
+            names.push(name);
+        }
+        let close_error = if unsafe { libc::closedir(stream) } == 0 {
+            None
+        } else {
+            Some(std::io::Error::last_os_error())
+        };
+        if let Some(error) = read_error.or(close_error) {
+            return Err(io_error(error));
+        }
+        names.sort();
+        Ok(Some(names))
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    pub(super) fn list_worktree_directory(
+        _root: &Path,
+        _segments: &[&str],
+    ) -> Result<Option<Vec<String>>, PromotionFsError> {
+        Err(io_error(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "secure directory listing is unavailable on this Unix platform",
+        )))
     }
 
     pub(super) fn read_worktree_file(
@@ -325,11 +630,202 @@ mod imp {
         }
         Ok(())
     }
+
+    pub(super) fn delete_worktree_file(
+        root: &Path,
+        segments: &[&str],
+    ) -> Result<bool, PromotionFsError> {
+        assert!(!segments.is_empty(), "target path must have segments");
+        let Some(parent) = open_parent(root, segments, false)? else {
+            return Ok(false);
+        };
+        let name = segment_cstring(segments[segments.len() - 1])?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let inspected = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if inspected != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::NotFound {
+                return Ok(false);
+            }
+            return Err(io_error(error));
+        }
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => return Err(PromotionFsError::Symlink),
+            libc::S_IFREG => {}
+            _ => {
+                return Err(io_error(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "the promotion delete target is not a regular file",
+                )));
+            }
+        }
+        let deleted = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+        if deleted != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::NotFound {
+                return Ok(false);
+            }
+            return Err(io_error(error));
+        }
+        parent.sync_all().map_err(io_error)?;
+        Ok(true)
+    }
+
+    pub(super) fn conditional_replace_worktree_file<F>(
+        root: &Path,
+        segments: &[&str],
+        expected: ExpectedWorktreeValue<'_>,
+        replacement: Option<&[u8]>,
+        staging_token: &str,
+        before_displacement: F,
+    ) -> Result<ConditionalMutationOutcome, PromotionFsError>
+    where
+        F: FnOnce(),
+    {
+        assert!(!segments.is_empty(), "target path must have segments");
+        let parent = open_parent(root, segments, replacement.is_some())?.ok_or_else(|| {
+            io_error(std::io::Error::new(
+                ErrorKind::NotFound,
+                "the promotion target parent does not exist",
+            ))
+        })?;
+        let target_name = segment_cstring(segments[segments.len() - 1])?;
+        let (hold_name, replacement_name) = staging_names(staging_token)?;
+        let mut hold = read_regular_at(&parent, &hold_name)?;
+        let target = read_regular_at(&parent, &target_name)?;
+
+        if let Some(held) = hold.as_deref() {
+            if !expected.matches(Some(held)) {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                    staging_name: hold_name.to_string_lossy().into_owned(),
+                });
+            }
+            if replacement.is_some_and(|bytes| target.as_deref() == Some(bytes))
+                || (replacement.is_none() && target.is_none())
+            {
+                return Ok(ConditionalMutationOutcome::Applied);
+            }
+            if target.is_some() {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                    staging_name: hold_name.to_string_lossy().into_owned(),
+                });
+            }
+        } else {
+            if !expected.matches(target.as_deref()) {
+                return Ok(ConditionalMutationOutcome::Drift);
+            }
+            if target.is_some() {
+                before_displacement();
+                match rename_noreplace(&parent, &target_name, &hold_name) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.kind() == ErrorKind::NotFound
+                            || error.kind() == ErrorKind::AlreadyExists =>
+                    {
+                        return Ok(ConditionalMutationOutcome::Drift);
+                    }
+                    Err(error) => return Err(io_error(error)),
+                }
+                parent.sync_all().map_err(io_error)?;
+                hold = read_regular_at(&parent, &hold_name)?;
+                if !expected.matches(hold.as_deref()) {
+                    return match rename_noreplace(&parent, &hold_name, &target_name) {
+                        Ok(()) => {
+                            parent.sync_all().map_err(io_error)?;
+                            Ok(ConditionalMutationOutcome::Drift)
+                        }
+                        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                            Ok(ConditionalMutationOutcome::RecoveryRequired {
+                                staging_name: hold_name.to_string_lossy().into_owned(),
+                            })
+                        }
+                        Err(error) => Err(io_error(error)),
+                    };
+                }
+            }
+        }
+
+        let Some(replacement) = replacement else {
+            return Ok(ConditionalMutationOutcome::Applied);
+        };
+        create_replacement(&parent, &replacement_name, replacement)?;
+        match rename_noreplace(&parent, &replacement_name, &target_name) {
+            Ok(()) => {
+                parent.sync_all().map_err(io_error)?;
+                Ok(ConditionalMutationOutcome::Applied)
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let current = read_regular_at(&parent, &target_name)?;
+                if current.as_deref() == Some(replacement) {
+                    Ok(ConditionalMutationOutcome::Applied)
+                } else {
+                    Ok(ConditionalMutationOutcome::RecoveryRequired {
+                        staging_name: hold
+                            .as_ref()
+                            .map(|_| hold_name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| replacement_name.to_string_lossy().into_owned()),
+                    })
+                }
+            }
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    pub(super) fn cleanup_worktree_mutation_artifacts(
+        root: &Path,
+        segments: &[&str],
+        expected: ExpectedWorktreeValue<'_>,
+        replacement: Option<&[u8]>,
+        staging_token: &str,
+    ) -> Result<ConditionalMutationOutcome, PromotionFsError> {
+        assert!(!segments.is_empty(), "target path must have segments");
+        let Some(parent) = open_parent(root, segments, false)? else {
+            return Ok(ConditionalMutationOutcome::Applied);
+        };
+        let (hold_name, replacement_name) = staging_names(staging_token)?;
+        if let Some(held) = read_regular_at(&parent, &hold_name)? {
+            if !expected.matches(Some(&held)) {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                    staging_name: hold_name.to_string_lossy().into_owned(),
+                });
+            }
+            if let ConditionalMutationOutcome::RecoveryRequired { staging_name } =
+                remove_known_artifact(&parent, &hold_name, &held)?
+            {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired { staging_name });
+            }
+        }
+        if let Some(staged) = read_regular_at(&parent, &replacement_name)? {
+            let Some(replacement) = replacement else {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                    staging_name: replacement_name.to_string_lossy().into_owned(),
+                });
+            };
+            if staged != replacement {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired {
+                    staging_name: replacement_name.to_string_lossy().into_owned(),
+                });
+            }
+            if let ConditionalMutationOutcome::RecoveryRequired { staging_name } =
+                remove_known_artifact(&parent, &replacement_name, &staged)?
+            {
+                return Ok(ConditionalMutationOutcome::RecoveryRequired { staging_name });
+            }
+        }
+        Ok(ConditionalMutationOutcome::Applied)
+    }
 }
 
 #[cfg(not(unix))]
 mod imp {
-    use super::PromotionFsError;
+    use super::{ConditionalMutationOutcome, ExpectedWorktreeValue, PromotionFsError};
     use std::path::Path;
 
     fn unsupported() -> PromotionFsError {
@@ -346,6 +842,13 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn list_worktree_directory(
+        _root: &Path,
+        _segments: &[&str],
+    ) -> Result<Option<Vec<String>>, PromotionFsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn write_worktree_file(
         _root: &Path,
         _segments: &[&str],
@@ -353,11 +856,56 @@ mod imp {
     ) -> Result<(), PromotionFsError> {
         Err(unsupported())
     }
+
+    pub(super) fn delete_worktree_file(
+        _root: &Path,
+        _segments: &[&str],
+    ) -> Result<bool, PromotionFsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn conditional_replace_worktree_file<F>(
+        _root: &Path,
+        _segments: &[&str],
+        _expected: ExpectedWorktreeValue<'_>,
+        _replacement: Option<&[u8]>,
+        _staging_token: &str,
+        _before_displacement: F,
+    ) -> Result<ConditionalMutationOutcome, PromotionFsError>
+    where
+        F: FnOnce(),
+    {
+        Err(unsupported())
+    }
+
+    pub(super) fn cleanup_worktree_mutation_artifacts(
+        _root: &Path,
+        _segments: &[&str],
+        _expected: ExpectedWorktreeValue<'_>,
+        _replacement: Option<&[u8]>,
+        _staging_token: &str,
+    ) -> Result<ConditionalMutationOutcome, PromotionFsError> {
+        Err(unsupported())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_base64, git_blob_oid_hex};
+    use super::{
+        ConditionalMutationOutcome, ExpectedWorktreeValue, cleanup_worktree_mutation_artifacts,
+        decode_base64, git_blob_oid_hex,
+    };
+
+    #[cfg(unix)]
+    fn mutation_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "threadshare-promotion-{label}-{}-{}",
+            std::process::id(),
+            super::imp::NEXT_TEMP_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join(".threadshare/memory/scenes")).unwrap();
+        root
+    }
 
     #[test]
     fn git_blob_oid_matches_git_hash_object() {
@@ -383,5 +931,90 @@ mod tests {
         }
         // Padding only in the final chunk.
         assert_eq!(decode_base64("aA==aGVsbG8K"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_write_preserves_a_value_racing_before_displacement() {
+        let root = mutation_root("write-race");
+        let target = root.join(".threadshare/memory/scenes/release.md");
+        std::fs::write(&target, b"old").unwrap();
+        let outcome = super::imp::conditional_replace_worktree_file(
+            &root,
+            &[".threadshare", "memory", "scenes", "release.md"],
+            ExpectedWorktreeValue::Bytes(b"old"),
+            Some(b"promoted"),
+            &"a".repeat(64),
+            || std::fs::write(&target, b"external edit").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outcome, ConditionalMutationOutcome::Drift);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert_eq!(
+            std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_delete_preserves_a_value_racing_before_displacement() {
+        let root = mutation_root("delete-race");
+        let target = root.join(".threadshare/memory/scenes/release.md");
+        std::fs::write(&target, b"old").unwrap();
+        let outcome = super::imp::conditional_replace_worktree_file(
+            &root,
+            &[".threadshare", "memory", "scenes", "release.md"],
+            ExpectedWorktreeValue::Bytes(b"old"),
+            None,
+            &"b".repeat(64),
+            || std::fs::write(&target, b"external edit").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outcome, ConditionalMutationOutcome::Drift);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+        assert_eq!(
+            std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_write_recovers_a_persisted_displacement() {
+        let root = mutation_root("resume");
+        let directory = root.join(".threadshare/memory/scenes");
+        let target = directory.join("release.md");
+        let token = "c".repeat(64);
+        let hold = directory.join(format!(".threadshare-promotion-{token}.hold"));
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::rename(&target, &hold).unwrap();
+        let outcome = super::imp::conditional_replace_worktree_file(
+            &root,
+            &[".threadshare", "memory", "scenes", "release.md"],
+            ExpectedWorktreeValue::Bytes(b"old"),
+            Some(b"promoted"),
+            &token,
+            || {},
+        )
+        .unwrap();
+        assert_eq!(outcome, ConditionalMutationOutcome::Applied);
+        assert_eq!(std::fs::read(&target).unwrap(), b"promoted");
+        assert!(hold.exists());
+        assert_eq!(
+            cleanup_worktree_mutation_artifacts(
+                &root,
+                &[".threadshare", "memory", "scenes", "release.md"],
+                ExpectedWorktreeValue::Bytes(b"old"),
+                Some(b"promoted"),
+                &token,
+            )
+            .unwrap(),
+            ConditionalMutationOutcome::Applied
+        );
+        assert!(!hold.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

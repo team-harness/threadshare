@@ -225,6 +225,7 @@ function recipeRequest(overrides = {}) {
       projectKeys: [],
       capabilityKeys: [],
       sessionKeys: [],
+      turnKeys: [],
       eventKinds: [],
       text: null,
       bucket: null,
@@ -606,9 +607,13 @@ test("memory envelope pins the op enum and requires plain-object payloads", () =
   assert.deepEqual(MEMORY_OPS, [
     "open",
     "bind-repository",
+    "list-memory-files",
+    "read-memory-file",
     "plan-tasks",
     "claim-task",
     "submit-extraction",
+    "submit-consolidation",
+    "consolidation-baseline",
     "recall",
     "submit-adjudication",
     "sync-approved",
@@ -2028,7 +2033,7 @@ test("Recipe protocol keeps requests exact and rejects forged response counts", 
   );
 
   const recipes = JSON.parse(await readFile(recipeItemsUrl, "utf8"));
-  assert.equal(recipes.length, 7);
+  assert.equal(recipes.length, 8);
   for (const { name, item } of recipes) {
     const typed = recipeResponse({ name, items: [item] });
     assert.equal(

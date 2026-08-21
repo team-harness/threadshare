@@ -68,6 +68,7 @@ const RECIPE_NAMES = new Set([
   "token-hotspots@1",
   "solution-recall@1",
   "session-timeline@1",
+  "extraction-candidates@1",
   "delivery-trace@1",
 ]);
 
@@ -328,7 +329,7 @@ function normalizeRecipeWindow(value, label) {
 
 function normalizeRecipeFilters(value = {}) {
   exactKeys(value, [
-    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "turnKeys", "eventKinds", "text", "bucket",
   ], "Recipe filters");
   const text = value.text ?? null;
   if (text !== null && (typeof text !== "string" || text.length === 0 ||
@@ -346,6 +347,7 @@ function normalizeRecipeFilters(value = {}) {
     projectKeys: stringArray(value.projectKeys, "Recipe filters.projectKeys", { maximum: 64, hex: true }),
     capabilityKeys: stringArray(value.capabilityKeys, "Recipe filters.capabilityKeys", { maximum: 64, hex: true }),
     sessionKeys: stringArray(value.sessionKeys, "Recipe filters.sessionKeys", { maximum: 64, hex: true }),
+    turnKeys: stringArray(value.turnKeys, "Recipe filters.turnKeys", { maximum: 200, hex: true }),
     eventKinds: stringArray(value.eventKinds, "Recipe filters.eventKinds", {
       maximum: 64, maxBytes: 256,
     }),

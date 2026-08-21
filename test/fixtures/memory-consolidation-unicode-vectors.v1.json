@@ -1,0 +1,86 @@
+{
+  "format": "threadshare-memory-consolidation-unicode-vectors@v1",
+  "vectors": [
+    {
+      "name": "cjk",
+      "input": { "unit": "\u4e2d\u6587", "repeat": 1 },
+      "normalized": { "unit": "\u4e2d\u6587", "repeat": 1 },
+      "codePointCount": 2,
+      "sha256": "72726d8818f693066ceb69afa364218b692e62ea92b385782363780f47529c21",
+      "maxCodePoints": 2,
+      "accepted": true
+    },
+    {
+      "name": "surrogate-pair-emoji",
+      "input": { "unit": "\ud83d\ude00", "repeat": 1 },
+      "normalized": { "unit": "\ud83d\ude00", "repeat": 1 },
+      "codePointCount": 1,
+      "sha256": "f0443a342c5ef54783a111b51ba56c938e474c32324d90c3a60c9c8e3a37e2d9",
+      "maxCodePoints": 1,
+      "accepted": true
+    },
+    {
+      "name": "zwj-emoji",
+      "input": { "unit": "\ud83d\udc69\u200d\ud83d\udcbb", "repeat": 1 },
+      "normalized": { "unit": "\ud83d\udc69\u200d\ud83d\udcbb", "repeat": 1 },
+      "codePointCount": 3,
+      "sha256": "427274538f1f24ef137872891551ffb4263f6edd90c80c533534578e8a5a9893",
+      "maxCodePoints": 3,
+      "accepted": true
+    },
+    {
+      "name": "combining-character",
+      "input": { "unit": "e\u0301", "repeat": 1 },
+      "normalized": { "unit": "e\u0301", "repeat": 1 },
+      "codePointCount": 2,
+      "sha256": "bf12767b0f2a56b2190075bae8169f656e3ce8d6357d4aff184bc6c7ea48f9f6",
+      "maxCodePoints": 2,
+      "accepted": true
+    },
+    {
+      "name": "crlf-and-trailing-whitespace",
+      "input": { "unit": "\u4e2d\u6587  \r\n\ud83d\ude00\t\r\ne\u0301 \r\n\r\n", "repeat": 1 },
+      "normalized": { "unit": "\u4e2d\u6587\n\ud83d\ude00\ne\u0301\n\n", "repeat": 1 },
+      "codePointCount": 9,
+      "sha256": "bead36b4385f95123ed2a60aa2642d98ac636e114ccb58d1c51509125ce8c3b4",
+      "maxCodePoints": 9,
+      "accepted": true
+    },
+    {
+      "name": "summary-40",
+      "input": { "unit": "a", "repeat": 40 },
+      "normalized": { "unit": "a", "repeat": 40 },
+      "codePointCount": 40,
+      "sha256": "e33cdf9c7f7120b98e8c78408953e07f2ecd183006b5606df349b4c212acf43e",
+      "maxCodePoints": 40,
+      "accepted": true
+    },
+    {
+      "name": "summary-41",
+      "input": { "unit": "a", "repeat": 41 },
+      "normalized": { "unit": "a", "repeat": 41 },
+      "codePointCount": 41,
+      "sha256": "c0f8bd4dbc2b0c03107c1c37913f2a7501f521467f45dd0fef6958e9a4692719",
+      "maxCodePoints": 40,
+      "accepted": false
+    },
+    {
+      "name": "scene-body-1500",
+      "input": { "unit": "b", "repeat": 1500 },
+      "normalized": { "unit": "b", "repeat": 1500 },
+      "codePointCount": 1500,
+      "sha256": "d06603d375d65d00443144fa71d605c56449e442cc6b0d67951946df94c2222f",
+      "maxCodePoints": 1500,
+      "accepted": true
+    },
+    {
+      "name": "scene-body-1501",
+      "input": { "unit": "b", "repeat": 1501 },
+      "normalized": { "unit": "b", "repeat": 1501 },
+      "codePointCount": 1501,
+      "sha256": "1b18eebae0a92616c513e55b287efe8ae453d1e3ef2d66d126a8df754279dcb2",
+      "maxCodePoints": 1500,
+      "accepted": false
+    }
+  ]
+}

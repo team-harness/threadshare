@@ -1,7 +1,7 @@
 # Threadshare 团队记忆与经验总结 提案
 
-状态：Active（rev7；Phase 1 已实现并通过真实 Codex 验收，Phase 2/3 未启动）
-日期：2026-08-21（rev7；五轮设计审查意见、自查增补与 Phase 1 实施反馈均已吸收，见附录 B）
+状态：Active（rev8；Phase 1/2 已实现并通过真实 Codex 验收，Phase 3 未启动）
+日期：2026-08-21（rev8；五轮设计审查意见、自查增补与 Phase 1/2 实施反馈均已吸收，见附录 B）
 适用范围：本机 Threadshare Insights 与新增的仓库内记忆库；云端共享面在本提案中保持**未设计**状态（见 Phase 3）
 
 设计输入：
@@ -472,9 +472,9 @@ git entry:                                           approved ──被替代─
 
 验收（全链路之外的专项）：
 
-- **Conformance**：对抗性探针验证 Claude/Codex profile 拒绝 shell/文件/MCP/任务外网络且无副作用；CLI 二进制或 profile 变化触发重测；`npm run test:memory-codex-live` 必须用真实 Codex 完成 conformance、L1 提取、裁决，并证明不新增可索引 Session；fake runner 只用于超时、漂移、网络违规等确定性故障注入，不能作为 Runner 可用性验收；
+- **Conformance**：对抗性探针验证 Claude/Codex profile 拒绝 shell/文件/MCP/任务外网络且无副作用；CLI 二进制或 profile 变化触发重测；`npm run test:memory-codex-live` 必须用真实 Codex 完成 conformance、L1 提取、裁决、L2/L3 归纳、人工确认后的晋升与 Codex adapter 装配，并证明不新增可索引 Session；fake runner 只用于超时、漂移、网络违规等确定性故障注入，不能作为 Runner 可用性验收；
 - **授权**：MCP 与仅指定 runner 均只产生 pending plan；未批准 digest 不交付任何输入；用相同字节数替换 transcript 或候选池内容时 runnerInputDigest/inputCoverageDigest 必须变化并要求重新确认；manifest 批准后修改其中一个 task 的输入，仅该 plan 失效、清单内其余 plan 照常执行；runner 运行不产生新的可索引会话；
-- **事务**：并发 claim 竞争唯一持有；candidate 行、revision、FTS、assessment 与游标推进同事务的逐崩溃点注入；同 taskId 重复提交幂等；promotion journal 半途崩溃恢复；
+- **事务**：并发 claim 竞争唯一持有；candidate 行、revision、FTS、assessment 与游标推进同事务的逐崩溃点注入；同 taskId 重复提交幂等；promotion journal 半途崩溃恢复；apply 全程跨进程互斥，并在 mutation 前重验 candidate/assessment/policy 快照；
 - **CAS/召回**：无关会话同步推进 snapshotSeq 时任务不失效；相关 turn revision 漂移拒绝；approved/candidate 任一侧新条目进入 top-5 或池项 revision/content/state 漂移均使任务重出；projection generation 变化但 resultSetDigest 相同则接受；并发 merge 同一 candidate 仅一个 revision CAS 成功；跨 chunk 重复被捕获；
 - **证据**：任务外/虚构 evidenceId 校验失败；把合法 direct commit evidenceId 挂到无关生成 statement 时，只能得到 provenance，claimSupport 仍为 unverified；未逐条确认不得生成 PromotionPlan；typed-fact renderer mutation test 证明 LLM 不能伪造 typed-fact；
 - **owner/晋升**：project 多仓映射硬失败；在另一 worktree 执行 plan、目标父目录或文件为 symlink、路径越过 memoryRoot、批准后 git pull/assessment 漂移均作废或 fail-closed；promote 不产生任何 git 历史操作；
@@ -482,7 +482,7 @@ git entry:                                           approved ──被替代─
 
 ### Phase 2 — 归纳与装配
 
-12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展。原第 15 项 Codex runner 重评估已前移为 Phase 1 完成门并于 2026-08-21 验收，不计入 Phase 2；**Phase 2 尚未启动**。
+12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展。原第 15 项 Codex runner 重评估已前移为 Phase 1 完成门，不计入 Phase 2。**Phase 2 已于 2026-08-21 完成**：真实 `codex-cli 0.149.0` 跑通提取 → 裁决 → 非空归纳 Patch → 逐 operation 人审 → 可恢复晋升 → `AGENTS.md` 装配；MCP 保持 pending-only。归纳输入改由 Rust descriptor-relative no-follow 安全读取，完整 L1/Scene/Doctrine 源树、replay epoch、assessment/policy 快照在 submit/review/plan/apply 阶段 fail closed；promotion 以跨进程锁与状态 CAS 保证单 owner，并用同目录 no-replace conditional displacement 避免覆盖或删除并发外部编辑；发布包与 Skill 已同步。
 
 ### Phase 3 — Skill 提取与跨仓共享
 
@@ -566,7 +566,7 @@ git entry:                                           approved ──被替代─
 
 | 审查意见 | 结论 | 落点 |
 |---|---|---|
-| 1. [Blocking] Codex Runner 无法证明"零工具"，profile 声明≠资格 | 采纳并在 Phase 1 复测后收口 | D1：资格始终由 deny-all conformance + 二进制/profile 指纹证明；Codex 0.147.0 采用 feature deny + fail-closed code-mode host + 一次性 home，并由真实 live gate 验证。原 Phase 2 重评估项已前移完成；F9、R9/R10 |
+| 1. [Blocking] Codex Runner 无法证明"零工具"，profile 声明≠资格 | 采纳并持续由 live gate 收口 | D1：资格始终由 deny-all conformance + 二进制/profile 指纹证明；Codex 0.147.0 的 Phase 1 与 0.149.0 的 Phase 2 均采用 feature deny + fail-closed code-mode host + 一次性 home，并由真实 live gate 验证；F9、R9/R10 |
 | 2. [Blocking] SQLite 事务不能包含外部 sidecar/quarantine 文件 | 采纳 | D4/§5.5：candidates、evidence_refs、submissions、chunks 全部入 memory-state 表，单事务；git 写入改独立 promotion journal（可恢复重放）；F11 |
 | 3. [Blocking] 提取与逐候选去重存在循环依赖 | 采纳 | D4 两阶段任务：ExtractionTask→CandidateDraftBatch → Threadshare 召回 → AdjudicationTask→AdjudicationResult，各自 taskId/lease/binding/幂等；§5.6 契约拆分；§6.3/6.4 重写 |
 | 4. [Blocking] 原始 transcript 出网缺显式授权契约 | 采纳 | D1：RunnerExecutionPlan@v1；CLI 显式参数=授权、MCP 仅 pending；no-session-persistence 强制（防反馈回路）；authorization_log；F10；验收项 |

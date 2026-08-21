@@ -126,6 +126,9 @@ test("renders a self-describing root and command help contract", () => {
       "approve-manifest",
       "approve-plan",
       "format",
+      "full",
+      "if-due",
+      "kind",
       "limit",
       "plan",
       "provider",
@@ -211,6 +214,7 @@ test("renders a self-describing root and command help contract", () => {
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
+    "TS_MEMORY_BINDING_DRIFT",
     "TS_OPERATION_FAILED",
   ];
   assert.deepEqual(Object.keys(COMMAND_SPECS), Object.keys(expectedOptions));
@@ -442,6 +446,7 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
+    "TS_MEMORY_BINDING_DRIFT",
   ]) {
     const reserved = {
       status: 1,

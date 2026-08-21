@@ -15,7 +15,6 @@ import {
   CHUNKER_VERSION,
   DEFAULT_CHUNK_BUDGET_BYTES,
   MemoryExtractionError,
-  SESSION_SCORE_WEIGHTS,
   TOOL_PAYLOAD_EXCERPT_BYTES,
   TYPED_FACT_ALLOWLIST,
   buildAdjudicationTask,
@@ -31,91 +30,15 @@ import {
   computeSourceInputDigest,
   computeStatementTextDigest,
   deriveEvidenceAssessments,
-  listScoredSessions,
   loadSessionTurns,
   planSessionChunks,
   renderTypedFact,
-  scoreCandidateSessions,
   serializeTranscript,
 } from "../src/memory-extraction.mjs";
 
 const HEX = (character) => character.repeat(64);
 const HEX40 = (character) => character.repeat(40);
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
-
-function hardTurns(count) {
-  return Array.from({ length: count }, () => ({ eligible: true, active: true, sealed: "hard" }));
-}
-
-function baseSession(sessionKey, overrides = {}) {
-  return {
-    sessionKey,
-    scope: "main",
-    excluded: false,
-    turns: hardTurns(4),
-    directDeliveryEdges: 0,
-    observedDeliveryEdges: 0,
-    recoveredFailureChains: 0,
-    toolInvocations: 0,
-    conclusiveFinalAnswer: false,
-    ...overrides,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// §6.1 selection scoring
-// ---------------------------------------------------------------------------
-
-test("scoreCandidateSessions weights signals per §6.1 ordering", () => {
-  const { selected, rejected } = scoreCandidateSessions([
-    baseSession("s-direct", { directDeliveryEdges: 1 }),
-    baseSession("s-observed", { observedDeliveryEdges: 1 }),
-    baseSession("s-recovered", { recoveredFailureChains: 1 }),
-    baseSession("s-tools", { toolInvocations: 100 }),
-    baseSession("s-final", { conclusiveFinalAnswer: true }),
-  ]);
-  assert.equal(rejected.length, 0);
-  assert.deepEqual(selected.map((entry) => entry.sessionKey), [
-    "s-direct", "s-observed", "s-recovered", "s-tools", "s-final",
-  ]);
-  const byKey = new Map(selected.map((entry) => [entry.sessionKey, entry]));
-  assert.equal(byKey.get("s-direct").score, SESSION_SCORE_WEIGHTS.deliveryDirect);
-  assert.equal(byKey.get("s-observed").score, SESSION_SCORE_WEIGHTS.deliveryObserved);
-  assert.equal(byKey.get("s-recovered").score, SESSION_SCORE_WEIGHTS.recoveredFailureChain);
-  // Density saturates at its weight, below the recovered-failure-chain weight.
-  assert.equal(byKey.get("s-tools").score, SESSION_SCORE_WEIGHTS.toolDensity);
-  assert.equal(byKey.get("s-final").score, SESSION_SCORE_WEIGHTS.conclusiveFinalAnswer);
-  assert.deepEqual(byKey.get("s-direct").signals, {
-    deliveryDirect: 40,
-    deliveryObserved: 0,
-    recoveredFailureChain: 0,
-    toolDensity: 0,
-    conclusiveFinalAnswer: 0,
-  });
-});
-
-test("scoreCandidateSessions rejects gated sessions with visible reasons", () => {
-  const { selected, rejected } = scoreCandidateSessions([
-    baseSession("s-ok", { directDeliveryEdges: 1 }),
-    baseSession("s-scope", { scope: "subagent" }),
-    baseSession("s-excluded", { excluded: true }),
-    baseSession("s-short", { turns: hardTurns(2) }),
-    // 3 turns but one is only soft-sealed -> 2 eligible turns.
-    baseSession("s-soft", {
-      turns: [...hardTurns(2), { eligible: true, active: true, sealed: "soft" }],
-    }),
-    baseSession("s-rolled-back", {
-      turns: [...hardTurns(2), { eligible: true, active: false, sealed: "hard" }],
-    }),
-  ]);
-  assert.deepEqual(selected.map((entry) => entry.sessionKey), ["s-ok"]);
-  const reasonsByKey = new Map(rejected.map((entry) => [entry.sessionKey, entry.reasons]));
-  assert.deepEqual(reasonsByKey.get("s-scope"), ["not-main-scope"]);
-  assert.deepEqual(reasonsByKey.get("s-excluded"), ["excluded"]);
-  assert.deepEqual(reasonsByKey.get("s-short"), ["insufficient-eligible-turns"]);
-  assert.deepEqual(reasonsByKey.get("s-soft"), ["insufficient-eligible-turns"]);
-  assert.deepEqual(reasonsByKey.get("s-rolled-back"), ["insufficient-eligible-turns"]);
-});
 
 // ---------------------------------------------------------------------------
 // §6.2 chunking
@@ -645,10 +568,6 @@ test("resultSetDigest shifts when pool item revision drifts; missing pool item t
 function fakeSources() {
   const payloadSha = HEX("d");
   return {
-    listCandidateSessions: async () => [
-      baseSession("s-a", { directDeliveryEdges: 2 }),
-      baseSession("s-b", { excluded: true }),
-    ],
     readTurns: async (sessionKey, range) => {
       assert.equal(sessionKey, "s-a");
       assert.equal(range, null);
@@ -680,12 +599,8 @@ function fakeSources() {
   };
 }
 
-test("listScoredSessions and planSessionChunks run on injected in-memory fakes", async () => {
+test("planSessionChunks runs on injected in-memory fakes", async () => {
   const sources = fakeSources();
-  const { selected, rejected } = await listScoredSessions({ sources });
-  assert.deepEqual(selected.map((entry) => entry.sessionKey), ["s-a"]);
-  assert.deepEqual(rejected.map((entry) => entry.sessionKey), ["s-b"]);
-
   const turns = await loadSessionTurns({ sources, sessionKey: "s-a" });
   const payloadEvent = turns[0].events[1];
   assert.equal(payloadEvent.truncated, true);
