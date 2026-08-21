@@ -3,6 +3,7 @@ import process from "node:process";
 import { Readable } from "node:stream";
 import { TextDecoder } from "node:util";
 
+import { sanitizeDiagnosticProblem } from "./cli-contract.mjs";
 import { createInsightsAgentSpec } from "./insights-agent-spec.mjs";
 import { executeInsightsQuery, insightsQueryDiagnostic } from "./insights-query.mjs";
 
@@ -13,6 +14,8 @@ const TOOL_NAMES = Object.freeze([
   "threadshare_insights_query",
   "threadshare_insights_recipe",
   "threadshare_insights_evidence",
+  "threadshare_memory_search",
+  "threadshare_memory_status",
 ]);
 
 function plainObject(value) {
@@ -29,12 +32,13 @@ async function readSchema(name) {
 }
 
 async function toolCatalog() {
-  const [spec, query, recipe, evidence, gitDiffEvidence] = await Promise.all([
+  const [spec, query, recipe, evidence, gitDiffEvidence, memorySearch] = await Promise.all([
     readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
     readSchema("threadshare-insights-recipe-request.v1.schema.json"),
     readSchema("threadshare-insights-evidence-request.v2.schema.json"),
     readSchema("threadshare-insights-git-diff-evidence-request.v1.schema.json"),
+    readSchema("threadshare-memory-search-request.v1.schema.json"),
   ]);
   const annotations = {
     readOnlyHint: true,
@@ -95,7 +99,44 @@ async function toolCatalog() {
       },
       annotations,
     },
+    {
+      name: TOOL_NAMES[4],
+      title: "Search approved local Team Memory",
+      description: "Search the owner repository's approved Team Memory; returns items with generation and coverage.",
+      inputSchema: memorySearch,
+      annotations,
+    },
+    {
+      name: TOOL_NAMES[5],
+      title: "Summarize local Team Memory state",
+      description: "Return owner Team Memory counters. Extraction is CLI-only; no transcript is ever returned.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+      },
+      annotations,
+    },
   ]);
+}
+
+async function defaultMemoryExecute(action, args, options) {
+  const { executeMemoryMcp } = await import("./memory-command.mjs");
+  return executeMemoryMcp(action, args, { ...options.memoryOptions, signal: options.signal });
+}
+
+function memoryToolError(error, action) {
+  const code = typeof error?.code === "string" ? error.code : "TS_OPERATION_FAILED";
+  const value = {
+    code,
+    problem: sanitizeDiagnosticProblem(error instanceof Error ? error.message : String(error)),
+    next: `Run \`threadshare memory ${action} --help\` and retry.`,
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(value) }],
+    structuredContent: value,
+    isError: true,
+  };
 }
 
 async function defaultExecute(invocation, request, options) {
@@ -135,6 +176,25 @@ function toolInvocation(name, args) {
   }
   if (name === TOOL_NAMES[3]) {
     return { invocation: { action: "evidence-v2", requestSource: "-" }, request: args };
+  }
+  if (name === TOOL_NAMES[4]) {
+    if (!exactKeys(args, ["query", "limit"]) || typeof args.query !== "string" ||
+        args.query.length === 0 ||
+        (Object.hasOwn(args, "limit") &&
+         (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100))) {
+      throw Object.assign(new Error("memory search requires a non-empty query and optional 1..100 limit"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "search", args } };
+  }
+  if (name === TOOL_NAMES[5]) {
+    if (!exactKeys(args, [])) {
+      throw Object.assign(new Error("memory status arguments must be empty"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "status", args } };
   }
   return null;
 }
@@ -189,6 +249,7 @@ async function* readMessages(input) {
 
 export function createInsightsMcpServer(options = {}) {
   const execute = options.execute ?? defaultExecute;
+  const memoryExecute = options.memoryExecute ?? defaultMemoryExecute;
   const catalog = options.catalog ?? toolCatalog;
   const handle = async (message) => {
     const id = plainObject(message) && Object.hasOwn(message, "id") ? message.id : null;
@@ -229,7 +290,22 @@ export function createInsightsMcpServer(options = {}) {
           typeof message.params.name !== "string") {
         return rpcError(message.id, -32602, "Invalid params");
       }
-      const target = toolInvocation(message.params.name, message.params.arguments ?? {});
+      let target;
+      try {
+        target = toolInvocation(message.params.name, message.params.arguments ?? {});
+      } catch (error) {
+        // Argument-shape rejections stay in-band as stable tool errors so one
+        // bad request never tears down the JSON-RPC stream.
+        const memoryAction = message.params.name === TOOL_NAMES[4]
+          ? "search"
+          : message.params.name === TOOL_NAMES[5] ? "status" : null;
+        return {
+          jsonrpc: "2.0", id: message.id,
+          result: memoryAction === null
+            ? toolError(error, "query")
+            : memoryToolError(error, memoryAction),
+        };
+      }
       if (target === null) return rpcError(message.id, -32602, "Unknown tool");
       if (Object.hasOwn(target, "result")) {
         return {
@@ -240,6 +316,24 @@ export function createInsightsMcpServer(options = {}) {
             isError: false,
           },
         };
+      }
+      if (Object.hasOwn(target, "memory")) {
+        try {
+          const result = await memoryExecute(target.memory.action, target.memory.args, options);
+          return {
+            jsonrpc: "2.0", id: message.id,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+              structuredContent: result,
+              isError: false,
+            },
+          };
+        } catch (error) {
+          return {
+            jsonrpc: "2.0", id: message.id,
+            result: memoryToolError(error, target.memory.action),
+          };
+        }
       }
       try {
         const result = await execute(target.invocation, target.request, options);

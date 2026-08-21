@@ -1,6 +1,6 @@
 ---
 name: threadshare
-description: Find, analyze, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions through the Threadshare CLI. Use when a user asks to list, inspect, analyze, publish, export, validate, or share an agent conversation; requests a link to the current session; or needs agent-readable thread JSON or Markdown.
+description: Find, analyze, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions, or build and search repository Team Memory, through the Threadshare CLI. Use when a user asks to list, inspect, analyze, publish, export, validate, or share an agent conversation; requests a link to the current session; needs agent-readable thread JSON or Markdown; or wants reviewed shared memory from past work.
 ---
 
 # Threadshare
@@ -19,6 +19,7 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 - Route a natural-language analysis question: `threadshare insights spec --format json`, then choose the bounded Insights actions internally
 - Query committed local history: `threadshare insights <overview|search|capabilities|usage|activity|query|recipe|evidence> ... --format json`
 - Expose the same deep read contracts to an Agent: `threadshare insights mcp --stdio`
+- Inspect or build repository Team Memory: read `threadshare memory --help`, then use its staged lifecycle
 - List start candidates for an agent-driven partial share: `threadshare messages <codex|claude|paseo> <session-or-agent> --format json`
 - Preflight without uploading: `threadshare share <provider> <session-or-agent> --dry-run --report --json`
 - Export without uploading: `threadshare export <codex|claude|paseo> <session-or-agent> --output <file>`
@@ -100,6 +101,27 @@ Query requests use `threadshare-insights-query-request@v2`; Recipe requests use
 `threadshare-insights-evidence-request@v2`. Prefer `payloadMode: "reference"`, carry `nextCursor`
 unchanged, and use the exact returned revision for evidence. These commands never run `sync`
 implicitly.
+
+## Build Or Search Team Memory
+
+Use `threadshare_memory_search` for read-only recall of approved memory in the current repository.
+If coverage is partial, stop and ask the user to run the explicit local maintenance flow; do not treat
+partial results as a complete candidate pool.
+
+Phase 1 extraction takes an already-exported local memory session bundle. Never place that bundle in a
+shared directory or commit it. Start without an approval option so `memory extract` prints the exact
+runner plan, provider, model, retention state, and bytes to send. Show that summary to the user. Only
+after they approve it may you repeat the command with its exact `--approve-plan` or
+`--approve-manifest` digest.
+
+Extraction and adjudication are separate network deliveries. Approval of the extraction digest never
+authorizes the adjudication digest printed afterward; obtain a second explicit approval. Never use an
+internal callback, JSON mode, or a non-TTY process to confirm generated statements. A person runs
+`threadshare memory review` in a real TTY, reviews statement evidence and limitations, and then decides
+whether to run the printed `memory promote --plan <plan-id>` command. Promotion changes only the
+worktree and approved local projection; it never stages, commits, or pushes. After pulling approved
+memory from Git, run `threadshare memory assemble --provider claude` to refresh the generated provider
+block and local approved projection.
 
 ## Choose A Start Turn
 

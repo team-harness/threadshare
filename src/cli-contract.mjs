@@ -53,6 +53,36 @@ export const OPTION_DEFINITIONS = Object.freeze({
     placeholder: "<n>",
     description: "Return 1 through 50 items. The default is 10.",
   },
+  runner: {
+    type: "value",
+    placeholder: "<claude>",
+    description: "Select the restricted extraction runner. Only claude is available in Phase 1.",
+  },
+  "approve-plan": {
+    type: "value",
+    placeholder: "<digest>",
+    description: "Authorize delivery of one pending extraction plan by its exact plan digest.",
+  },
+  "approve-manifest": {
+    type: "value",
+    placeholder: "<digest>",
+    description: "Authorize delivery of a multi-plan run by its exact authorization manifest digest.",
+  },
+  plan: {
+    type: "value",
+    placeholder: "<plan-id>",
+    description: "Apply the approved promotion plan with this id, writing only into the worktree.",
+  },
+  provider: {
+    type: "value",
+    placeholder: "<provider>",
+    description: "Assemble team memory into this provider's context file. Only claude is implemented.",
+  },
+  session: {
+    type: "value",
+    placeholder: "<file>",
+    description: "Phase 1 extraction data source: one already-exported memory session bundle JSON.",
+  },
   offset: {
     type: "value",
     placeholder: "<n>",
@@ -276,6 +306,84 @@ export const COMMAND_SPECS = Object.freeze({
     ],
     environment: [
       "THREADSHARE_INSIGHTS_HOME overrides derived state; THREADSHARE_CONFIG overrides persistent config.",
+    ],
+  }),
+  memory: command({
+    summary: "Build and promote a repository's shared Team Memory from local sessions.",
+    usage: "threadshare memory <action> [path...] [options]",
+    arguments: [
+      argument(
+        "action",
+        "<init|status|lint|extract|review|promote|assemble|reverify-runner>",
+        "Team Memory lifecycle action.",
+      ),
+      argument("path", "[path...]", "Only for lint: entry files to check; defaults to the entries directory.", true),
+    ],
+    options: [
+      "approve-manifest",
+      "approve-plan",
+      "format",
+      "limit",
+      "plan",
+      "provider",
+      "repository",
+      "runner",
+      "session",
+    ],
+    optionDetails: {
+      format: "Queries and maintenance use text by default or json for agents.",
+      repository: "Resolve the owner repository from this worktree path instead of the current directory.",
+      runner: "Only for extract and reverify-runner. The only Phase 1 value is claude.",
+      "approve-plan": "Only for extract. Authorizes exactly one pending extraction or adjudication plan by digest (D1).",
+      "approve-manifest": "Only for extract. Authorizes exactly the pending plans in one extraction or adjudication manifest (D1).",
+      limit: "Only for extract. Number of pending chunks to plan or deliver; 1 through 50, default 1.",
+      session: "Only for extract. The Phase 1 memory session bundle JSON data source.",
+      plan: "Only for promote. The promotion plan id produced by review.",
+      provider: "Only for assemble. The provider context file to update; only claude is implemented.",
+    },
+    defaults: [
+      "--format text",
+      "Each extraction and adjudication stage prints a pending plan and delivers nothing until its own approval digest is supplied.",
+    ],
+    output: [
+      "init: creates the .threadshare/memory skeleton and confirms the memory-state id.",
+      "status: chunk/task/candidate/promotion counters for the owner repository.",
+      "lint: per-file block/warn findings; a block exits non-zero.",
+      "extract: without approval, pending extraction plans; after extraction, separate pending adjudication plans.",
+      "review: confirms statements and prints a promotion plan; promote applies it into the worktree.",
+      "assemble: regenerates the provider memory block; reverify-runner refreshes the conformance cache.",
+    ],
+    constraints: [
+      "init, status, extract, review, promote, and assemble require a non-bare Git worktree (owner resolution).",
+      "extract never spawns a runner without a matching --approve-plan or --approve-manifest digest.",
+      "Approving extraction does not approve adjudication; authorize the next-stage digest in a separate invocation.",
+      "extract accepts at most one of --approve-plan or --approve-manifest.",
+      "promote writes only into the worktree; it never stages, commits, or pushes.",
+      "Phase 1 extract reads one exported session bundle passed with --session.",
+    ],
+    examples: [
+      "threadshare memory init",
+      "threadshare memory status --format json",
+      "threadshare memory lint",
+      "threadshare memory extract --runner claude --session bundle.json",
+      "threadshare memory extract --runner claude --session bundle.json --approve-plan <digest>",
+      "threadshare memory extract --runner claude --approve-plan <adjudication-digest>",
+      "threadshare memory review",
+      "threadshare memory promote --plan <plan-id>",
+      "threadshare memory assemble --provider claude",
+      "threadshare memory reverify-runner --runner claude",
+    ],
+    agentNotes: [
+      "Treat each pending plan digest as a one-stage authorization token; only re-run with it after the user approves that exact delivery summary.",
+      "Extraction and adjudication are separate deliveries and require separate user approvals.",
+      "Never place transcript bytes in a shared location; extraction delivery is local and authorized per run.",
+    ],
+    security: [
+      "Sanitized promotion content is linted for secrets and provider session ids before it can enter the worktree.",
+      "Local paths, the memory-state path, and the origin secret are never printed.",
+    ],
+    environment: [
+      "THREADSHARE_INSIGHTS_HOME overrides derived state; THREADSHARE_MEMORY_RUNNER_BIN overrides the runner binary.",
     ],
   }),
   messages: command({
@@ -851,7 +959,7 @@ export function preflightHelp(args) {
 }
 
 function optionNotAllowedNext(commandName, optionName) {
-  if (optionName === "json" && ["sessions", "analyze", "insights", "messages", "read"].includes(commandName)) {
+  if (optionName === "json" && ["sessions", "analyze", "insights", "memory", "messages", "read"].includes(commandName)) {
     return `Use --format json instead. Run \`threadshare ${commandName} --help\`.`;
   }
   if (optionName === "format" && ["publish", "share", "revoke"].includes(commandName)) {

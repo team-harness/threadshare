@@ -79,6 +79,14 @@ const expectedPackageFiles = [
   "schema/threadshare-insights-search.v1.schema.json",
   "schema/threadshare-insights-usage-request.v1.schema.json",
   "schema/threadshare-insights-usage.v1.schema.json",
+  "schema/threadshare-memory-adjudication-result.v1.schema.json",
+  "schema/threadshare-memory-adjudication-task.v1.schema.json",
+  "schema/threadshare-memory-authorization-manifest.v1.schema.json",
+  "schema/threadshare-memory-candidate-draft-batch.v1.schema.json",
+  "schema/threadshare-memory-extraction-task.v1.schema.json",
+  "schema/threadshare-memory-promotion-plan.v1.schema.json",
+  "schema/threadshare-memory-runner-execution-plan.v1.schema.json",
+  "schema/threadshare-memory-search-request.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
   "src/agent-transcript.mjs",
@@ -108,6 +116,15 @@ const expectedPackageFiles = [
   "src/insights-repository-source.mjs",
   "src/insights-state.mjs",
   "src/insights-writer-lock.mjs",
+  "src/memory-command.mjs",
+  "src/memory-contracts.mjs",
+  "src/memory-extraction.mjs",
+  "src/memory-format.mjs",
+  "src/memory-lint.mjs",
+  "src/memory-prompts.mjs",
+  "src/memory-repository.mjs",
+  "src/memory-runner.mjs",
+  "src/memory-state-client.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
   "src/session-export.mjs",
@@ -221,14 +238,14 @@ test("locks npm pack to the exact public root files", () => {
     /package files/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, size: 272 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, size: 336 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
     /compressed size/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, unpackedSize: 1280 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, unpackedSize: 1664 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),

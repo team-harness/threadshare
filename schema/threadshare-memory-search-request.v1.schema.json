@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-search-request.v1.schema.json",
+  "title": "Threadshare Team Memory Search Request V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query"],
+  "properties": {
+    "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+  }
+}

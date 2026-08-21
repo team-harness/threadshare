@@ -122,6 +122,17 @@ test("renders a self-describing root and command help contract", () => {
       "stdio",
       "verify",
     ],
+    memory: [
+      "approve-manifest",
+      "approve-plan",
+      "format",
+      "limit",
+      "plan",
+      "provider",
+      "repository",
+      "runner",
+      "session",
+    ],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
     publish: ["expires", "json", "revoke", "url"],
@@ -207,7 +218,6 @@ test("renders a self-describing root and command help contract", () => {
     [...cliSource.matchAll(/\boptions(?:\.([a-z][a-z0-9-]*)|\["([^"]+)"\])/gu)]
       .map((match) => match[1] ?? match[2]),
   );
-  referencedOptions.delete("provider");
   assert.deepEqual(
     [...referencedOptions].sort(),
     Object.keys(OPTION_DEFINITIONS).filter((name) => name !== "help").sort(),
@@ -447,7 +457,7 @@ test("returns deterministic help diagnostics that tell agents how to recover", (
     {
       args: ["bogus", "--help"],
       code: "TS_USAGE_UNKNOWN_COMMAND",
-      next: /Choose one of: sessions, analyze, insights, messages, export, publish, share, read, revoke, validate/,
+      next: /Choose one of: sessions, analyze, insights, memory, messages, export, publish, share, read, revoke, validate/,
     },
     {
       args: ["help", "bogus"],

@@ -221,6 +221,31 @@ Usage counts are recorded invocations, not inferred independent uses. Agents sho
 terminal states from the outcome of the containing Turn. Co-occurrence does not prove that a Tool or
 Skill caused a Turn to succeed or fail.
 
+### Build Shared Team Memory
+
+Team Memory turns an already-exported local session bundle into reviewed, repository-owned memory.
+Phase 1 uses an explicit bundle file; it does not automatically scan all Insights sessions. Read
+`threadshare memory --help` for the canonical command and bundle contract.
+
+```bash
+threadshare memory init
+threadshare memory extract --runner claude --session bundle.json
+# After approving the exact extraction plan shown above:
+threadshare memory extract --runner claude --session bundle.json --approve-plan <extraction-digest>
+# Adjudication is a separate delivery with a separate approval:
+threadshare memory extract --runner claude --approve-plan <adjudication-digest>
+threadshare memory review
+threadshare memory promote --plan <plan-id>
+threadshare memory assemble --provider claude
+```
+
+Each runner stage is deny-all except for its model connection and receives transcript bytes only after
+the user approves that stage's exact digest and byte summary. `review` requires a real TTY and confirms
+every generated statement; non-interactive callers can inspect pending work but cannot approve it.
+`promote` writes only sanitized content below `.threadshare/memory/`, refreshes the approved search
+projection, and never stages, commits, or pushes. After a teammate pulls approved memory from Git, run
+`assemble` to refresh both the provider context block and local search projection.
+
 ### Use Another Threadshare Server
 
 The hosted service is the default. Override it per command or for the current shell when you want to use a self-hosted deployment:

@@ -1107,6 +1107,65 @@ async function main() {
       throw insightsFailure(error, invocation?.action ?? positionals[1]);
     }
   }
+  if (command === "memory") {
+    const { insightsEngineReleaseTarget } = await import("../src/insights-engine-targets.mjs");
+    if (insightsEngineReleaseTarget() === null) {
+      throw cliDiagnostic(
+        "TS_INSIGHTS_ENGINE_UNAVAILABLE",
+        "Local Team Memory is not available for this platform in this release.",
+        {
+          command: "memory",
+          next: "Use Threadshare core commands on Windows, or run Team Memory on macOS or Linux.",
+        },
+      );
+    }
+    const memoryOptions = {
+      format: options.format,
+      limit: options.limit,
+      repository: options.repository,
+      runner: options.runner,
+      "approve-plan": options["approve-plan"],
+      "approve-manifest": options["approve-manifest"],
+      plan: options.plan,
+      provider: options.provider,
+      session: options.session,
+    };
+    const controller = new AbortController();
+    const onSignal = () => controller.abort();
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    let invocation;
+    try {
+      const {
+        createMemoryReviewConfirmer,
+        parseMemoryInvocation,
+        executeMemoryCommand,
+        formatMemoryCommandResult,
+        memoryFailure,
+      } = await import("../src/memory-command.mjs");
+      invocation = parseMemoryInvocation(positionals, memoryOptions);
+      const reviewer = invocation.action === "review" && invocation.format === "text"
+        ? createMemoryReviewConfirmer({ input: process.stdin, output: process.stderr })
+        : null;
+      try {
+        const result = await executeMemoryCommand(invocation, {
+          signal: controller.signal,
+          ...(reviewer === null ? {} : { confirmStatement: reviewer.confirmStatement }),
+        });
+        process.stdout.write(formatMemoryCommandResult(result, invocation));
+        if (result.action === "lint" && result.blocked) process.exitCode = 1;
+        return;
+      } catch (error) {
+        if (error?.name === "CliDiagnostic") throw error;
+        throw memoryFailure(error, invocation?.action ?? positionals[1]);
+      } finally {
+        reviewer?.close();
+      }
+    } finally {
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+    }
+  }
   if (command === "messages") {
     const { provider, session } = sessionCommand(command, positionals, options);
     if (options.format !== "json") {

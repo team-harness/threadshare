@@ -214,6 +214,30 @@ Local Insights 查询已提交的本地历史，不会上传数据。Deep Query 
 Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 应把 Tool 调用终态与所在
 Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。
 
+### 构建团队共享记忆
+
+Team Memory 把已导出的本机会话 bundle 转成经过审核、归属于仓库的共享记忆。Phase 1 需要显式传入
+bundle 文件，尚不会自动遍历全部 Insights Session。命令和 bundle 契约以
+`threadshare memory --help` 为准。
+
+```bash
+threadshare memory init
+threadshare memory extract --runner claude --session bundle.json
+# 用户批准上一步展示的精确 extraction plan 后：
+threadshare memory extract --runner claude --session bundle.json --approve-plan <extraction-digest>
+# adjudication 是另一次数据发送，必须单独批准：
+threadshare memory extract --runner claude --approve-plan <adjudication-digest>
+threadshare memory review
+threadshare memory promote --plan <plan-id>
+threadshare memory assemble --provider claude
+```
+
+每个 runner 阶段除模型连接外均为 deny-all；只有用户批准该阶段的精确 digest 与字节摘要后，Threadshare
+才发送 transcript。`review` 要求真实 TTY 并逐条确认生成的 statement；非交互调用只能查看待审内容，
+不能批准。`promote` 只把净化后的正文写入 `.threadshare/memory/` 并刷新 approved 搜索投影，不会
+stage、commit 或 push。团队成员从 Git 拉取记忆后运行 `assemble`，即可同时刷新 provider 上下文块与
+本机搜索投影。
+
 ### 使用其他 Threadshare 服务端
 
 CLI 默认连接托管服务。需要使用独立部署时，可以为单次命令或当前 shell 覆盖地址：

@@ -444,7 +444,14 @@ export function buildEvidenceCatalog({ deliveryEdges = [], chunk }) {
     seenTurns.add(event.turnIndex);
     // Recorded session-contains-turn relation: the chunk turn itself is a direct
     // observation of session content (Delivery Trace recorded relation).
-    merge({ kind: "turn", turnIndex: event.turnIndex }, "session-contains-turn", "direct", [], null, undefined);
+    merge(
+      { kind: "turn", turnIndex: event.turnIndex },
+      "session-contains-turn",
+      "direct",
+      ["source-local-only"],
+      null,
+      undefined,
+    );
   }
 
   const kindOrder = { commit: 0, turn: 1, path: 2 };
@@ -832,8 +839,14 @@ export function buildAdjudicationTask({
       memoryStateUuid,
       owner,
       draftBatchDigest: draftBatchDigest ?? computeDraftBatchDigest(drafts),
-      approvedProjection: recall.approvedProjection,
-      candidateProjection: recall.candidateProjection,
+      approvedProjection: {
+        generation: recall.approvedProjection.generation,
+        analyzerVersion: recall.approvedProjection.analyzerVersion,
+      },
+      candidateProjection: {
+        generation: recall.candidateProjection.generation,
+        analyzerVersion: recall.candidateProjection.analyzerVersion,
+      },
       recallAlgorithmVersion: recall.recallAlgorithmVersion,
       recallQueryDigest: recallQueryDigest ?? computeRecallQueryDigest({
         recallAlgorithmVersion: recall.recallAlgorithmVersion,

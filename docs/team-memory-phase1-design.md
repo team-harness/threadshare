@@ -254,7 +254,7 @@ MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 genera
 - **git 先例**：`resolveGitRepository`（`insights-repository-source.mjs:413-446`）**已提供 common dir / worktree root / device / inode 解析**，memory-repository 直接复用；沙箱 env 两套模板（execFile 有界 buffer / spawn 流式 spool）。
 - **文件读取先例**：`insights-intent-source.mjs:156-209` 的安全读取骨架（realpath 双向前缀 + O_NOFOLLOW + 读前后 bigint stat 比对 TOCTOU + 1MiB 上限 + ENOENT 降级）为 memory 文件读取模板；**运行时无 YAML**（yaml 仅 devDependency、markdown-it 的唯一使用者不在发布白名单）——印证 DEV-2 手写 frontmatter。
 - **测试落点**：需要引擎二进制的 Node 测试进 `test:insights-engine` 组（先 cargo build；`test/helpers/insights-e2e.mjs` 提供二进制路径与跳过闸门，要求 Node ≥ 22.5）；纯 Node 测试进 `test:cli`；npm scripts 的测试文件列表是**硬编码枚举**，新文件必须显式追加。Rust 集成测试模板 `tests/insights_overview.rs:1-60`；crash 注入用 `THREADSHARE_INSIGHTS_TEST_CRASH_AT` failpoint（`storage.rs:13-48`）。
-- **发布白名单三份手抄副本**：`package.json:26-70`（src 逐文件、schema 整目录）、`scripts/verify-release.mjs:23-96`（73 条扁平清单 + 272KiB/1.25MiB 门限，逐位精确比对）、`test/release-automation.test.mjs:48+`；`AGENTS.md:59` 的 "73-file" 字样需同步——全部集中在 Stage 8 处理。
+- **发布白名单三份手抄副本**：`package.json`（src 逐文件、schema 整目录）、`scripts/verify-release.mjs`（90 条扁平清单 + 336KiB/1.625MiB 门限，逐位精确比对）、`test/release-automation.test.mjs`；`AGENTS.md` 的精确文件数与压缩门限同步——已在 Stage 8 完成。
 
 ## 9. 契约字段定稿（Stage 2 实现依据）
 
