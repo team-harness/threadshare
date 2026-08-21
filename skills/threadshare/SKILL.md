@@ -108,9 +108,10 @@ Use `threadshare_memory_search` for read-only recall of approved memory in the c
 If coverage is partial, stop and ask the user to run the explicit local maintenance flow; do not treat
 partial results as a complete candidate pool.
 
-Start a new extraction with `threadshare memory extract --runner <claude|codex> --request <file|->`,
-or call `threadshare_memory_extract_preview` to create the same pending-only plan over MCP. A Codex
-preview also requires an exact `model` and HTTPS `endpoint` (CLI: `--runner-model` plus
+Start a new extraction with `threadshare memory extract --runner <claude|codex> --request <file|->`.
+`claude` launches the installed Claude Code CLI; `codex` launches the installed Codex CLI. Alternatively,
+call `threadshare_memory_extract_preview` to create the same pending-only plan over MCP. A Codex preview
+also requires an exact `model` and HTTPS `endpoint` (CLI: `--runner-model` plus
 `--runner-endpoint`). The MCP tool cannot approve a digest, start a Runner, or return transcript. The
 `threadshare-memory-extraction-request@v1` object requires a canonical UTC `window.after` / `before`
 (at most 366 days) and may contain `query` plus `filters.providers`, `sessionKeys`,

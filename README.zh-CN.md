@@ -236,6 +236,9 @@ project scope 与 `hard-sealed`，调用方不能覆盖这两个边界。
 }
 ```
 
+`--runner` 选择本机受限 CLI 适配器：`claude` 会启动已安装的 Claude Code `claude` CLI，
+`codex` 会启动已安装的 `codex` CLI。下面第一组流程使用 Claude：
+
 ```bash
 threadshare memory init
 threadshare memory extract --runner claude --request memory-filter.json
@@ -252,6 +255,22 @@ threadshare memory review --kind consolidation
 threadshare memory promote --plan <plan-id>
 threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
+```
+
+改用本机 Codex CLI 时，新 preview 必须绑定精确 model 与 HTTPS endpoint；后续批准复用私有保存的
+profile，不能覆盖这两个值：
+
+```bash
+threadshare memory extract --runner codex \
+  --runner-model <model> \
+  --runner-endpoint <https-url> \
+  --request memory-filter.json
+threadshare memory extract --runner codex --approve-plan <extraction-digest>
+threadshare memory extract --runner codex --approve-plan <adjudication-digest>
+threadshare memory consolidate --runner codex \
+  --runner-model <model> \
+  --runner-endpoint <https-url>
+threadshare memory consolidate --runner codex --approve-plan <consolidation-digest>
 ```
 
 每个 runner 阶段除模型连接外均为 deny-all；只有用户批准该阶段的精确 digest 与字节摘要后，Threadshare

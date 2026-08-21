@@ -244,6 +244,9 @@ worktree project scope plus `hard-sealed`; callers cannot override either bounda
 }
 ```
 
+`--runner` selects the local restricted CLI adapter: `claude` launches the installed Claude Code
+`claude` CLI, while `codex` launches the installed `codex` CLI. This first flow uses Claude:
+
 ```bash
 threadshare memory init
 threadshare memory extract --runner claude --request memory-filter.json
@@ -262,8 +265,8 @@ threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
 ```
 
-Codex is also a restricted extraction, adjudication, and consolidation runner. A new Codex preview binds the exact model and HTTPS
-endpoint; later approval reuses that private stored profile and cannot override it:
+To use the local Codex CLI instead, a new Codex preview must bind the exact model and HTTPS endpoint;
+later approval reuses that private stored profile and cannot override it:
 
 ```bash
 threadshare memory extract --runner codex \

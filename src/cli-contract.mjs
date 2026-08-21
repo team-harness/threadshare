@@ -56,7 +56,7 @@ export const OPTION_DEFINITIONS = Object.freeze({
   runner: {
     type: "value",
     placeholder: "<claude|codex>",
-    description: "Select the restricted extraction runner.",
+    description: "Launch the local restricted Claude Code or Codex CLI runner.",
   },
   "runner-model": {
     type: "value",
@@ -356,7 +356,7 @@ export const COMMAND_SPECS = Object.freeze({
     optionDetails: {
       format: "Queries and maintenance use text by default or json for agents.",
       repository: "Resolve the owner repository from this worktree path instead of the current directory.",
-      runner: "Only for extract, consolidate, and reverify-runner. Values: claude or codex.",
+      runner: "Only for extract, consolidate, and reverify-runner. claude launches the local Claude Code CLI; codex launches the local Codex CLI.",
       "runner-model": "For a new Codex preview or Codex reverify-runner. Must be paired with --runner-endpoint.",
       "runner-endpoint": "For a new Codex preview or Codex reverify-runner. HTTPS only; credentials, query, and fragment are rejected.",
       "approve-plan": "For extract or consolidate. Authorizes exactly one pending runner plan by digest (D1).",
