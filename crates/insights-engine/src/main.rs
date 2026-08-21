@@ -303,6 +303,10 @@ fn search_request(message: &Value) -> SearchRequest {
             .expect("validated providers"),
         project_keys: serde_json::from_value(filters["projectKeys"].clone())
             .expect("validated project keys"),
+        session_keys: filters
+            .get("sessionKeys")
+            .map(|keys| serde_json::from_value(keys.clone()).expect("validated session keys"))
+            .unwrap_or_default(),
         tool_capability_keys: serde_json::from_value(filters["toolCapabilityKeys"].clone())
             .expect("validated tool keys"),
         skill_capability_keys: serde_json::from_value(filters["skillCapabilityKeys"].clone())

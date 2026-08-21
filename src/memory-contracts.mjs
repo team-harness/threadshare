@@ -122,6 +122,11 @@ const extractionBindingSchema = z.object({
   databaseUuid: nonEmptyString,
   owner: ownerKeysSchema,
   sourceInputDigest: hex64,
+  selection: z.object({
+    requestDigest: hex64,
+    resultSetDigest: hex64,
+    sourceBindingDigest: hex64,
+  }).strict(),
   turnRevisions: z.array(hex64),
   payloadDigests: z.array(hex64),
   deliveryEdgeRevisions: z.array(hex64),

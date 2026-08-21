@@ -463,7 +463,7 @@ function stringArray(value, label, { maximum, allowed, hex = false, maxBytes, as
 
 function normalizeFilters(filters = {}) {
   exactKeys(filters, [
-    "providers", "projectKeys", "toolCapabilityKeys", "skillCapabilityKeys",
+    "providers", "projectKeys", "sessionKeys", "toolCapabilityKeys", "skillCapabilityKeys",
     "observedAtOrAfter", "observedBefore", "resultEvidence", "closureStates",
     "capabilityTerminalStates",
   ], "filters");
@@ -489,6 +489,12 @@ function normalizeFilters(filters = {}) {
       maximum: 5, allowed: CAPABILITY_TERMINAL_STATES,
     }),
   };
+  if (Object.hasOwn(filters, "sessionKeys")) {
+    result.sessionKeys = stringArray(filters.sessionKeys, "filters.sessionKeys", {
+      maximum: 64,
+      hex: true,
+    });
+  }
   if (result.capabilityTerminalStates.length > 0 &&
       result.toolCapabilityKeys.length === 0 && result.skillCapabilityKeys.length === 0) {
     throw requestError("capabilityTerminalStates requires a tool or skill capability key filter");

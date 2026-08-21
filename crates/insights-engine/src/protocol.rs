@@ -1345,29 +1345,20 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
         "resultEvidence",
         "closureStates",
     ];
-    const FIELDS: [&str; 9] = [
-        "providers",
-        "projectKeys",
-        "observedAtOrAfterUnixMs",
-        "observedBeforeUnixMs",
-        "toolCapabilityKeys",
-        "skillCapabilityKeys",
-        "resultEvidence",
-        "closureStates",
-        "capabilityTerminalStates",
-    ];
+    let has_session_keys = value
+        .as_object()
+        .is_some_and(|value| value.contains_key("sessionKeys"));
     let has_capability_terminal_states = value
         .as_object()
         .is_some_and(|value| value.contains_key("capabilityTerminalStates"));
-    exact_object_keys(
-        value,
-        "SEARCH_TURNS.filters",
-        if has_capability_terminal_states {
-            &FIELDS
-        } else {
-            &LEGACY_FIELDS
-        },
-    )?;
+    let mut fields = LEGACY_FIELDS.to_vec();
+    if has_session_keys {
+        fields.push("sessionKeys");
+    }
+    if has_capability_terminal_states {
+        fields.push("capabilityTerminalStates");
+    }
+    exact_object_keys(value, "SEARCH_TURNS.filters", &fields)?;
     sorted_bounded_strings(
         field(value, "providers", "SEARCH_TURNS.filters")?,
         "SEARCH_TURNS.filters.providers",
@@ -1375,7 +1366,12 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
         64,
         true,
     )?;
-    for name in ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"] {
+    let mut opaque_key_fields = vec!["projectKeys"];
+    if has_session_keys {
+        opaque_key_fields.push("sessionKeys");
+    }
+    opaque_key_fields.extend(["toolCapabilityKeys", "skillCapabilityKeys"]);
+    for name in opaque_key_fields {
         let label = format!("SEARCH_TURNS.filters.{name}");
         let values = field(value, name, "SEARCH_TURNS.filters")?
             .as_array()
@@ -5566,12 +5562,20 @@ mod tests {
             .unwrap()
             .message;
         request["orderBy"] = json!("observed-desc");
+        request["filters"]["sessionKeys"] = json!(["0".repeat(64)]);
         request["filters"]["toolCapabilityKeys"] = json!(["1".repeat(64)]);
         request["filters"]["capabilityTerminalStates"] = json!(["completed", "failed"]);
         assert_eq!(
             validate_protocol_message(&request).unwrap(),
             MessageKind::SearchTurns
         );
+
+        request["filters"]["sessionKeys"] = json!(["not-an-opaque-key"]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+        request["filters"]["sessionKeys"] = json!(["0".repeat(64)]);
 
         request["filters"]["toolCapabilityKeys"] = json!([]);
         assert_eq!(

@@ -108,11 +108,17 @@ Use `threadshare_memory_search` for read-only recall of approved memory in the c
 If coverage is partial, stop and ask the user to run the explicit local maintenance flow; do not treat
 partial results as a complete candidate pool.
 
-Phase 1 extraction takes an already-exported local memory session bundle. Never place that bundle in a
-shared directory or commit it. Start without an approval option so `memory extract` prints the exact
-runner plan, provider, model, retention state, and bytes to send. Show that summary to the user. Only
-after they approve it may you repeat the command with its exact `--approve-plan` or
-`--approve-manifest` digest.
+Start a new extraction with `threadshare memory extract --runner claude --request <file|->`. The
+`threadshare-memory-extraction-request@v1` object requires a canonical UTC `window.after` / `before`
+(at most 366 days) and may contain `query` plus `filters.providers`, `sessionKeys`,
+`toolCapabilityKeys`, `skillCapabilityKeys`, `resultEvidence`, and `capabilityTerminalStates`.
+Threadshare derives the bound worktree project/repository keys and forces `hard-sealed`; never attempt
+to supply or weaken those fields. More than 200 matching Turns is a hard error, so narrow the request.
+
+Start without an approval option so `memory extract` prints the exact runner plan, provider, model,
+retention state, and bytes to send. Show that summary to the user. Only after they approve it may you
+repeat the command with its exact `--approve-plan` or `--approve-manifest` digest; approval reads the
+private pending artifact and does not take `--request` again.
 
 Extraction and adjudication are separate network deliveries. Approval of the extraction digest never
 authorizes the adjudication digest printed afterward; obtain a second explicit approval. Never use an

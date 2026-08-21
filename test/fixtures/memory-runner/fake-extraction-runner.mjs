@@ -51,7 +51,10 @@ let output;
 if (task === null || typeof task !== "object") {
   output = refusalReport();
 } else if (task.format === "threadshare-memory-extraction-task@v1") {
-  const evidenceId = task.evidenceCatalog?.[0]?.evidenceId;
+  const turnEvidence = task.evidenceCatalog?.find((entry) =>
+    entry.kind === "turn" && entry.display === "turn 0") ??
+    task.evidenceCatalog?.find((entry) => entry.kind === "turn");
+  const evidenceId = turnEvidence?.evidenceId;
   output = {
     format: "threadshare-memory-candidate-draft-batch@v1",
     taskId: task.taskId,

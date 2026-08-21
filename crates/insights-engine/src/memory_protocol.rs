@@ -69,7 +69,9 @@
 //!     "chunkRef": string|null, "draftBatchRef": string|null,
 //!     "binding": object, "authorizationPlanDigest": hex64|null }] }`
 //! - result: `{ "insertedChunks": int, "skippedChunks": int,
-//!   "insertedTasks": int, "skippedTasks": int }`
+//!   "insertedTasks": int, "skippedTasks": int,
+//!   "tasks": [{ "taskId": string, "status": "pending"|"claimed"|"submitted"|"stale",
+//!     "claimable": bool }] }`
 //!
 //! ## `claim-task`
 //! Transactional lease claim. Claimable iff `status='pending'`, or
@@ -1246,6 +1248,15 @@ pub struct PlanTasksOutcome {
     pub skipped_chunks: usize,
     pub inserted_tasks: usize,
     pub skipped_tasks: usize,
+    pub tasks: Vec<PlannedTaskStateWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedTaskStateWire {
+    pub task_id: String,
+    pub status: String,
+    pub claimable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

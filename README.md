@@ -223,15 +223,32 @@ Skill caused a Turn to succeed or fail.
 
 ### Build Shared Team Memory
 
-Team Memory turns an already-exported local session bundle into reviewed, repository-owned memory.
-Phase 1 uses an explicit bundle file; it does not automatically scan all Insights sessions. Read
-`threadshare memory --help` for the canonical command and bundle contract.
+Team Memory retrospectively selects local Insights Turns and turns them into reviewed,
+repository-owned memory. It never defaults to the whole Insights database: every new preview requires
+a request with an explicit UTC time window (at most 366 days) and may add text, provider, opaque
+session, Tool, Skill, result-evidence, and capability-state filters. Threadshare always adds the bound
+worktree project scope plus `hard-sealed`; callers cannot override either boundary.
+
+```json
+{
+  "format": "threadshare-memory-extraction-request@v1",
+  "window": {
+    "after": "2026-08-01T00:00:00.000Z",
+    "before": "2026-08-22T00:00:00.000Z"
+  },
+  "query": "release verification",
+  "filters": {
+    "providers": ["claude", "codex"],
+    "resultEvidence": ["provider-completed"]
+  }
+}
+```
 
 ```bash
 threadshare memory init
-threadshare memory extract --runner claude --session bundle.json
+threadshare memory extract --runner claude --request memory-filter.json
 # After approving the exact extraction plan shown above:
-threadshare memory extract --runner claude --session bundle.json --approve-plan <extraction-digest>
+threadshare memory extract --runner claude --approve-plan <extraction-digest>
 # Adjudication is a separate delivery with a separate approval:
 threadshare memory extract --runner claude --approve-plan <adjudication-digest>
 threadshare memory review
@@ -242,6 +259,9 @@ threadshare memory assemble --provider claude
 Each runner stage is deny-all except for its model connection and receives transcript bytes only after
 the user approves that stage's exact digest and byte summary. `review` requires a real TTY and confirms
 every generated statement; non-interactive callers can inspect pending work but cannot approve it.
+The selector rejects requests matching more than 200 Turns instead of silently taking a prefix. It
+reads complete selected Turns, injects bounded Delivery Trace evidence, and revalidates the exact
+source binding before candidate submission; unrelated snapshot advances do not invalidate a plan.
 `promote` writes only sanitized content below `.threadshare/memory/`, refreshes the approved search
 projection, and never stages, commits, or pushes. After a teammate pulls approved memory from Git, run
 `assemble` to refresh both the provider context block and local search projection.

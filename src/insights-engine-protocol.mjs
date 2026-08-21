@@ -1461,6 +1461,8 @@ function assertSearchFilters(filters, label) {
     "resultEvidence",
     "closureStates",
   ];
+  const hasSessionKeys = Object.hasOwn(filters, "sessionKeys");
+  if (hasSessionKeys) fields.push("sessionKeys");
   const hasCapabilityTerminalStates = Object.hasOwn(filters, "capabilityTerminalStates");
   if (hasCapabilityTerminalStates) fields.push("capabilityTerminalStates");
   assertExactKeys(filters, label, fields);
@@ -1469,7 +1471,12 @@ function assertSearchFilters(filters, label) {
       allowEmpty: false,
       ascii: true,
     }));
-  for (const field of ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"]) {
+  for (const field of [
+    "projectKeys",
+    ...(hasSessionKeys ? ["sessionKeys"] : []),
+    "toolCapabilityKeys",
+    "skillCapabilityKeys",
+  ]) {
     assertBoundedSortedArray(filters[field], `${label}.${field}`, MAX_FILTER_KEYS, assertHex64);
   }
   if (filters.observedAtOrAfterUnixMs !== null) {
@@ -1502,6 +1509,7 @@ function assertSearchFilters(filters, label) {
 
 function hasStructuredSearchFilter(filters) {
   return filters.providers.length > 0 || filters.projectKeys.length > 0 ||
+    (filters.sessionKeys?.length ?? 0) > 0 ||
     filters.observedAtOrAfterUnixMs !== null || filters.observedBeforeUnixMs !== null ||
     filters.toolCapabilityKeys.length > 0 || filters.skillCapabilityKeys.length > 0 ||
     filters.resultEvidence.length > 0 || filters.closureStates.length > 0 ||
@@ -4417,11 +4425,12 @@ export function createCapabilityPageMessage({ requestId, page }) {
 
 function canonicalSearchFilters(filters) {
   assertPlainObject(filters, "filters");
+  const hasSessionKeys = Object.hasOwn(filters, "sessionKeys");
   const source = {
     ...filters,
     capabilityTerminalStates: filters.capabilityTerminalStates ?? [],
   };
-  assertExactKeys(source, "filters", [
+  const fields = [
     "providers",
     "projectKeys",
     "observedAtOrAfterUnixMs",
@@ -4431,7 +4440,9 @@ function canonicalSearchFilters(filters) {
     "resultEvidence",
     "closureStates",
     "capabilityTerminalStates",
-  ]);
+  ];
+  if (hasSessionKeys) fields.push("sessionKeys");
+  assertExactKeys(source, "filters", fields);
   const result = {
     providers: canonicalBoundedArray(source.providers, "filters.providers", MAX_FILTER_PROVIDERS,
       (value, label) => assertBoundedString(value, label, 64, {
@@ -4477,6 +4488,14 @@ function canonicalSearchFilters(filters) {
       (value, label) => assertEnum(value, label, CAPABILITY_TERMINAL_STATES),
     ),
   };
+  if (hasSessionKeys) {
+    result.sessionKeys = canonicalBoundedArray(
+      source.sessionKeys,
+      "filters.sessionKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    );
+  }
   assertSearchFilters(result, "filters");
   return result;
 }

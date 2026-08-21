@@ -10,10 +10,9 @@
  * `--approve-manifest` on the CLI is the authorization to deliver transcript
  * bytes to a provider; without it the runner is never spawned).
  *
- * Phase 1 data-source scope: candidate-session selection reads a single
- * already-exported "memory session bundle" JSON handed to `--session <file>`
- * rather than scanning the live Insights index. This keeps Stage 7 decoupled
- * from Insights query wiring; a richer adapter is Phase 2 work.
+ * Extraction selection is a bounded retrospective query over the local
+ * Insights index. The caller supplies a canonical window and optional
+ * filters; Threadshare injects the bound worktree and hard-sealed scope.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -25,15 +24,20 @@ import { createInterface } from "node:readline/promises";
 
 import { canonicalJson } from "./canonical-json.mjs";
 import { cliDiagnostic, DIAGNOSTIC_CODES } from "./cli-contract.mjs";
+import { readExistingInsightsConfig } from "./insights-config.mjs";
 import { createInsightsEngineClient } from "./insights-engine-client.mjs";
 import { insightsChildEnv, insightsRequiredContract } from "./insights-command.mjs";
 import { resolveInsightsPaths } from "./insights-paths.mjs";
+import { readInsightsQueryRequest } from "./insights-query.mjs";
+import { createInsightsQueryReader } from "./insights-query-reader.mjs";
 import { openInsightsState } from "./insights-state.mjs";
+import { withInsightsWriterLock } from "./insights-writer-lock.mjs";
 import {
   adjudicationResultSchema,
   adjudicationTaskSchema,
   authorizationManifestSchema,
   candidateDraftBatchSchema,
+  extractionTaskSchema,
   runnerExecutionPlanSchema,
 } from "./memory-contracts.mjs";
 import {
@@ -45,6 +49,11 @@ import {
   computeCitationsDigest,
   deriveEvidenceAssessments,
 } from "./memory-extraction.mjs";
+import {
+  collectMemoryInsightsSelection,
+  normalizeMemoryExtractionRequest,
+  resolveMemoryInsightsScope,
+} from "./memory-insights-source.mjs";
 import { parseMemoryEntry, serializeMemoryEntry, validateDoctrine, parseSceneMeta } from "./memory-format.mjs";
 import { lintEntryForPromotion } from "./memory-lint.mjs";
 import { resolveRepositoryBinding } from "./memory-repository.mjs";
@@ -93,10 +102,6 @@ const POLICY_VERSION = "sanitize@1";
 const RUNNER_ADAPTERS = Object.freeze({ claude: "claude-cli" });
 const ASSEMBLE_BEGIN = "<!-- BEGIN THREADSHARE MEMORY (generated; do not edit by hand) -->";
 const ASSEMBLE_END = "<!-- END THREADSHARE MEMORY -->";
-// Deterministic provenance so an extraction plan digest previewed by one
-// invocation matches the digest an `--approve-plan` re-run recomputes.
-const STABLE_EVALUATED_AT = "1970-01-01T00:00:00.000Z";
-const STABLE_SNAPSHOT_SEQ = "0";
 
 function memoryDiagnostic(code, problem, next, result) {
   return cliDiagnostic(code, problem, { command: "memory", next, result });
@@ -247,7 +252,7 @@ export function parseMemoryInvocation(positionals, options) {
       return { action, runner: parseRunner(action, options), format: parseFormat(action, options) };
     case "extract": {
       assertAllowedOptions(action, options, [
-        "repository", "runner", "approve-plan", "approve-manifest", "limit", "format", "session",
+        "repository", "runner", "approve-plan", "approve-manifest", "limit", "format", "request",
       ]);
       if (rest.length > 0) throw unexpectedPositional(action, rest[0]);
       if (options["approve-plan"] !== undefined && options["approve-manifest"] !== undefined) {
@@ -255,6 +260,22 @@ export function parseMemoryInvocation(positionals, options) {
           "TS_USAGE_OPTION_CONFLICT",
           "memory extract accepts only one of --approve-plan or --approve-manifest.",
           "Pass a single authorization digest.",
+        );
+      }
+      if ((options["approve-plan"] !== undefined || options["approve-manifest"] !== undefined) &&
+          options.request !== undefined) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_CONFLICT",
+          "memory extract approval cannot be combined with --request.",
+          "Approve the stored plan by digest alone; use --request only to create a new preview.",
+        );
+      }
+      if (options["approve-plan"] === undefined && options["approve-manifest"] === undefined &&
+          options.request === undefined) {
+        throw memoryDiagnostic(
+          "TS_USAGE_OPTION_DEPENDENCY",
+          "memory extract requires --request <file|-> when creating a new plan.",
+          "Provide an explicit Insights time window and optional filters in the request.",
         );
       }
       let limit = 1;
@@ -274,7 +295,7 @@ export function parseMemoryInvocation(positionals, options) {
         runner: parseRunner(action, options),
         approvePlan: options["approve-plan"],
         approveManifest: options["approve-manifest"],
-        session: options.session,
+        requestSource: options.request,
         limit,
         format: parseFormat(action, options),
       };
@@ -422,17 +443,36 @@ async function openMemoryContext(invocation, options) {
       memoryStateUuid: opened.memoryStateUuid,
       binding, rootRealpath,
       originSecret: state.originSecret,
+      insightsReader: null,
       owner: binding === null
         ? null
         : { repositoryKey: binding.repositoryKey, worktreeKey: binding.worktreeKey },
       async close() {
-        await engine.close();
+        try {
+          await this.insightsReader?.close();
+        } finally {
+          await engine.close();
+        }
       },
     };
   } catch (error) {
     await engine.close();
     throw error;
   }
+}
+
+function memoryInsightsReader(context, options) {
+  if (context.insightsReader === null) {
+    const createReader = options.createInsightsReader ?? createInsightsQueryReader;
+    context.insightsReader = createReader({
+      paths: context.paths,
+      originSecretEpoch: context.state.originSecretEpoch,
+      runtimeOptions: options.runtimeOptions,
+      childEnv: options.childEnv,
+      timeoutMs: options.timeoutMs,
+    });
+  }
+  return context.insightsReader;
 }
 
 function sameFileIdentity(left, right) {
@@ -1160,49 +1200,47 @@ async function runReverifyRunner(invocation, options) {
 // extract (D1 authorization gate + two-phase runner pipeline)
 // ---------------------------------------------------------------------------
 
-async function readSessionBundle(invocation, options) {
-  if (invocation.session === undefined) {
+async function readMemoryExtractionRequest(invocation, options) {
+  if (invocation.requestSource === undefined) {
     throw memoryDiagnostic(
       "TS_USAGE_OPTION_DEPENDENCY",
-      "memory extract requires --session <file> in Phase 1.",
-      "Phase 1 reads one already-exported memory session bundle JSON; pass it with --session.",
+      "memory extract requires --request <file|-> when creating a new plan.",
+      "Provide an explicit Insights time window and optional filters in the request.",
     );
   }
-  const cwd = invocation.repository ?? options.cwd ?? process.cwd();
-  let raw;
-  try {
-    raw = await readFile(path.resolve(cwd, invocation.session), "utf8");
-  } catch {
-    throw memoryDiagnostic(
-      "TS_INPUT_READ_FAILED",
-      "Unable to read the --session bundle.",
-      "Pass a readable memory session bundle JSON file.",
-    );
-  }
-  let bundle;
-  try {
-    bundle = JSON.parse(raw);
-  } catch {
-    throw memoryDiagnostic("TS_INPUT_INVALID_JSON", "The --session bundle is not valid JSON.",
-      "Provide a JSON object with { sessionId, turns }.");
-  }
-  if (bundle === null || typeof bundle !== "object" || !Array.isArray(bundle.turns) ||
-      bundle.turns.length === 0) {
-    throw memoryDiagnostic(
-      "TS_INPUT_SCHEMA_INVALID",
-      "The --session bundle must be an object with a non-empty turns array.",
-      "See the Phase 1 memory session bundle shape: { sessionId, project?, turns: [{ events: [{ role, text }] }] }.",
-    );
-  }
-  const sessionId = typeof bundle.sessionId === "string" && bundle.sessionId.length > 0
-    ? bundle.sessionId
-    : sha256Hex(raw);
-  return {
-    sessionId,
-    sessionKey: sha256Hex(sessionId),
-    project: typeof bundle.project === "string" && bundle.project.length > 0 ? bundle.project : null,
-    turns: bundle.turns,
-  };
+  const source = invocation.requestSource === "-"
+    ? "-"
+    : path.resolve(invocation.repository ?? options.cwd ?? process.cwd(), invocation.requestSource);
+  const input = await readInsightsQueryRequest(source, {
+    input: options.input,
+    signal: options.signal,
+  });
+  return normalizeMemoryExtractionRequest(input);
+}
+
+function extractionEvaluatedAt(options) {
+  const milliseconds = typeof options.now === "function" ? options.now() : Date.now();
+  return new Date(milliseconds).toISOString();
+}
+
+async function collectExtractionSelection(context, request, options, evaluatedAt) {
+  const readConfig = options.readInsightsConfig ?? readExistingInsightsConfig;
+  const config = await readConfig({ paths: context.paths });
+  const scope = resolveMemoryInsightsScope({
+    config,
+    privacyContext: context.state.privacyContext,
+    rootRealpath: context.rootRealpath,
+    providers: request.filters.providers,
+    publicRepositoryIdentity: context.binding.publicRepositoryIdentity,
+  });
+  const selection = await collectMemoryInsightsSelection({
+    reader: memoryInsightsReader(context, options),
+    request,
+    scope,
+    evaluatedAt,
+    signal: options.signal,
+  });
+  return { scope, selection };
 }
 
 function summarizePlan(plan) {
@@ -1269,9 +1307,22 @@ function pendingRunnerPlanPath(memoryStateDir, planDigest) {
   return path.join(memoryStateDir, "runner-plans", `${planDigest}.json`);
 }
 
-async function persistPendingRunnerPlan(context, plan, stdinBytes) {
+async function persistPendingRunnerPlan(context, plan, stdinBytes, extraction = null) {
   const parsedPlan = runnerExecutionPlanSchema.parse(plan);
   const buffer = Buffer.from(stdinBytes);
+  let extractionSource;
+  if (extraction !== null) {
+    const request = normalizeMemoryExtractionRequest(extraction.request);
+    const task = extractionTaskSchema.parse(JSON.parse(buffer.toString("utf8")));
+    if (parsedPlan.taskKind !== "extraction" || task.taskId !== parsedPlan.taskId) {
+      throw memoryDiagnostic(
+        "TS_INSIGHTS_STATE_INVALID",
+        "The pending extraction source does not match its runner plan.",
+        "Regenerate the extraction preview from the bound worktree.",
+      );
+    }
+    extractionSource = { request, task };
+  }
   await writePrivateJsonAtomic(
     path.join(context.memoryStateDir, "runner-plans"),
     `${parsedPlan.planDigest}.json`,
@@ -1280,6 +1331,7 @@ async function persistPendingRunnerPlan(context, plan, stdinBytes) {
       owner: context.owner,
       plan: parsedPlan,
       stdinBase64: buffer.toString("base64"),
+      ...(extractionSource === undefined ? {} : { extraction: extractionSource }),
     },
   );
 }
@@ -1315,7 +1367,29 @@ async function loadPendingRunnerPlan(context, planDigest) {
       "Do not authorize it; regenerate the plan from the bound worktree.",
     );
   }
-  return { plan, stdinBytes };
+  let extraction = null;
+  if (artifact.extraction !== undefined) {
+    try {
+      const request = normalizeMemoryExtractionRequest(artifact.extraction.request);
+      const task = extractionTaskSchema.parse(artifact.extraction.task);
+      const stdinTask = extractionTaskSchema.parse(JSON.parse(stdinBytes.toString("utf8")));
+      if (
+        plan.taskKind !== "extraction" ||
+        task.taskId !== plan.taskId ||
+        canonicalJson(task) !== canonicalJson(stdinTask)
+      ) {
+        throw new Error("extraction binding mismatch");
+      }
+      extraction = { request, task };
+    } catch {
+      throw memoryDiagnostic(
+        "TS_INSIGHTS_STATE_INVALID",
+        "A pending Team Memory extraction source failed contract validation.",
+        "Do not authorize it; regenerate the extraction plan from the bound worktree.",
+      );
+    }
+  }
+  return { plan, stdinBytes, extraction };
 }
 
 function pendingRunnerManifestPath(memoryStateDir, manifestDigest) {
@@ -1376,42 +1450,158 @@ async function recordRunnerAuthorization(context, plan, { via, manifestDigest = 
   });
 }
 
-function buildExtractionArtifacts(context, bundle, options) {
-  const chunks = chunkSession({ turns: bundle.turns });
+function buildExtractionArtifacts(context, selection, options) {
   const provider = "claude";
   const model = options.runnerModel ?? process.env.THREADSHARE_MEMORY_RUNNER_MODEL ?? "claude-latest";
   const endpoint = "api.anthropic.com";
   const profile = loadRunnerProfile(RUNNER_ADAPTERS.claude);
-  const artifacts = chunks.map((chunk, index) => {
-    const evidence = buildEvidenceCatalog({ deliveryEdges: [], chunk });
-    const taskId = `extract-${bundle.sessionKey.slice(0, 16)}-${index}`;
-    const { task, stdinBytes } = buildExtractionTask({
-      taskId,
-      lease: { holder: "threadshare-memory-cli", expiresAt: 0 },
-      databaseUuid: context.memoryStateUuid,
-      owner: context.owner,
-      session: { project: bundle.project, repositoryKey: context.owner.repositoryKey, timeWindow: null },
-      chunk,
-      evidenceCatalog: evidence.catalog,
-      turnRevisions: chunk.turnRevisions,
-      payloadDigests: collectPayloadDigests(chunk),
-      deliveryEdgeRevisions: evidence.deliveryEdgeRevisions,
-      snapshotSeq: STABLE_SNAPSHOT_SEQ,
-      evaluatedAt: STABLE_EVALUATED_AT,
-    });
-    const plan = buildExecutionPlan({
-      taskKind: "extraction",
-      taskId,
-      stdinBytes,
-      profile,
-      provider,
-      model,
-      endpoint,
-    });
-    const chunkRef = `${bundle.sessionKey}:${chunk.turnRange.start}:${chunk.turnRange.end}:${chunk.chunkDigest}`;
-    return { taskId, chunkRef, sessionKey: bundle.sessionKey, chunk, evidence, task, stdinBytes, plan };
+  const artifacts = [];
+  for (const session of selection.sessions) {
+    const chunks = chunkSession({ turns: session.turns });
+    for (const chunk of chunks) {
+      const evidence = buildEvidenceCatalog({ deliveryEdges: session.deliveryEdges, chunk });
+      const selectionBinding = {
+        requestDigest: selection.requestDigest,
+        resultSetDigest: selection.resultSetDigest,
+        sourceBindingDigest: session.sourceBindingDigest,
+      };
+      const identityDigest = sha256Hex(canonicalJson({
+        sessionKey: session.sessionKey,
+        chunkDigest: chunk.chunkDigest,
+        turnRange: chunk.turnRange,
+        selection: selectionBinding,
+      }));
+      const taskInput = {
+        lease: { holder: "threadshare-memory-cli", expiresAt: 0 },
+        databaseUuid: selection.databaseUuid,
+        owner: context.owner,
+        session: {
+          project: session.project,
+          repositoryKey: context.owner.repositoryKey,
+          timeWindow: session.timeWindow,
+        },
+        chunk,
+        evidenceCatalog: evidence.catalog,
+        selection: selectionBinding,
+        turnRevisions: chunk.turnRevisions,
+        payloadDigests: collectPayloadDigests(chunk),
+        deliveryEdgeRevisions: evidence.deliveryEdgeRevisions,
+        snapshotSeq: selection.snapshotSeq,
+        evaluatedAt: selection.evaluatedAt,
+      };
+      const preview = buildExtractionTask({
+        ...taskInput,
+        taskId: `extract-${identityDigest}`,
+      });
+      const taskId = `extract-${preview.task.binding.sourceInputDigest}`;
+      const chunkRef = [
+        session.sessionKey,
+        chunk.turnRange.start,
+        chunk.turnRange.end,
+        preview.task.binding.sourceInputDigest,
+      ].join(":");
+      const { task, stdinBytes } = buildExtractionTask({
+        ...taskInput,
+        taskId,
+      });
+      const plan = buildExecutionPlan({
+        taskKind: "extraction",
+        taskId,
+        stdinBytes,
+        profile,
+        provider,
+        model,
+        endpoint,
+      });
+      artifacts.push({
+        taskId,
+        chunkRef,
+        sessionKey: session.sessionKey,
+        chunk,
+        evidence,
+        task,
+        stdinBytes,
+        plan,
+      });
+    }
+  }
+  return { profile, provider, model, endpoint, artifacts, selection };
+}
+
+async function planExtractionArtifacts(context, built, limit) {
+  const planned = await memoryPlanTasks(context.engine, {
+    ...context.owner,
+    chunks: built.artifacts.map((artifact) => ({
+      chunkRef: artifact.chunkRef,
+      sessionKey: artifact.sessionKey,
+      turnRange: `${artifact.chunk.turnRange.start}-${artifact.chunk.turnRange.end}`,
+      chunkDigest: artifact.chunk.chunkDigest,
+      provenanceSnapshotSeq: built.selection.snapshotSeq,
+    })),
+    tasks: built.artifacts.map((artifact) => ({
+      taskId: artifact.taskId,
+      kind: "extraction",
+      chunkRef: artifact.chunkRef,
+      binding: artifact.task.binding,
+    })),
   });
-  return { profile, provider, model, endpoint, artifacts };
+  const claimable = new Set(planned.tasks
+    .filter((task) => task.claimable)
+    .map((task) => task.taskId));
+  return built.artifacts.filter((artifact) => claimable.has(artifact.taskId)).slice(0, limit);
+}
+
+async function persistExtractionPlans(context, artifacts, request) {
+  for (const artifact of artifacts) {
+    await persistPendingRunnerPlan(context, artifact.plan, artifact.stdinBytes, {
+      request,
+    });
+  }
+  const manifest = artifacts.length > 1
+    ? buildAuthorizationManifest(artifacts.map((artifact) => artifact.plan))
+    : null;
+  if (manifest !== null) await persistPendingRunnerManifest(context, manifest);
+  return manifest;
+}
+
+function extractionInputMatches(storedTask, currentTask) {
+  return storedTask.taskId === currentTask.taskId &&
+    storedTask.binding.databaseUuid === currentTask.binding.databaseUuid &&
+    storedTask.binding.sourceInputDigest === currentTask.binding.sourceInputDigest &&
+    canonicalJson(storedTask.binding.selection) === canonicalJson(currentTask.binding.selection) &&
+    ownerMatches(storedTask.binding.owner, currentTask.binding.owner);
+}
+
+async function revalidatePendingExtraction(context, pending, options) {
+  if (pending.extraction === null || pending.plan.taskKind !== "extraction") {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_STATE_INVALID",
+      "The pending extraction plan has no bound Insights source.",
+      "Do not authorize it; regenerate the extraction preview.",
+    );
+  }
+  const evaluatedAt = extractionEvaluatedAt(options);
+  const { selection } = await collectExtractionSelection(
+    context,
+    pending.extraction.request,
+    options,
+    evaluatedAt,
+  );
+  const current = buildExtractionArtifacts(context, selection, options).artifacts
+    .find((artifact) => artifact.taskId === pending.plan.taskId);
+  if (current === undefined || !extractionInputMatches(pending.extraction.task, current.task)) {
+    throw memoryDiagnostic(
+      "TS_INSIGHTS_PAYLOAD_CHANGED",
+      "The Insights Turns or Delivery Trace bound to this extraction plan changed.",
+      "Run memory extract with the original --request to preview and approve a new plan.",
+    );
+  }
+  return {
+    ...current,
+    task: pending.extraction.task,
+    stdinBytes: pending.stdinBytes,
+    plan: pending.plan,
+  };
 }
 
 function candidateIdsFor(taskId, draftBatch) {
@@ -1460,6 +1650,7 @@ async function deliverExtraction(
   conformance,
   options,
   authorization,
+  revalidate = null,
 ) {
   await memoryPlanTasks(context.engine, {
     ...context.owner,
@@ -1468,13 +1659,13 @@ async function deliverExtraction(
       sessionKey: artifact.sessionKey,
       turnRange: `${artifact.chunk.turnRange.start}-${artifact.chunk.turnRange.end}`,
       chunkDigest: artifact.chunk.chunkDigest,
-      provenanceSnapshotSeq: STABLE_SNAPSHOT_SEQ,
+      provenanceSnapshotSeq: artifact.task.binding.provenance.snapshotSeq,
     }],
     tasks: [{
       taskId: artifact.taskId,
       kind: "extraction",
       chunkRef: artifact.chunkRef,
-      binding: { owner: context.owner },
+      binding: artifact.task.binding,
     }],
   });
   const claim = await memoryClaimTask(context.engine, {
@@ -1492,17 +1683,28 @@ async function deliverExtraction(
     signingKey: context.originSecret,
   });
   const draftBatch = candidateDraftBatchSchema.parse(JSON.parse(execution.stdout.toString("utf8")));
-  const candidateIds = candidateIdsFor(artifact.taskId, draftBatch);
+  if (
+    draftBatch.taskId !== artifact.task.taskId ||
+    canonicalJson(draftBatch.binding) !== canonicalJson(artifact.task.binding)
+  ) {
+    throw memoryDiagnostic(
+      "TS_INPUT_SCHEMA_INVALID",
+      "The extraction runner did not echo the authorized task binding.",
+      "Treat the runner result as failed; do not submit candidates from another input.",
+    );
+  }
+  const currentArtifact = artifact;
+  const candidateIds = candidateIdsFor(currentArtifact.taskId, draftBatch);
   const derived = deriveEvidenceAssessments({
     draftBatch,
-    internalIndex: artifact.evidence.internalIndex,
+    internalIndex: currentArtifact.evidence.internalIndex,
     candidateIds,
   });
   if (derived.assessments.length === 0) {
     throw memoryDiagnostic(
       "TS_OPERATION_FAILED",
       "The extraction runner produced no citable statements.",
-      "Inspect the session bundle and re-run.",
+      "Inspect the selected Insights Turns and re-run with a narrower request if needed.",
     );
   }
   const citationsByStatement = new Map(
@@ -1516,7 +1718,7 @@ async function deliverExtraction(
       priority: candidate.priority,
       confidence: candidate.confidence,
       scene: candidate.scene,
-      reviewStatements: buildReviewStatements(candidate, artifact),
+      reviewStatements: buildReviewStatements(candidate, currentArtifact),
     },
     searchableText: candidate.content.slice(0, 1024),
   }));
@@ -1535,7 +1737,7 @@ async function deliverExtraction(
     }
   }
   const submission = {
-    taskId: artifact.taskId,
+    taskId: currentArtifact.taskId,
     claimToken: claim.claimToken,
     responseDigest: sha256Hex(canonicalJson(draftBatch)),
     drafts: drafts.filter((d) => submittedIds.has(d.candidateId)),
@@ -1553,8 +1755,46 @@ async function deliverExtraction(
       revision: a.revision,
     })),
   };
-  const accepted = await memorySubmitExtraction(context.engine, submission);
+  const accepted = revalidate === null
+    ? await memorySubmitExtraction(context.engine, submission)
+    : await withInsightsWriterLock(context.paths, async () => {
+        await revalidate();
+        return memorySubmitExtraction(context.engine, submission);
+      }, options.writerLockOptions);
   return { draftBatch, candidateIds, accepted, drafts: submission.drafts };
+}
+
+async function deliverPendingExtraction(
+  context,
+  profile,
+  pending,
+  approvedPlan,
+  conformance,
+  options,
+  authorization,
+) {
+  const artifact = await revalidatePendingExtraction(context, pending, options);
+  const extraction = await deliverExtraction(
+    context,
+    profile,
+    artifact,
+    approvedPlan,
+    conformance,
+    options,
+    authorization,
+    () => revalidatePendingExtraction(context, pending, options),
+  );
+  const adjudication = await prepareAdjudication(context, profile, artifact, extraction);
+  return {
+    delivered: {
+      taskId: artifact.taskId,
+      taskKind: "extraction",
+      candidates: extraction.accepted.candidates.length,
+      candidateGeneration: extraction.accepted.candidateGeneration,
+      adjudication: "pending",
+    },
+    adjudication,
+  };
 }
 
 async function prepareAdjudication(context, profile, artifact, extractionResult) {
@@ -1727,36 +1967,59 @@ async function deliverStoredManifest(context, profile, manifest, options) {
   );
   const delivered = [];
   const failed = [];
+  const pendingAdjudications = [];
   for (const entry of approvedManifest.plans) {
     try {
       const pending = await loadPendingRunnerPlan(context, entry.planDigest);
-      if (pending === null || pending.plan.taskKind !== "adjudication") {
+      if (pending === null) {
         throw memoryDiagnostic(
           "TS_INPUT_READ_FAILED",
-          `No pending adjudication plan matches ${entry.planDigest}.`,
-          "Regenerate the adjudication manifest; approvals never extend to missing or future plans.",
+          `No pending runner plan matches ${entry.planDigest}.`,
+          "Regenerate the manifest; approvals never extend to missing or future plans.",
         );
       }
       const approvedPlan = approvePlanFromManifest(pending.plan, approvedManifest);
-      const outcome = await deliverPendingAdjudication(
-        context,
-        profile,
-        pending,
-        approvedPlan,
-        conformance,
-        options,
-        { via: "manifest", manifestDigest: approvedManifest.manifestDigest },
-      );
-      delivered.push({
-        taskId: pending.plan.taskId,
-        taskKind: "adjudication",
-        adjudication: outcome.status,
-      });
+      const authorization = {
+        via: "manifest",
+        manifestDigest: approvedManifest.manifestDigest,
+      };
+      if (pending.plan.taskKind === "extraction") {
+        const result = await deliverPendingExtraction(
+          context, profile, pending, approvedPlan, conformance, options, authorization,
+        );
+        delivered.push(result.delivered);
+        pendingAdjudications.push(result.adjudication);
+      } else if (pending.plan.taskKind === "adjudication") {
+        const outcome = await deliverPendingAdjudication(
+          context, profile, pending, approvedPlan, conformance, options, authorization,
+        );
+        delivered.push({
+          taskId: pending.plan.taskId,
+          taskKind: "adjudication",
+          adjudication: outcome.status,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        });
+      } else {
+        throw memoryDiagnostic(
+          "TS_INPUT_SCHEMA_INVALID",
+          `Unsupported pending task kind ${pending.plan.taskKind}.`,
+          "Regenerate the pending Team Memory plan.",
+        );
+      }
     } catch (error) {
       failed.push(failedRunnerPlan(entry, error));
     }
   }
-  return { delivered, failed };
+  const nextManifest = pendingAdjudications.length > 1
+    ? buildAuthorizationManifest(pendingAdjudications.map((artifact) => artifact.plan))
+    : null;
+  if (nextManifest !== null) await persistPendingRunnerManifest(context, nextManifest);
+  return {
+    delivered,
+    failed,
+    plans: pendingAdjudications.map((artifact) => summarizePlan(artifact.plan)),
+    manifestDigest: nextManifest?.manifestDigest ?? null,
+  };
 }
 
 async function runExtract(invocation, options) {
@@ -1766,25 +2029,44 @@ async function runExtract(invocation, options) {
     const manifestDigest = invocation.approveManifest;
     const profile = loadRunnerProfile(RUNNER_ADAPTERS.claude);
 
-    // Adjudication plans are materialized only after extraction. They are kept
-    // in the private sidecar and require a distinct later approval.
     if (authorizedDigest !== undefined) {
       const pending = await loadPendingRunnerPlan(context, authorizedDigest);
-      if (pending !== null) {
-        if (pending.plan.taskKind !== "adjudication") {
-          throw memoryDiagnostic(
-            "TS_INPUT_SCHEMA_INVALID",
-            "The stored runner plan is not an adjudication plan.",
-            "Regenerate the pending plan from `threadshare memory extract`.",
-          );
-        }
-        const approvedPlan = approvePlan(pending.plan, { approvedDigest: authorizedDigest });
-        const conformance = await ensureConformance(
+      if (pending === null) {
+        throw memoryDiagnostic(
+          "TS_INPUT_READ_FAILED",
+          `No pending runner plan matches ${authorizedDigest}.`,
+          "Run memory extract with --request to generate the plan before authorizing it.",
+        );
+      }
+      const approvedPlan = approvePlan(pending.plan, { approvedDigest: authorizedDigest });
+      const conformance = await ensureConformance(
+        context,
+        profile,
+        RUNNER_ADAPTERS.claude,
+        options,
+      );
+      if (pending.plan.taskKind === "extraction") {
+        const result = await deliverPendingExtraction(
           context,
           profile,
-          RUNNER_ADAPTERS.claude,
+          pending,
+          approvedPlan,
+          conformance,
           options,
+          { via: "digest" },
         );
+        return {
+          action: "extract",
+          authorized: true,
+          dataSource: "pending-insights-retrospective",
+          delivered: [result.delivered],
+          failed: [],
+          plans: [summarizePlan(result.adjudication.plan)],
+          manifestDigest: null,
+          note: "Extraction completed. No adjudication input was delivered; approve the listed plan in a separate invocation.",
+        };
+      }
+      if (pending.plan.taskKind === "adjudication") {
         const outcome = await deliverPendingAdjudication(
           context,
           profile,
@@ -1809,112 +2091,58 @@ async function runExtract(invocation, options) {
           manifestDigest: null,
         };
       }
+      throw memoryDiagnostic(
+        "TS_INPUT_SCHEMA_INVALID",
+        `Unsupported pending task kind ${pending.plan.taskKind}.`,
+        "Regenerate the pending Team Memory plan.",
+      );
     }
 
     if (manifestDigest !== undefined) {
       const storedManifest = await loadPendingRunnerManifest(context, manifestDigest);
-      if (storedManifest !== null) {
-        const result = await deliverStoredManifest(context, profile, storedManifest, options);
-        return {
-          action: "extract",
-          authorized: true,
-          dataSource: "pending-runner-artifact",
-          ...result,
-          plans: [],
-          manifestDigest: null,
-        };
+      if (storedManifest === null) {
+        throw memoryDiagnostic(
+          "TS_INPUT_READ_FAILED",
+          `No pending runner manifest matches ${manifestDigest}.`,
+          "Run memory extract with --request to generate the manifest before authorizing it.",
+        );
       }
-    }
-
-    const bundle = await readSessionBundle(invocation, options);
-    const built = buildExtractionArtifacts(context, bundle, options);
-    const selected = built.artifacts.slice(0, invocation.limit);
-
-    // D1: without an explicit approval digest, print the pending plan(s) and
-    // stop. No runner process is ever spawned in this branch.
-    if (authorizedDigest === undefined && manifestDigest === undefined) {
-      const manifest = selected.length > 1
-        ? buildAuthorizationManifest(selected.map((a) => a.plan))
-        : null;
+      const result = await deliverStoredManifest(context, profile, storedManifest, options);
       return {
         action: "extract",
-        authorized: false,
-        dataSource: "phase1-session-bundle",
-        plans: selected.map((a) => summarizePlan(a.plan)),
-        manifestDigest: manifest?.manifestDigest ?? null,
-        note: "No transcript was delivered. Re-run with --approve-plan <digest> (or --approve-manifest <digest>) to authorize delivery.",
+        authorized: true,
+        dataSource: "pending-runner-artifact",
+        ...result,
+        ...(result.plans.length === 0 ? {} : {
+          note: "Extraction completed. No adjudication input was delivered; approve the listed next-stage plans separately.",
+        }),
       };
     }
 
-    // Resolve which plans this invocation authorizes.
-    let authorizedPlans;
-    if (manifestDigest !== undefined) {
-      const manifest = buildAuthorizationManifest(selected.map((artifact) => artifact.plan));
-      if (manifest.manifestDigest !== manifestDigest) {
-        throw memoryDiagnostic(
-          "TS_USAGE_INVALID_VALUE",
-          "The --approve-manifest digest does not match the pending manifest.",
-          "Re-run without approval to print the current manifest digest.",
-        );
-      }
-      const approvedManifest = approveManifest(manifest, { approvedDigest: manifestDigest });
-      authorizedPlans = selected.map((artifact) => ({
-        artifact,
-        approvedPlan: approvePlanFromManifest(artifact.plan, approvedManifest),
-        authorization: { via: "manifest", manifestDigest },
-      }));
-    } else {
-      const matching = selected.filter((artifact) => artifact.plan.planDigest === authorizedDigest);
-      authorizedPlans = matching.map((artifact) => ({
-        artifact,
-        approvedPlan: approvePlan(artifact.plan, { approvedDigest: authorizedDigest }),
-        authorization: { via: "digest" },
-      }));
-      if (authorizedPlans.length === 0) {
-        throw memoryDiagnostic(
-          "TS_USAGE_INVALID_VALUE",
-          "The --approve-plan digest does not match any pending extraction plan.",
-          "Re-run without approval to print the current plan digest.",
-        );
-      }
-    }
-
-    const conformance = await ensureConformance(context, built.profile, RUNNER_ADAPTERS.claude, options);
-    const delivered = [];
-    const pendingAdjudications = [];
-    for (const { artifact, approvedPlan, authorization } of authorizedPlans) {
-      const extraction = await deliverExtraction(
-        context,
-        built.profile,
-        artifact,
-        approvedPlan,
-        conformance,
-        options,
-        authorization,
-      );
-      const adjudication = await prepareAdjudication(context, built.profile, artifact, extraction);
-      pendingAdjudications.push(adjudication);
-      delivered.push({
-        taskId: artifact.taskId,
-        taskKind: "extraction",
-        candidates: extraction.accepted.candidates.length,
-        candidateGeneration: extraction.accepted.candidateGeneration,
-        adjudication: "pending",
-      });
-    }
-    const pendingManifest = pendingAdjudications.length > 1
-      ? buildAuthorizationManifest(pendingAdjudications.map((artifact) => artifact.plan))
-      : null;
-    if (pendingManifest !== null) await persistPendingRunnerManifest(context, pendingManifest);
+    const request = await readMemoryExtractionRequest(invocation, options);
+    const evaluatedAt = extractionEvaluatedAt(options);
+    const { selection } = await collectExtractionSelection(
+      context, request, options, evaluatedAt,
+    );
+    const built = buildExtractionArtifacts(context, selection, options);
+    const selected = await planExtractionArtifacts(context, built, invocation.limit);
+    const manifest = await persistExtractionPlans(context, selected, request);
     return {
       action: "extract",
-      authorized: true,
-      dataSource: "phase1-session-bundle",
-      delivered,
-      failed: [],
-      plans: pendingAdjudications.map((artifact) => summarizePlan(artifact.plan)),
-      manifestDigest: pendingManifest?.manifestDigest ?? null,
-      note: "Extraction completed. No adjudication input was delivered; approve the listed plan or manifest digest in a separate invocation.",
+      authorized: false,
+      dataSource: "insights-retrospective",
+      plans: selected.map((artifact) => summarizePlan(artifact.plan)),
+      manifestDigest: manifest?.manifestDigest ?? null,
+      selection: {
+        requestDigest: selection.requestDigest,
+        resultSetDigest: selection.resultSetDigest,
+        matchedSessions: selection.sessions.length,
+        rejectedSessions: selection.rejected.length,
+        pendingChunks: selected.length,
+      },
+      note: selected.length === 0
+        ? "No claimable chunks matched the request. No transcript was delivered."
+        : "No transcript was delivered. Re-run with --approve-plan <digest> (or --approve-manifest <digest>) to authorize exactly the listed delivery.",
     };
   } finally {
     await context.close();
@@ -2009,7 +2237,12 @@ export function formatMemoryCommandResult(result, invocation) {
       break;
     case "extract":
       if (!result.authorized) {
-        line(lines, `Pending extraction plan(s); data source: ${result.dataSource}.`);
+        line(lines, result.plans.length === 0
+          ? `No pending extraction plans; data source: ${result.dataSource}.`
+          : `Pending extraction plan(s); data source: ${result.dataSource}.`);
+        if (result.selection !== undefined) {
+          line(lines, `  matched sessions=${result.selection.matchedSessions} rejected=${result.selection.rejectedSessions} pending chunks=${result.selection.pendingChunks}`);
+        }
         for (const plan of result.plans) {
           line(lines, `  ${plan.taskKind} plan ${plan.planDigest} ${plan.provider}/${plan.model} ${plan.bytesToSend} bytes retention=${plan.providerRetention}`);
         }

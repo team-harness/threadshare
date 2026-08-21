@@ -28,12 +28,11 @@ function extractionInvocation(repository, overrides = {}) {
 
 async function extractAndAdjudicate(fixture) {
   const pending = await executeMemoryCommand(
-    extractionInvocation(fixture.repository, { session: "session.json" }),
+    extractionInvocation(fixture.repository, { request: "memory-request.json" }),
     fixture.options,
   );
   const extracted = await executeMemoryCommand(
     extractionInvocation(fixture.repository, {
-      session: "session.json",
       "approve-plan": pending.plans[0].planDigest,
     }),
     fixture.options,
@@ -58,7 +57,7 @@ test("cross-chunk recall works and manifest input drift invalidates only one pla
     ],
   });
   const pending = await executeMemoryCommand(
-    extractionInvocation(fixture.repository, { session: "session.json", limit: "2" }),
+    extractionInvocation(fixture.repository, { request: "memory-request.json", limit: "2" }),
     fixture.options,
   );
   assert.equal(pending.plans.length, 2);
@@ -66,7 +65,6 @@ test("cross-chunk recall works and manifest input drift invalidates only one pla
 
   const extracted = await executeMemoryCommand(
     extractionInvocation(fixture.repository, {
-      session: "session.json",
       limit: "2",
       "approve-manifest": pending.manifestDigest,
     }),

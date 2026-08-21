@@ -1128,7 +1128,7 @@ async function main() {
       "approve-manifest": options["approve-manifest"],
       plan: options.plan,
       provider: options.provider,
-      session: options.session,
+      request: options.request,
     };
     const controller = new AbortController();
     const onSignal = () => controller.abort();

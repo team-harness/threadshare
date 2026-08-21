@@ -518,6 +518,7 @@ function searchFilters(overrides = {}) {
   return {
     providers: [],
     projectKeys: [],
+    sessionKeys: [],
     observedAtOrAfterUnixMs: null,
     observedBeforeUnixMs: null,
     toolCapabilityKeys: [],
@@ -842,6 +843,7 @@ test("turn search requests canonicalize bounded filters and reject broad queries
     query: "Bash timeout",
     filters: searchFilters({
       providers: ["codex", "claude"],
+      sessionKeys: ["4".repeat(64), "3".repeat(64)],
       toolCapabilityKeys: ["2".repeat(64), "1".repeat(64)],
       resultEvidence: ["unknown", "provider-completed"],
       capabilityTerminalStates: ["failed", "completed"],
@@ -850,6 +852,7 @@ test("turn search requests canonicalize bounded filters and reject broad queries
     nowUnixMs: "1786323723000",
   });
   assert.deepEqual(request.filters.providers, ["claude", "codex"]);
+  assert.deepEqual(request.filters.sessionKeys, ["3".repeat(64), "4".repeat(64)]);
   assert.deepEqual(request.filters.toolCapabilityKeys, ["1".repeat(64), "2".repeat(64)]);
   assert.deepEqual(request.filters.resultEvidence, ["provider-completed", "unknown"]);
   assert.deepEqual(request.filters.capabilityTerminalStates, ["completed", "failed"]);

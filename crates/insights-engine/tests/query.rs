@@ -275,6 +275,30 @@ fn text_search_intersects_tool_filter_before_ranking() {
 }
 
 #[test]
+fn session_key_filter_is_applied_before_search_results_are_bounded() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage.apply_session_facts(fixture_delta()).unwrap();
+
+    let selected = storage
+        .search(SearchRequest {
+            session_keys: vec!["a".repeat(64)],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert_eq!(selected.results.len(), 1);
+
+    let absent = storage
+        .search(SearchRequest {
+            session_keys: vec!["0".repeat(64)],
+            now_unix_ms: 1_786_320_000_000,
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert!(absent.results.is_empty());
+}
+
+#[test]
 fn filter_arrays_must_be_bounded_and_unique() {
     let duplicate = SearchRequest {
         query: "needle".to_owned(),

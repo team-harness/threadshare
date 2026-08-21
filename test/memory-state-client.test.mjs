@@ -198,12 +198,20 @@ test("memory ops run end-to-end against a real engine", {
     skippedChunks: 0,
     insertedTasks: 2,
     skippedTasks: 0,
+    tasks: [
+      { taskId: "task-extract-1", status: "pending", claimable: true },
+      { taskId: "task-adjudicate-1", status: "pending", claimable: true },
+    ],
   });
   assert.deepEqual(await memoryPlanTasks(client, plan), {
     insertedChunks: 0,
     skippedChunks: 1,
     insertedTasks: 0,
     skippedTasks: 2,
+    tasks: [
+      { taskId: "task-extract-1", status: "pending", claimable: true },
+      { taskId: "task-adjudicate-1", status: "pending", claimable: true },
+    ],
   });
 
   // claim-task issues a lease and a hex32 claim token.

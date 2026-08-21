@@ -452,7 +452,7 @@ test("renderTypedFact rejects non-allowlisted kinds and invalid params", () => {
 // ExtractionTask assembly + digest sensitivity
 // ---------------------------------------------------------------------------
 
-function extractionFixture({ turnText = "fix the bug", taskId = "task-extract-1", lease = { holder: "cli", expiresAt: 1000 }, snapshotSeq = "42", evaluatedAt = "2026-08-20T00:00:00.000Z" } = {}) {
+function extractionFixture({ turnText = "fix the bug", taskId = "task-extract-1", lease = { holder: "cli", expiresAt: 1000 }, snapshotSeq = "42", evaluatedAt = "2026-08-20T00:00:00.000Z", requestDigest = HEX("2") } = {}) {
   const [chunk] = chunkSession({
     turns: [
       { turnIndex: 3, turnRevision: HEX("a"), events: [{ role: "user", text: turnText }] },
@@ -490,6 +490,11 @@ function extractionFixture({ turnText = "fix the bug", taskId = "task-extract-1"
     },
     chunk,
     evidenceCatalog: evidence.catalog,
+    selection: {
+      requestDigest,
+      resultSetDigest: HEX("3"),
+      sourceBindingDigest: HEX("4"),
+    },
     deliveryEdgeRevisions: evidence.deliveryEdgeRevisions,
     snapshotSeq,
     evaluatedAt,
@@ -506,6 +511,7 @@ test("buildExtractionTask emits a schema-valid task with canonical stdin bytes",
   assert.deepEqual(task.binding.turnRevisions, [HEX("a"), HEX("b")]);
   assert.deepEqual(task.binding.payloadDigests, [HEX("e")]);
   assert.deepEqual(task.binding.deliveryEdgeRevisions, [HEX("1")]);
+  assert.equal(task.binding.selection.requestDigest, HEX("2"));
   assert.ok(task.chunk.transcript.startsWith(TRANSCRIPT_PREAMBLE));
   // Same inputs -> byte-identical stdin.
   assert.equal(extractionFixture().stdinBytes, stdinBytes);
@@ -527,6 +533,10 @@ test("sourceInputDigest reacts to transcript bytes and ignores unrelated fields"
   assert.notEqual(
     base.task.binding.sourceInputDigest,
     changedTranscript.task.binding.sourceInputDigest);
+  assert.notEqual(
+    base.task.binding.sourceInputDigest,
+    extractionFixture({ requestDigest: HEX("f") }).task.binding.sourceInputDigest,
+  );
 
   const unrelated = extractionFixture({
     taskId: "task-extract-2",
@@ -547,6 +557,7 @@ test("computeSourceInputDigest is exported and matches the assembled binding", (
     turnRevisions: task.binding.turnRevisions,
     payloadDigests: task.binding.payloadDigests,
     deliveryEdgeRevisions: task.binding.deliveryEdgeRevisions,
+    selection: task.binding.selection,
     promptVersion: task.binding.promptVersion,
     schemaVersion: task.binding.schemaVersion,
     chunkerVersion: task.binding.chunkerVersion,

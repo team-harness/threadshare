@@ -738,6 +738,7 @@ test("search request normalization is exact, bounded, and preserves explicit UTC
     filters: {
       providers: ["codex"],
       projectKeys: [KEY],
+      sessionKeys: [SESSION_KEY],
       toolCapabilityKeys: [KEY],
       skillCapabilityKeys: [],
       observedAtOrAfter: "2026-01-01T00:00:00.000Z",
@@ -753,6 +754,7 @@ test("search request normalization is exact, bounded, and preserves explicit UTC
   assert.equal(request.orderBy, "observed-desc");
   assert.equal(request.filters.observedAtOrAfterUnixMs, "1767225600000");
   assert.equal(request.filters.observedBeforeUnixMs, "1769904000000");
+  assert.deepEqual(request.filters.sessionKeys, [SESSION_KEY]);
   assert.equal(Object.isFrozen(request.filters), true);
 
   for (const invalid of [

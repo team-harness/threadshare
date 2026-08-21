@@ -216,15 +216,31 @@ Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导�
 
 ### 构建团队共享记忆
 
-Team Memory 把已导出的本机会话 bundle 转成经过审核、归属于仓库的共享记忆。Phase 1 需要显式传入
-bundle 文件，尚不会自动遍历全部 Insights Session。命令和 bundle 契约以
-`threadshare memory --help` 为准。
+Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归属于仓库的共享记忆。它不会默认回看
+全部 Insights：每次生成新计划都必须提供明确的 UTC 时间窗（最长 366 天），还可按全文、provider、
+opaque session、Tool、Skill、结果证据和能力终态过滤。Threadshare 始终强制叠加当前 worktree 的
+project scope 与 `hard-sealed`，调用方不能覆盖这两个边界。
+
+```json
+{
+  "format": "threadshare-memory-extraction-request@v1",
+  "window": {
+    "after": "2026-08-01T00:00:00.000Z",
+    "before": "2026-08-22T00:00:00.000Z"
+  },
+  "query": "发布验证",
+  "filters": {
+    "providers": ["claude", "codex"],
+    "resultEvidence": ["provider-completed"]
+  }
+}
+```
 
 ```bash
 threadshare memory init
-threadshare memory extract --runner claude --session bundle.json
+threadshare memory extract --runner claude --request memory-filter.json
 # 用户批准上一步展示的精确 extraction plan 后：
-threadshare memory extract --runner claude --session bundle.json --approve-plan <extraction-digest>
+threadshare memory extract --runner claude --approve-plan <extraction-digest>
 # adjudication 是另一次数据发送，必须单独批准：
 threadshare memory extract --runner claude --approve-plan <adjudication-digest>
 threadshare memory review
@@ -236,7 +252,8 @@ threadshare memory assemble --provider claude
 才发送 transcript。`review` 要求真实 TTY 并逐条确认生成的 statement；非交互调用只能查看待审内容，
 不能批准。`promote` 只把净化后的正文写入 `.threadshare/memory/` 并刷新 approved 搜索投影，不会
 stage、commit 或 push。团队成员从 Git 拉取记忆后运行 `assemble`，即可同时刷新 provider 上下文块与
-本机搜索投影。
+本机搜索投影。筛选命中超过 200 个 Turn 时会拒绝，不会静默取前缀；选中的完整 Turn 会注入有界
+Delivery Trace 证据，并在候选提交前复核精确 source binding。无关 snapshot 推进不会让计划失效。
 
 ### 使用其他 Threadshare 服务端
 

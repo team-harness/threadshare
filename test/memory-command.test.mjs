@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -14,9 +14,13 @@ import {
   formatMemoryCommandResult,
   parseMemoryInvocation,
 } from "../src/memory-command.mjs";
+import { executeInsightsCommand, parseInsightsInvocation } from "../src/insights-command.mjs";
 import { parseMemoryEntry } from "../src/memory-format.mjs";
 import { INSIGHTS_E2E_ENGINE, INSIGHTS_E2E_SKIP } from "./helpers/insights-e2e.mjs";
-import { createMemoryCommandFixture } from "./helpers/memory-command-e2e.mjs";
+import {
+  createMemoryCommandFixture,
+  MEMORY_FAKE_PROVIDER_SESSION_ID,
+} from "./helpers/memory-command-e2e.mjs";
 
 const execFileAsync = promisify(execFile);
 const ttyCli = fileURLToPath(new URL("./fixtures/run-threadshare-cli-as-tty.mjs", import.meta.url));
@@ -192,11 +196,48 @@ test("memory extract text exposes every next-stage authorization digest", () => 
   assert.doesNotMatch(output, /undefined/);
 });
 
+test("memory extract requires a filtered Insights request for a new plan", () => {
+  const invocation = parseMemoryInvocation(["memory", "extract"], {
+    repository: "/work/threadshare",
+    runner: "claude",
+    request: "memory-filter.json",
+    format: "json",
+  });
+  assert.equal(invocation.requestSource, "memory-filter.json");
+  assert.equal(invocation.session, undefined);
+
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      repository: "/work/threadshare",
+      runner: "claude",
+      format: "json",
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_DEPENDENCY",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      repository: "/work/threadshare",
+      runner: "claude",
+      session: "bundle.json",
+      format: "json",
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_NOT_ALLOWED",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      runner: "claude",
+      request: "memory-filter.json",
+      "approve-plan": "a".repeat(64),
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_CONFLICT",
+  );
+});
+
 async function extractCandidate(fixture) {
   const pendingInvocation = parseMemoryInvocation(["memory", "extract"], {
     repository: fixture.repository,
     runner: "claude",
-    session: "session.json",
+    request: "memory-request.json",
     format: "json",
   });
   const pending = await executeMemoryCommand(pendingInvocation, fixture.options);
@@ -206,7 +247,6 @@ async function extractCandidate(fixture) {
   const approvedInvocation = parseMemoryInvocation(["memory", "extract"], {
     repository: fixture.repository,
     runner: "claude",
-    session: "session.json",
     format: "json",
     "approve-plan": pending.plans[0].planDigest,
   });
@@ -226,6 +266,123 @@ async function extractCandidate(fixture) {
   assert.equal(adjudicated.delivered[0].adjudication, "applied");
   return { pending, delivered, adjudicated };
 }
+
+test("Insights extraction binds Delivery Trace and advances the chunk cursor only after submit", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  const pending = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      request: "memory-request.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(pending.plans.length, 1);
+  const sidecar = JSON.parse(await readFile(path.join(
+    fixture.options.paths.stateDirectory,
+    "memory",
+    "runner-plans",
+    `${pending.plans[0].planDigest}.json`,
+  ), "utf8"));
+  const taskText = Buffer.from(sidecar.stdinBase64, "base64").toString("utf8");
+  const task = JSON.parse(taskText);
+  assert.notEqual(task.binding.provenance.snapshotSeq, "0");
+  assert.match(task.binding.selection.requestDigest, /^[0-9a-f]{64}$/);
+  assert.equal(task.binding.deliveryEdgeRevisions.length > 0, true);
+  assert.equal(task.evidenceCatalog.some((entry) =>
+    entry.kind === "commit" && entry.display.includes(fixture.commitHash)), true);
+  assert.equal(task.evidenceCatalog.some((entry) =>
+    entry.kind === "path" && entry.display === "path README.md"), true);
+  assert.equal(taskText.includes(MEMORY_FAKE_PROVIDER_SESSION_ID), false);
+
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+      "approve-plan": pending.plans[0].planDigest,
+    }),
+    fixture.options,
+  );
+  const repeated = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      request: "memory-request.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.deepEqual(repeated.plans, []);
+  assert.equal(repeated.selection.pendingChunks, 0);
+});
+
+test("extraction approval rejects a related Insights revision change", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  const pending = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      request: "memory-request.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  await appendFile(fixture.sessionFile, `${[
+    {
+      type: "event_msg",
+      timestamp: "2026-08-10T09:10:00.000Z",
+      payload: { type: "task_started", turn_id: "memory-turn-4" },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-10T09:10:01.000Z",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Add a changed retrospective input" }],
+      },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-08-10T09:10:02.000Z",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "The selected input has changed." }],
+      },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-10T09:10:03.000Z",
+      payload: { type: "task_complete", turn_id: "memory-turn-4" },
+    },
+  ].map((record) => JSON.stringify(record)).join("\n")}\n`);
+  await executeInsightsCommand(
+    parseInsightsInvocation(["insights", "sync"], { format: "json" }),
+    fixture.options,
+  );
+
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "extract"], {
+        repository: fixture.repository,
+        runner: "claude",
+        format: "json",
+        "approve-plan": pending.plans[0].planDigest,
+      }),
+      fixture.options,
+    ),
+    (error) => error?.code === "TS_INSIGHTS_PAYLOAD_CHANGED",
+  );
+});
 
 test("extracted candidates retain reviewable statements and local evidence", {
   skip: INSIGHTS_E2E_SKIP,
@@ -446,7 +603,7 @@ test("adjudication requires a second exact runner-plan approval", {
     parseMemoryInvocation(["memory", "extract"], {
       repository: fixture.repository,
       runner: "claude",
-      session: "session.json",
+      request: "memory-request.json",
       format: "json",
     }),
     fixture.options,
@@ -455,7 +612,6 @@ test("adjudication requires a second exact runner-plan approval", {
     parseMemoryInvocation(["memory", "extract"], {
       repository: fixture.repository,
       runner: "claude",
-      session: "session.json",
       format: "json",
       "approve-plan": pending.plans[0].planDigest,
     }),

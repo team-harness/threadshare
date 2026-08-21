@@ -22,7 +22,7 @@ use crate::memory_protocol::{
     BindRepositoryRequest, CandidateCountsWire, CandidateProjectionWire, CandidateStateWire,
     ChunkCountsWire, ClaimTaskOutcome, ClaimTaskRequest, ConfirmStatementRequest,
     DiscardCandidateRequest, MemorySearchRequest, MemoryStatusOutcome, MemoryStatusRequest,
-    PlanTasksOutcome, PlanTasksRequest, PoolItemWire, PromotionApplyRequest,
+    PlanTasksOutcome, PlanTasksRequest, PlannedTaskStateWire, PoolItemWire, PromotionApplyRequest,
     PromotionApproveRequest, PromotionCountsWire, PromotionPlanRequest, RecallHitWire,
     RecallOutcome, RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire,
     ReviewQueueOutcome, ReviewQueueRequest, SearchItemWire, SearchOutcome,
@@ -1026,6 +1026,23 @@ impl MemoryStorage {
             )?;
             inserted_tasks += changed;
         }
+        let mut planned_tasks = Vec::with_capacity(request.tasks.len());
+        {
+            let mut statement = transaction
+                .prepare("SELECT status, lease_expires_at FROM tasks WHERE task_id=?1")?;
+            for task in &request.tasks {
+                let (status, lease_expires_at): (String, Option<i64>) = statement
+                    .query_row(params![task.task_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                let claimable = status == "pending"
+                    || (status == "claimed"
+                        && lease_expires_at.is_some_and(|expires_at| expires_at < now_unix_ms));
+                planned_tasks.push(PlannedTaskStateWire {
+                    task_id: task.task_id.clone(),
+                    status,
+                    claimable,
+                });
+            }
+        }
         transaction.commit()?;
         self.maintain_wal_after_commit()?;
         Ok(PlanTasksOutcome {
@@ -1033,6 +1050,7 @@ impl MemoryStorage {
             skipped_chunks: request.chunks.len() - inserted_chunks,
             inserted_tasks,
             skipped_tasks: request.tasks.len() - inserted_tasks,
+            tasks: planned_tasks,
         })
     }
 

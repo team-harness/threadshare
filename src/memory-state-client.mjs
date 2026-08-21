@@ -485,6 +485,11 @@ const planTasksResult = z.object({
   skippedChunks: nonNegativeInteger,
   insertedTasks: nonNegativeInteger,
   skippedTasks: nonNegativeInteger,
+  tasks: z.array(z.object({
+    taskId: identifier,
+    status: z.enum(["pending", "claimed", "submitted", "stale"]),
+    claimable: z.boolean(),
+  }).strict()).max(MEMORY_MAX_PAYLOAD_ITEMS),
 }).strict();
 
 const claimTaskResult = z.object({

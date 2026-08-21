@@ -123,6 +123,11 @@ function extractionBinding() {
     databaseUuid: "11111111-2222-4333-8444-555555555555",
     owner: { repositoryKey: HEX("1"), worktreeKey: HEX("2") },
     sourceInputDigest: HEX("9"),
+    selection: {
+      requestDigest: HEX("c"),
+      resultSetDigest: HEX("d"),
+      sourceBindingDigest: HEX("e"),
+    },
     turnRevisions: [HEX("4"), HEX("5"), HEX("6")],
     payloadDigests: [HEX("a")],
     deliveryEdgeRevisions: [HEX("7")],
