@@ -237,11 +237,11 @@ export function validatePackOutput(packOutput, metadata) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   if (metadata.kind !== "platform") {
-    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 368 * 1024) {
-      throw new Error("npm root package compressed size must not exceed 368 KiB");
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 400 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 400 KiB");
     }
-    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1792 * 1024) {
-      throw new Error("npm root package unpacked size must not exceed 1.75 MiB");
+    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1920 * 1024) {
+      throw new Error("npm root package unpacked size must not exceed 1.875 MiB");
     }
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };

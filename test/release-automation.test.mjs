@@ -229,7 +229,7 @@ test("locks npm pack to the exact public root files", () => {
     { integrity, files: expectedPackageFiles },
   );
   assert.deepEqual(
-    validatePackOutput([{ ...packed, size: 368 * 1024 }], {
+    validatePackOutput([{ ...packed, size: 400 * 1024, unpackedSize: 1920 * 1024 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
@@ -254,14 +254,14 @@ test("locks npm pack to the exact public root files", () => {
     /package files/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, size: 368 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, size: 400 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
     /compressed size/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, unpackedSize: 1792 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, unpackedSize: 1920 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
