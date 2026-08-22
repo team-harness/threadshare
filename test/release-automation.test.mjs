@@ -1489,3 +1489,12 @@ test("Engine CI gates all six reproducible target builds on the contract suite",
   assert.match(commands, /> "engine\/\$\{\{ matrix\.target \}\}\/version\.json"/);
   assert.doesNotMatch(source, /secrets\s*(?:\.|\[)|npm publish/i);
 });
+
+test("Linux promotion uses the kernel syscall without a musl renameat2 symbol dependency", async () => {
+  const source = await readFile(
+    path.join(root, "crates", "insights-engine", "src", "memory_promotion.rs"),
+    "utf8",
+  );
+  assert.match(source, /libc::syscall\(\s*libc::SYS_renameat2,/);
+  assert.doesNotMatch(source, /libc::renameat2\(/);
+});
