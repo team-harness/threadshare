@@ -302,11 +302,11 @@ test("usage and activity schemas lock the non-causal aggregate axes", async () =
   }), false);
 });
 
-test("all seven Recipe schemas accept reviewed items and reject unknown fields", async () => {
+test("all eight Recipe schemas accept reviewed items and reject unknown fields", async () => {
   const schemas = await compiledSchemas();
   const validate = schemas.get("threadshare-insights-recipe@v1");
   const recipes = JSON.parse(await readFile(RECIPE_ITEMS_URL, "utf8"));
-  assert.equal(recipes.length, 7);
+  assert.equal(recipes.length, 8);
   for (const { name, item } of recipes) {
     const response = {
       format: "threadshare-insights-recipe@v1",

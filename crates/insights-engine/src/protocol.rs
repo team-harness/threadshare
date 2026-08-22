@@ -167,6 +167,8 @@ pub enum MessageKind {
     InsightsRecipe,
     ReadInsightsDeliveryTrace,
     InsightsDeliveryTrace,
+    MemoryCommand,
+    MemoryResult,
     AbortSession,
     SessionAborted,
     AbortTraceSource,
@@ -228,6 +230,8 @@ impl MessageKind {
             Self::InsightsRecipe => "INSIGHTS_RECIPE",
             Self::ReadInsightsDeliveryTrace => "READ_INSIGHTS_DELIVERY_TRACE",
             Self::InsightsDeliveryTrace => "INSIGHTS_DELIVERY_TRACE",
+            Self::MemoryCommand => "MEMORY_COMMAND",
+            Self::MemoryResult => "MEMORY_RESULT",
             Self::AbortSession => "ABORT_SESSION",
             Self::SessionAborted => "SESSION_ABORTED",
             Self::AbortTraceSource => "ABORT_TRACE_SOURCE",
@@ -1341,29 +1345,20 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
         "resultEvidence",
         "closureStates",
     ];
-    const FIELDS: [&str; 9] = [
-        "providers",
-        "projectKeys",
-        "observedAtOrAfterUnixMs",
-        "observedBeforeUnixMs",
-        "toolCapabilityKeys",
-        "skillCapabilityKeys",
-        "resultEvidence",
-        "closureStates",
-        "capabilityTerminalStates",
-    ];
+    let has_session_keys = value
+        .as_object()
+        .is_some_and(|value| value.contains_key("sessionKeys"));
     let has_capability_terminal_states = value
         .as_object()
         .is_some_and(|value| value.contains_key("capabilityTerminalStates"));
-    exact_object_keys(
-        value,
-        "SEARCH_TURNS.filters",
-        if has_capability_terminal_states {
-            &FIELDS
-        } else {
-            &LEGACY_FIELDS
-        },
-    )?;
+    let mut fields = LEGACY_FIELDS.to_vec();
+    if has_session_keys {
+        fields.push("sessionKeys");
+    }
+    if has_capability_terminal_states {
+        fields.push("capabilityTerminalStates");
+    }
+    exact_object_keys(value, "SEARCH_TURNS.filters", &fields)?;
     sorted_bounded_strings(
         field(value, "providers", "SEARCH_TURNS.filters")?,
         "SEARCH_TURNS.filters.providers",
@@ -1371,7 +1366,12 @@ fn validate_search_filters(value: &Value) -> Result<(), ProtocolError> {
         64,
         true,
     )?;
-    for name in ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"] {
+    let mut opaque_key_fields = vec!["projectKeys"];
+    if has_session_keys {
+        opaque_key_fields.push("sessionKeys");
+    }
+    opaque_key_fields.extend(["toolCapabilityKeys", "skillCapabilityKeys"]);
+    for name in opaque_key_fields {
         let label = format!("SEARCH_TURNS.filters.{name}");
         let values = field(value, name, "SEARCH_TURNS.filters")?
             .as_array()
@@ -3673,6 +3673,8 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
         "INSIGHTS_RECIPE" => MessageKind::InsightsRecipe,
         "READ_INSIGHTS_DELIVERY_TRACE" => MessageKind::ReadInsightsDeliveryTrace,
         "INSIGHTS_DELIVERY_TRACE" => MessageKind::InsightsDeliveryTrace,
+        "MEMORY_COMMAND" => MessageKind::MemoryCommand,
+        "MEMORY_RESULT" => MessageKind::MemoryResult,
         "ABORT_SESSION" => MessageKind::AbortSession,
         "SESSION_ABORTED" => MessageKind::SessionAborted,
         "ABORT_TRACE_SOURCE" => MessageKind::AbortTraceSource,
@@ -4628,6 +4630,34 @@ pub fn validate_protocol_message(message: &Value) -> Result<MessageKind, Protoco
                 .validate_against(&request)
                 .map_err(|_| invalid_frame("INSIGHTS_DELIVERY_TRACE.response is invalid"))?;
         }
+        MessageKind::MemoryCommand => {
+            validate_envelope(message, kind, &["op", "payload"])?;
+            let op = non_empty_string(field(message, "op", kind.as_str())?, "MEMORY_COMMAND.op")?;
+            if !crate::memory_protocol::is_memory_op(op) {
+                return Err(invalid_frame(format!(
+                    "MEMORY_COMMAND.op {op} is not supported"
+                )));
+            }
+            let payload = field(message, "payload", kind.as_str())?;
+            if !payload.is_object() {
+                return Err(invalid_frame("MEMORY_COMMAND.payload must be an object"));
+            }
+            crate::memory_protocol::validate_command_payload(op, payload).map_err(|error| {
+                invalid_frame(format!("MEMORY_COMMAND.payload is invalid: {error}"))
+            })?;
+        }
+        MessageKind::MemoryResult => {
+            validate_envelope(message, kind, &["op", "payload"])?;
+            let op = non_empty_string(field(message, "op", kind.as_str())?, "MEMORY_RESULT.op")?;
+            if !crate::memory_protocol::is_memory_op(op) {
+                return Err(invalid_frame(format!(
+                    "MEMORY_RESULT.op {op} is not supported"
+                )));
+            }
+            if !field(message, "payload", kind.as_str())?.is_object() {
+                return Err(invalid_frame("MEMORY_RESULT.payload must be an object"));
+            }
+        }
         MessageKind::AbortSession => {
             validate_envelope(message, kind, &["nextSequence", "reason"])?;
             decimal_u64(
@@ -5280,6 +5310,8 @@ mod tests {
                 MessageKind::AbortSession,
                 MessageKind::SessionAborted,
                 MessageKind::Error,
+                MessageKind::MemoryCommand,
+                MessageKind::MemoryResult,
             ]
         );
     }
@@ -5530,12 +5562,20 @@ mod tests {
             .unwrap()
             .message;
         request["orderBy"] = json!("observed-desc");
+        request["filters"]["sessionKeys"] = json!(["0".repeat(64)]);
         request["filters"]["toolCapabilityKeys"] = json!(["1".repeat(64)]);
         request["filters"]["capabilityTerminalStates"] = json!(["completed", "failed"]);
         assert_eq!(
             validate_protocol_message(&request).unwrap(),
             MessageKind::SearchTurns
         );
+
+        request["filters"]["sessionKeys"] = json!(["not-an-opaque-key"]);
+        assert_eq!(
+            validate_protocol_message(&request).unwrap_err().code,
+            "TS_INSIGHTS_PROTOCOL_INVALID_FRAME"
+        );
+        request["filters"]["sessionKeys"] = json!(["0".repeat(64)]);
 
         request["filters"]["toolCapabilityKeys"] = json!([]);
         assert_eq!(

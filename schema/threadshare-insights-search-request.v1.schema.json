@@ -32,6 +32,10 @@
           "type": "array", "maxItems": 64, "uniqueItems": true,
           "items": { "$ref": "#/$defs/hex64" }
         },
+        "sessionKeys": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hex64" }
+        },
         "toolCapabilityKeys": {
           "type": "array", "maxItems": 64, "uniqueItems": true,
           "items": { "$ref": "#/$defs/hex64" }

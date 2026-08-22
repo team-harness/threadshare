@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-authorization-manifest.v1.schema.json",
+  "title": "Threadshare Memory Authorization Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "manifestDigest", "plans", "totalBytes", "authorization"],
+  "properties": {
+    "format": { "const": "threadshare-memory-authorization-manifest@v1" },
+    "manifestDigest": { "oneOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+    "plans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["planDigest", "taskKind", "taskId", "bytesToSend"],
+        "properties": {
+          "planDigest": { "$ref": "#/$defs/hex64" },
+          "taskKind": { "enum": ["extraction", "adjudication", "consolidation"] },
+          "taskId": { "$ref": "#/$defs/identifier" },
+          "bytesToSend": { "$ref": "#/$defs/nonNegativeInteger" }
+        }
+      }
+    },
+    "totalBytes": { "$ref": "#/$defs/nonNegativeInteger" },
+    "authorization": { "enum": ["pending", "approved"] }
+  },
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "nonNegativeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+  }
+}

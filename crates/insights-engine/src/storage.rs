@@ -114,7 +114,7 @@ impl From<std::io::Error> for StorageError {
 }
 
 #[cfg(unix)]
-mod persistent_file_permissions {
+pub(crate) mod persistent_file_permissions {
     use super::StorageError;
     use std::fs::{self, OpenOptions, Permissions};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -126,7 +126,7 @@ mod persistent_file_permissions {
         PathBuf::from(value)
     }
 
-    pub(super) fn prepare(path: &Path) -> Result<(), StorageError> {
+    pub(crate) fn prepare(path: &Path) -> Result<(), StorageError> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -138,7 +138,7 @@ mod persistent_file_permissions {
         Ok(())
     }
 
-    pub(super) fn enforce(path: &Path) -> Result<(), StorageError> {
+    pub(crate) fn enforce(path: &Path) -> Result<(), StorageError> {
         for candidate in [
             path.to_path_buf(),
             sidecar_path(path, "-wal"),
@@ -157,17 +157,17 @@ mod persistent_file_permissions {
 }
 
 #[cfg(not(unix))]
-mod persistent_file_permissions {
+pub(crate) mod persistent_file_permissions {
     use super::StorageError;
     use std::path::Path;
 
     // Windows has no POSIX mode bits. The launcher or installer must protect the database
     // directory with an owner-only ACL; this interface deliberately makes no 0600 claim.
-    pub(super) fn prepare(_path: &Path) -> Result<(), StorageError> {
+    pub(crate) fn prepare(_path: &Path) -> Result<(), StorageError> {
         Ok(())
     }
 
-    pub(super) fn enforce(_path: &Path) -> Result<(), StorageError> {
+    pub(crate) fn enforce(_path: &Path) -> Result<(), StorageError> {
         Ok(())
     }
 }
@@ -295,7 +295,7 @@ pub(crate) fn wal_pressure_action(
     }
 }
 
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_owned();
     value.push(suffix);
     PathBuf::from(value)

@@ -122,6 +122,31 @@ test("renders a self-describing root and command help contract", () => {
       "stdio",
       "verify",
     ],
+    memory: [
+      "approve-manifest",
+      "approve-plan",
+      "capability-terminal-states",
+      "format",
+      "full",
+      "if-due",
+      "kind",
+      "limit",
+      "plan",
+      "provider",
+      "providers",
+      "query",
+      "repository",
+      "request",
+      "result-evidence",
+      "runner",
+      "runner-endpoint",
+      "runner-model",
+      "session-keys",
+      "since",
+      "skill-capability-keys",
+      "tool-capability-keys",
+      "until",
+    ],
     messages: ["before", "format", "limit", "offset"],
     export: ["before", "from", "output"],
     publish: ["expires", "json", "revoke", "url"],
@@ -187,6 +212,8 @@ test("renders a self-describing root and command help contract", () => {
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_WRITER_LOCKED",
     "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_ENGINE_PROTOCOL",
+    "TS_INSIGHTS_STATE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",
     "TS_INSIGHTS_STORAGE_CORRUPT",
     "TS_INSIGHTS_WAL_BACKPRESSURE",
@@ -198,6 +225,12 @@ test("renders a self-describing root and command help contract", () => {
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
+    "TS_MEMORY_BINDING_DRIFT",
+    "TS_MEMORY_CANDIDATE_NOT_FOUND",
+    "TS_MEMORY_CANDIDATE_STALE",
+    "TS_MEMORY_PLAN_STATE_INVALID",
+    "TS_MEMORY_SUBMISSION_CONFLICT",
+    "TS_MEMORY_TASK_NOT_CLAIMABLE",
     "TS_OPERATION_FAILED",
   ];
   assert.deepEqual(Object.keys(COMMAND_SPECS), Object.keys(expectedOptions));
@@ -207,7 +240,6 @@ test("renders a self-describing root and command help contract", () => {
     [...cliSource.matchAll(/\boptions(?:\.([a-z][a-z0-9-]*)|\["([^"]+)"\])/gu)]
       .map((match) => match[1] ?? match[2]),
   );
-  referencedOptions.delete("provider");
   assert.deepEqual(
     [...referencedOptions].sort(),
     Object.keys(OPTION_DEFINITIONS).filter((name) => name !== "help").sort(),
@@ -419,6 +451,8 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_INSIGHTS_ENGINE_UNAVAILABLE",
     "TS_INSIGHTS_WRITER_LOCKED",
     "TS_INSIGHTS_ENGINE_INVALID",
+    "TS_INSIGHTS_ENGINE_PROTOCOL",
+    "TS_INSIGHTS_STATE_INVALID",
     "TS_INSIGHTS_STORAGE_FAILED",
     "TS_INSIGHTS_STORAGE_CORRUPT",
     "TS_INSIGHTS_WAL_BACKPRESSURE",
@@ -430,6 +464,12 @@ test("sanitizes every diagnostic problem without damaging HTTP URLs", () => {
     "TS_INSIGHTS_REINDEX_RECOVERY_REQUIRED",
     "TS_INSIGHTS_REINDEX_INCOMPLETE",
     "TS_INSIGHTS_PURGE_PENDING",
+    "TS_MEMORY_BINDING_DRIFT",
+    "TS_MEMORY_CANDIDATE_NOT_FOUND",
+    "TS_MEMORY_CANDIDATE_STALE",
+    "TS_MEMORY_PLAN_STATE_INVALID",
+    "TS_MEMORY_SUBMISSION_CONFLICT",
+    "TS_MEMORY_TASK_NOT_CLAIMABLE",
   ]) {
     const reserved = {
       status: 1,
@@ -447,7 +487,7 @@ test("returns deterministic help diagnostics that tell agents how to recover", (
     {
       args: ["bogus", "--help"],
       code: "TS_USAGE_UNKNOWN_COMMAND",
-      next: /Choose one of: sessions, analyze, insights, messages, export, publish, share, read, revoke, validate/,
+      next: /Choose one of: sessions, analyze, insights, memory, messages, export, publish, share, read, revoke, validate/,
     },
     {
       args: ["help", "bogus"],

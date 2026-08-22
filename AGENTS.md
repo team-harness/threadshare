@@ -56,7 +56,7 @@ One-time npm package settings:
 For each stable release:
 
 1. Set the same unprefixed stable version in `package.json`, the lockfile top level, and the lockfile root package. Source `package.json` and lockfile must contain none of the six platform package names; only isolated release staging injects their exact-version optional dependencies.
-2. Run the full verification above plus `npm run test:insights-engine` and `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 73-file source-root allowlist, the 272 KiB compressed root limit, and each platform package's exact four-file allowlist from `scripts/verify-release.mjs`.
+2. Run the full verification above plus `npm run test:insights-engine` and `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 95-file source-root allowlist, the 368 KiB compressed root limit, and each platform package's exact four-file allowlist from `scripts/verify-release.mjs`.
 3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
 4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
 5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`. Require its four signed/notarized Engine artifacts and SBOMs, attempt-scoped five-package release bundle, Engine publication, six-target consumer smoke (full Insights on macOS/Linux and core-only on Windows), and root-last publication to finish successfully. Then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.
@@ -71,3 +71,15 @@ Recovery rules:
 - A cancelled run is incomplete. Rerun it before any higher release. If a higher version already reached npm, never backfill the lower version.
 
 Do not commit generated deployment state, `node_modules`, storage credentials, `.void/`, `.wrangler/`, `fc/.licell/`, `fc/dist/`, or `fc/static-assets.ts`.
+
+<!-- BEGIN THREADSHARE MEMORY (generated; do not edit by hand) -->
+
+## Team memory
+
+_No approved team doctrine yet._
+
+### Scenes
+
+- .threadshare/memory/scenes/team-memory-design.md (heat 1) — Threadshare memory pipeline
+
+<!-- END THREADSHARE MEMORY -->

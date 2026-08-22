@@ -54,6 +54,18 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "schema/threadshare-insights-search.v1.schema.json",
   "schema/threadshare-insights-usage-request.v1.schema.json",
   "schema/threadshare-insights-usage.v1.schema.json",
+  "schema/threadshare-memory-adjudication-result.v1.schema.json",
+  "schema/threadshare-memory-adjudication-task.v1.schema.json",
+  "schema/threadshare-memory-authorization-manifest.v1.schema.json",
+  "schema/threadshare-memory-candidate-draft-batch.v1.schema.json",
+  "schema/threadshare-memory-consolidation-patch.v1.schema.json",
+  "schema/threadshare-memory-consolidation-task.v1.schema.json",
+  "schema/threadshare-memory-extraction-request.v1.schema.json",
+  "schema/threadshare-memory-extraction-task.v1.schema.json",
+  "schema/threadshare-memory-prepare-request.v1.schema.json",
+  "schema/threadshare-memory-promotion-plan.v1.schema.json",
+  "schema/threadshare-memory-runner-execution-plan.v1.schema.json",
+  "schema/threadshare-memory-search-request.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
   "src/agent-transcript.mjs",
@@ -83,6 +95,18 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/insights-repository-source.mjs",
   "src/insights-state.mjs",
   "src/insights-writer-lock.mjs",
+  "src/memory-command.mjs",
+  "src/memory-consolidation.mjs",
+  "src/memory-contracts.mjs",
+  "src/memory-extraction.mjs",
+  "src/memory-format.mjs",
+  "src/memory-insights-source.mjs",
+  "src/memory-lint.mjs",
+  "src/memory-operation-registry.mjs",
+  "src/memory-prompts.mjs",
+  "src/memory-repository.mjs",
+  "src/memory-runner.mjs",
+  "src/memory-state-client.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
   "src/session-export.mjs",
@@ -211,11 +235,11 @@ export function validatePackOutput(packOutput, metadata) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   if (metadata.kind !== "platform") {
-    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 272 * 1024) {
-      throw new Error("npm root package compressed size must not exceed 272 KiB");
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 368 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 368 KiB");
     }
-    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1280 * 1024) {
-      throw new Error("npm root package unpacked size must not exceed 1.25 MiB");
+    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1792 * 1024) {
+      throw new Error("npm root package unpacked size must not exceed 1.75 MiB");
     }
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };

@@ -9,11 +9,11 @@
     "format": { "const": "threadshare-insights-recipe@v1" },
     "snapshot": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/snapshot" },
     "sourceFreshness": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/sourceFreshness" },
-    "name": { "enum": ["capability-contexts@1", "failure-chains@1", "file-workflow-signals@1", "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1"] },
+    "name": { "enum": ["capability-contexts@1", "failure-chains@1", "file-workflow-signals@1", "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1", "extraction-candidates@1"] },
     "window": { "$ref": "#/$defs/window" },
     "comparisonWindow": { "oneOf": [{ "$ref": "#/$defs/window" }, { "type": "null" }] },
     "evaluatedAt": { "$ref": "#/$defs/timestamp" },
-    "items": { "type": "array", "maxItems": 50 },
+    "items": { "type": "array", "maxItems": 66 },
     "totalItemCount": { "$ref": "#/$defs/decimal" },
     "truncated": { "type": "boolean" },
     "coverage": { "$ref": "threadshare-insights-query.v2.schema.json#/$defs/coverage" },
@@ -47,6 +47,10 @@
     {
       "if": { "properties": { "name": { "const": "session-timeline@1" } }, "required": ["name"] },
       "then": { "properties": { "items": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/sessionTimelineItem" } } } }
+    },
+    {
+      "if": { "properties": { "name": { "const": "extraction-candidates@1" } }, "required": ["name"] },
+      "then": { "properties": { "items": { "type": "array", "maxItems": 66, "items": { "$ref": "#/$defs/extractionCandidateItem" } } } }
     }
   ],
   "$defs": {
@@ -278,6 +282,32 @@
             { "type": "null" }
           ]
         },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "extractionCandidateItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sessionKey", "eligibleTurnCount", "directDeliveryEdgeCount", "observedDeliveryEdgeCount", "recoveredFailureChainCount", "mainCapabilityInvocationCount", "hasConclusiveFinalAnswer", "contributions", "score", "evidence"],
+      "properties": {
+        "sessionKey": { "$ref": "#/$defs/key" },
+        "eligibleTurnCount": { "$ref": "#/$defs/decimal" },
+        "directDeliveryEdgeCount": { "$ref": "#/$defs/decimal" },
+        "observedDeliveryEdgeCount": { "$ref": "#/$defs/decimal" },
+        "recoveredFailureChainCount": { "$ref": "#/$defs/decimal" },
+        "mainCapabilityInvocationCount": { "$ref": "#/$defs/decimal" },
+        "hasConclusiveFinalAnswer": { "type": "boolean" },
+        "contributions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["directDelivery", "observedDelivery", "recoveredFailureChains", "capabilityDensity", "conclusiveFinalAnswer"],
+          "properties": {
+            "directDelivery": { "$ref": "#/$defs/decimal" },
+            "observedDelivery": { "$ref": "#/$defs/decimal" },
+            "recoveredFailureChains": { "$ref": "#/$defs/decimal" },
+            "capabilityDensity": { "$ref": "#/$defs/decimal" },
+            "conclusiveFinalAnswer": { "$ref": "#/$defs/decimal" }
+          }
+        },
+        "score": { "$ref": "#/$defs/decimal" },
         "evidence": { "$ref": "#/$defs/evidence" }
       }
     },

@@ -19,6 +19,7 @@ const INTENT_IDS = Object.freeze([
   "solution-reuse",
   "session-explanation",
   "delivery-trace",
+  "memory-candidate-selection",
   "custom-query",
 ]);
 const RECIPE_NAMES = Object.freeze([
@@ -29,6 +30,7 @@ const RECIPE_NAMES = Object.freeze([
   "token-hotspots@1",
   "solution-recall@1",
   "session-timeline@1",
+  "extraction-candidates@1",
   "delivery-trace@1",
 ]);
 

@@ -114,12 +114,45 @@ const MESSAGE_TYPES = new Set([
   "INSIGHTS_RECIPE",
   "READ_INSIGHTS_DELIVERY_TRACE",
   "INSIGHTS_DELIVERY_TRACE",
+  "MEMORY_COMMAND",
+  "MEMORY_RESULT",
   "ABORT_SESSION",
   "SESSION_ABORTED",
   "ABORT_TRACE_SOURCE",
   "TRACE_SOURCE_ABORTED",
   "ERROR",
 ]);
+
+/**
+ * Stage 4a + 4c Team Memory op names (`MEMORY_COMMAND.op` / `MEMORY_RESULT.op`),
+ * lowercase kebab-case, mirroring `MEMORY_OPS` in
+ * `crates/insights-engine/src/memory_protocol.rs`.
+ */
+export const MEMORY_OPS = Object.freeze([
+  "open",
+  "bind-repository",
+  "list-memory-files",
+  "read-memory-file",
+  "plan-tasks",
+  "claim-task",
+  "abandon-task",
+  "submit-extraction",
+  "submit-consolidation",
+  "consolidation-baseline",
+  "recall",
+  "submit-adjudication",
+  "sync-approved",
+  "search",
+  "review-queue",
+  "status",
+  "confirm-statement",
+  "discard-candidate",
+  "promotion-plan",
+  "promotion-approve",
+  "promotion-apply",
+  "authorize",
+]);
+const MEMORY_OP_SET = new Set(MEMORY_OPS);
 
 const COMMON_FIELDS = ["format", "type", "requestId"];
 const HEX_64 = /^[0-9a-f]{64}$/u;
@@ -1433,6 +1466,8 @@ function assertSearchFilters(filters, label) {
     "resultEvidence",
     "closureStates",
   ];
+  const hasSessionKeys = Object.hasOwn(filters, "sessionKeys");
+  if (hasSessionKeys) fields.push("sessionKeys");
   const hasCapabilityTerminalStates = Object.hasOwn(filters, "capabilityTerminalStates");
   if (hasCapabilityTerminalStates) fields.push("capabilityTerminalStates");
   assertExactKeys(filters, label, fields);
@@ -1441,7 +1476,12 @@ function assertSearchFilters(filters, label) {
       allowEmpty: false,
       ascii: true,
     }));
-  for (const field of ["projectKeys", "toolCapabilityKeys", "skillCapabilityKeys"]) {
+  for (const field of [
+    "projectKeys",
+    ...(hasSessionKeys ? ["sessionKeys"] : []),
+    "toolCapabilityKeys",
+    "skillCapabilityKeys",
+  ]) {
     assertBoundedSortedArray(filters[field], `${label}.${field}`, MAX_FILTER_KEYS, assertHex64);
   }
   if (filters.observedAtOrAfterUnixMs !== null) {
@@ -1474,6 +1514,7 @@ function assertSearchFilters(filters, label) {
 
 function hasStructuredSearchFilter(filters) {
   return filters.providers.length > 0 || filters.projectKeys.length > 0 ||
+    (filters.sessionKeys?.length ?? 0) > 0 ||
     filters.observedAtOrAfterUnixMs !== null || filters.observedBeforeUnixMs !== null ||
     filters.toolCapabilityKeys.length > 0 || filters.skillCapabilityKeys.length > 0 ||
     filters.resultEvidence.length > 0 || filters.closureStates.length > 0 ||
@@ -2232,6 +2273,7 @@ function assertInsightsEvidenceV2(message, validatedPayloadByteLength = null) {
 const RECIPE_NAMES = new Set([
   "capability-contexts@1", "failure-chains@1", "file-workflow-signals@1",
   "activity-shifts@1", "token-hotspots@1", "solution-recall@1", "session-timeline@1",
+  "extraction-candidates@1",
 ]);
 
 function assertRecipeWindow(value, label) {
@@ -2245,7 +2287,7 @@ function assertRecipeWindow(value, label) {
 
 function assertRecipeFilters(value, label) {
   assertExactKeys(value, label, [
-    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "turnKeys", "eventKinds", "text", "bucket",
   ]);
   for (const field of ["providers", "eventKinds"]) {
     assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
@@ -2255,6 +2297,8 @@ function assertRecipeFilters(value, label) {
     assertBoundedSortedArray(value[field], `${label}.${field}`, 64,
       (item, itemLabel) => assertHex64(item, itemLabel));
   }
+  assertBoundedSortedArray(value.turnKeys, `${label}.turnKeys`, 200,
+    (item, itemLabel) => assertHex64(item, itemLabel));
   if (value.text !== null) {
     assertBoundedString(value.text, `${label}.text`, 8 * 1_024, { allowEmpty: false });
   }
@@ -2275,8 +2319,19 @@ function assertRecipeRequest(request, label) {
     assertRecipeWindow(request.comparisonWindow, `${label}.comparisonWindow`);
   }
   assertRecipeFilters(request.filters, `${label}.filters`);
-  assertSafeInteger(request.limit, `${label}.limit`, { min: 1, max: 50 });
+  assertSafeInteger(request.limit, `${label}.limit`, {
+    min: 1,
+    max: request.name === "extraction-candidates@1" ? 66 : 50,
+  });
   assertBoolean(request.allowDegraded, `${label}.allowDegraded`);
+  if (request.name === "extraction-candidates@1") {
+    if (request.filters.turnKeys.length === 0 || request.filters.projectKeys.length === 0 ||
+        request.filters.sessionKeys.length !== 0 || request.allowDegraded) {
+      throw invalidFrame(`${label} extraction candidate scope is invalid`);
+    }
+  } else if (request.filters.turnKeys.length !== 0) {
+    throw invalidFrame(`${label}.filters.turnKeys is not supported by this recipe`);
+  }
   assertCanonicalTimestamp(request.evaluatedAt, `${label}.evaluatedAt`);
   if (Buffer.byteLength(canonicalJson(request), "utf8") > MAX_DEEP_QUERY_REQUEST_BYTES) {
     throw invalidFrame(`${label} exceeds 64 KiB`);
@@ -2769,6 +2824,36 @@ function assertSessionTimelineItem(item, label, expectedOrdinal) {
   assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "event" });
 }
 
+function assertExtractionCandidateItem(item, label) {
+  assertExactKeys(item, label, [
+    "sessionKey", "eligibleTurnCount", "directDeliveryEdgeCount",
+    "observedDeliveryEdgeCount", "recoveredFailureChainCount",
+    "mainCapabilityInvocationCount", "hasConclusiveFinalAnswer", "contributions",
+    "score", "evidence",
+  ]);
+  assertHex64(item.sessionKey, `${label}.sessionKey`);
+  for (const field of [
+    "eligibleTurnCount", "directDeliveryEdgeCount", "observedDeliveryEdgeCount",
+    "recoveredFailureChainCount", "mainCapabilityInvocationCount", "score",
+  ]) {
+    assertDecimal(item[field], `${label}.${field}`);
+  }
+  assertBoolean(item.hasConclusiveFinalAnswer, `${label}.hasConclusiveFinalAnswer`);
+  assertRecipeDecimalFields(item.contributions, `${label}.contributions`, [
+    "directDelivery", "observedDelivery", "recoveredFailureChains",
+    "capabilityDensity", "conclusiveFinalAnswer",
+  ]);
+  const contributionTotal = Object.values(item.contributions)
+    .reduce((total, value) => total + BigInt(value), 0n);
+  if (contributionTotal !== BigInt(item.score)) {
+    throw invalidFrame(`${label}.score does not equal its declared contributions`);
+  }
+  if (item.evidence?.sessionKey !== item.sessionKey) {
+    throw invalidFrame(`${label}.evidence does not bind the candidate Session`);
+  }
+  assertRecipeEvidence(item.evidence, `${label}.evidence`, { kind: "session" });
+}
+
 function assertRecipeItem(name, item, label, index) {
   if (name === "capability-contexts@1") return assertCapabilityContextItem(item, label);
   if (name === "failure-chains@1") return assertFailureChainItem(item, label);
@@ -2776,6 +2861,7 @@ function assertRecipeItem(name, item, label, index) {
   if (name === "activity-shifts@1") return assertActivityShiftItem(item, label);
   if (name === "token-hotspots@1") return assertTokenHotspotItem(item, label);
   if (name === "solution-recall@1") return assertSolutionRecallItem(item, label);
+  if (name === "extraction-candidates@1") return assertExtractionCandidateItem(item, label);
   return assertSessionTimelineItem(item, label, index);
 }
 
@@ -2795,8 +2881,9 @@ function assertRecipeResponse(response, label) {
     assertRecipeWindow(response.comparisonWindow, `${label}.comparisonWindow`);
   }
   assertCanonicalTimestamp(response.evaluatedAt, `${label}.evaluatedAt`);
-  if (!Array.isArray(response.items) || response.items.length > 50) {
-    throw invalidFrame(`${label}.items exceeds 50 items`);
+  const maximumItems = response.name === "extraction-candidates@1" ? 66 : 50;
+  if (!Array.isArray(response.items) || response.items.length > maximumItems) {
+    throw invalidFrame(`${label}.items exceeds ${maximumItems} items`);
   }
   for (let index = 0; index < response.items.length; index += 1) {
     assertRecipeItem(response.name, response.items[index], `${label}.items[${index}]`, index);
@@ -3086,6 +3173,30 @@ function assertReadInsightsDeliveryTrace(message) {
 function assertInsightsDeliveryTrace(message) {
   assertEnvelope(message, "INSIGHTS_DELIVERY_TRACE", ["request", "response"]);
   assertDeliveryTracePair(message.request, message.response, "INSIGHTS_DELIVERY_TRACE");
+}
+
+/**
+ * Envelope-level validation for the Team Memory `MEMORY_COMMAND`/`MEMORY_RESULT`
+ * pair (design doc §3 DEV-4): the op must be one of the Stage 4a kebab-case ops
+ * and the payload must be a plain object. Op-level deep validation lives in
+ * `memory-state-client.mjs` (zod), matching the Rust side where `MEMORY_RESULT`
+ * is only envelope-validated (crates/insights-engine/src/protocol.rs).
+ */
+function assertMemoryEnvelope(message, type) {
+  assertEnvelope(message, type, ["op", "payload"]);
+  if (typeof message.op !== "string" || !MEMORY_OP_SET.has(message.op)) {
+    throw invalidFrame(`${type}.op ${String(message.op)} is not supported`);
+  }
+  assertPlainObject(message.payload, `${type}.payload`);
+  assertMessagePayloadBound(message, type);
+}
+
+function assertMemoryCommand(message) {
+  assertMemoryEnvelope(message, "MEMORY_COMMAND");
+}
+
+function assertMemoryResult(message) {
+  assertMemoryEnvelope(message, "MEMORY_RESULT");
 }
 
 export function assertGitDiffEvidenceRequest(request, label = "Git diff request") {
@@ -3883,6 +3994,8 @@ function validateProtocolMessage(message, validatedPayloadByteLength = null) {
   else if (message.type === "INSIGHTS_RECIPE") assertInsightsRecipe(message);
   else if (message.type === "READ_INSIGHTS_DELIVERY_TRACE") assertReadInsightsDeliveryTrace(message);
   else if (message.type === "INSIGHTS_DELIVERY_TRACE") assertInsightsDeliveryTrace(message);
+  else if (message.type === "MEMORY_COMMAND") assertMemoryCommand(message);
+  else if (message.type === "MEMORY_RESULT") assertMemoryResult(message);
   else if (message.type === "ABORT_SESSION") assertAbortSession(message);
   else if (message.type === "SESSION_ABORTED") assertSessionAborted(message);
   else if (message.type === "ABORT_TRACE_SOURCE") {
@@ -4363,11 +4476,12 @@ export function createCapabilityPageMessage({ requestId, page }) {
 
 function canonicalSearchFilters(filters) {
   assertPlainObject(filters, "filters");
+  const hasSessionKeys = Object.hasOwn(filters, "sessionKeys");
   const source = {
     ...filters,
     capabilityTerminalStates: filters.capabilityTerminalStates ?? [],
   };
-  assertExactKeys(source, "filters", [
+  const fields = [
     "providers",
     "projectKeys",
     "observedAtOrAfterUnixMs",
@@ -4377,7 +4491,9 @@ function canonicalSearchFilters(filters) {
     "resultEvidence",
     "closureStates",
     "capabilityTerminalStates",
-  ]);
+  ];
+  if (hasSessionKeys) fields.push("sessionKeys");
+  assertExactKeys(source, "filters", fields);
   const result = {
     providers: canonicalBoundedArray(source.providers, "filters.providers", MAX_FILTER_PROVIDERS,
       (value, label) => assertBoundedString(value, label, 64, {
@@ -4423,6 +4539,14 @@ function canonicalSearchFilters(filters) {
       (value, label) => assertEnum(value, label, CAPABILITY_TERMINAL_STATES),
     ),
   };
+  if (hasSessionKeys) {
+    result.sessionKeys = canonicalBoundedArray(
+      source.sessionKeys,
+      "filters.sessionKeys",
+      MAX_FILTER_KEYS,
+      assertHex64,
+    );
+  }
   assertSearchFilters(result, "filters");
   return result;
 }
@@ -4636,6 +4760,14 @@ export function createReadInsightsDeliveryTraceMessage({ requestId, request }) {
 
 export function createInsightsDeliveryTraceMessage({ requestId, request, response }) {
   return assertProtocolMessage(envelope("INSIGHTS_DELIVERY_TRACE", requestId, { request, response }));
+}
+
+export function createMemoryCommandMessage({ requestId, op, payload }) {
+  return assertProtocolMessage(envelope("MEMORY_COMMAND", requestId, { op, payload }));
+}
+
+export function createMemoryResultMessage({ requestId, op, payload }) {
+  return assertProtocolMessage(envelope("MEMORY_RESULT", requestId, { op, payload }));
 }
 
 export function createAbortSessionMessage({ requestId, nextSequence, reason }) {

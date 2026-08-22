@@ -283,6 +283,34 @@ const SPEC = deepFreeze({
       ],
     },
     {
+      id: "memory-candidate-selection",
+      when: "The user asks Threadshare to rank a bounded set of past Sessions for Team Memory extraction.",
+      userQuestions: [
+        "Which matching Sessions are strongest candidates for Team Memory extraction?",
+        "Rank these past Sessions using recorded delivery and recovery evidence.",
+      ],
+      plan: [
+        {
+          action: "search",
+          purpose: "Resolve at most 200 exact active, hard-sealed Turns inside the owner-bound project scope.",
+          requiredInputs: ["window", "owner-derived projectKeys"],
+          optionalFilters: ["query", "providers", "sessionKeys", "capability filters"],
+        },
+        {
+          action: "recipe",
+          recipe: "extraction-candidates@1",
+          purpose: "Rank only the exact Search Turn set with host-owned delivery, recovery, capability, and final-answer signals.",
+          requiredInputs: ["window", "filters.projectKeys", "filters.turnKeys"],
+          optionalFilters: ["providers"],
+        },
+      ],
+      answerRules: [
+        "Use the Recipe score and ordering as recorded; never reproduce its weights in an Agent or client.",
+        "Reject truncated, degraded, multiply mapped, or unavailable Delivery Graph coverage.",
+        "Ranking selects extraction inputs; it does not approve or promote memory content.",
+      ],
+    },
+    {
       id: "custom-query",
       when: "The question needs fields, filters, grouping, or metrics not covered by a predefined intent.",
       userQuestions: [

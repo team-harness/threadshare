@@ -11,6 +11,7 @@ import {
   createHelloMessage,
   createListCapabilitiesMessage,
   createListSourceStatesMessage,
+  createMemoryCommandMessage,
   createReadEngineStatusMessage,
   createReadRepositoryStateMessage,
   createReadCapabilityUsageMessage,
@@ -662,6 +663,28 @@ class InsightsEngineClient {
     return operation;
   }
 
+  /**
+   * Sends one Team Memory `MEMORY_COMMAND` envelope (`{ op, payload }`) and
+   * returns the matching `MEMORY_RESULT` payload. Op-level payload validation
+   * lives in `memory-state-client.mjs`.
+   */
+  memoryCommand(input, options = {}) {
+    if (this.#closed) {
+      return Promise.reject(clientError(
+        "TS_INSIGHTS_ENGINE_CLOSED",
+        "Insights Engine client is closed",
+      ));
+    }
+    const signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      return Promise.reject(new TypeError("signal must be an AbortSignal"));
+    }
+    const operation = this.#tail.then(() =>
+      this.#runRead(() => this.#memoryCommand(input, signal), signal));
+    this.#tail = operation.catch(() => {});
+    return operation;
+  }
+
   searchTurns(input, options = {}) {
     if (this.#closed) {
       return Promise.reject(clientError(
@@ -1272,6 +1295,32 @@ class InsightsEngineClient {
     );
     throwIfAborted(signal, this.#transport.stderr);
     return freezeProtocolValue(response);
+  }
+
+  async #memoryCommand(input, signal) {
+    throwIfAborted(signal, this.#transport.stderr);
+    if (this.#broken || this.#transport.failed) {
+      throw this.#transport.failure ?? disconnectedError(this.#transport.stderr);
+    }
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new TypeError("memoryCommand input must be an object");
+    }
+    const requestId = this.#nextRequestId();
+    const request = createMemoryCommandMessage({
+      requestId,
+      op: input.op,
+      payload: input.payload,
+    });
+    await this.#transport.write(request, "sending MEMORY_COMMAND", this.#timeoutMs);
+    const response = await this.#expect(
+      "MEMORY_RESULT",
+      requestId,
+      { op: request.op },
+      "waiting for MEMORY_RESULT",
+      this.#timeoutMs,
+    );
+    throwIfAborted(signal, this.#transport.stderr);
+    return freezeProtocolValue(response.payload);
   }
 
   async #listCapabilities(input, signal) {

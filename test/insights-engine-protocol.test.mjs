@@ -8,6 +8,7 @@ import {
   INSIGHTS_PROTOCOL_FORMAT,
   INSIGHTS_PROTOCOL_VERSION,
   MAX_PROTOCOL_PAYLOAD_BYTES,
+  MEMORY_OPS,
   RETRACTION_COLLECTION_ORDER,
   UPSERT_COLLECTION_ORDER,
   V2_UPSERT_COLLECTION_ORDER,
@@ -27,6 +28,8 @@ import {
   createInsightsOverviewMessage,
   createListCapabilitiesMessage,
   createListSourceStatesMessage,
+  createMemoryCommandMessage,
+  createMemoryResultMessage,
   createProtocolErrorMessage,
   createPurgeMaintenanceStatusMessage,
   createPurgeStatusMessage,
@@ -222,6 +225,7 @@ function recipeRequest(overrides = {}) {
       projectKeys: [],
       capabilityKeys: [],
       sessionKeys: [],
+      turnKeys: [],
       eventKinds: [],
       text: null,
       bucket: null,
@@ -515,6 +519,7 @@ function searchFilters(overrides = {}) {
   return {
     providers: [],
     projectKeys: [],
+    sessionKeys: [],
     observedAtOrAfterUnixMs: null,
     observedBeforeUnixMs: null,
     toolCapabilityKeys: [],
@@ -596,6 +601,74 @@ test("protocol constants and shared frame vectors stay byte-for-byte stable", as
       vector.name,
     );
   }
+});
+
+test("memory envelope pins the op enum and requires plain-object payloads", () => {
+  assert.deepEqual(MEMORY_OPS, [
+    "open",
+    "bind-repository",
+    "list-memory-files",
+    "read-memory-file",
+    "plan-tasks",
+    "claim-task",
+    "abandon-task",
+    "submit-extraction",
+    "submit-consolidation",
+    "consolidation-baseline",
+    "recall",
+    "submit-adjudication",
+    "sync-approved",
+    "search",
+    "review-queue",
+    "status",
+    "confirm-statement",
+    "discard-candidate",
+    "promotion-plan",
+    "promotion-approve",
+    "promotion-apply",
+    "authorize",
+  ]);
+
+  const payload = { repositoryKey: "1".repeat(64), worktreeKey: "2".repeat(64) };
+  const command = createMemoryCommandMessage({ requestId: "91", op: "status", payload });
+  assert.deepEqual(command, {
+    format: INSIGHTS_PROTOCOL_FORMAT,
+    type: "MEMORY_COMMAND",
+    requestId: "91",
+    op: "status",
+    payload,
+  });
+  const result = createMemoryResultMessage({
+    requestId: "91",
+    op: "status",
+    payload: { chunks: {}, tasks: {}, candidates: {} },
+  });
+  assert.equal(assertProtocolMessage(result), result);
+  for (const op of MEMORY_OPS) {
+    assertProtocolMessage(createMemoryCommandMessage({ requestId: "1", op, payload: {} }));
+    assertProtocolMessage(createMemoryResultMessage({ requestId: "1", op, payload: {} }));
+  }
+
+  const invalid = (error) => error.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME";
+  // Unknown, camelCase, and missing ops are rejected on both envelope types.
+  for (const op of ["promote", "bindRepository", "", undefined]) {
+    assert.throws(() => createMemoryCommandMessage({ requestId: "1", op, payload: {} }), invalid);
+    assert.throws(() => createMemoryResultMessage({ requestId: "1", op, payload: {} }), invalid);
+  }
+  // Payload must be a plain object.
+  for (const payloadValue of [undefined, null, [], "x", 7]) {
+    assert.throws(
+      () => createMemoryCommandMessage({ requestId: "1", op: "open", payload: payloadValue }),
+      invalid,
+    );
+    assert.throws(
+      () => createMemoryResultMessage({ requestId: "1", op: "open", payload: payloadValue }),
+      invalid,
+    );
+  }
+  // The envelope is exact-keyed.
+  assert.throws(() => assertProtocolMessage({ ...command, extra: true }), invalid);
+  assert.throws(() => assertProtocolMessage((({ op: _op, ...rest }) => rest)(command)), invalid);
 });
 
 test("engine status protocol is bounded, read-only, and rejects inconsistent state", () => {
@@ -776,6 +849,7 @@ test("turn search requests canonicalize bounded filters and reject broad queries
     query: "Bash timeout",
     filters: searchFilters({
       providers: ["codex", "claude"],
+      sessionKeys: ["4".repeat(64), "3".repeat(64)],
       toolCapabilityKeys: ["2".repeat(64), "1".repeat(64)],
       resultEvidence: ["unknown", "provider-completed"],
       capabilityTerminalStates: ["failed", "completed"],
@@ -784,6 +858,7 @@ test("turn search requests canonicalize bounded filters and reject broad queries
     nowUnixMs: "1786323723000",
   });
   assert.deepEqual(request.filters.providers, ["claude", "codex"]);
+  assert.deepEqual(request.filters.sessionKeys, ["3".repeat(64), "4".repeat(64)]);
   assert.deepEqual(request.filters.toolCapabilityKeys, ["1".repeat(64), "2".repeat(64)]);
   assert.deepEqual(request.filters.resultEvidence, ["provider-completed", "unknown"]);
   assert.deepEqual(request.filters.capabilityTerminalStates, ["completed", "failed"]);
@@ -1959,7 +2034,7 @@ test("Recipe protocol keeps requests exact and rejects forged response counts", 
   );
 
   const recipes = JSON.parse(await readFile(recipeItemsUrl, "utf8"));
-  assert.equal(recipes.length, 7);
+  assert.equal(recipes.length, 8);
   for (const { name, item } of recipes) {
     const typed = recipeResponse({ name, items: [item] });
     assert.equal(

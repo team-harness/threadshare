@@ -93,6 +93,8 @@ pub struct SearchRequest {
     #[serde(default)]
     pub project_keys: Vec<String>,
     #[serde(default)]
+    pub session_keys: Vec<String>,
+    #[serde(default)]
     pub tool_capability_keys: Vec<String>,
     #[serde(default)]
     pub skill_capability_keys: Vec<String>,
@@ -117,6 +119,7 @@ impl Default for SearchRequest {
             order_by: SearchOrderBy::Relevance,
             providers: Vec::new(),
             project_keys: Vec::new(),
+            session_keys: Vec::new(),
             tool_capability_keys: Vec::new(),
             skill_capability_keys: Vec::new(),
             capability_terminal_states: Vec::new(),
@@ -154,6 +157,7 @@ impl SearchRequest {
         }
         for (name, keys) in [
             ("projectKeys", &self.project_keys),
+            ("sessionKeys", &self.session_keys),
             ("toolCapabilityKeys", &self.tool_capability_keys),
             ("skillCapabilityKeys", &self.skill_capability_keys),
         ] {
@@ -287,6 +291,7 @@ impl SearchRequest {
     fn has_structured_filter(&self) -> bool {
         !self.providers.is_empty()
             || !self.project_keys.is_empty()
+            || !self.session_keys.is_empty()
             || !self.tool_capability_keys.is_empty()
             || !self.skill_capability_keys.is_empty()
             || !self.capability_terminal_states.is_empty()
@@ -990,6 +995,10 @@ fn append_structured_filters(
     if !request.project_keys.is_empty() {
         let values = parameters.bind_list(stable_key_values(&request.project_keys)?);
         filters.push(format!("s.project_key IN ({values})"));
+    }
+    if !request.session_keys.is_empty() {
+        let values = parameters.bind_list(stable_key_values(&request.session_keys)?);
+        filters.push(format!("s.session_key IN ({values})"));
     }
     // The terminal-state predicate lives inside the same EXISTS as the capability key so it
     // constrains the same use row; hoisting it out would match "this turn used X and, separately,

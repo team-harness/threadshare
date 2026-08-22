@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-candidate-draft-batch.v1.schema.json",
+  "title": "Threadshare Memory Candidate Draft Batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "taskId", "binding", "candidates"],
+  "properties": {
+    "format": { "const": "threadshare-memory-candidate-draft-batch@v1" },
+    "taskId": { "$ref": "#/$defs/identifier" },
+    "binding": { "$ref": "#/$defs/extractionBinding" },
+    "candidates": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content", "type", "priority", "confidence", "scene", "statements"],
+        "properties": {
+          "content": { "type": "string", "minLength": 1 },
+          "type": { "enum": ["work_fact", "work_task", "work_method", "work_artifact"] },
+          "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "confidence": { "enum": ["high", "medium", "low"] },
+          "scene": { "oneOf": [{ "$ref": "#/$defs/sceneName" }, { "type": "null" }] },
+          "statements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["statementId", "text", "evidenceIds"],
+              "properties": {
+                "statementId": { "$ref": "#/$defs/identifier" },
+                "text": { "type": "string", "minLength": 1 },
+                "evidenceIds": { "type": "array", "items": { "$ref": "#/$defs/identifier" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "sceneName": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "decimalString": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "extractionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["databaseUuid", "owner", "sourceInputDigest", "selection", "turnRevisions", "payloadDigests", "deliveryEdgeRevisions", "promptVersion", "schemaVersion", "chunkerVersion", "provenance"],
+      "properties": {
+        "databaseUuid": { "type": "string", "minLength": 1 },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repositoryKey", "worktreeKey"],
+          "properties": {
+            "repositoryKey": { "$ref": "#/$defs/hex64" },
+            "worktreeKey": { "$ref": "#/$defs/hex64" }
+          }
+        },
+        "sourceInputDigest": { "$ref": "#/$defs/hex64" },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestDigest", "resultSetDigest", "sourceBindingDigest"],
+          "properties": {
+            "requestDigest": { "$ref": "#/$defs/hex64" },
+            "resultSetDigest": { "$ref": "#/$defs/hex64" },
+            "sourceBindingDigest": { "$ref": "#/$defs/hex64" }
+          }
+        },
+        "turnRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "payloadDigests": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "deliveryEdgeRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "promptVersion": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "chunkerVersion": { "type": "string", "minLength": 1 },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snapshotSeq", "evaluatedAt"],
+          "properties": {
+            "snapshotSeq": { "$ref": "#/$defs/decimalString" },
+            "evaluatedAt": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

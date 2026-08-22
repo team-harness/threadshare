@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-promotion-plan.v1.schema.json",
+  "title": "Threadshare Memory Promotion Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "planId", "owner", "candidateIds", "assessmentDigest", "perFile", "policyVersion", "diff"],
+  "properties": {
+    "format": { "const": "threadshare-memory-promotion-plan@v1" },
+    "planId": { "$ref": "#/$defs/identifier" },
+    "owner": { "$ref": "#/$defs/repositoryBinding" },
+    "candidateIds": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+    "assessmentDigest": { "$ref": "#/$defs/hex64" },
+    "perFile": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["targetPath", "targetBlobHash", "sanitizedContentDigest"],
+        "properties": {
+          "targetPath": { "type": "string", "minLength": 1 },
+          "targetBlobHash": { "oneOf": [{ "$ref": "#/$defs/hex40" }, { "type": "null" }] },
+          "sanitizedContentDigest": { "oneOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] },
+          "operation": { "enum": ["write", "delete"], "default": "write" }
+        },
+        "allOf": [{
+          "if": {
+            "required": ["operation"],
+            "properties": { "operation": { "const": "delete" } }
+          },
+          "then": {
+            "properties": {
+              "targetBlobHash": { "$ref": "#/$defs/hex40" },
+              "sanitizedContentDigest": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "sanitizedContentDigest": { "$ref": "#/$defs/hex64" }
+            }
+          }
+        }]
+      }
+    },
+    "policyVersion": { "type": "string", "minLength": 1 },
+    "diff": { "type": "string" }
+  },
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hex40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "decimalString": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "repositoryBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "repositoryKey", "worktreeKey", "publicRepositoryIdentity", "rootRealpathDigest", "commonDirectoryIdentity", "memoryRoot"],
+      "properties": {
+        "format": { "const": "threadshare-memory-repository-binding@v1" },
+        "repositoryKey": { "$ref": "#/$defs/hex64" },
+        "worktreeKey": { "$ref": "#/$defs/hex64" },
+        "publicRepositoryIdentity": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+        "rootRealpathDigest": { "$ref": "#/$defs/hex64" },
+        "commonDirectoryIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["device", "inode"],
+          "properties": {
+            "device": { "$ref": "#/$defs/decimalString" },
+            "inode": { "$ref": "#/$defs/decimalString" }
+          }
+        },
+        "memoryRoot": { "const": ".threadshare/memory" }
+      }
+    }
+  }
+}

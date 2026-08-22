@@ -13,6 +13,7 @@ import {
   createReadInsightsEvidenceV2Message,
   createReadInsightsQueryV2Message,
   createReadInsightsRecipeMessage,
+  MAX_PROTOCOL_PAYLOAD_BYTES,
 } from "./insights-engine-protocol.mjs";
 import { readGitDiffEvidence } from "./insights-git-evidence.mjs";
 import { createInsightsQueryReader } from "./insights-query-reader.mjs";
@@ -32,6 +33,10 @@ export const INSIGHTS_QUERY_ACTIONS = new Set([
 ]);
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+// Agent-native memory stage/prepare requests echo the complete source binding.
+// Keep their input cap aligned with the memory command transport, while the
+// public Insights query readers retain the smaller deep-query limit above.
+export const MAX_MEMORY_REQUEST_BYTES = MAX_PROTOCOL_PAYLOAD_BYTES;
 const MAX_QUERY_BYTES = 8 * 1024;
 const MAX_PUBLIC_LIMIT = 50;
 const MAX_PATH_LIMIT = 20;
@@ -68,6 +73,7 @@ const RECIPE_NAMES = new Set([
   "token-hotspots@1",
   "solution-recall@1",
   "session-timeline@1",
+  "extraction-candidates@1",
   "delivery-trace@1",
 ]);
 
@@ -328,7 +334,7 @@ function normalizeRecipeWindow(value, label) {
 
 function normalizeRecipeFilters(value = {}) {
   exactKeys(value, [
-    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text", "bucket",
+    "providers", "projectKeys", "capabilityKeys", "sessionKeys", "turnKeys", "eventKinds", "text", "bucket",
   ], "Recipe filters");
   const text = value.text ?? null;
   if (text !== null && (typeof text !== "string" || text.length === 0 ||
@@ -346,6 +352,7 @@ function normalizeRecipeFilters(value = {}) {
     projectKeys: stringArray(value.projectKeys, "Recipe filters.projectKeys", { maximum: 64, hex: true }),
     capabilityKeys: stringArray(value.capabilityKeys, "Recipe filters.capabilityKeys", { maximum: 64, hex: true }),
     sessionKeys: stringArray(value.sessionKeys, "Recipe filters.sessionKeys", { maximum: 64, hex: true }),
+    turnKeys: stringArray(value.turnKeys, "Recipe filters.turnKeys", { maximum: 200, hex: true }),
     eventKinds: stringArray(value.eventKinds, "Recipe filters.eventKinds", {
       maximum: 64, maxBytes: 256,
     }),
@@ -463,7 +470,7 @@ function stringArray(value, label, { maximum, allowed, hex = false, maxBytes, as
 
 function normalizeFilters(filters = {}) {
   exactKeys(filters, [
-    "providers", "projectKeys", "toolCapabilityKeys", "skillCapabilityKeys",
+    "providers", "projectKeys", "sessionKeys", "toolCapabilityKeys", "skillCapabilityKeys",
     "observedAtOrAfter", "observedBefore", "resultEvidence", "closureStates",
     "capabilityTerminalStates",
   ], "filters");
@@ -489,6 +496,12 @@ function normalizeFilters(filters = {}) {
       maximum: 5, allowed: CAPABILITY_TERMINAL_STATES,
     }),
   };
+  if (Object.hasOwn(filters, "sessionKeys")) {
+    result.sessionKeys = stringArray(filters.sessionKeys, "filters.sessionKeys", {
+      maximum: 64,
+      hex: true,
+    });
+  }
   if (result.capabilityTerminalStates.length > 0 &&
       result.toolCapabilityKeys.length === 0 && result.skillCapabilityKeys.length === 0) {
     throw requestError("capabilityTerminalStates requires a tool or skill capability key filter");
@@ -641,7 +654,21 @@ export function normalizeInsightsActivityRequest(input) {
   });
 }
 
-async function readBoundedRequestStream(input, signal) {
+function requestByteLimit(options) {
+  const maxBytes = options.maxBytes ?? MAX_REQUEST_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_PROTOCOL_PAYLOAD_BYTES) {
+    throw new RangeError("maxBytes must be a positive protocol-sized integer");
+  }
+  return maxBytes;
+}
+
+function requestTooLargeMessage(maxBytes) {
+  return maxBytes === MAX_REQUEST_BYTES
+    ? "Insights request exceeds 64 KiB"
+    : `Insights request exceeds ${maxBytes} bytes`;
+}
+
+async function readBoundedRequestStream(input, signal, maxBytes) {
   const iterator = input[Symbol.asyncIterator]();
   let abortHandler;
   let completed = false;
@@ -663,8 +690,8 @@ async function readBoundedRequestStream(input, signal) {
         return bytes;
       }
       const next = Buffer.from(result.value);
-      if (bytes.byteLength + next.byteLength > MAX_REQUEST_BYTES) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (bytes.byteLength + next.byteLength > maxBytes) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
       bytes = Buffer.concat([bytes, next], bytes.byteLength + next.byteLength);
     }
@@ -676,10 +703,15 @@ async function readBoundedRequestStream(input, signal) {
 
 export async function readInsightsQueryRequest(source, options = {}) {
   if (options.signal?.aborted) throw queryAborted(options.signal.reason);
+  const maxBytes = requestByteLimit(options);
   let bytes;
   if (source === "-") {
     try {
-      bytes = await readBoundedRequestStream(options.input ?? process.stdin, options.signal);
+      bytes = await readBoundedRequestStream(
+        options.input ?? process.stdin,
+        options.signal,
+        maxBytes,
+      );
     } catch (error) {
       if (error?.code === "TS_INSIGHTS_REQUEST_INVALID" ||
           error?.code === "TS_INSIGHTS_ENGINE_ABORTED") throw error;
@@ -690,10 +722,10 @@ export async function readInsightsQueryRequest(source, options = {}) {
     try {
       handle = await (options.openFile ?? open)(source, "r");
       const stats = await handle.stat({ bigint: true });
-      if (!stats.isFile() || stats.size > BigInt(MAX_REQUEST_BYTES)) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (!stats.isFile() || stats.size > BigInt(maxBytes)) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
-      const bounded = Buffer.alloc(MAX_REQUEST_BYTES + 1);
+      const bounded = Buffer.alloc(maxBytes + 1);
       let offset = 0;
       while (offset < bounded.byteLength) {
         if (options.signal?.aborted) throw queryAborted(options.signal.reason);
@@ -707,8 +739,8 @@ export async function readInsightsQueryRequest(source, options = {}) {
         offset += bytesRead;
       }
       if (options.signal?.aborted) throw queryAborted(options.signal.reason);
-      if (offset > MAX_REQUEST_BYTES) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (offset > maxBytes) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
       bytes = bounded.subarray(0, offset);
     } catch (error) {

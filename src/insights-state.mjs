@@ -285,6 +285,10 @@ export async function openInsightsState(options = {}) {
     paths,
     created: origin.created,
     originSecretEpoch: privacyContext.originSecretEpoch,
+    // Raw 32-byte machine-local origin secret. Team Memory derives its
+    // repository keys and the runner conformance signing key from it
+    // (docs/team-memory-phase1-design.md §8); it never leaves this process.
+    originSecret: Buffer.from(origin.secret),
     privacyContext,
   });
 }
@@ -298,6 +302,7 @@ export async function openExistingInsightsState(options = {}) {
     paths,
     created: false,
     originSecretEpoch: privacyContext.originSecretEpoch,
+    originSecret: Buffer.from(origin.secret),
     privacyContext,
   });
 }

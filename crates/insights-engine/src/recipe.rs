@@ -12,7 +12,8 @@ use crate::agent_query::{
 };
 use crate::analyzer::{AnalyzerError, analyze_query};
 use crate::deep_query::{
-    DeepCoverage, DeepMatchingCoverage, DeepProvenance, DeepProvenanceField, assemble_coverage,
+    DeepCoverage, DeepFtsCoverage, DeepIndexedHistoryCoverage, DeepMatchingCoverage,
+    DeepProvenance, DeepProvenanceField, assemble_coverage,
 };
 use crate::evidence_path::RepeatBucket;
 use crate::fts_projection::HistoryFtsMatchExpression;
@@ -23,6 +24,8 @@ pub const RECIPE_REQUEST_FORMAT: &str = "threadshare-insights-recipe-request@v1"
 pub const RECIPE_RESPONSE_FORMAT: &str = "threadshare-insights-recipe@v1";
 const MAX_FILTER_VALUES: usize = 64;
 const MAX_RECIPE_LIMIT: u16 = 50;
+const MAX_EXTRACTION_TURN_KEYS: usize = 200;
+const MAX_EXTRACTION_CANDIDATE_LIMIT: u16 = 66;
 const MAX_RECIPE_ITEMS: usize = 10_000;
 const MAX_RECIPE_DETAIL_ITEMS: usize = 10_000;
 const MAX_RECIPE_PAGE_BYTES: usize = 3_932_160;
@@ -45,6 +48,8 @@ pub enum RecipeName {
     SolutionRecall,
     #[serde(rename = "session-timeline@1")]
     SessionTimeline,
+    #[serde(rename = "extraction-candidates@1")]
+    ExtractionCandidates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +77,8 @@ pub struct RecipeFilters {
     pub capability_keys: Vec<String>,
     #[serde(default)]
     pub session_keys: Vec<String>,
+    #[serde(default)]
+    pub turn_keys: Vec<String>,
     #[serde(default)]
     pub event_kinds: Vec<String>,
     #[serde(default)]
@@ -389,6 +396,34 @@ fn validate_recipe_item(name: RecipeName, item: &Value, index: usize) -> Result<
             }
             validate_evidence_target(&item["evidence"])?;
         }
+        RecipeName::ExtractionCandidates => {
+            let item = exact_object(
+                item,
+                &[
+                    "sessionKey",
+                    "eligibleTurnCount",
+                    "directDeliveryEdgeCount",
+                    "observedDeliveryEdgeCount",
+                    "recoveredFailureChainCount",
+                    "mainCapabilityInvocationCount",
+                    "hasConclusiveFinalAnswer",
+                    "contributions",
+                    "score",
+                    "evidence",
+                ],
+            )?;
+            exact_object(
+                &item["contributions"],
+                &[
+                    "directDelivery",
+                    "observedDelivery",
+                    "recoveredFailureChains",
+                    "capabilityDensity",
+                    "conclusiveFinalAnswer",
+                ],
+            )?;
+            validate_evidence_target(&item["evidence"])?;
+        }
     }
     Ok(())
 }
@@ -627,8 +662,15 @@ impl RecipeRequest {
         if self.format != RECIPE_REQUEST_FORMAT {
             return Err(invalid("recipe format is not supported"));
         }
-        if !(1..=MAX_RECIPE_LIMIT).contains(&self.limit) {
-            return Err(invalid("recipe limit must be in 1..=50"));
+        let maximum_limit = if self.name == RecipeName::ExtractionCandidates {
+            MAX_EXTRACTION_CANDIDATE_LIMIT
+        } else {
+            MAX_RECIPE_LIMIT
+        };
+        if !(1..=maximum_limit).contains(&self.limit) {
+            return Err(invalid(format!(
+                "recipe limit must be in 1..={maximum_limit}"
+            )));
         }
         self.window.bounds("window")?;
         if let Some(window) = &self.comparison_window {
@@ -648,6 +690,12 @@ impl RecipeRequest {
             true,
         )?;
         validate_filter_values(&self.filters.session_keys, "filters.sessionKeys", true)?;
+        validate_filter_values_with_limit(
+            &self.filters.turn_keys,
+            "filters.turnKeys",
+            true,
+            MAX_EXTRACTION_TURN_KEYS,
+        )?;
         validate_filter_values(&self.filters.event_kinds, "filters.eventKinds", false)?;
         if self
             .filters
@@ -670,6 +718,19 @@ impl RecipeRequest {
             }
             RecipeName::ActivityShifts if self.filters.bucket.is_none() => {
                 return Err(invalid("activity-shifts@1 requires filters.bucket"));
+            }
+            RecipeName::ExtractionCandidates if self.filters.turn_keys.is_empty() => {
+                return Err(invalid("extraction-candidates@1 requires filters.turnKeys"));
+            }
+            RecipeName::ExtractionCandidates if self.filters.project_keys.is_empty() => {
+                return Err(invalid(
+                    "extraction-candidates@1 requires filters.projectKeys",
+                ));
+            }
+            RecipeName::ExtractionCandidates if self.allow_degraded => {
+                return Err(invalid(
+                    "extraction-candidates@1 does not support allowDegraded",
+                ));
             }
             _ => {}
         }
@@ -726,6 +787,19 @@ impl RecipeRequest {
                 reject(self.filters.text.is_some(), "filters.text")?;
                 reject(self.filters.bucket.is_some(), "filters.bucket")?;
             }
+            RecipeName::ExtractionCandidates => {
+                reject(
+                    !self.filters.capability_keys.is_empty(),
+                    "filters.capabilityKeys",
+                )?;
+                reject(!self.filters.session_keys.is_empty(), "filters.sessionKeys")?;
+                reject(!self.filters.event_kinds.is_empty(), "filters.eventKinds")?;
+                reject(self.filters.text.is_some(), "filters.text")?;
+                reject(self.filters.bucket.is_some(), "filters.bucket")?;
+            }
+        }
+        if self.name != RecipeName::ExtractionCandidates {
+            reject(!self.filters.turn_keys.is_empty(), "filters.turnKeys")?;
         }
         Ok(())
     }
@@ -922,6 +996,11 @@ pub fn read_recipe(
         }
         RecipeName::SessionTimeline => {
             let items = session_timeline(&transaction, request)?;
+            let total = items.len();
+            (items, false, total)
+        }
+        RecipeName::ExtractionCandidates => {
+            let items = extraction_candidates(&transaction, request)?;
             let total = items.len();
             (items, false, total)
         }
@@ -3265,10 +3344,448 @@ fn timeline_repeat_group(row: &rusqlite::Row<'_>) -> Result<Value, rusqlite::Err
     Ok(json!({"groupKey":group_key,"bucket":bucket.as_str()}))
 }
 
+#[derive(Default)]
+struct ExtractionCandidateSummary {
+    session_key: String,
+    session_revision: String,
+    eligible_turn_count: u64,
+    main_capability_invocation_count: u64,
+    has_conclusive_final_answer: bool,
+    direct_delivery_edge_count: u64,
+    observed_delivery_edge_count: u64,
+    recovered_failure_chain_count: u64,
+}
+
+fn extraction_turn_scope(request: &RecipeRequest) -> Result<(String, Vec<SqlValue>), QueryError> {
+    let mut values = request
+        .filters
+        .turn_keys
+        .iter()
+        .map(|key| decode_key(key, "filters.turnKeys").map(SqlValue::Blob))
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_rows = std::iter::repeat_n("(?)", request.filters.turn_keys.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let hard_sealed = crate::query::hard_sealed_sql();
+    let mut clauses = vec![
+        "s.eligibility='eligible'".to_owned(),
+        "s.session_scope='main'".to_owned(),
+        "t.effective_provider_visibility='active'".to_owned(),
+        "t.revision IS NOT NULL".to_owned(),
+        "t.observed_timestamp>=?".to_owned(),
+        "t.observed_timestamp<?".to_owned(),
+        format!("({hard_sealed})"),
+        "NOT EXISTS (SELECT 1 FROM source_purge_states purge WHERE purge.session_key=s.session_key)"
+            .to_owned(),
+    ];
+    values.push(SqlValue::Text(request.window.after.clone()));
+    values.push(SqlValue::Text(request.window.before.clone()));
+    push_text_filter(
+        &mut clauses,
+        &mut values,
+        "s.provider",
+        &request.filters.providers,
+    );
+    push_blob_filter(
+        &mut clauses,
+        &mut values,
+        "s.project_key",
+        &request.filters.project_keys,
+    )?;
+    Ok((
+        format!(
+            "WITH requested_turns(turn_key) AS (VALUES {requested_rows}),
+             eligible_turns AS (
+               SELECT t.turn_id,t.turn_key,t.session_id,t.final_answer_excerpt,s.project_key
+               FROM requested_turns requested
+               JOIN turns t ON t.turn_key=requested.turn_key
+               JOIN sessions s ON s.session_id=t.session_id
+               WHERE {}
+             )",
+            clauses.join(" AND ")
+        ),
+        values,
+    ))
+}
+
+fn extraction_candidates(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<Vec<Value>, QueryError> {
+    let (with_clause, values) = extraction_turn_scope(request)?;
+    let sql = format!(
+        "{with_clause}
+         SELECT et.session_id,lower(hex(s.session_key)),lower(hex(sc.canonical_digest)),
+                COUNT(DISTINCT et.turn_id),COUNT(DISTINCT cu.use_id),
+                MAX(CASE WHEN et.final_answer_excerpt IS NOT NULL
+                              AND trim(et.final_answer_excerpt)<>'' THEN 1 ELSE 0 END)
+         FROM eligible_turns et
+         JOIN sessions s ON s.session_id=et.session_id
+         JOIN session_commits sc ON sc.session_id=et.session_id
+         LEFT JOIN capability_uses cu ON cu.turn_id=et.turn_id AND cu.origin_scope='main'
+         GROUP BY et.session_id,s.session_key,sc.canonical_digest
+         HAVING COUNT(DISTINCT et.turn_id)>=3"
+    );
+    let mut summaries = BTreeMap::<i64, ExtractionCandidateSummary>::new();
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        summaries.insert(
+            row.get(0).map_err(query_failed)?,
+            ExtractionCandidateSummary {
+                session_key: row.get(1).map_err(query_failed)?,
+                session_revision: row.get(2).map_err(query_failed)?,
+                eligible_turn_count: nonnegative_u64(row.get(3).map_err(query_failed)?)
+                    .map_err(query_failed)?,
+                main_capability_invocation_count: nonnegative_u64(
+                    row.get(4).map_err(query_failed)?,
+                )
+                .map_err(query_failed)?,
+                has_conclusive_final_answer: row.get::<_, i64>(5).map_err(query_failed)? != 0,
+                ..ExtractionCandidateSummary::default()
+            },
+        );
+    }
+    drop(rows);
+    drop(statement);
+    if summaries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (with_clause, values) = extraction_turn_scope(request)?;
+    let sql = format!(
+        "{with_clause}
+         SELECT et.session_id,edge.strength,COUNT(DISTINCT edge.edge_key)
+         FROM eligible_turns et
+         JOIN repository_project_keys project ON project.project_key=et.project_key
+         JOIN delivery_trace_edges edge
+           ON edge.repository_id=project.repository_id
+          AND edge.from_kind='turn' AND edge.from_key=et.turn_key
+          AND edge.to_kind='git-commit'
+          AND edge.relation IN ('turn-observed-commit','turn-correlates-commit')
+          AND edge.strength IN ('direct','observed')
+         GROUP BY et.session_id,edge.strength"
+    );
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let session_id: i64 = row.get(0).map_err(query_failed)?;
+        let Some(summary) = summaries.get_mut(&session_id) else {
+            continue;
+        };
+        let count = nonnegative_u64(row.get(2).map_err(query_failed)?).map_err(query_failed)?;
+        match row.get::<_, String>(1).map_err(query_failed)?.as_str() {
+            "direct" => summary.direct_delivery_edge_count = count,
+            "observed" => summary.observed_delivery_edge_count = count,
+            _ => {
+                return Err(QueryError::new(
+                    "QUERY_FAILED",
+                    "delivery edge strength is invalid",
+                ));
+            }
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    let (with_clause, values) = extraction_turn_scope(request)?;
+    let sql = format!(
+        "{with_clause}
+         SELECT et.session_id,lower(hex(ace.chain_key)),
+                json_extract(he.metadata_json,'$.providerState'),he.completeness,
+                hec.missing_payload,he.record_start_offset,he.content_index,
+                he.event_ordinal,he.event_key
+         FROM eligible_turns et
+         JOIN history_events he ON he.occurred_turn_id=et.turn_id
+         JOIN attempt_chain_events ace ON ace.event_key=he.event_key
+         JOIN history_event_coverage hec ON hec.event_key=he.event_key
+         ORDER BY et.session_id,ace.chain_key,he.record_start_offset,
+                  he.content_index,he.event_ordinal,he.event_key"
+    );
+    let mut chains = BTreeMap::<(i64, String), ChainSummary>::new();
+    let mut statement = connection.prepare(&sql).map_err(query_failed)?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(query_failed)?;
+    while let Some(row) = rows.next().map_err(query_failed)? {
+        let session_id: i64 = row.get(0).map_err(query_failed)?;
+        if !summaries.contains_key(&session_id) {
+            continue;
+        }
+        let order = ChainEventOrder {
+            record_start_offset: row.get(5).map_err(query_failed)?,
+            content_index: row.get(6).map_err(query_failed)?,
+            event_ordinal: row.get(7).map_err(query_failed)?,
+            event_key: row.get(8).map_err(query_failed)?,
+        };
+        let entry = chains
+            .entry((session_id, row.get(1).map_err(query_failed)?))
+            .or_default();
+        let provider_state = row.get::<_, Option<String>>(2).map_err(query_failed)?;
+        if provider_state.as_deref() == Some("failed") {
+            entry.failed = entry
+                .failed
+                .checked_add(1)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "attempt chain is too large"))?;
+            if entry
+                .first_failure
+                .as_ref()
+                .is_none_or(|first| order < *first)
+            {
+                entry.first_failure = Some(order.clone());
+            }
+        } else if provider_state.as_deref() == Some("completed") {
+            entry.completed = entry
+                .completed
+                .checked_add(1)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "attempt chain is too large"))?;
+            if entry
+                .last_completion
+                .as_ref()
+                .is_none_or(|last| order > *last)
+            {
+                entry.last_completion = Some(order);
+            }
+        }
+        entry.incomplete |= row.get::<_, String>(3).map_err(query_failed)? != "full"
+            || row.get::<_, i64>(4).map_err(query_failed)? != 0;
+    }
+    for ((session_id, _), chain) in chains {
+        let resolved = !chain.incomplete
+            && chain.failed > 0
+            && chain
+                .first_failure
+                .as_ref()
+                .zip(chain.last_completion.as_ref())
+                .is_some_and(|(failure, completion)| completion > failure);
+        if resolved {
+            let summary = summaries.get_mut(&session_id).expect("session was checked");
+            summary.recovered_failure_chain_count = summary
+                .recovered_failure_chain_count
+                .checked_add(1)
+                .ok_or_else(|| QueryError::new("QUERY_FAILED", "too many recovered chains"))?;
+        }
+    }
+
+    let mut result = summaries
+        .into_values()
+        .map(extraction_candidate_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    result.sort_by(|left, right| {
+        decimal_json(right.get("score"))
+            .cmp(&decimal_json(left.get("score")))
+            .then_with(|| {
+                left["sessionKey"]
+                    .as_str()
+                    .cmp(&right["sessionKey"].as_str())
+            })
+    });
+    Ok(result)
+}
+
+fn extraction_candidate_value(summary: ExtractionCandidateSummary) -> Result<Value, QueryError> {
+    let direct = summary
+        .direct_delivery_edge_count
+        .checked_mul(40)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?;
+    let observed = summary
+        .observed_delivery_edge_count
+        .checked_mul(25)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?;
+    let recovered = summary
+        .recovered_failure_chain_count
+        .checked_mul(15)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?;
+    let scaled_capabilities = summary
+        .main_capability_invocation_count
+        .checked_mul(10)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?;
+    let capability_density = scaled_capabilities
+        .checked_add(summary.eligible_turn_count / 2)
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?
+        / summary.eligible_turn_count;
+    let capability_density = capability_density.min(10);
+    let conclusive = u64::from(summary.has_conclusive_final_answer) * 5;
+    let score = direct
+        .checked_add(observed)
+        .and_then(|value| value.checked_add(recovered))
+        .and_then(|value| value.checked_add(capability_density))
+        .and_then(|value| value.checked_add(conclusive))
+        .ok_or_else(|| QueryError::new("QUERY_FAILED", "candidate score overflowed"))?;
+    let session_key = summary.session_key;
+    Ok(json!({
+        "sessionKey": session_key,
+        "eligibleTurnCount": summary.eligible_turn_count.to_string(),
+        "directDeliveryEdgeCount": summary.direct_delivery_edge_count.to_string(),
+        "observedDeliveryEdgeCount": summary.observed_delivery_edge_count.to_string(),
+        "recoveredFailureChainCount": summary.recovered_failure_chain_count.to_string(),
+        "mainCapabilityInvocationCount": summary.main_capability_invocation_count.to_string(),
+        "hasConclusiveFinalAnswer": summary.has_conclusive_final_answer,
+        "contributions": {
+            "directDelivery": direct.to_string(),
+            "observedDelivery": observed.to_string(),
+            "recoveredFailureChains": recovered.to_string(),
+            "capabilityDensity": capability_density.to_string(),
+            "conclusiveFinalAnswer": conclusive.to_string(),
+        },
+        "score": score.to_string(),
+        "evidence": {
+            "kind": "session",
+            "sessionKey": session_key,
+            "revision": summary.session_revision,
+        },
+    }))
+}
+
+fn read_extraction_candidates_coverage(
+    connection: &Connection,
+    request: &RecipeRequest,
+) -> Result<DeepCoverage, QueryError> {
+    let mut repositories = BTreeSet::new();
+    for project_key in &request.filters.project_keys {
+        let key = decode_key(project_key, "filters.projectKeys")?;
+        let mut statement = connection
+            .prepare(
+                "SELECT source.repository_id,source.available
+                 FROM repository_project_keys project
+                 JOIN repository_sources source USING(repository_id)
+                 WHERE project.project_key=?1 ORDER BY source.repository_id",
+            )
+            .map_err(query_failed)?;
+        let rows = statement
+            .query_map([key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(query_failed)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(query_failed)?;
+        if rows.len() != 1 || rows[0].1 != 1 {
+            return Err(QueryError::new(
+                "TS_INSIGHTS_COVERAGE_INCOMPLETE",
+                "candidate scoring requires one available repository for every project",
+            ));
+        }
+        repositories.insert(rows[0].0.clone());
+    }
+    if repositories.len() != 1 {
+        return Err(QueryError::new(
+            "TS_INSIGHTS_COVERAGE_INCOMPLETE",
+            "candidate scoring projects do not resolve to one repository",
+        ));
+    }
+
+    let (with_clause, values) = extraction_turn_scope(request)?;
+    let sql = format!(
+        "{with_clause}
+         SELECT
+           SUM(CASE WHEN coverage.completeness='full' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN coverage.completeness='summary' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN coverage.completeness='unloaded' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN coverage.completeness='truncated' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN coverage.completeness='unavailable' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN coverage.observed_timestamp IS NULL THEN 1 ELSE 0 END),
+           SUM(coverage.missing_revision),SUM(coverage.missing_token_metric),
+           SUM(coverage.missing_payload)
+         FROM eligible_turns selected
+         JOIN history_events event ON event.occurred_turn_id=selected.turn_id
+         JOIN history_event_coverage coverage ON coverage.event_key=event.event_key"
+    );
+    let counts = connection
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+            ))
+        })
+        .map_err(query_failed)?;
+    let matching = DeepMatchingCoverage {
+        full_record_count: nonnegative_count(counts.0)?,
+        summary_record_count: nonnegative_count(counts.1)?,
+        unloaded_record_count: nonnegative_count(counts.2)?,
+        truncated_record_count: nonnegative_count(counts.3)?,
+        unavailable_record_count: nonnegative_count(counts.4)?,
+        missing_timestamp_count: nonnegative_count(counts.5)?,
+        missing_revision_count: nonnegative_count(counts.6)?,
+        missing_token_metric_count: nonnegative_count(counts.7)?,
+        missing_payload_count: nonnegative_count(counts.8)?,
+    };
+
+    // Extraction receives an exact Turn set that is already restricted to eligible, active,
+    // main-scope Sessions. Global excluded or subagent Sessions are intentionally outside that
+    // universe and must not make this request look partial.
+    let scoped_sql = format!(
+        "{with_clause},
+         selected_sessions AS (SELECT DISTINCT session_id FROM eligible_turns)
+         SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN rollup.session_id IS NULL THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(rollup.fts_searchable_event_count),0),
+                COALESCE(SUM(rollup.fts_stored_not_searchable_event_count),0),
+                COALESCE(SUM(rollup.fts_searchable_payload_bytes),0),
+                COALESCE(SUM(rollup.fts_stored_not_searchable_payload_bytes),0)
+         FROM selected_sessions selected
+         LEFT JOIN history_coverage_rollups rollup USING(session_id)"
+    );
+    let scoped = connection
+        .query_row(&scoped_sql, params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(query_failed)?;
+    let indexed_history = DeepIndexedHistoryCoverage {
+        visible_session_count: nonnegative_count(scoped.0)?,
+        excluded_session_count: "0".to_owned(),
+        subagent_excluded_session_count: "0".to_owned(),
+        unknown_eligibility_session_count: "0".to_owned(),
+        pending_purge_session_count: "0".to_owned(),
+        purged_session_count: "0".to_owned(),
+        missing_coverage_rollup_session_count: nonnegative_count(scoped.1)?,
+        fts: DeepFtsCoverage {
+            searchable_event_count: nonnegative_count(scoped.2)?,
+            stored_not_searchable_event_count: nonnegative_count(scoped.3)?,
+            searchable_payload_bytes: nonnegative_count(scoped.4)?,
+            stored_not_searchable_payload_bytes: nonnegative_count(scoped.5)?,
+        },
+    };
+    let degraded = matching.summary_record_count != "0"
+        || matching.unloaded_record_count != "0"
+        || matching.truncated_record_count != "0"
+        || matching.unavailable_record_count != "0"
+        || indexed_history.missing_coverage_rollup_session_count != "0";
+    Ok(DeepCoverage {
+        matching,
+        indexed_history,
+        degraded,
+        diagnostics: degraded
+            .then(|| "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE".to_owned())
+            .into_iter()
+            .collect(),
+    })
+}
+
 fn read_recipe_coverage(
     connection: &Connection,
     request: &RecipeRequest,
 ) -> Result<DeepCoverage, QueryError> {
+    if request.name == RecipeName::ExtractionCandidates {
+        return read_extraction_candidates_coverage(connection, request);
+    }
     if request.name == RecipeName::ActivityShifts && complete_day_window(&request.window)?.is_some()
     {
         return read_projected_activity_coverage(connection, request);
@@ -3280,7 +3797,9 @@ fn read_recipe_coverage(
         RecipeName::FileWorkflowSignals => Some("he.has_file_activity=1"),
         RecipeName::TokenHotspots => Some("he.has_token_usage=1"),
         RecipeName::SolutionRecall => None,
-        RecipeName::ActivityShifts | RecipeName::SessionTimeline => None,
+        RecipeName::ActivityShifts
+        | RecipeName::SessionTimeline
+        | RecipeName::ExtractionCandidates => None,
     };
     let (with_clause, event_source, where_clause, values) =
         if request.name == RecipeName::SolutionRecall {
@@ -3423,6 +3942,10 @@ fn recipe_provenance(name: RecipeName) -> DeepProvenance {
             vec![derived("items.*.subsequentSuccess", "solution-recall@1")]
         }
         RecipeName::SessionTimeline => Vec::new(),
+        RecipeName::ExtractionCandidates => vec![
+            derived("items.*.contributions", "extraction-candidates@1"),
+            derived("items.*.score", "extraction-candidates@1"),
+        ],
     };
     DeepProvenance {
         default: "recorded".to_owned(),
@@ -3631,11 +4154,18 @@ fn placeholders(count: usize) -> String {
 }
 
 fn validate_filter_values(values: &[String], label: &str, keys: bool) -> Result<(), QueryError> {
-    if values.len() > MAX_FILTER_VALUES
-        || values.iter().collect::<BTreeSet<_>>().len() != values.len()
-    {
+    validate_filter_values_with_limit(values, label, keys, MAX_FILTER_VALUES)
+}
+
+fn validate_filter_values_with_limit(
+    values: &[String],
+    label: &str,
+    keys: bool,
+    maximum: usize,
+) -> Result<(), QueryError> {
+    if values.len() > maximum || values.iter().collect::<BTreeSet<_>>().len() != values.len() {
         return Err(invalid(format!(
-            "{label} must contain at most 64 unique values"
+            "{label} must contain at most {maximum} unique values"
         )));
     }
     for value in values {
@@ -3811,16 +4341,325 @@ fn invalid(message: impl Into<String>) -> QueryError {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{Connection, params_from_iter};
+    use rusqlite::{Connection, params, params_from_iter};
 
     use super::{
         MAX_RECIPE_PAGE_BYTES, RecipeFilters, RecipeName, RecipeRequest, RecipeResponse,
         RecipeWindow, exact_activity_order_statement, failure_chain_summary_statement,
         file_workflow_summary_statement, fit_degraded_recipe_response,
         projected_activity_coverage_statement, projected_capability_cooccurrences_statement,
-        projected_capability_representatives_statement, read_recipe_coverage, recipe_provenance,
-        solution_recall_statement, truncate_recipe_details,
+        projected_capability_representatives_statement, read_extraction_candidates_coverage,
+        read_recipe_coverage, recipe_provenance, solution_recall_statement,
+        truncate_recipe_details,
     };
+
+    fn extraction_request() -> RecipeRequest {
+        RecipeRequest {
+            format: super::RECIPE_REQUEST_FORMAT.to_owned(),
+            name: RecipeName::ExtractionCandidates,
+            window: RecipeWindow {
+                after: "2026-01-01T00:00:00.000Z".to_owned(),
+                before: "2026-01-02T00:00:00.000Z".to_owned(),
+            },
+            comparison_window: None,
+            filters: RecipeFilters {
+                providers: vec!["codex".to_owned()],
+                project_keys: vec!["bb".repeat(32)],
+                turn_keys: vec!["a1".repeat(32), "a2".repeat(32), "a3".repeat(32)],
+                ..RecipeFilters::default()
+            },
+            limit: 66,
+            allow_degraded: false,
+            evaluated_at: "2026-01-02T01:00:00.000Z".to_owned(),
+        }
+    }
+
+    fn numbered_key(value: u16) -> Vec<u8> {
+        let mut key = vec![0_u8; 32];
+        key[..2].copy_from_slice(&value.to_be_bytes());
+        key
+    }
+
+    fn extraction_connection() -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_metadata (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO engine_metadata(key,value) VALUES
+                   ('snapshot_seq','0'),
+                   ('database_uuid','00000000-0000-4000-8000-000000000000');",
+            )
+            .unwrap();
+        crate::normalized_repository::initialize_schema(&mut connection).unwrap();
+        crate::source_state::initialize_schema(&connection).unwrap();
+        crate::delivery_graph_repository::initialize_schema(&connection).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                   session_id,session_key,provider,session_scope,eligibility,project_key,
+                   duplicate_policy_version
+                 ) VALUES (1,?1,'codex','main','eligible',?2,1)",
+                params![vec![0xaa_u8; 32], vec![0xbb_u8; 32]],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_commits(
+                   session_id,generation,delta_id,canonical_digest,snapshot_seq
+                 ) VALUES (1,?1,?2,?3,1)",
+                params![vec![0_u8; 8], vec![0x22_u8; 32], vec![0x33_u8; 32]],
+            )
+            .unwrap();
+        for ordinal in 1_u8..=3 {
+            let turn_id = i64::from(ordinal);
+            connection
+                .execute(
+                    "INSERT INTO turns(
+                       turn_id,turn_key,session_id,turn_start_offset,problem_text,
+                       final_answer_excerpt,observed_timestamp,next_user_boundary,
+                       provider_terminal,observed_eof_closed,base_provider_visibility,
+                       effective_provider_visibility,revision
+                     ) VALUES (?1,?2,1,?3,'problem',?4,?5,1,NULL,0,'active','active',?6)",
+                    params![
+                        turn_id,
+                        vec![0xa0 + ordinal; 32],
+                        u64::from(ordinal).to_be_bytes().to_vec(),
+                        (ordinal == 3).then_some("conclusive answer"),
+                        format!("2026-01-01T00:00:0{ordinal}.000Z"),
+                        vec![0xc0 + ordinal; 32],
+                    ],
+                )
+                .unwrap();
+            let event_id = 1_000 + turn_id;
+            connection
+                .execute(
+                    "INSERT INTO evidence_events(
+                       event_id,event_key,session_id,occurred_turn_id,source_record_id,
+                       record_start_offset,content_index,event_ordinal,pointer_kind,
+                       pointer_content_index,pointer_event_ordinal,origin_scope,
+                       observed_timestamp,event_kind
+                     ) VALUES (?1,?2,1,?3,1,?4,0,0,'message',0,0,'main',?5,'visible-message')",
+                    params![
+                        event_id,
+                        vec![0xd0 + ordinal; 32],
+                        turn_id,
+                        u64::from(ordinal).to_be_bytes().to_vec(),
+                        format!("2026-01-01T00:00:1{ordinal}.000Z"),
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO visible_message_events(event_id,message_role) VALUES (?1,'user')",
+                    [event_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO turn_evidence(session_id,turn_id,event_id,role)
+                     VALUES (1,?1,?2,'follow-up')",
+                    params![turn_id, event_id],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO capabilities(
+                   capability_id,capability_key,provider,capability_kind,canonical_name,identity_version
+                 ) VALUES (1,?1,'codex','tool','Bash',1)",
+                [vec![0x44_u8; 32]],
+            )
+            .unwrap();
+        for use_id in 1_i64..=2 {
+            connection
+                .execute(
+                    "INSERT INTO capability_uses(
+                       use_id,use_key,session_id,turn_id,capability_id,turn_ordinal,
+                       exact_observed_name,origin_scope,provider_terminal_state,strength
+                     ) VALUES (?1,?2,1,?1,1,?3,'Bash','main','completed','direct')",
+                    params![
+                        use_id,
+                        numbered_key(200 + u16::try_from(use_id).unwrap()),
+                        u64::try_from(use_id).unwrap().to_be_bytes().to_vec(),
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO repository_sources(
+                   repository_id,repository_key,generation,delta_id,ref_digest,available,snapshot_seq
+                 ) VALUES ('repo',?1,?2,?3,?4,1,1)",
+                params![
+                    vec![0x55_u8; 32],
+                    vec![0_u8; 8],
+                    vec![0x56_u8; 32],
+                    vec![0x57_u8; 32]
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO repository_project_keys(repository_id,project_key)
+                 VALUES ('repo',?1)",
+                [vec![0xbb_u8; 32]],
+            )
+            .unwrap();
+        for (ordinal, strength, relation) in [
+            (1_u8, "direct", "turn-observed-commit"),
+            (2_u8, "observed", "turn-correlates-commit"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO delivery_trace_edges(
+                       repository_id,object_id,edge_key,from_kind,from_key,to_kind,to_key,
+                       relation,strength,source,revision
+                     ) VALUES ('repo',?1,?2,'turn',?3,'git-commit',?4,?5,?6,'test',?7)",
+                    params![
+                        format!("commit-{ordinal}"),
+                        vec![0x60 + ordinal; 32],
+                        vec![0xa0 + ordinal; 32],
+                        vec![0x70 + ordinal; 32],
+                        relation,
+                        strength,
+                        vec![0x80 + ordinal; 32],
+                    ],
+                )
+                .unwrap();
+        }
+        for chain_ordinal in 1_u16..=51 {
+            for (state_ordinal, provider_state) in [(0_u16, "failed"), (1_u16, "completed")] {
+                let event_ordinal = chain_ordinal * 2 + state_ordinal;
+                let event_key = numbered_key(1_000 + event_ordinal);
+                connection
+                    .execute(
+                        "INSERT INTO history_events(
+                           event_key,session_id,occurred_turn_id,source_record_id,
+                           record_start_offset,content_index,event_ordinal,origin_scope,
+                           observed_timestamp,event_kind,completeness,revision,metadata_json
+                         ) VALUES (?1,1,1,1,?2,0,0,'main',?3,'capability-result','full',?4,?5)",
+                        params![
+                            &event_key,
+                            u64::from(event_ordinal).to_be_bytes().to_vec(),
+                            format!("2026-01-01T00:10:{:02}.000Z", event_ordinal % 60),
+                            numbered_key(2_000 + event_ordinal),
+                            format!("{{\"providerState\":\"{provider_state}\"}}"),
+                        ],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO history_event_coverage(
+                           event_key,session_id,event_kind,observed_timestamp,completeness,
+                           missing_revision,missing_token_metric,missing_payload,
+                           has_file_activity,has_token_usage
+                         ) VALUES (?1,1,'capability-result',?2,'full',0,0,0,0,0)",
+                        params![
+                            &event_key,
+                            format!("2026-01-01T00:10:{:02}.000Z", event_ordinal % 60),
+                        ],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO attempt_chain_events(
+                           event_key,chain_key,session_id,correlation_digest
+                         ) VALUES (?1,?2,1,?3)",
+                        params![
+                            &event_key,
+                            numbered_key(chain_ordinal),
+                            numbered_key(chain_ordinal)
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        connection
+    }
+
+    #[test]
+    fn extraction_candidate_scoring_is_host_owned_and_counts_more_than_fifty_chains() {
+        let connection = extraction_connection();
+        let request = extraction_request();
+        request.validate().unwrap();
+        let items = super::extraction_candidates(&connection, &request).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["eligibleTurnCount"], "3");
+        assert_eq!(items[0]["directDeliveryEdgeCount"], "1");
+        assert_eq!(items[0]["observedDeliveryEdgeCount"], "1");
+        assert_eq!(items[0]["recoveredFailureChainCount"], "51");
+        assert_eq!(items[0]["mainCapabilityInvocationCount"], "2");
+        assert_eq!(items[0]["contributions"]["capabilityDensity"], "7");
+        assert_eq!(items[0]["score"], "842");
+    }
+
+    #[test]
+    fn extraction_candidate_coverage_rejects_ambiguous_project_mapping() {
+        let connection = extraction_connection();
+        connection
+            .execute(
+                "INSERT INTO repository_sources(
+                   repository_id,repository_key,generation,delta_id,ref_digest,available,snapshot_seq
+                 ) VALUES ('other',?1,?2,?3,?4,1,1)",
+                params![
+                    vec![0x91_u8; 32],
+                    vec![0_u8; 8],
+                    vec![0x92_u8; 32],
+                    vec![0x93_u8; 32]
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO repository_project_keys(repository_id,project_key)
+                 VALUES ('other',?1)",
+                [vec![0xbb_u8; 32]],
+            )
+            .unwrap();
+        let error = read_extraction_candidates_coverage(&connection, &extraction_request())
+            .expect_err("ambiguous project mapping must fail closed");
+        assert_eq!(error.code, "TS_INSIGHTS_COVERAGE_INCOMPLETE");
+    }
+
+    #[test]
+    fn extraction_candidate_coverage_ignores_sessions_outside_the_exact_scope() {
+        let connection = extraction_connection();
+        connection
+            .execute(
+                "INSERT INTO history_coverage_rollups(
+                   session_id,missing_payload_event_count,missing_token_metric_event_count,
+                   fts_searchable_event_count,fts_stored_not_searchable_event_count,
+                   fts_searchable_payload_bytes,fts_stored_not_searchable_payload_bytes
+                 ) VALUES (1,0,0,3,0,21,0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                   session_id,session_key,provider,session_scope,eligibility,
+                   duplicate_policy_version
+                 ) VALUES (2,?1,'codex','subagent','subagent-excluded',1)",
+                [vec![0xee_u8; 32]],
+            )
+            .unwrap();
+
+        let coverage = read_extraction_candidates_coverage(&connection, &extraction_request())
+            .expect("unrelated excluded Sessions must not degrade an exact extraction scope");
+
+        assert!(!coverage.degraded);
+        assert_eq!(coverage.indexed_history.visible_session_count, "1");
+        assert_eq!(
+            coverage.indexed_history.subagent_excluded_session_count,
+            "0"
+        );
+    }
 
     #[test]
     fn degraded_recipe_details_keep_a_ranked_prefix_within_the_byte_budget() {
