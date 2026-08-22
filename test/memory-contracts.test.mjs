@@ -25,6 +25,7 @@ import {
   MEMORY_REPOSITORY_BINDING_FORMAT,
   MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT,
   MEMORY_RUNNER_EXECUTION_PLAN_FORMAT,
+  MEMORY_SKILL_CANDIDATE_FORMAT,
   MEMORY_SLUG_PATTERN,
   adjudicationResultSchema,
   adjudicationTaskSchema,
@@ -44,6 +45,7 @@ import {
   repositoryBindingSchema,
   restrictedExtractionRunnerSchema,
   runnerExecutionPlanSchema,
+  skillCandidateSchema,
 } from "../src/memory-contracts.mjs";
 import { canonicalJson } from "../src/canonical-json.mjs";
 
@@ -379,6 +381,27 @@ function memoryPrepareRequest() {
   };
 }
 
+function skillCandidate() {
+  return {
+    format: MEMORY_SKILL_CANDIDATE_FORMAT,
+    taskId: "task-0004",
+    binding: extractionBinding(),
+    memoryContextDigest: HEX("9"),
+    skill: {
+      name: "release-checks",
+      description: "Run release checks before publishing.",
+      body: "## Procedure\n\n1. Run the checks.\n",
+      action: "create",
+      expectedContentDigest: null,
+    },
+    statements: [{
+      statementId: "skill-s-1",
+      text: "Run the release checks before publishing.",
+      evidenceIds: ["ev-1"],
+    }],
+  };
+}
+
 const CONTRACT_CASES = [
   {
     name: "repository binding",
@@ -492,12 +515,22 @@ const CONTRACT_CASES = [
     }),
     schemaFile: "threadshare-memory-prepare-request.v1.schema.json",
   },
+  {
+    name: "skill candidate",
+    schema: skillCandidateSchema,
+    sample: skillCandidate,
+    invalid: (value) => ({
+      ...value,
+      skill: { ...value.skill, action: "update", expectedContentDigest: null },
+    }),
+    schemaFile: "threadshare-memory-skill-candidate.v1.schema.json",
+  },
 ];
 
 test("every contract format has exactly one schema and case", () => {
   const formats = Object.keys(MEMORY_CONTRACT_FORMATS);
-  assert.equal(formats.length, 13);
-  assert.equal(CONTRACT_CASES.length, 13);
+  assert.equal(formats.length, 14);
+  assert.equal(CONTRACT_CASES.length, 14);
   for (const format of formats) {
     assert.match(format, /^threadshare-memory-[a-z0-9-]+@v1$/);
   }
@@ -692,9 +725,9 @@ async function loadJsonSchemaValidators() {
   return validators;
 }
 
-test("all ten memory JSON Schema files compile under ajv 2020-12", async () => {
+test("all memory JSON Schema files compile under ajv 2020-12", async () => {
   const validators = await loadJsonSchemaValidators();
-  assert.equal(validators.size, 10);
+  assert.equal(validators.size, 11);
   for (const [, { document }] of validators) {
     assert.equal(document.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.equal(document.additionalProperties, false);

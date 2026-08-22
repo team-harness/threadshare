@@ -1622,6 +1622,8 @@ fn recall_on(
                  FROM candidate_fts f JOIN candidates c ON c.rowid = f.rowid
                  WHERE candidate_fts MATCH ?1 AND c.repository_key=?2 AND c.worktree_key=?3
                    AND c.status IN ('draft','quarantined')
+                   AND c.candidate_kind='entry'
+                   AND COALESCE(json_extract(c.payload_json, '$.candidateKind'), 'entry')='entry'
                  ORDER BY bm25(candidate_fts), c.candidate_id LIMIT ?4",
             )?;
             let rows = candidate.query_map(
@@ -1648,6 +1650,16 @@ fn recall_on(
                 // adjudication batch remain visible so cross-chunk duplicates
                 // can be skipped atomically against the shared snapshot.
                 if candidate_id == draft.candidate_id {
+                    continue;
+                }
+                // Defense in depth for databases created by older builds. The
+                // SQL predicate above keeps Skills from consuming the bounded
+                // BM25 window before this check.
+                if parse_json(&payload_json)
+                    .get("candidateKind")
+                    .and_then(Value::as_str)
+                    == Some("skill")
+                {
                     continue;
                 }
                 list_rank += 1;
@@ -2368,15 +2380,26 @@ impl MemoryStorage {
                 return Err(error);
             }
         }
+        let finalized_skill = request.finalize;
         let mut candidates = Vec::new();
         for draft in &request.drafts {
             let payload_json = canonical(&draft.payload)?;
             let content_digest = Sha256::digest(payload_json.as_bytes()).to_vec();
+            let candidate_status = if finalized_skill {
+                "quarantined"
+            } else {
+                "draft"
+            };
+            let candidate_adjudication = if finalized_skill {
+                "applied"
+            } else {
+                "pending"
+            };
             let changed = transaction.execute(
                 "INSERT OR IGNORE INTO candidates(
                    candidate_id, repository_key, worktree_key, chunk_ref, revision,
                    content_digest, payload_json, status, adjudication, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 'draft', 'pending', ?7)",
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     draft.candidate_id,
                     task.repository_key,
@@ -2384,6 +2407,8 @@ impl MemoryStorage {
                     chunk_ref,
                     content_digest,
                     payload_json,
+                    candidate_status,
+                    candidate_adjudication,
                     now_unix_ms,
                 ],
             )?;
@@ -2402,7 +2427,7 @@ impl MemoryStorage {
                 candidate_id: draft.candidate_id.clone(),
                 revision: 1,
                 content_digest: hex::encode(content_digest),
-                status: "draft".to_owned(),
+                status: candidate_status.to_owned(),
             });
         }
         for reference in &request.evidence_refs {
@@ -2470,7 +2495,11 @@ impl MemoryStorage {
                 if request.drafts.is_empty() {
                     "extracted"
                 } else {
-                    "drafted"
+                    if finalized_skill {
+                        "extracted"
+                    } else {
+                        "drafted"
+                    }
                 },
                 chunk_ref,
                 task.repository_key,
@@ -3251,7 +3280,7 @@ impl MemoryStorage {
     ) -> Result<ReviewQueueOutcome, MemoryError> {
         let repository_key = hex_blob(&request.repository_key)?;
         let worktree_key = hex_blob(&request.worktree_key)?;
-        let candidate_kind = if request.kind == "consolidation" {
+        let stored_candidate_kind = if request.kind == "consolidation" {
             "consolidation-patch"
         } else {
             "entry"
@@ -3261,13 +3290,19 @@ impl MemoryStorage {
              FROM candidates
              WHERE repository_key=?1 AND worktree_key=?2 AND status='quarantined'
                AND candidate_kind=?3
-             ORDER BY candidate_id LIMIT ?4",
+               AND (
+                 ?4='consolidation'
+                 OR (?4='skill' AND json_extract(payload_json, '$.candidateKind')='skill')
+                 OR (?4='entry' AND COALESCE(json_extract(payload_json, '$.candidateKind'), 'entry')='entry')
+               )
+             ORDER BY candidate_id LIMIT ?5",
         )?;
         let rows = statement.query_map(
             params![
                 &repository_key,
                 &worktree_key,
-                candidate_kind,
+                stored_candidate_kind,
+                request.kind,
                 i64::from(request.limit)
             ],
             |row| {
@@ -3283,8 +3318,26 @@ impl MemoryStorage {
         )?;
         let mut items = Vec::new();
         for row in rows {
-            let (candidate_id, candidate_kind, chunk_ref, revision, content_digest, payload_json) =
-                row?;
+            let (
+                candidate_id,
+                stored_candidate_kind,
+                chunk_ref,
+                revision,
+                content_digest,
+                payload_json,
+            ) = row?;
+            let payload = parse_json(&payload_json);
+            let visible_candidate_kind =
+                if payload.get("candidateKind").and_then(Value::as_str) == Some("skill") {
+                    "skill"
+                } else {
+                    stored_candidate_kind.as_str()
+                };
+            if (request.kind == "skill" && visible_candidate_kind != "skill")
+                || (request.kind == "entry" && visible_candidate_kind != "entry")
+            {
+                continue;
+            }
             let mut assessments = Vec::new();
             let mut assessment_statement = self.connection.prepare(
                 "SELECT statement_id, citations_digest, provenance_strength, limitations_json,
@@ -3335,13 +3388,16 @@ impl MemoryStorage {
             }
             items.push(ReviewItemWire {
                 candidate_id,
-                candidate_kind,
+                candidate_kind: visible_candidate_kind.to_owned(),
                 chunk_ref,
                 revision,
                 content_digest: hex::encode(content_digest),
-                payload: parse_json(&payload_json),
+                payload,
                 assessments,
             });
+            if items.len() >= usize::from(request.limit) {
+                break;
+            }
         }
         Ok(ReviewQueueOutcome { items })
     }
@@ -5267,6 +5323,7 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn temp_database_path(label: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5388,5 +5445,132 @@ mod tests {
                 .unwrap(),
             WalPressureAction::None
         );
+    }
+
+    #[test]
+    fn review_queue_filters_skill_kind_before_applying_its_limit() {
+        let storage = MemoryStorage::open_in_memory().unwrap();
+        let repository_key = vec![0x11_u8; 32];
+        let worktree_key = vec![0x22_u8; 32];
+        for index in 0..200 {
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO candidates(
+                       candidate_id, repository_key, worktree_key, chunk_ref, revision,
+                       content_digest, payload_json, status, adjudication, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 'quarantined', 'applied', 1)",
+                    params![
+                        format!("entry-{index:03}"),
+                        &repository_key,
+                        &worktree_key,
+                        format!("chunk-{index:03}"),
+                        vec![index as u8; 32],
+                        r#"{"content":"entry"}"#,
+                    ],
+                )
+                .unwrap();
+        }
+        storage
+            .connection
+            .execute(
+                "INSERT INTO candidates(
+                   candidate_id, repository_key, worktree_key, chunk_ref, revision,
+                   content_digest, payload_json, status, adjudication, updated_at)
+                 VALUES ('skill-z', ?1, ?2, 'chunk-skill', 1, ?3, ?4,
+                         'quarantined', 'applied', 1)",
+                params![
+                    &repository_key,
+                    &worktree_key,
+                    vec![0xff_u8; 32],
+                    r#"{"candidateKind":"skill","content":"release skill"}"#,
+                ],
+            )
+            .unwrap();
+
+        let request: ReviewQueueRequest = serde_json::from_value(json!({
+            "repositoryKey": hex::encode(&repository_key),
+            "worktreeKey": hex::encode(&worktree_key),
+            "kind": "skill",
+            "limit": 1,
+        }))
+        .unwrap();
+        let items = storage.review_queue(&request).unwrap().items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].candidate_id, "skill-z");
+        assert_eq!(items[0].candidate_kind, "skill");
+    }
+
+    #[test]
+    fn entry_recall_filters_skills_before_the_bounded_fts_window() {
+        let storage = MemoryStorage::open_in_memory().unwrap();
+        let repository_key = vec![0x33_u8; 32];
+        let worktree_key = vec![0x44_u8; 32];
+        for index in 0..5 {
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO candidates(
+                       candidate_id, repository_key, worktree_key, chunk_ref, revision,
+                       content_digest, payload_json, status, adjudication, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 'quarantined', 'applied', 1)",
+                    params![
+                        format!("a-skill-{index}"),
+                        &repository_key,
+                        &worktree_key,
+                        format!("chunk-skill-{index}"),
+                        vec![index as u8; 32],
+                        r#"{"candidateKind":"skill","content":"release"}"#,
+                    ],
+                )
+                .unwrap();
+            let rowid = storage.connection.last_insert_rowid();
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO candidate_fts(rowid, searchable_text) VALUES (?1, 'release')",
+                    params![rowid],
+                )
+                .unwrap();
+        }
+        storage
+            .connection
+            .execute(
+                "INSERT INTO candidates(
+                   candidate_id, repository_key, worktree_key, chunk_ref, revision,
+                   content_digest, payload_json, status, adjudication, updated_at)
+                 VALUES ('z-entry', ?1, ?2, 'chunk-entry', 1, ?3, ?4,
+                         'quarantined', 'applied', 1)",
+                params![
+                    &repository_key,
+                    &worktree_key,
+                    vec![0xee_u8; 32],
+                    r#"{"content":"release entry"}"#,
+                ],
+            )
+            .unwrap();
+        let rowid = storage.connection.last_insert_rowid();
+        storage
+            .connection
+            .execute(
+                "INSERT INTO candidate_fts(rowid, searchable_text) VALUES (?1, 'release')",
+                params![rowid],
+            )
+            .unwrap();
+
+        let request: RecallRequest = serde_json::from_value(json!({
+            "repositoryKey": hex::encode(&repository_key),
+            "worktreeKey": hex::encode(&worktree_key),
+            "k": 1,
+            "drafts": [{
+                "draftRef": "draft-1",
+                "candidateId": "new-candidate",
+                "queryText": "release",
+            }],
+        }))
+        .unwrap();
+        let outcome = recall_on(&storage.connection, &request).unwrap().outcome;
+        assert_eq!(outcome.pool.len(), 1);
+        assert_eq!(outcome.pool[0].id, "z-entry");
     }
 }

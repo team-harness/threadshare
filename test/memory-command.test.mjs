@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -16,6 +17,7 @@ import {
 } from "../src/memory-command.mjs";
 import { executeInsightsCommand, parseInsightsInvocation } from "../src/insights-command.mjs";
 import { parseMemoryEntry, serializeMemoryEntry } from "../src/memory-format.mjs";
+import { serializeSkillDocument } from "../src/memory-skill.mjs";
 import { INSIGHTS_E2E_ENGINE, INSIGHTS_E2E_SKIP } from "./helpers/insights-e2e.mjs";
 import {
   createMemoryCommandFixture,
@@ -133,6 +135,24 @@ test("memory init, status, lint, and assemble form an idempotent repository work
   );
   assert.equal(linted.blocked, true);
   assert.ok(linted.files[0].findings.some((finding) => finding.code === "MEMORY_LINT_GITHUB_TOKEN"));
+
+  const skillDirectory = path.join(memoryRoot, "skills", "release-checks");
+  await mkdir(skillDirectory, { recursive: true });
+  const skillPath = path.join(skillDirectory, "SKILL.md");
+  await writeFile(skillPath, serializeSkillDocument({
+    name: "release-checks",
+    description: "Run release checks before publishing.",
+    body: "## Procedure\n\n1. Run the release checks.\n",
+  }));
+  const lintedSkill = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "lint", skillPath], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(lintedSkill.blocked, false);
+  assert.deepEqual(lintedSkill.files[0].findings, []);
 });
 
 test("memory init refuses an existing symlink in the public memory path", {
@@ -1053,6 +1073,389 @@ test("Agent-native empty stage advances the chunk as an explicit no-op", {
     repository: fixture.repository,
   });
   assert.deepEqual(repeated.sources, []);
+});
+
+test("SkillCandidate stages, reviews, promotes, and assembles through the shared CLI/MCP lifecycle", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const options = { ...fixture.options, repository: fixture.repository };
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const recalled = await executeMemoryMcp("recall", { request }, options);
+  assert.equal(recalled.guidance.skillRequestFormat,
+    "threadshare-memory-skill-candidate@v1");
+  assert.deepEqual(recalled.skillContext.items, []);
+  assert.equal(recalled.memoryContext.strategy, "memory-first");
+  assert.deepEqual(recalled.memoryContext.items, []);
+  assert.match(recalled.memoryContext.bindingDigest, /^[0-9a-f]{64}$/u);
+  const source = recalled.sources[0];
+  const evidenceId = source.evidenceCatalog.find((evidence) => evidence.kind === "turn").evidenceId;
+  const candidate = {
+    format: "threadshare-memory-skill-candidate@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    memoryContextDigest: recalled.memoryContext.bindingDigest,
+    skill: {
+      name: "release-checks",
+      description: "  Run the release checks before publishing.  ",
+      body: "## Procedure\n\n1. Run `npm run test:release`.\n",
+      action: "create",
+      expectedContentDigest: null,
+    },
+    statements: [{
+      statementId: "skill-release-check",
+      text: "Run npm run test:release before publishing.",
+      evidenceIds: [evidenceId],
+    }],
+  };
+  const staged = await executeMemoryMcp("stage", candidate, options);
+  assert.equal(staged.status, "staged");
+  assert.equal(staged.skill, true);
+  assert.equal(staged.reviewItems[0].candidateKind, "skill");
+
+  const reviewed = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], {
+      repository: fixture.repository,
+      kind: "skill",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(reviewed.items.length, 1);
+  const item = reviewed.items[0];
+  assert.equal(item.payload.skill.name, "release-checks");
+  assert.equal(item.payload.skill.description, "Run the release checks before publishing.");
+  const prepared = await executeMemoryMcp("prepare", {
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "skill",
+    candidates: [{
+      candidateId: item.candidateId,
+      expectedRevision: item.revision,
+      statements: item.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  }, options);
+  assert.equal(prepared.plan.changes[0].targetPath,
+    ".threadshare/memory/skills/release-checks/SKILL.md");
+  const promoted = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "promote"], {
+      repository: fixture.repository,
+      plan: prepared.plan.planId,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(promoted.status, "applied");
+  const skillPath = path.join(fixture.repository, prepared.plan.changes[0].targetPath);
+  assert.match(await readFile(skillPath, "utf8"), /npm run test:release/u);
+
+  const assembled = await executeMemoryMcp("assemble", { provider: "claude" }, options);
+  assert.equal(assembled.skills, 1);
+  const claudeSkillPath = path.join(
+    fixture.repository,
+    ".claude",
+    "skills",
+    "release-checks",
+    "SKILL.md",
+  );
+  assert.match(
+    await readFile(claudeSkillPath, "utf8"),
+    /Run `npm run test:release`/u,
+  );
+  const codexAssembly = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "assemble"], {
+      repository: fixture.repository,
+      provider: "codex",
+    }),
+    fixture.options,
+  );
+  assert.equal(codexAssembly.skills, 1);
+  assert.match(
+    await readFile(path.join(fixture.repository, ".codex", "skills", "release-checks", "SKILL.md"), "utf8"),
+    /Run `npm run test:release`/u,
+  );
+
+  const rerecalled = await executeMemoryMcp("recall", { request }, options);
+  assert.equal(rerecalled.skillContext.total, 1);
+  assert.equal(rerecalled.skillContext.truncated, false);
+  assert.equal(rerecalled.skillContext.items[0].name, "release-checks");
+  assert.equal(rerecalled.skillContext.items[0].contentDigest,
+    createHash("sha256").update(await readFile(skillPath)).digest("hex"));
+  assert.match(rerecalled.skillContext.items[0].document, /npm run test:release/u);
+  await writeFile(claudeSkillPath, `${await readFile(claudeSkillPath, "utf8")}# local edit\n`);
+  await assert.rejects(
+    executeMemoryMcp("assemble", { provider: "claude" }, options),
+    (error) => error.code === "TS_MEMORY_ASSEMBLY_CONFLICT",
+  );
+});
+
+test("Skill recall returns memory-first context and rejects entry, scene, or doctrine drift", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const memoryRoot = path.join(fixture.repository, ".threadshare", "memory");
+  const entryPath = path.join(memoryRoot, "entries", "release-recovery.md");
+  const entry = serializeMemoryEntry({
+    frontmatter: {
+      id: "release-recovery",
+      type: "work_method",
+      status: "approved",
+      priority: 90,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: ["Only after the staging smoke test fails."],
+      scope: "repo",
+      scene: "release-failures",
+      occurred: [],
+      evidence: { commits: [], paths: [] },
+      superseded_by: null,
+    },
+    body: "Restore the previous staging artifact before retrying a failed release.\n",
+  });
+  const scene = [
+    "-----META-START-----",
+    "created: 2026-08-21",
+    "updated: 2026-08-22",
+    "summary: Release failure recovery",
+    "heat: 4",
+    "-----META-END-----",
+    "## Release failure recovery",
+    "Use the staging smoke result as the release gate.",
+  ].join("\n");
+  const doctrine = "Never bypass a failed staging smoke test.\n";
+  await writeFile(entryPath, entry);
+  await writeFile(path.join(memoryRoot, "scenes", "release-failures.md"), scene);
+  await writeFile(path.join(memoryRoot, "doctrine.md"), doctrine);
+
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const options = { ...fixture.options, repository: fixture.repository };
+  const recalled = await executeMemoryMcp("recall", { request }, options);
+  assert.deepEqual(recalled.memoryContext.priority, [
+    "existing-skill",
+    "scene",
+    "doctrine",
+    "approved-entry",
+    "historical-turn",
+  ]);
+  assert.deepEqual(recalled.memoryContext.items.map((item) => item.kind), [
+    "scene",
+    "doctrine",
+    "approved-entry",
+  ]);
+  assert.equal(recalled.memoryContext.items[0].name, "release-failures");
+  assert.equal(recalled.memoryContext.items[2].entryId, "release-recovery");
+  assert.equal(recalled.memoryContext.items.every((item) => item.truncated === false), true);
+  assert.equal(recalled.memoryContext.truncated, false);
+
+  const source = recalled.sources[0];
+  const evidenceId = source.evidenceCatalog.find((evidence) => evidence.kind === "turn").evidenceId;
+  const candidate = {
+    format: "threadshare-memory-skill-candidate@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    memoryContextDigest: recalled.memoryContext.bindingDigest,
+    skill: {
+      name: "release-recovery",
+      description: "Recover a failed staging release safely.",
+      body: "## Procedure\n\n1. Check staging smoke.\n2. Restore the previous artifact.\n",
+      action: "create",
+      expectedContentDigest: null,
+    },
+    statements: [{
+      statementId: "skill-memory-first",
+      text: "Restore the previous artifact after a failed staging smoke test.",
+      evidenceIds: [evidenceId],
+    }],
+  };
+  await writeFile(entryPath, entry.replace("previous staging artifact", "last known-good artifact"));
+  await assert.rejects(
+    executeMemoryMcp("stage", candidate, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(entryPath, entry);
+  const scenePath = path.join(memoryRoot, "scenes", "release-failures.md");
+  await writeFile(scenePath, scene.replace("staging smoke result", "production health result"));
+  await assert.rejects(
+    executeMemoryMcp("stage", candidate, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(scenePath, scene);
+  const doctrinePath = path.join(memoryRoot, "doctrine.md");
+  await writeFile(doctrinePath, doctrine.replace("Never bypass", "Always investigate"));
+  await assert.rejects(
+    executeMemoryMcp("stage", candidate, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(doctrinePath, doctrine);
+  const staged = await executeMemoryMcp("stage", candidate, options);
+  assert.equal(staged.status, "staged");
+  await writeFile(scenePath, scene.replace("release gate", "deployment gate"));
+  await assert.rejects(
+    executeMemoryMcp("review", { kind: "skill" }, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(scenePath, scene);
+  const reviewed = await executeMemoryMcp("review", { kind: "skill" }, options);
+  const reviewItem = reviewed.items[0];
+  const prepared = await executeMemoryMcp("prepare", {
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "skill",
+    candidates: [{
+      candidateId: reviewItem.candidateId,
+      expectedRevision: reviewItem.revision,
+      statements: reviewItem.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  }, options);
+  await writeFile(doctrinePath, doctrine.replace("failed staging", "failed production"));
+  await assert.rejects(
+    executeMemoryMcp("promote", { plan: prepared.plan.planId }, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(doctrinePath, doctrine);
+  const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);
+  assert.equal(promoted.status, "applied");
+});
+
+test("SkillCandidate update binds the current source digest and rejects review-time drift", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const options = { ...fixture.options, repository: fixture.repository };
+  const skillDirectory = path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "skills",
+    "release-checks",
+  );
+  await mkdir(skillDirectory);
+  const original = [
+    "---",
+    'name: "release-checks"',
+    'description: "Run release checks."',
+    "---",
+    "## Procedure",
+    "",
+    "1. Run the old check.",
+    "",
+  ].join("\n");
+  const skillPath = path.join(skillDirectory, "SKILL.md");
+  await writeFile(skillPath, original);
+
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const recalled = await executeMemoryMcp("recall", { request }, options);
+  const source = recalled.sources[0];
+  const contextItem = recalled.skillContext.items.find((item) => item.name === "release-checks");
+  assert.ok(contextItem);
+  assert.equal(contextItem.contentDigest,
+    createHash("sha256").update(original).digest("hex"));
+  const evidenceId = source.evidenceCatalog.find((evidence) => evidence.kind === "turn").evidenceId;
+  const staged = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-skill-candidate@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    memoryContextDigest: recalled.memoryContext.bindingDigest,
+    skill: {
+      name: "release-checks",
+      description: "Run release checks.",
+      body: "## Procedure\n\n1. Run the new check.\n",
+      action: "update",
+      expectedContentDigest: contextItem.contentDigest,
+    },
+    statements: [{
+      statementId: "skill-update-check",
+      text: "Run the new release check.",
+      evidenceIds: [evidenceId],
+    }],
+  }, options);
+  assert.equal(staged.status, "staged");
+
+  await writeFile(skillPath, original.replace("old check", "outside edit"));
+  await assert.rejects(
+    executeMemoryMcp("review", { kind: "skill" }, options),
+    (error) => error.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  await writeFile(skillPath, original);
+  const reviewed = await executeMemoryMcp("review", { kind: "skill" }, options);
+  const item = reviewed.items[0];
+  const prepared = await executeMemoryMcp("prepare", {
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "skill",
+    candidates: [{
+      candidateId: item.candidateId,
+      expectedRevision: item.revision,
+      statements: item.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  }, options);
+  const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);
+  assert.equal(promoted.status, "applied");
+  assert.match(await readFile(skillPath, "utf8"), /Run the new check/u);
+});
+
+test("Skill recall ranks by query when complete documents exceed the byte budget", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const skillsRoot = path.join(fixture.repository, ".threadshare", "memory", "skills");
+  const filler = `## Procedure\n\n${"background ".repeat(5_000)}\n`;
+  for (const skill of [
+    { name: "a-background", description: "General background procedure." },
+    { name: "b-background", description: "Another background procedure." },
+    { name: "z-release-outage", description: "Handle a release outage failure." },
+  ]) {
+    const directory = path.join(skillsRoot, skill.name);
+    await mkdir(directory);
+    await writeFile(path.join(directory, "SKILL.md"), serializeSkillDocument({
+      ...skill,
+      body: filler,
+    }));
+  }
+
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  request.query = "release outage";
+  const recalled = await executeMemoryMcp("recall", { request }, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  assert.equal(recalled.skillContext.total, 3);
+  assert.equal(recalled.skillContext.truncated, true);
+  assert.equal(recalled.skillContext.selection, "query-ranked");
+  assert.equal(recalled.skillContext.items[0].name, "z-release-outage");
+  assert.equal(recalled.skillContext.items.some((item) => item.name === "z-release-outage"), true);
+  assert.equal(recalled.skillContext.items.every((item) =>
+    Buffer.byteLength(item.document, "utf8") > 40 * 1024), true);
 });
 
 test("Agent-native adjudication can skip a draft covered by approved memory", {

@@ -854,6 +854,118 @@ fn submit_extraction_is_idempotent_and_audits_digest_conflicts() {
 }
 
 #[test]
+fn finalized_skill_is_quarantined_kind_filtered_and_excluded_from_entry_recall() {
+    let mut storage = MemoryStorage::open_in_memory().unwrap();
+    plan_chunk_and_task(
+        &mut storage,
+        "chunk-skill",
+        "task-skill",
+        "extraction",
+        1_000,
+    );
+    let token = claim(&mut storage, "task-skill", "holder-skill", 60_000, 10_000);
+    let submit: SubmitExtractionRequest = request(json!({
+        "taskId": "task-skill",
+        "claimToken": token,
+        "responseDigest": hex64('a'),
+        "finalize": true,
+        "drafts": [{
+            "candidateId": "skill-candidate",
+            "payload": {
+                "candidateKind": "skill",
+                "memoryContextDigest": hex64('9'),
+                "skill": {
+                    "name": "release-checks",
+                    "description": "Run release checks.",
+                    "body": "## Procedure\nRun checks.\n",
+                    "action": "create",
+                    "expectedContentDigest": null
+                },
+                "statements": [{
+                    "statementId": "s1",
+                    "text": "Run checks.",
+                    "evidenceIds": ["e1"]
+                }],
+                "content": "release checks"
+            },
+            "searchableText": "release checks"
+        }],
+        "evidenceRefs": [{
+            "candidateId": "skill-candidate",
+            "statementId": "s1",
+            "evidenceId": "e1",
+            "pointerDigest": hex64('5'),
+            "sessionKey": hex64('3'),
+            "turnKey": null,
+            "revision": hex64('6'),
+            "payloadSha256": null,
+            "relation": "direct",
+            "strength": "direct",
+            "limitations": []
+        }],
+        "assessments": [{
+            "candidateId": "skill-candidate",
+            "statementId": "s1",
+            "citationsDigest": hex64('7'),
+            "provenanceStrength": "direct",
+            "limitations": [],
+            "claimSupport": "unverified",
+            "assessedBy": "deterministic",
+            "statementTextDigest": hex64('8'),
+            "revision": 1
+        }]
+    }));
+    submit.validate().unwrap();
+    let mut missing_assessment = submit.clone();
+    missing_assessment.assessments.clear();
+    assert_eq!(
+        missing_assessment.validate().unwrap_err(),
+        "every finalized SkillCandidate statement must have exactly one assessment"
+    );
+    let mut orphan_evidence = submit.clone();
+    orphan_evidence.evidence_refs[0].evidence_id = "other-evidence".to_owned();
+    assert_eq!(
+        orphan_evidence.validate().unwrap_err(),
+        "finalized SkillCandidate evidenceRefs must match payload evidenceIds"
+    );
+    let mut invalid_action = submit.clone();
+    invalid_action.drafts[0].payload["skill"]["action"] = json!("replace");
+    assert_eq!(
+        invalid_action.validate().unwrap_err(),
+        "finalized SkillCandidate skill action must be create or update"
+    );
+    let mut unexpected_skill_field = submit.clone();
+    unexpected_skill_field.drafts[0].payload["skill"]["provider"] = json!("codex");
+    assert_eq!(
+        unexpected_skill_field.validate().unwrap_err(),
+        "finalized SkillCandidate skill details contain unknown or missing fields"
+    );
+    let outcome = storage.submit_extraction(&submit, 10_100).unwrap();
+    assert_eq!(outcome["candidates"][0]["status"], "quarantined");
+    assert_eq!(status_counts(&storage)["chunks"]["extracted"], 1);
+
+    let entry_queue: ReviewQueueRequest = request(json!({
+        "repositoryKey": REPO, "worktreeKey": TREE, "kind": "entry"
+    }));
+    assert!(storage.review_queue(&entry_queue).unwrap().items.is_empty());
+    let skill_queue: ReviewQueueRequest = request(json!({
+        "repositoryKey": REPO, "worktreeKey": TREE, "kind": "skill"
+    }));
+    let queue = storage.review_queue(&skill_queue).unwrap();
+    assert_eq!(queue.items.len(), 1);
+    assert_eq!(queue.items[0].candidate_kind, "skill");
+
+    let recall = storage
+        .recall(&recall_request(
+            "other",
+            "other-candidate",
+            "release checks",
+        ))
+        .unwrap();
+    assert!(recall.pool.is_empty());
+}
+
+#[test]
 fn consolidation_submit_is_transactional_kind_filtered_and_digest_bound() {
     let mut storage = MemoryStorage::open_in_memory().unwrap();
     let worktree = prepare_consolidation_worktree(&mut storage, "consolidation-submit");

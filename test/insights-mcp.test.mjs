@@ -274,6 +274,7 @@ test("Memory MCP exposes Agent-native operations plus optional pending batch pre
   assert.deepEqual(memoryTools.map((tool) => tool.name), MEMORY_MCP_TOOL_NAMES);
   const stageTool = memoryTools.find((tool) => tool.name === "threadshare_memory_stage");
   assert.deepEqual(stageTool.inputSchema.oneOf.map((schema) => schema.properties.format.const), [
+    "threadshare-memory-skill-candidate@v1",
     "threadshare-memory-candidate-draft-batch@v1",
     "threadshare-memory-adjudication-result@v1",
     "threadshare-memory-consolidation-patch@v1",
@@ -419,6 +420,7 @@ test("Agent-native Memory MCP routes recall, stage, review, prepare, and promote
     ["threadshare_memory_review", { kind: "entry" }],
     ["threadshare_memory_prepare", prepare],
     ["threadshare_memory_promote", { plan: "plan-1" }],
+    ["threadshare_memory_assemble", { provider: "codex" }],
   ].map(([name, args], index) => ({
     jsonrpc: "2.0",
     id: index + 1,
@@ -433,7 +435,7 @@ test("Agent-native Memory MCP routes recall, stage, review, prepare, and promote
   });
   assert.equal(responses.every((response) => response.result.isError === false), true);
   assert.deepEqual(calls.map(({ action }) => action), [
-    "recall", "synthesize", "stage", "stage", "review", "prepare", "promote",
+    "recall", "synthesize", "stage", "stage", "review", "prepare", "promote", "assemble",
   ]);
   assert.deepEqual(calls[0].args, { request, limit: 1 });
   assert.deepEqual(calls[1].args, { full: true });
@@ -441,6 +443,7 @@ test("Agent-native Memory MCP routes recall, stage, review, prepare, and promote
   assert.deepEqual(calls[3].args, adjudication);
   assert.deepEqual(calls[5].args, prepare);
   assert.deepEqual(calls[6].args, { plan: "plan-1" });
+  assert.deepEqual(calls[7].args, { provider: "codex" });
 });
 
 test("Memory MCP rejects a malformed search request as a stable tool error", async () => {

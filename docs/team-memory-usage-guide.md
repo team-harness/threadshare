@@ -80,7 +80,45 @@ threadshare memory promote --plan <plan-id> --format json
 
 上面的占位符不是要求用户手写的文件。若 Agent 不在场，先运行 `threadshare memory --help` 和对应 schema；不要凭字段名称猜测 digest、candidate id 或 evidence id。
 
-### 3.2 证据与确认规则
+### 3.2 把可重复步骤提炼成 Skill
+
+当结论不是一条事实，而是一套以后可以照着执行的步骤时，使用 `SkillCandidate@v1`。Agent 不会直接从原始聊天重新开始：先比较现有 Skill，再阅读 Scene/Doctrine 和 approved entry，最后回到 `recall` 返回的 Turn 做原始取证。Agent 把综合后的候选展示给用户；用户补充或改写后，再通过 CLI 或 MCP 提交：
+
+```text
+stage(SkillCandidate@v1) → review(kind=skill) → prepare(kind=skill) → promote
+```
+
+Skill 的 `name`、描述、正文和每条 statement 的 evidence id 都由 Threadshare 校验。新建 Skill 的目标不能已存在；更新 Skill 必须绑定当前正文 digest；没有 delete 操作。Skill 正文会经过与 L1 相同的 secret/provider-session lint。Memory 上下文不能替代原始证据：每条 statement 仍要引用同一 recall source 中的 Turn evidence id。
+
+Agent 不需要另行扫描 Memory 目录或让用户提供 digest：
+
+- `skillContext.items` 包含相关现有 Skill 的完整文档和 `contentDigest`，用于判断 create/update；上限是 20 个、完整正文合计 128 KiB。
+- `memoryContext.items` 按 Scene、Doctrine、approved entry 排列，单项不截断；上限是 40 项、正文合计 128 KiB。
+- 任一 context 的 `truncated=true` 都表示 Agent 应缩小 query 后重新 recall，不能假定未返回的内容不存在。
+- Agent 必须把 `memoryContext.bindingDigest` 原样写入 `SkillCandidate.memoryContextDigest`。Threadshare 会在 stage、review、prepare 和 promote 前复核；entry、scene 或 doctrine 变化后，旧候选不能继续晋升。
+
+`guidance.skillRequestFormat` 会告诉 Agent 改用 `SkillCandidate@v1`。
+
+示例用户请求：
+
+```text
+回看最近两周这个仓库的发布失败，整理成一个 release-checks Skill。先展示步骤、证据和限制，我确认后再写入。
+```
+
+晋升后，通过 CLI 或 MCP 显式运行装配：
+
+```bash
+threadshare memory lint .threadshare/memory/skills/<name>/SKILL.md
+threadshare memory assemble --provider claude  # .claude/skills/<name>/SKILL.md
+threadshare memory assemble --provider codex   # .codex/skills/<name>/SKILL.md
+```
+
+MCP 等价调用是 `threadshare_memory_assemble({provider:"claude"})` 或
+`threadshare_memory_assemble({provider:"codex"})`。
+
+`.threadshare/memory/skills/**` 是 Git 真相源；provider 目录是可重建投影。装配发现投影文件被用户改过时会报冲突，不会静默覆盖，也不会删除旧投影。完整协议见 [Skill 提取与装配设计](./team-memory-skill-design.md)。
+
+### 3.3 证据与确认规则
 
 - 每条 statement 必须引用当前 recall source 中的 evidence id；不要按 `ev-*` 的编号顺序猜映射。
 - Delivery Trace 的 `direct/observed/candidate/contextual/unknown` 是来源强度，不等于自然语言陈述已经成立。
@@ -138,6 +176,7 @@ CLI 和 MCP 提供同一组交互操作：
 | `memory review` | `threadshare_memory_review` |
 | `memory prepare` | `threadshare_memory_prepare` |
 | `memory promote` | `threadshare_memory_promote` |
+| `memory assemble` | `threadshare_memory_assemble` |
 
 MCP 通过本机 Insights stdio server 暴露：
 

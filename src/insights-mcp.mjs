@@ -29,7 +29,7 @@ const TOOL_NAMES = Object.freeze([
 const MEMORY_TOOL_NAMES = Object.freeze(Object.fromEntries(
   [
     "search", "status", "extract", "consolidate", "review", "recall", "synthesize",
-    "stage", "prepare", "promote",
+    "stage", "prepare", "promote", "assemble",
   ]
     .map((id) => [id, memoryOperationById(id).mcp.tool]),
 ));
@@ -50,7 +50,7 @@ async function readSchema(name) {
 async function toolCatalog() {
   const [
     spec, query, recipe, evidence, gitDiffEvidence, memorySearch, memoryExtraction,
-    memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch, memoryPrepare,
+    memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch, memorySkillCandidate, memoryPrepare,
   ] = await Promise.all([
     readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
@@ -62,6 +62,7 @@ async function toolCatalog() {
     readSchema("threadshare-memory-candidate-draft-batch.v1.schema.json"),
     readSchema("threadshare-memory-adjudication-result.v1.schema.json"),
     readSchema("threadshare-memory-consolidation-patch.v1.schema.json"),
+    readSchema("threadshare-memory-skill-candidate.v1.schema.json"),
     readSchema("threadshare-memory-prepare-request.v1.schema.json"),
   ]);
   const readOnlyAnnotations = {
@@ -211,7 +212,7 @@ async function toolCatalog() {
         type: "object",
         additionalProperties: false,
         properties: {
-          kind: { enum: ["entry", "consolidation"], default: "entry" },
+          kind: { enum: ["entry", "skill", "consolidation"], default: "entry" },
         },
       },
       annotations: readOnlyAnnotations,
@@ -219,7 +220,7 @@ async function toolCatalog() {
     {
       name: MEMORY_TOOL_NAMES.recall,
       title: "Recall bounded repository conversations for the current Agent",
-      description: "Return complete bounded Turn chunks, evidence ids, and the extraction contract. The current Agent analyzes the source directly; no runner is launched.",
+      description: "Return complete bounded Turn chunks, evidence ids, entry/Skill output contracts, relevant existing Skills, and a digest-bound memory-first context of scenes/doctrine/approved entries. The current Agent analyzes the source directly; no runner is launched.",
       inputSchema: {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         type: "object",
@@ -264,10 +265,10 @@ async function toolCatalog() {
     {
       name: MEMORY_TOOL_NAMES.stage,
       title: "Stage or adjudicate Agent-authored Team Memory candidates",
-      description: "A CandidateDraftBatch returns an AdjudicationTask with the current memory pool; an exact AdjudicationResult then applies store/skip/update/merge and quarantines only retained candidates.",
+      description: "A SkillCandidate must echo the recalled Memory context digest and is quarantined directly with evidence assessments; a CandidateDraftBatch returns an AdjudicationTask; an exact AdjudicationResult then applies store/skip/update/merge. All variants share the CLI lifecycle.",
       inputSchema: {
         $schema: "https://json-schema.org/draft/2020-12/schema",
-        oneOf: [memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch],
+        oneOf: [memorySkillCandidate, memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch],
       },
       annotations: {
         readOnlyHint: false,
@@ -304,6 +305,26 @@ async function toolCatalog() {
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.assemble,
+      title: "Assemble Team Memory for one Agent provider",
+      description: "Refresh the generated provider context block and Skill projections from the repository's approved Team Memory source. Stops on unrecorded projection edits.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["provider"],
+        properties: {
+          provider: { enum: ["claude", "codex"] },
+        },
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false,
       },
@@ -399,8 +420,8 @@ function toolInvocation(name, args) {
   }
   if (name === MEMORY_TOOL_NAMES.review) {
     if (!exactKeys(args, ["kind"]) ||
-        (Object.hasOwn(args, "kind") && args.kind !== "entry" && args.kind !== "consolidation")) {
-      throw Object.assign(new Error("memory review kind must be entry or consolidation"), {
+        (Object.hasOwn(args, "kind") && !["entry", "skill", "consolidation"].includes(args.kind))) {
+      throw Object.assign(new Error("memory review kind must be entry, skill, or consolidation"), {
         code: "TS_INSIGHTS_REQUEST_INVALID",
       });
     }
@@ -431,6 +452,15 @@ function toolInvocation(name, args) {
       });
     }
     return { memory: { action: "promote", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.assemble) {
+    if (!exactKeys(args, ["provider"]) ||
+        (args.provider !== "claude" && args.provider !== "codex")) {
+      throw Object.assign(new Error("memory assemble requires provider claude or codex"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "assemble", args } };
   }
   if (name === MEMORY_TOOL_NAMES.extract) {
     if (!exactKeys(args, ["runner", "model", "endpoint", "limit", "request"]) ||

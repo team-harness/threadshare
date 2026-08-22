@@ -38,6 +38,7 @@ const EXPECTED_MCP_TOOLS = [
   "threadshare_memory_stage",
   "threadshare_memory_prepare",
   "threadshare_memory_promote",
+  "threadshare_memory_assemble",
 ];
 
 test("Team Memory operation registry owns the public CLI and MCP names", () => {
@@ -60,7 +61,7 @@ test("stable Team Memory operations must have equal real CLI and MCP capabilitie
   assert.doesNotThrow(() => validateMemoryOperationSpecs(MEMORY_OPERATION_SPECS));
   const stable = MEMORY_OPERATION_SPECS.filter((operation) => operation.stability === "stable");
   assert.deepEqual(stable.map((operation) => operation.id), [
-    "status", "review", "recall", "synthesize", "stage", "prepare", "promote",
+    "status", "review", "recall", "synthesize", "stage", "prepare", "promote", "assemble",
   ]);
   for (const operation of stable) {
     assert.deepEqual(operation.cli.capabilities, operation.capabilityVector);

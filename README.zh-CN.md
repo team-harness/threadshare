@@ -258,11 +258,20 @@ threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
 ```
 
+如果要把可重复执行的步骤沉淀成 Agent Skill，可以直接让当前 Codex 或 Claude 对话回看有界 Insights
+范围并提出 `SkillCandidate@v1`。recall 采用 Memory 优先顺序：先返回相关现有 Skill，再返回当前
+Scene/Doctrine 与 approved entry，最后才是用于原始取证的有界历史 Turn。Memory 上下文带有候选必须
+回显的 digest，因此 entry、scene 或 doctrine 在流程中发生漂移会被拒绝；Agent 先展示证据，再沿用
+`stage → review --kind skill → prepare(kind=skill) → promote`；确认后通过
+`assemble --provider claude|codex` 投影到 `.claude/skills/` 或 `.codex/skills/`。装配或提交前可以用
+`memory lint .threadshare/memory/skills/<name>/SKILL.md` 显式校验 canonical Skill。详见
+[Skill 提取与装配](./docs/team-memory-skill-design.md)。
+
 本机 Insights MCP server 暴露完全相同的稳定操作：`threadshare_memory_recall`、
 `threadshare_memory_synthesize`、`threadshare_memory_stage`、`threadshare_memory_review`、
-`threadshare_memory_prepare`、`threadshare_memory_promote`。recall 直接把完整有界 Turn chunk 返回给当前
-Agent；synthesize 返回已批准记忆与当前 scenes/doctrine。CLI 与 MCP 共用 source 校验、确认流程和可恢复
-promotion 流程。
+`threadshare_memory_prepare`、`threadshare_memory_promote`、`threadshare_memory_assemble`。recall 直接把完整有界 Turn chunk 和同一份
+Skill/Memory 上下文返回给当前 Agent；synthesize 返回已批准记忆与当前 scenes/doctrine。CLI 与 MCP 共用
+source 校验、确认流程和可恢复 promotion 流程。
 
 除非能确认当前 Agent context 容得下全部 chunk，否则保持 recall 默认一次 1 个 chunk。候选 stage
 有意分两步：第一次返回当前 approved/candidate 池，第二次提交精确裁决后才会 store、skip、update 或 merge。

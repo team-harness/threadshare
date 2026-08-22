@@ -279,7 +279,7 @@
 //!   "limit": int (1..=200, default 50),
 //!   "kind": "entry"|"consolidation" (default "entry") }`
 //! - result: `{ "items": [{ "candidateId": string,
-//!   "candidateKind": "entry"|"consolidation-patch", "chunkRef": string,
+//!   "candidateKind": "entry"|"skill"|"consolidation-patch", "chunkRef": string,
 //!   "revision": int, "contentDigest": hex64, "payload": object,
 //!   "assessments": [{ "statementId": string, "citationsDigest": hex64,
 //!     "provenanceStrength": string, "limitations": [string],
@@ -512,6 +512,78 @@ fn valid_text(value: &str, label: &str) -> Result<(), String> {
         value.len() <= MAX_TEXT_BYTES,
         &format!("{label} exceeds 64 KiB"),
     )
+}
+
+fn validate_finalized_skill_payload(payload: &Value) -> Result<(), String> {
+    valid_hex64(
+        payload
+            .get("memoryContextDigest")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "drafts[].payload.memoryContextDigest",
+    )?;
+    let skill = payload
+        .get("skill")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "finalized SkillCandidate payloads must include skill details".to_owned())?;
+    const SKILL_KEYS: [&str; 5] = [
+        "name",
+        "description",
+        "body",
+        "action",
+        "expectedContentDigest",
+    ];
+    require(
+        skill.len() == SKILL_KEYS.len()
+            && skill.keys().all(|key| SKILL_KEYS.contains(&key.as_str())),
+        "finalized SkillCandidate skill details contain unknown or missing fields",
+    )?;
+    let name = skill.get("name").and_then(Value::as_str).unwrap_or("");
+    require(
+        !name.is_empty()
+            && name.len() <= 64
+            && name.split('-').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            }),
+        "finalized SkillCandidate skill name must be a lowercase slug",
+    )?;
+    let description = skill
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    require(
+        !description.is_empty()
+            && description.trim() == description
+            && description.encode_utf16().count() <= 1024
+            && !description.contains(['<', '>', '\r', '\n']),
+        "finalized SkillCandidate skill description is invalid",
+    )?;
+    let body = skill.get("body").and_then(Value::as_str).unwrap_or("");
+    valid_text(body, "drafts[].payload.skill.body")?;
+    require(
+        !body.trim().is_empty()
+            && !body.starts_with('\u{feff}')
+            && !body.contains('\r')
+            && body.ends_with('\n'),
+        "finalized SkillCandidate skill body must be canonical LF text",
+    )?;
+    match skill.get("action").and_then(Value::as_str) {
+        Some("create") => require(
+            skill.get("expectedContentDigest") == Some(&Value::Null),
+            "finalized SkillCandidate create must not carry an expected digest",
+        ),
+        Some("update") => valid_hex64(
+            skill
+                .get("expectedContentDigest")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            "drafts[].payload.skill.expectedContentDigest",
+        ),
+        _ => Err("finalized SkillCandidate skill action must be create or update".to_owned()),
+    }
 }
 
 fn valid_object(value: &Value, label: &str) -> Result<(), String> {
@@ -797,6 +869,8 @@ pub struct SubmitExtractionRequest {
     pub task_id: String,
     pub claim_token: String,
     pub response_digest: String,
+    #[serde(default)]
+    pub finalize: bool,
     pub drafts: Vec<ExtractionDraftInput>,
     pub evidence_refs: Vec<EvidenceRefInput>,
     pub assessments: Vec<AssessmentInput>,
@@ -940,7 +1014,15 @@ impl SubmitExtractionRequest {
                 && self.assessments.len() <= MAX_PAYLOAD_ITEMS,
             "submit-extraction batches are limited to 512 items per list",
         )?;
+        if self.finalize {
+            require(
+                self.drafts.len() == 1,
+                "finalized SkillCandidate submissions must contain exactly one draft",
+            )?;
+        }
         let mut candidate_ids = Vec::new();
+        let mut finalized_statements = Vec::new();
+        let mut finalized_evidence = Vec::new();
         for draft in &self.drafts {
             valid_identifier(&draft.candidate_id, "drafts[].candidateId")?;
             valid_object(&draft.payload, "drafts[].payload")?;
@@ -950,7 +1032,93 @@ impl SubmitExtractionRequest {
                 "drafts[].candidateId must be unique",
             )?;
             candidate_ids.push(draft.candidate_id.as_str());
+            if self.finalize {
+                require(
+                    draft
+                        .payload
+                        .get("candidateKind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("skill"),
+                    "finalized extraction drafts must be SkillCandidate payloads",
+                )?;
+                validate_finalized_skill_payload(&draft.payload)?;
+                let statements = draft
+                    .payload
+                    .get("statements")
+                    .and_then(serde_json::Value::as_array);
+                require(
+                    statements.is_some_and(|statements| !statements.is_empty()),
+                    "finalized SkillCandidate payloads must include statements",
+                )?;
+                for statement in statements.expect("validated SkillCandidate statements") {
+                    let statement = statement.as_object();
+                    require(
+                        statement.is_some(),
+                        "finalized SkillCandidate statements must be objects",
+                    )?;
+                    let statement = statement.expect("validated SkillCandidate statement object");
+                    let statement_id = statement
+                        .get("statementId")
+                        .and_then(serde_json::Value::as_str);
+                    require(
+                        statement_id.is_some(),
+                        "finalized SkillCandidate statements require statementId",
+                    )?;
+                    let statement_id = statement_id.expect("validated statementId");
+                    valid_identifier(statement_id, "drafts[].payload.statements[].statementId")?;
+                    require(
+                        !finalized_statements
+                            .iter()
+                            .any(|(candidate_id, existing_id)| {
+                                candidate_id == &draft.candidate_id && existing_id == statement_id
+                            }),
+                        "finalized SkillCandidate statementId values must be unique",
+                    )?;
+                    let text = statement.get("text").and_then(serde_json::Value::as_str);
+                    require(
+                        text.is_some_and(|value| !value.is_empty()),
+                        "finalized SkillCandidate statements require non-empty text",
+                    )?;
+                    valid_text(
+                        text.expect("validated statement text"),
+                        "drafts[].payload.statements[].text",
+                    )?;
+                    let evidence_ids = statement
+                        .get("evidenceIds")
+                        .and_then(serde_json::Value::as_array);
+                    require(
+                        evidence_ids.is_some_and(|values| !values.is_empty()),
+                        "finalized SkillCandidate statements require evidenceIds",
+                    )?;
+                    let mut statement_evidence = Vec::new();
+                    for evidence_id in evidence_ids.expect("validated evidenceIds") {
+                        let evidence_id = evidence_id.as_str();
+                        require(
+                            evidence_id.is_some(),
+                            "finalized SkillCandidate evidenceIds must be strings",
+                        )?;
+                        let evidence_id = evidence_id.expect("validated evidenceId");
+                        valid_identifier(
+                            evidence_id,
+                            "drafts[].payload.statements[].evidenceIds[]",
+                        )?;
+                        require(
+                            !statement_evidence.contains(&evidence_id),
+                            "finalized SkillCandidate evidenceIds must be unique per statement",
+                        )?;
+                        statement_evidence.push(evidence_id);
+                        finalized_evidence.push((
+                            draft.candidate_id.clone(),
+                            statement_id.to_owned(),
+                            evidence_id.to_owned(),
+                        ));
+                    }
+                    finalized_statements
+                        .push((draft.candidate_id.clone(), statement_id.to_owned()));
+                }
+            }
         }
+        let mut submitted_evidence = Vec::new();
         for reference in &self.evidence_refs {
             require(
                 candidate_ids.contains(&reference.candidate_id.as_str()),
@@ -977,13 +1145,55 @@ impl SubmitExtractionRequest {
                     valid_text(limitation, "evidenceRefs[].limitations[]")?;
                 }
             }
+            if self.finalize {
+                let key = (
+                    reference.candidate_id.clone(),
+                    reference.statement_id.clone(),
+                    reference.evidence_id.clone(),
+                );
+                require(
+                    finalized_evidence.contains(&key),
+                    "finalized SkillCandidate evidenceRefs must match payload evidenceIds",
+                )?;
+                require(
+                    !submitted_evidence.contains(&key),
+                    "finalized SkillCandidate evidenceRefs must be unique",
+                )?;
+                submitted_evidence.push(key);
+            }
         }
+        let mut submitted_assessments = Vec::new();
         for assessment in &self.assessments {
             require(
                 candidate_ids.contains(&assessment.candidate_id.as_str()),
                 "assessments[].candidateId must reference a draft in this batch",
             )?;
             validate_assessment(assessment)?;
+            if self.finalize {
+                let key = (
+                    assessment.candidate_id.clone(),
+                    assessment.statement_id.clone(),
+                );
+                require(
+                    finalized_statements.contains(&key),
+                    "finalized SkillCandidate assessments must match payload statements",
+                )?;
+                require(
+                    !submitted_assessments.contains(&key),
+                    "finalized SkillCandidate assessments must be unique",
+                )?;
+                submitted_assessments.push(key);
+            }
+        }
+        if self.finalize {
+            require(
+                submitted_evidence.len() == finalized_evidence.len(),
+                "every finalized SkillCandidate evidenceId must have exactly one evidenceRef",
+            )?;
+            require(
+                submitted_assessments.len() == finalized_statements.len(),
+                "every finalized SkillCandidate statement must have exactly one assessment",
+            )?;
         }
         Ok(())
     }
@@ -1298,8 +1508,8 @@ impl ReviewQueueRequest {
             "limit must be between 1 and 200",
         )?;
         require(
-            matches!(self.kind.as_str(), "entry" | "consolidation"),
-            "kind must be entry or consolidation",
+            matches!(self.kind.as_str(), "entry" | "skill" | "consolidation"),
+            "kind must be entry, skill, or consolidation",
         )
     }
 }
