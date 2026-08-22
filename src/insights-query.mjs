@@ -13,6 +13,7 @@ import {
   createReadInsightsEvidenceV2Message,
   createReadInsightsQueryV2Message,
   createReadInsightsRecipeMessage,
+  MAX_PROTOCOL_PAYLOAD_BYTES,
 } from "./insights-engine-protocol.mjs";
 import { readGitDiffEvidence } from "./insights-git-evidence.mjs";
 import { createInsightsQueryReader } from "./insights-query-reader.mjs";
@@ -32,6 +33,10 @@ export const INSIGHTS_QUERY_ACTIONS = new Set([
 ]);
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+// Agent-native memory stage/prepare requests echo the complete source binding.
+// Keep their input cap aligned with the memory command transport, while the
+// public Insights query readers retain the smaller deep-query limit above.
+export const MAX_MEMORY_REQUEST_BYTES = MAX_PROTOCOL_PAYLOAD_BYTES;
 const MAX_QUERY_BYTES = 8 * 1024;
 const MAX_PUBLIC_LIMIT = 50;
 const MAX_PATH_LIMIT = 20;
@@ -649,7 +654,21 @@ export function normalizeInsightsActivityRequest(input) {
   });
 }
 
-async function readBoundedRequestStream(input, signal) {
+function requestByteLimit(options) {
+  const maxBytes = options.maxBytes ?? MAX_REQUEST_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_PROTOCOL_PAYLOAD_BYTES) {
+    throw new RangeError("maxBytes must be a positive protocol-sized integer");
+  }
+  return maxBytes;
+}
+
+function requestTooLargeMessage(maxBytes) {
+  return maxBytes === MAX_REQUEST_BYTES
+    ? "Insights request exceeds 64 KiB"
+    : `Insights request exceeds ${maxBytes} bytes`;
+}
+
+async function readBoundedRequestStream(input, signal, maxBytes) {
   const iterator = input[Symbol.asyncIterator]();
   let abortHandler;
   let completed = false;
@@ -671,8 +690,8 @@ async function readBoundedRequestStream(input, signal) {
         return bytes;
       }
       const next = Buffer.from(result.value);
-      if (bytes.byteLength + next.byteLength > MAX_REQUEST_BYTES) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (bytes.byteLength + next.byteLength > maxBytes) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
       bytes = Buffer.concat([bytes, next], bytes.byteLength + next.byteLength);
     }
@@ -684,10 +703,15 @@ async function readBoundedRequestStream(input, signal) {
 
 export async function readInsightsQueryRequest(source, options = {}) {
   if (options.signal?.aborted) throw queryAborted(options.signal.reason);
+  const maxBytes = requestByteLimit(options);
   let bytes;
   if (source === "-") {
     try {
-      bytes = await readBoundedRequestStream(options.input ?? process.stdin, options.signal);
+      bytes = await readBoundedRequestStream(
+        options.input ?? process.stdin,
+        options.signal,
+        maxBytes,
+      );
     } catch (error) {
       if (error?.code === "TS_INSIGHTS_REQUEST_INVALID" ||
           error?.code === "TS_INSIGHTS_ENGINE_ABORTED") throw error;
@@ -698,10 +722,10 @@ export async function readInsightsQueryRequest(source, options = {}) {
     try {
       handle = await (options.openFile ?? open)(source, "r");
       const stats = await handle.stat({ bigint: true });
-      if (!stats.isFile() || stats.size > BigInt(MAX_REQUEST_BYTES)) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (!stats.isFile() || stats.size > BigInt(maxBytes)) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
-      const bounded = Buffer.alloc(MAX_REQUEST_BYTES + 1);
+      const bounded = Buffer.alloc(maxBytes + 1);
       let offset = 0;
       while (offset < bounded.byteLength) {
         if (options.signal?.aborted) throw queryAborted(options.signal.reason);
@@ -715,8 +739,8 @@ export async function readInsightsQueryRequest(source, options = {}) {
         offset += bytesRead;
       }
       if (options.signal?.aborted) throw queryAborted(options.signal.reason);
-      if (offset > MAX_REQUEST_BYTES) {
-        throw requestError("Insights request exceeds 64 KiB");
+      if (offset > maxBytes) {
+        throw requestError(requestTooLargeMessage(maxBytes));
       }
       bytes = bounded.subarray(0, offset);
     } catch (error) {

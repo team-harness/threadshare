@@ -11,6 +11,7 @@
     "binding": { "$ref": "#/$defs/extractionBinding" },
     "candidates": {
       "type": "array",
+      "maxItems": 8,
       "items": {
         "type": "object",
         "additionalProperties": false,

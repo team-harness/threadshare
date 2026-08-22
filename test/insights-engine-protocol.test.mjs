@@ -611,6 +611,7 @@ test("memory envelope pins the op enum and requires plain-object payloads", () =
     "read-memory-file",
     "plan-tasks",
     "claim-task",
+    "abandon-task",
     "submit-extraction",
     "submit-consolidation",
     "consolidation-baseline",

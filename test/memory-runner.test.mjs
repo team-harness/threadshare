@@ -14,8 +14,10 @@ import {
   computeRunnerInputDigest,
 } from "../src/memory-contracts.mjs";
 import {
+  ADJUDICATION_PROMPT_VERSION,
   ADJUDICATION_PROMPT,
   CONSOLIDATION_PROMPT,
+  CONSOLIDATION_PROMPT_VERSION,
   EXTRACTION_PROMPT,
   MEMORY_PROMPTS,
   PROMPT_VERSION,
@@ -40,6 +42,7 @@ import {
 const FIXTURES = fileURLToPath(new URL("./fixtures/memory-runner/", import.meta.url));
 const CONFORMANT = path.join(FIXTURES, "fake-conformant.mjs");
 const VIOLATING = path.join(FIXTURES, "fake-violating.mjs");
+const PROMPT_REPEATER = path.join(FIXTURES, "fake-prompt-repeater.mjs");
 const ECHO = path.join(FIXTURES, "fake-echo.mjs");
 const HANG = path.join(FIXTURES, "fake-hang.mjs");
 const FLOOD = path.join(FIXTURES, "fake-flood.mjs");
@@ -48,7 +51,16 @@ const LINGERING = path.join(FIXTURES, "fake-lingering.mjs");
 
 // The fake runners rely on their shebang; make sure they are executable even on
 // checkouts that lost the executable bit.
-for (const script of [CONFORMANT, VIOLATING, ECHO, HANG, FLOOD, NETWORK_VIOLATING, LINGERING]) {
+for (const script of [
+  CONFORMANT,
+  VIOLATING,
+  PROMPT_REPEATER,
+  ECHO,
+  HANG,
+  FLOOD,
+  NETWORK_VIOLATING,
+  LINGERING,
+]) {
   await chmod(script, 0o755);
 }
 
@@ -248,6 +260,16 @@ test("conformant runner passes the deny-all probe and yields a bound identity re
   assert.ok(!Number.isNaN(Date.parse(result.record.passedAt)));
 });
 
+test("verbatim prompt repetition cannot forge the derived execution proof", async () => {
+  const result = await runConformanceTest(loadRunnerProfile("claude-cli"), {
+    binaryPath: PROMPT_REPEATER,
+    timeoutMs: 30_000,
+    signingKey: SIGNING_KEY,
+  });
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.failures, []);
+});
+
 test("registered runner command resolves from PATH before identity binding and execution", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "threadshare-memory-runner-path-"));
   const binary = path.join(root, "claude");
@@ -355,7 +377,7 @@ test("binary or profile identity drift invalidates a cached conformance record",
   assert.equal(isConformanceValid(record, { profileDigest: alteredDigest, ...sameBinary }, key), false);
   assert.equal(
     isConformanceValid(record, {
-      testVersion: "conformance-test@2",
+      testVersion: "conformance-test@1",
       profileDigest,
       ...sameBinary,
     }, key),
@@ -948,12 +970,26 @@ test("runner exceeding the output limit is killed", async () => {
 // ---------------------------------------------------------------------------
 
 test("prompts are versioned and carry the contract vocabulary", () => {
-  assert.equal(PROMPT_VERSION, "memory-prompts@1");
+  assert.equal(PROMPT_VERSION, "memory-prompts@2");
+  assert.equal(ADJUDICATION_PROMPT_VERSION, "memory-adjudication@2");
   assert.equal(MEMORY_PROMPTS.version, PROMPT_VERSION);
   assert.equal(MEMORY_PROMPTS.extraction, EXTRACTION_PROMPT);
   assert.equal(MEMORY_PROMPTS.adjudication, ADJUDICATION_PROMPT);
   assert.equal(MEMORY_PROMPTS.consolidation, CONSOLIDATION_PROMPT);
   assert.equal(MEMORY_PROMPTS.transcriptPreamble, TRANSCRIPT_PREAMBLE);
+  assert.match(ADJUDICATION_PROMPT, /compare every draft with both the other drafts and the pool/i);
+  assert.match(ADJUDICATION_PROMPT, /A skipped draft may not cover another skipped draft/i);
+});
+
+test("consolidation prompt requires a code-point budget self-check", () => {
+  assert.equal(CONSOLIDATION_PROMPT_VERSION, "memory-consolidation@3");
+  assert.match(CONSOLIDATION_PROMPT, /complete scene body, including its Markdown heading/i);
+  assert.match(CONSOLIDATION_PROMPT, /must not exceed 900 Unicode code points/i);
+  assert.match(CONSOLIDATION_PROMPT, /hard limit is 1500/i);
+  assert.match(CONSOLIDATION_PROMPT, /at most 8 bullet items/i);
+  assert.match(CONSOLIDATION_PROMPT, /at most 100 Unicode code points/i);
+  assert.match(CONSOLIDATION_PROMPT, /count Unicode code points/i);
+  assert.match(CONSOLIDATION_PROMPT, /rewrite it more concisely before output/i);
 });
 
 test("extraction prompt states the CandidateDraftBatch contract without skill sentinels", () => {
@@ -963,6 +999,8 @@ test("extraction prompt states the CandidateDraftBatch contract without skill se
   }
   assert.ok(EXTRACTION_PROMPT.includes("evidenceIds"));
   assert.ok(EXTRACTION_PROMPT.includes("evidenceCatalog"));
+  assert.ok(EXTRACTION_PROMPT.includes("task.chunk.turnEvidence"));
+  assert.match(EXTRACTION_PROMPT, /Never infer an evidence id from its ev-\* sequence number/i);
   assert.match(EXTRACTION_PROMPT, /suggestion is not a decision/i);
   assert.match(EXTRACTION_PROMPT, /never output secrets/i);
   // "Nothing to save." belongs to the separate skill-extraction contract (§6.7).

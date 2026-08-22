@@ -75,6 +75,18 @@
             }
           }
         },
+        "turnEvidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["turnIndex", "evidenceId"],
+            "properties": {
+              "turnIndex": { "$ref": "#/$defs/nonNegativeInteger" },
+              "evidenceId": { "$ref": "#/$defs/identifier" }
+            }
+          }
+        },
         "transcript": { "type": "string" }
       }
     },

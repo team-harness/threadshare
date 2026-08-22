@@ -17,12 +17,14 @@ export const MEMORY_RUNNER_EXECUTION_PLAN_FORMAT = "threadshare-memory-runner-ex
 export const MEMORY_AUTHORIZATION_MANIFEST_FORMAT = "threadshare-memory-authorization-manifest@v1";
 export const MEMORY_EXTRACTION_TASK_FORMAT = "threadshare-memory-extraction-task@v1";
 export const MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT = "threadshare-memory-candidate-draft-batch@v1";
+export const MEMORY_MAX_EXTRACTION_CANDIDATES = 8;
 export const MEMORY_EVIDENCE_ASSESSMENT_FORMAT = "threadshare-memory-evidence-assessment@v1";
 export const MEMORY_ADJUDICATION_TASK_FORMAT = "threadshare-memory-adjudication-task@v1";
 export const MEMORY_ADJUDICATION_RESULT_FORMAT = "threadshare-memory-adjudication-result@v1";
 export const MEMORY_CONSOLIDATION_TASK_FORMAT = "threadshare-memory-consolidation-task@v1";
 export const MEMORY_CONSOLIDATION_PATCH_FORMAT = "threadshare-memory-consolidation-patch@v1";
 export const MEMORY_PROMOTION_PLAN_FORMAT = "threadshare-memory-promotion-plan@v1";
+export const MEMORY_PREPARE_REQUEST_FORMAT = "threadshare-memory-prepare-request@v1";
 
 const hex64 = z.string().regex(MEMORY_HEX64_PATTERN, "expected lowercase sha256 hex64");
 const hex40 = z.string().regex(MEMORY_HEX40_PATTERN, "expected lowercase git object hex40");
@@ -173,6 +175,10 @@ export const extractionTaskSchema = z.object({
       completeness: z.enum(["full", "truncated"]),
       bytes: nonNegativeInteger,
     }).strict()),
+    turnEvidence: z.array(z.object({
+      turnIndex: nonNegativeInteger,
+      evidenceId: identifier,
+    }).strict()).optional(),
     transcript: z.string(),
   }).strict(),
   context: z.object({
@@ -206,8 +212,42 @@ export const candidateDraftBatchSchema = z.object({
   format: z.literal(MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT),
   taskId: identifier,
   binding: extractionBindingSchema,
-  candidates: z.array(z.object(draftCandidateShape).strict()),
+  candidates: z.array(z.object(draftCandidateShape).strict())
+    .max(MEMORY_MAX_EXTRACTION_CANDIDATES),
 }).strict();
+
+export const memoryPrepareRequestSchema = z.object({
+  format: z.literal(MEMORY_PREPARE_REQUEST_FORMAT),
+  kind: z.enum(["entry", "consolidation"]).default("entry"),
+  candidates: z.array(z.object({
+    candidateId: identifier,
+    expectedRevision: positiveInteger,
+    statements: z.array(z.object({
+      statementId: identifier,
+      statementTextDigest: hex64,
+      citationsDigest: hex64,
+    }).strict()).min(1),
+  }).strict()).min(1).max(50),
+}).strict().superRefine((request, context) => {
+  const candidateIds = request.candidates.map((candidate) => candidate.candidateId);
+  if (new Set(candidateIds).size !== candidateIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["candidates"],
+      message: "candidate ids must be unique",
+    });
+  }
+  for (const [index, candidate] of request.candidates.entries()) {
+    const statementIds = candidate.statements.map((statement) => statement.statementId);
+    if (new Set(statementIds).size !== statementIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["candidates", index, "statements"],
+        message: "statement ids must be unique per candidate",
+      });
+    }
+  }
+});
 
 export const evidenceAssessmentSchema = z.object({
   format: z.literal(MEMORY_EVIDENCE_ASSESSMENT_FORMAT),
@@ -447,6 +487,7 @@ export const MEMORY_CONTRACT_FORMATS = Object.freeze({
   [MEMORY_CONSOLIDATION_TASK_FORMAT]: consolidationTaskSchema,
   [MEMORY_CONSOLIDATION_PATCH_FORMAT]: consolidationPatchSchema,
   [MEMORY_PROMOTION_PLAN_FORMAT]: promotionPlanSchema,
+  [MEMORY_PREPARE_REQUEST_FORMAT]: memoryPrepareRequestSchema,
 });
 
 export function parseMemoryContract(value) {

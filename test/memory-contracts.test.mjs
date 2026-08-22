@@ -21,6 +21,7 @@ import {
   MEMORY_HEX64_PATTERN,
   MEMORY_ID_PATTERN,
   MEMORY_PROMOTION_PLAN_FORMAT,
+  MEMORY_PREPARE_REQUEST_FORMAT,
   MEMORY_REPOSITORY_BINDING_FORMAT,
   MEMORY_RESTRICTED_EXTRACTION_RUNNER_FORMAT,
   MEMORY_RUNNER_EXECUTION_PLAN_FORMAT,
@@ -37,6 +38,7 @@ import {
   evidenceAssessmentSchema,
   extractionTaskSchema,
   memoryDigestHex,
+  memoryPrepareRequestSchema,
   parseMemoryContract,
   promotionPlanSchema,
   repositoryBindingSchema,
@@ -361,6 +363,22 @@ function promotionPlan() {
   };
 }
 
+function memoryPrepareRequest() {
+  return {
+    format: MEMORY_PREPARE_REQUEST_FORMAT,
+    kind: "entry",
+    candidates: [{
+      candidateId: "cand-1",
+      expectedRevision: 2,
+      statements: [{
+        statementId: "s-1",
+        statementTextDigest: HEX("c"),
+        citationsDigest: HEX("d"),
+      }],
+    }],
+  };
+}
+
 const CONTRACT_CASES = [
   {
     name: "repository binding",
@@ -464,12 +482,22 @@ const CONTRACT_CASES = [
     }),
     schemaFile: "threadshare-memory-promotion-plan.v1.schema.json",
   },
+  {
+    name: "memory prepare request",
+    schema: memoryPrepareRequestSchema,
+    sample: memoryPrepareRequest,
+    invalid: (value) => ({
+      ...value,
+      candidates: [value.candidates[0], value.candidates[0]],
+    }),
+    schemaFile: "threadshare-memory-prepare-request.v1.schema.json",
+  },
 ];
 
 test("every contract format has exactly one schema and case", () => {
   const formats = Object.keys(MEMORY_CONTRACT_FORMATS);
-  assert.equal(formats.length, 12);
-  assert.equal(CONTRACT_CASES.length, 12);
+  assert.equal(formats.length, 13);
+  assert.equal(CONTRACT_CASES.length, 13);
   for (const format of formats) {
     assert.match(format, /^threadshare-memory-[a-z0-9-]+@v1$/);
   }
@@ -589,6 +617,18 @@ test("candidate scene names are free-form bounded strings (Chinese scene names w
   assert.deepEqual(adjudicationResultSchema.parse(merged), merged);
 });
 
+test("candidate draft batches are bounded for shared adjudication", () => {
+  const batch = candidateDraftBatch();
+  assert.doesNotThrow(() => candidateDraftBatchSchema.parse({
+    ...batch,
+    candidates: Array.from({ length: 8 }, draftCandidate),
+  }));
+  assert.throws(() => candidateDraftBatchSchema.parse({
+    ...batch,
+    candidates: Array.from({ length: 9 }, draftCandidate),
+  }));
+});
+
 test("memoryDigestHex is key-order independent and value sensitive", () => {
   const left = { alpha: 1, nested: { deep: [1, 2, 3], flag: true }, zeta: "z" };
   const right = { zeta: "z", nested: { flag: true, deep: [1, 2, 3] }, alpha: 1 };
@@ -652,9 +692,9 @@ async function loadJsonSchemaValidators() {
   return validators;
 }
 
-test("all nine memory JSON Schema files compile under ajv 2020-12", async () => {
+test("all ten memory JSON Schema files compile under ajv 2020-12", async () => {
   const validators = await loadJsonSchemaValidators();
-  assert.equal(validators.size, 9);
+  assert.equal(validators.size, 10);
   for (const [, { document }] of validators) {
     assert.equal(document.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.equal(document.additionalProperties, false);

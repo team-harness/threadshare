@@ -12,7 +12,8 @@ use crate::agent_query::{
 };
 use crate::analyzer::{AnalyzerError, analyze_query};
 use crate::deep_query::{
-    DeepCoverage, DeepMatchingCoverage, DeepProvenance, DeepProvenanceField, assemble_coverage,
+    DeepCoverage, DeepFtsCoverage, DeepIndexedHistoryCoverage, DeepMatchingCoverage,
+    DeepProvenance, DeepProvenanceField, assemble_coverage,
 };
 use crate::evidence_path::RepeatBucket;
 use crate::fts_projection::HistoryFtsMatchExpression;
@@ -3694,7 +3695,7 @@ fn read_extraction_candidates_coverage(
          JOIN history_event_coverage coverage ON coverage.event_key=event.event_key"
     );
     let counts = connection
-        .query_row(&sql, params_from_iter(values), |row| {
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
             Ok((
                 row.get::<_, Option<i64>>(0)?.unwrap_or(0),
                 row.get::<_, Option<i64>>(1)?.unwrap_or(0),
@@ -3719,7 +3720,63 @@ fn read_extraction_candidates_coverage(
         missing_token_metric_count: nonnegative_count(counts.7)?,
         missing_payload_count: nonnegative_count(counts.8)?,
     };
-    assemble_coverage(connection, matching, "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE")
+
+    // Extraction receives an exact Turn set that is already restricted to eligible, active,
+    // main-scope Sessions. Global excluded or subagent Sessions are intentionally outside that
+    // universe and must not make this request look partial.
+    let scoped_sql = format!(
+        "{with_clause},
+         selected_sessions AS (SELECT DISTINCT session_id FROM eligible_turns)
+         SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN rollup.session_id IS NULL THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(rollup.fts_searchable_event_count),0),
+                COALESCE(SUM(rollup.fts_stored_not_searchable_event_count),0),
+                COALESCE(SUM(rollup.fts_searchable_payload_bytes),0),
+                COALESCE(SUM(rollup.fts_stored_not_searchable_payload_bytes),0)
+         FROM selected_sessions selected
+         LEFT JOIN history_coverage_rollups rollup USING(session_id)"
+    );
+    let scoped = connection
+        .query_row(&scoped_sql, params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(query_failed)?;
+    let indexed_history = DeepIndexedHistoryCoverage {
+        visible_session_count: nonnegative_count(scoped.0)?,
+        excluded_session_count: "0".to_owned(),
+        subagent_excluded_session_count: "0".to_owned(),
+        unknown_eligibility_session_count: "0".to_owned(),
+        pending_purge_session_count: "0".to_owned(),
+        purged_session_count: "0".to_owned(),
+        missing_coverage_rollup_session_count: nonnegative_count(scoped.1)?,
+        fts: DeepFtsCoverage {
+            searchable_event_count: nonnegative_count(scoped.2)?,
+            stored_not_searchable_event_count: nonnegative_count(scoped.3)?,
+            searchable_payload_bytes: nonnegative_count(scoped.4)?,
+            stored_not_searchable_payload_bytes: nonnegative_count(scoped.5)?,
+        },
+    };
+    let degraded = matching.summary_record_count != "0"
+        || matching.unloaded_record_count != "0"
+        || matching.truncated_record_count != "0"
+        || matching.unavailable_record_count != "0"
+        || indexed_history.missing_coverage_rollup_session_count != "0";
+    Ok(DeepCoverage {
+        matching,
+        indexed_history,
+        degraded,
+        diagnostics: degraded
+            .then(|| "TS_INSIGHTS_RECIPE_PARTIAL_COVERAGE".to_owned())
+            .into_iter()
+            .collect(),
+    })
 }
 
 fn read_recipe_coverage(
@@ -4568,6 +4625,40 @@ mod tests {
         let error = read_extraction_candidates_coverage(&connection, &extraction_request())
             .expect_err("ambiguous project mapping must fail closed");
         assert_eq!(error.code, "TS_INSIGHTS_COVERAGE_INCOMPLETE");
+    }
+
+    #[test]
+    fn extraction_candidate_coverage_ignores_sessions_outside_the_exact_scope() {
+        let connection = extraction_connection();
+        connection
+            .execute(
+                "INSERT INTO history_coverage_rollups(
+                   session_id,missing_payload_event_count,missing_token_metric_event_count,
+                   fts_searchable_event_count,fts_stored_not_searchable_event_count,
+                   fts_searchable_payload_bytes,fts_stored_not_searchable_payload_bytes
+                 ) VALUES (1,0,0,3,0,21,0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                   session_id,session_key,provider,session_scope,eligibility,
+                   duplicate_policy_version
+                 ) VALUES (2,?1,'codex','subagent','subagent-excluded',1)",
+                [vec![0xee_u8; 32]],
+            )
+            .unwrap();
+
+        let coverage = read_extraction_candidates_coverage(&connection, &extraction_request())
+            .expect("unrelated excluded Sessions must not degrade an exact extraction scope");
+
+        assert!(!coverage.degraded);
+        assert_eq!(coverage.indexed_history.visible_session_count, "1");
+        assert_eq!(
+            coverage.indexed_history.subagent_excluded_session_count,
+            "0"
+        );
     }
 
     #[test]

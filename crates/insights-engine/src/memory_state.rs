@@ -26,18 +26,18 @@ use crate::memory_promotion::{
     git_blob_oid_hex, list_worktree_directory, read_worktree_file,
 };
 use crate::memory_protocol::{
-    AdjudicationDraftOutcome, ApprovedProjectionWire, AuthorizeRequest, BindRepositoryOutcome,
-    BindRepositoryRequest, CandidateCountsWire, CandidateProjectionWire, CandidateStateWire,
-    ChunkCountsWire, ClaimTaskOutcome, ClaimTaskRequest, ConfirmStatementRequest,
-    ConsolidationBaselineRequest, ConsolidationCountsWire, ConsolidationOperationInput,
-    DiscardCandidateRequest, ListMemoryFilesRequest, MAX_TEXT_BYTES, MemorySearchRequest,
-    MemoryStatusOutcome, MemoryStatusRequest, PlanTasksOutcome, PlanTasksRequest,
-    PlannedTaskStateWire, PoolItemWire, PromotionApplyRequest, PromotionApproveRequest,
-    PromotionCountsWire, PromotionPlanRequest, ReadMemoryFileRequest, RecallHitWire, RecallOutcome,
-    RecallRequest, RecallSetWire, ReviewAssessmentWire, ReviewItemWire, ReviewQueueOutcome,
-    ReviewQueueRequest, SearchItemWire, SearchOutcome, SubmitAdjudicationRequest,
-    SubmitConsolidationRequest, SubmitExtractionOutcome, SubmitExtractionRequest,
-    SyncApprovedRequest, TaskCountsWire, TaskLeaseWire, TaskWire,
+    AbandonTaskOutcome, AbandonTaskRequest, AdjudicationDraftOutcome, ApprovedProjectionWire,
+    AuthorizeRequest, BindRepositoryOutcome, BindRepositoryRequest, CandidateCountsWire,
+    CandidateProjectionWire, CandidateStateWire, ChunkCountsWire, ClaimTaskOutcome,
+    ClaimTaskRequest, ConfirmStatementRequest, ConsolidationBaselineRequest,
+    ConsolidationCountsWire, ConsolidationOperationInput, DiscardCandidateRequest,
+    ListMemoryFilesRequest, MAX_TEXT_BYTES, MemorySearchRequest, MemoryStatusOutcome,
+    MemoryStatusRequest, PlanTasksOutcome, PlanTasksRequest, PlannedTaskStateWire, PoolItemWire,
+    PromotionApplyRequest, PromotionApproveRequest, PromotionCountsWire, PromotionPlanRequest,
+    ReadMemoryFileRequest, RecallHitWire, RecallOutcome, RecallRequest, RecallSetWire,
+    ReviewAssessmentWire, ReviewItemWire, ReviewQueueOutcome, ReviewQueueRequest, SearchItemWire,
+    SearchOutcome, SubmitAdjudicationRequest, SubmitConsolidationRequest, SubmitExtractionOutcome,
+    SubmitExtractionRequest, SyncApprovedRequest, TaskCountsWire, TaskLeaseWire, TaskWire,
 };
 use crate::storage::{
     WAL_BACKPRESSURE_BYTES, WAL_PASSIVE_CHECKPOINT_BYTES, WalPressureAction,
@@ -1579,12 +1579,6 @@ fn recall_on(
     let worktree_key = hex_blob(&request.worktree_key)?;
     let k = usize::from(request.k);
     let fetch = 3 * k;
-    let batch_ids: Vec<&str> = request
-        .drafts
-        .iter()
-        .map(|draft| draft.candidate_id.as_str())
-        .collect();
-
     let mut recall_sets = Vec::new();
     let mut pool: Vec<PoolItemWire> = Vec::new();
     let mut digest_entries: Vec<Value> = Vec::new();
@@ -1635,7 +1629,7 @@ fn recall_on(
                     &match_query,
                     &repository_key,
                     &worktree_key,
-                    (fetch + batch_ids.len()) as i64
+                    (fetch + 1) as i64
                 ],
                 |row| {
                     Ok((
@@ -1650,7 +1644,10 @@ fn recall_on(
             let mut list_rank = 0usize;
             for row in rows {
                 let (candidate_id, revision, content_digest, status, payload_json) = row?;
-                if batch_ids.contains(&candidate_id.as_str()) {
+                // A draft must not recall itself, but other drafts in the same
+                // adjudication batch remain visible so cross-chunk duplicates
+                // can be skipped atomically against the shared snapshot.
+                if candidate_id == draft.candidate_id {
                     continue;
                 }
                 list_rank += 1;
@@ -2290,6 +2287,44 @@ impl MemoryStorage {
         })
     }
 
+    /// Releases a claimed task only when the caller still owns its exact
+    /// claim token. Pending is retryable; stale is terminal.
+    pub fn abandon_task(
+        &mut self,
+        request: &AbandonTaskRequest,
+    ) -> Result<AbandonTaskOutcome, MemoryError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = read_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            MemoryError::new("TS_MEMORY_TASK_NOT_FOUND", "the task does not exist")
+        })?;
+        if task.status != "claimed" || task.claim_token.as_deref() != Some(&request.claim_token) {
+            return Err(MemoryError::new(
+                "TS_MEMORY_LEASE_LOST",
+                "the task is not claimed by this claim token",
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE tasks SET status=?1, lease_holder=NULL, claim_token=NULL,
+               lease_expires_at=NULL
+             WHERE task_id=?2 AND status='claimed' AND claim_token=?3",
+            params![request.disposition, request.task_id, request.claim_token],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::new(
+                "TS_MEMORY_LEASE_LOST",
+                "the task claim changed before it could be released",
+            ));
+        }
+        transaction.commit()?;
+        self.maintain_wal_after_commit()?;
+        Ok(AbandonTaskOutcome {
+            task_id: request.task_id.clone(),
+            status: request.disposition.clone(),
+        })
+    }
+
     /// `submit-extraction` (design §2 tx-extraction-submit), single transaction.
     /// Returns the wire outcome value; idempotent replays return the stored
     /// outcome with `"idempotent": true`.
@@ -2422,12 +2457,25 @@ impl MemoryStorage {
                 ],
             )?;
         }
-        let candidate_generation =
-            bump_candidate_generation(&transaction, &task.repository_key, &task.worktree_key)?;
+        let candidate_generation = if request.drafts.is_empty() {
+            read_candidate_projection(&transaction, &task.repository_key, &task.worktree_key)?
+                .generation
+        } else {
+            bump_candidate_generation(&transaction, &task.repository_key, &task.worktree_key)?
+        };
         let changed = transaction.execute(
-            "UPDATE chunks SET status='drafted'
-             WHERE chunk_ref=?1 AND repository_key=?2 AND worktree_key=?3",
-            params![chunk_ref, task.repository_key, task.worktree_key],
+            "UPDATE chunks SET status=?1
+             WHERE chunk_ref=?2 AND repository_key=?3 AND worktree_key=?4",
+            params![
+                if request.drafts.is_empty() {
+                    "extracted"
+                } else {
+                    "drafted"
+                },
+                chunk_ref,
+                task.repository_key,
+                task.worktree_key
+            ],
         )?;
         if changed == 0 {
             return Err(MemoryError::invalid(

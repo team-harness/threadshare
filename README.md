@@ -224,80 +224,83 @@ Skill caused a Turn to succeed or fail.
 ### Build Shared Team Memory
 
 Team Memory retrospectively selects local Insights Turns and turns them into reviewed,
-repository-owned memory. It never defaults to the whole Insights database: every new preview requires
-a request with an explicit UTC time window (at most 366 days) and may add text, provider, opaque
-session, Tool, Skill, result-evidence, and capability-state filters. Threadshare always adds the bound
-worktree project scope plus `hard-sealed`; callers cannot override either boundary.
+repository-owned memory. In an existing Codex or Claude Code conversation, ask the current Agent in
+natural language, for example: "Use Threadshare to review this repository's release failures from the
+last two weeks and turn them into team experience." The Agent calls the Agent-native lifecycle itself;
+do not choose another `--runner`.
 
-```json
-{
-  "format": "threadshare-memory-extraction-request@v1",
-  "window": {
-    "after": "2026-08-01T00:00:00.000Z",
-    "before": "2026-08-22T00:00:00.000Z"
-  },
-  "query": "release verification",
-  "filters": {
-    "providers": ["claude", "codex"],
-    "resultEvidence": ["provider-completed"]
-  }
-}
-```
-
-`--runner` selects the local restricted CLI adapter: `claude` launches the installed Claude Code
-`claude` CLI, while `codex` launches the installed `codex` CLI. This first flow uses Claude:
+The equivalent CLI flow is shown below. People supply normal filter parameters. The JSON consumed by
+`stage` and `prepare` is produced by the Agent and piped through stdin; it is not a file the user must
+author or maintain.
 
 ```bash
 threadshare memory init
-threadshare memory extract --runner claude --request memory-filter.json
-# After approving the exact extraction plan shown above:
-threadshare memory extract --runner claude --approve-plan <extraction-digest>
-# Adjudication is a separate delivery with a separate approval:
-threadshare memory extract --runner claude --approve-plan <adjudication-digest>
-threadshare memory review
-threadshare memory promote --plan <plan-id>
-# Consolidate approved L1 entries into L2/L3 using another exact approval:
-threadshare memory consolidate --runner claude
-threadshare memory consolidate --runner claude --approve-plan <consolidation-digest>
-threadshare memory review --kind consolidation
-threadshare memory promote --plan <plan-id>
+threadshare memory recall \
+  --since 2026-08-01T00:00:00.000Z \
+  --until 2026-08-22T00:00:00.000Z \
+  --query "release verification" \
+  --providers claude,codex \
+  --result-evidence provider-completed \
+  --format json
+# The Agent analyzes one returned source at a time, discusses wording with the user,
+# then passes CandidateDraftBatch@v1 on stdin. Threadshare returns an AdjudicationTask:
+threadshare memory stage --request - --format json
+# The Agent compares the draft with the returned approved/candidate pool, discusses
+# store/skip/update/merge, then passes AdjudicationResult@v1 on stdin:
+threadshare memory stage --request - --format json
+threadshare memory review --format json
+# After the user confirms the exact candidate, the Agent passes PrepareRequest@v1:
+threadshare memory prepare --request - --format json
+# After the user confirms the resulting file plan:
+threadshare memory promote --plan <plan-id> --format json
+
+# Build L2/L3 scenes and doctrine through the same Agent conversation:
+threadshare memory synthesize --if-due --format json
+threadshare memory stage --request - --format json
+threadshare memory review --kind consolidation --format json
+threadshare memory prepare --request - --format json
+threadshare memory promote --plan <plan-id> --format json
 threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
 ```
 
-To use the local Codex CLI instead, a new Codex preview must bind the exact model and HTTPS endpoint;
-later approval reuses that private stored profile and cannot override it:
+The local Insights MCP server exposes the same stable operations:
+`threadshare_memory_recall`, `threadshare_memory_synthesize`, `threadshare_memory_stage`,
+`threadshare_memory_review`, `threadshare_memory_prepare`, and `threadshare_memory_promote`. Recall
+returns complete bounded Turn chunks directly to the current Agent. Synthesize returns approved L1
+entries plus current scenes/doctrine. CLI and MCP use the same source bindings, candidate revisions,
+statement/citation digests, target-blob CAS, and recoverable promotion journal.
+
+Keep recall at its default one-chunk limit unless the Agent context is known to hold every requested
+chunk. Candidate staging is deliberately two-step: the first call returns the current memory pool;
+only the second, exact adjudication call can retain, skip, update, or merge a draft.
+Each recalled Turn is labeled both in `chunk.turnEvidence` and by an inline
+`<<past-turn index="..." evidence-id="...">>` marker. Agents cite that exact mapping instead of guessing
+from the order of `ev-*` identifiers.
+
+`--runner` is only for the optional separate batch workflow. `claude` launches the installed Claude
+Code CLI; `codex` launches the installed Codex CLI and requires an exact model and HTTPS endpoint when
+creating a new preview:
 
 ```bash
+threadshare memory extract --runner claude --since <utc> --until <utc>
+threadshare memory extract --runner claude --approve-plan <extraction-digest>
+threadshare memory extract --runner claude --approve-plan <adjudication-digest>
+
 threadshare memory extract --runner codex \
   --runner-model <model> \
   --runner-endpoint <https-url> \
-  --request memory-filter.json
-threadshare memory extract --runner codex --approve-plan <extraction-digest>
-threadshare memory extract --runner codex --approve-plan <adjudication-digest>
-threadshare memory consolidate --runner codex \
-  --runner-model <model> \
-  --runner-endpoint <https-url>
-threadshare memory consolidate --runner codex --approve-plan <consolidation-digest>
+  --since <utc> \
+  --until <utc>
 ```
 
-Agents may create pending-only previews with `threadshare_memory_extract_preview` and
-`threadshare_memory_consolidate_preview` over the local Insights MCP server. These tools can write a
-private pending artifact, but cannot approve a digest, start a runner, or return transcript or memory
-content. `threadshare_memory_search` and `threadshare_memory_status` remain read-only.
-
-Each runner stage is deny-all except for its model connection and receives transcript bytes only after
-the user approves that stage's exact digest and byte summary. `review` requires a real TTY and confirms
-every generated statement; non-interactive callers can inspect pending work but cannot approve it.
-The selector rejects requests matching more than 200 Turns instead of silently taking a prefix. The
-Insights `extraction-candidates@1` Recipe is the only implementation of session scoring; it enforces
-eligible, active, `hard-sealed` Turns and complete Delivery Trace coverage. Threadshare reads complete
-selected Turns and revalidates the exact source binding before candidate submission; unrelated snapshot
-advances do not invalidate a plan. Consolidation is incremental; use `--if-due` for the 20-entry trigger
-or `--full` to replay all approved L1 after an empty or suspect baseline. `promote` applies one reviewed,
-recoverable write/delete journal below `.threadshare/memory/`, refreshes the approved search projection,
-and never stages, commits, or pushes. After a teammate pulls approved memory from Git, run `assemble`
-for each provider context file in use.
+Every recall requires explicit `--since` and `--until` timestamps (at most 366 days apart), with optional
+query, provider, opaque session, Tool, Skill, result-evidence, and capability-state filters. Threadshare
+always adds the current worktree scope plus eligible, active, `hard-sealed`, and complete Delivery Trace
+coverage. More than 200 matching Turns is rejected instead of silently truncated. Agent-native recall
+intentionally gives those bounded transcripts to the current trusted Agent; Threadshare does not add a
+Broker or separately authenticate the human. `promote` writes only below `.threadshare/memory/`, refreshes
+the approved projection, and never stages, commits, or pushes.
 
 ### Use Another Threadshare Server
 

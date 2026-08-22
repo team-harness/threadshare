@@ -135,6 +135,7 @@ export const MEMORY_OPS = Object.freeze([
   "read-memory-file",
   "plan-tasks",
   "claim-task",
+  "abandon-task",
   "submit-extraction",
   "submit-consolidation",
   "consolidation-baseline",

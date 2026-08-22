@@ -51,6 +51,9 @@ let output;
 if (task === null || typeof task !== "object") {
   output = refusalReport();
 } else if (task.format === "threadshare-memory-extraction-task@v1") {
+  const candidateContent = input.includes("THREADSHARE_TEST_SLUG_TRUNCATION")
+    ? `${"a".repeat(59)} next`
+    : "Release tests are grouped under npm run test release.";
   const turnEvidence = task.evidenceCatalog?.find((entry) =>
     entry.kind === "turn" && entry.display === "turn 0") ??
     task.evidenceCatalog?.find((entry) => entry.kind === "turn");
@@ -61,7 +64,7 @@ if (task === null || typeof task !== "object") {
     binding: task.binding,
     candidates: [
       {
-        content: "Release tests are grouped under npm run test release.",
+        content: candidateContent,
         type: "work_method",
         priority: 60,
         confidence: "high",
@@ -69,7 +72,7 @@ if (task === null || typeof task !== "object") {
         statements: [
           {
             statementId: "s-1",
-            text: "Release tests are grouped under npm run test release.",
+            text: candidateContent,
             evidenceIds: evidenceId ? [evidenceId] : [],
           },
         ],
@@ -77,23 +80,39 @@ if (task === null || typeof task !== "object") {
     ],
   };
 } else if (task.format === "threadshare-memory-adjudication-task@v1") {
+  const retainedByContent = new Map();
   output = {
     format: "threadshare-memory-adjudication-result@v1",
     taskId: process.env.THREADSHARE_TEST_WRONG_ADJUDICATION_BINDING
       ? `${task.taskId}-other`
       : task.taskId,
     binding: task.binding,
-    adjudications: (task.drafts ?? []).map((draft) => ({
-      draftRef: draft.candidateId,
-      action: "store",
-      targetIds: [],
-      mergedFields: null,
-    })),
+    adjudications: (task.drafts ?? []).map((draft) => {
+      const contentKey = draft.content.trim().toLowerCase();
+      const retainedId = retainedByContent.get(contentKey);
+      if (retainedId !== undefined) {
+        return {
+          draftRef: draft.candidateId,
+          action: "skip",
+          targetIds: [retainedId],
+          mergedFields: null,
+        };
+      }
+      retainedByContent.set(contentKey, draft.candidateId);
+      return {
+        draftRef: draft.candidateId,
+        action: "store",
+        targetIds: [],
+        mergedFields: null,
+      };
+    }),
   };
 } else if (task.format === "threadshare-memory-consolidation-task@v1") {
   const entryId = task.entries?.[0]?.entryId;
   const forceNoOp = task.entries?.some((entry) =>
     entry.body?.includes("THREADSHARE_TEST_EMPTY_PATCH"));
+  const forceOversizedScene = task.entries?.some((entry) =>
+    entry.body?.includes("THREADSHARE_TEST_OVERSIZED_SCENE"));
   output = {
     format: "threadshare-memory-consolidation-patch@v1",
     taskId: task.taskId,
@@ -110,7 +129,9 @@ if (task === null || typeof task !== "object") {
         "summary: \"Release workflow\"",
         "-----META-END-----",
         "## Release workflow",
-        "Run the release verification suite before publishing.",
+        forceOversizedScene
+          ? `Run ${"x".repeat(1600)}`
+          : "Run the release verification suite before publishing.",
       ].join("\n"),
       basedOnEntryIds: [entryId],
       mergeSources: [],

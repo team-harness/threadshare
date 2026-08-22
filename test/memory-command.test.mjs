@@ -57,6 +57,14 @@ test("memory init, status, lint, and assemble form an idempotent repository work
     fixture.options,
   );
   assert.deepEqual(status.candidates, { draft: 0, quarantined: 0, promoted: 0, discarded: 0 });
+  const emptyReview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(emptyReview.note, "No candidates are awaiting review.");
 
   const memoryRoot = path.join(fixture.repository, ".threadshare", "memory");
   await writeFile(path.join(memoryRoot, "doctrine.md"), "Run release checks before publishing.\n");
@@ -399,6 +407,71 @@ test("memory consolidate --full replays the same approved set after an empty pat
   assert.equal(replayed.status, "no_op");
 });
 
+test("invalid consolidation output releases its task claim for an exact retry", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const entryText = serializeMemoryEntry({
+    frontmatter: {
+      id: "oversized-scene",
+      type: "work_method",
+      status: "approved",
+      priority: 50,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: null,
+      occurred: [],
+      evidence: { commits: [], paths: [] },
+      superseded_by: null,
+    },
+    body: "THREADSHARE_TEST_OVERSIZED_SCENE\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "oversized-scene.md",
+  ), entryText);
+  const preview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "consolidate"], {
+      repository: fixture.repository,
+      runner: "claude",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  await assert.rejects(
+    executeMemoryCommand(
+      parseMemoryInvocation(["memory", "consolidate"], {
+        repository: fixture.repository,
+        runner: "claude",
+        "approve-plan": preview.plans[0].planDigest,
+        format: "json",
+      }),
+      fixture.options,
+    ),
+    (error) => /1500/u.test(error.message),
+  );
+  const status = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "status"], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(status.tasks.claimed, 0);
+  assert.equal(status.tasks.pending, 1);
+});
+
 test("memory consolidation never sends content through a symlinked parent", {
   skip: INSIGHTS_E2E_SKIP || process.platform === "win32",
   timeout: 120_000,
@@ -514,7 +587,59 @@ test("memory review shows statement evidence and limitations before confirmation
   assert.match(rendered, /package\.json defines test:release\./);
   assert.match(rendered, /Provenance: direct/);
   assert.match(rendered, /Limitations: single-session/);
-  assert.match(rendered, /Confirm this statement\? \[y\/N\]:/);
+  assert.match(rendered, /Confirm this statement, discard its candidate, or defer\? \[y\/d\/N\]:/);
+});
+
+test("memory review offers an explicit discard for candidates blocked by lint", async () => {
+  const input = ttyStream(new PassThrough());
+  const output = ttyStream(new PassThrough());
+  let rendered = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk) => {
+    rendered += chunk;
+  });
+
+  const reviewer = createMemoryReviewConfirmer({ input, output });
+  assert.notEqual(reviewer, null);
+  const decision = reviewer.discardCandidate(
+    { candidateId: "candidate-blocked" },
+    "the sanitization lint gate blocked the generated entry",
+  );
+  input.end("d\n");
+  assert.equal(await decision, true);
+  reviewer.close();
+
+  assert.match(rendered, /Candidate: candidate-blocked/u);
+  assert.match(rendered, /sanitization lint gate/u);
+  assert.match(rendered, /Discard this candidate or defer\? \[d\/N\]:/u);
+});
+
+test("memory review can explicitly discard a candidate", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await extractCandidate(fixture);
+
+  const review = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], { repository: fixture.repository }),
+    { ...fixture.options, confirmStatement: async () => "discard" },
+  );
+
+  assert.equal(review.plan, null);
+  assert.equal(review.discarded.length, 1);
+  assert.match(review.discarded[0], /^extract-/u);
+  assert.deepEqual(review.pending, []);
+
+  const status = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "status"], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(status.candidates.quarantined, 0);
+  assert.equal(status.candidates.discarded, 1);
 });
 
 test("memory extract text exposes every next-stage authorization digest", () => {
@@ -571,6 +696,41 @@ test("memory extract requires a filtered Insights request for a new plan", () =>
   assert.equal(codex.runnerModel, "gpt-5.6-sol");
   assert.equal(codex.runnerEndpoint, "https://api.openai.com/v1");
 
+  const sessionKey = "1".repeat(64);
+  const toolKey = "2".repeat(64);
+  const skillKey = "3".repeat(64);
+  const parameterized = parseMemoryInvocation(["memory", "extract"], {
+    repository: "/work/threadshare",
+    runner: "claude",
+    since: "2026-08-01T00:00:00.000Z",
+    until: "2026-08-22T00:00:00.000Z",
+    query: "release verification",
+    providers: "codex, claude",
+    "session-keys": sessionKey,
+    "tool-capability-keys": toolKey,
+    "skill-capability-keys": skillKey,
+    "result-evidence": "unknown,provider-completed",
+    "capability-terminal-states": "failed,completed",
+    format: "json",
+  });
+  assert.equal(parameterized.requestSource, undefined);
+  assert.deepEqual(parameterized.extractionRequest, {
+    format: "threadshare-memory-extraction-request@v1",
+    window: {
+      after: "2026-08-01T00:00:00.000Z",
+      before: "2026-08-22T00:00:00.000Z",
+    },
+    query: "release verification",
+    filters: {
+      providers: ["claude", "codex"],
+      sessionKeys: [sessionKey],
+      toolCapabilityKeys: [toolKey],
+      skillCapabilityKeys: [skillKey],
+      resultEvidence: ["provider-completed", "unknown"],
+      capabilityTerminalStates: ["completed", "failed"],
+    },
+  });
+
   assert.throws(
     () => parseMemoryInvocation(["memory", "extract"], {
       repository: "/work/threadshare",
@@ -595,6 +755,72 @@ test("memory extract requires a filtered Insights request for a new plan", () =>
       "approve-plan": "a".repeat(64),
     }),
     (error) => error?.code === "TS_USAGE_OPTION_CONFLICT",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      runner: "claude",
+      request: "memory-filter.json",
+      since: "2026-08-01T00:00:00.000Z",
+      until: "2026-08-22T00:00:00.000Z",
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_CONFLICT",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      runner: "claude",
+      since: "2026-08-01T00:00:00.000Z",
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_DEPENDENCY",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      runner: "claude",
+      query: "release verification",
+      "approve-plan": "a".repeat(64),
+    }),
+    (error) => error?.code === "TS_USAGE_OPTION_CONFLICT",
+  );
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "extract"], {
+      runner: "claude",
+      request: "memory-filter.json",
+      limit: "9",
+    }),
+    (error) => error?.code === "TS_USAGE_INVALID_VALUE" && /1 to 8/u.test(error.message),
+  );
+});
+
+test("Agent-native memory actions do not require a runner and keep bounded request inputs", () => {
+  const recall = parseMemoryInvocation(["memory", "recall"], {
+    repository: "/work/threadshare",
+    since: "2026-08-01T00:00:00.000Z",
+    until: "2026-08-22T00:00:00.000Z",
+    query: "release failures",
+    providers: "codex,claude",
+    limit: "2",
+    format: "json",
+  });
+  assert.equal(recall.runner, undefined);
+  assert.equal(recall.limit, 2);
+  assert.equal(recall.extractionRequest.query, "release failures");
+  assert.deepEqual(recall.extractionRequest.filters.providers, ["claude", "codex"]);
+
+  assert.deepEqual(parseMemoryInvocation(["memory", "stage"], {
+    repository: "/work/threadshare",
+    request: "-",
+    format: "json",
+  }), {
+    action: "stage",
+    repository: "/work/threadshare",
+    requestSource: "-",
+    format: "json",
+  });
+  assert.equal(parseMemoryInvocation(["memory", "prepare"], {
+    request: "prepare.json",
+  }).requestSource, "prepare.json");
+  assert.throws(
+    () => parseMemoryInvocation(["memory", "recall"], { runner: "codex" }),
+    (error) => error?.code === "TS_USAGE_OPTION_NOT_ALLOWED",
   );
 });
 
@@ -635,6 +861,445 @@ test("Memory MCP creates a private Codex pending preview and never runs it", {
     .includes(MEMORY_FAKE_PROVIDER_SESSION_ID), false);
 });
 
+test("Agent-native recall, stage, prepare, and promote form a runner-free CLI workflow", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+
+  const recalled = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "recall"], {
+      repository: fixture.repository,
+      request: "memory-request.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(recalled.format, "threadshare-memory-agent-recall@v1");
+  assert.equal(recalled.sources.length, 1);
+  assert.match(recalled.sources[0].chunk.transcript, /Run npm run test:release before publishing/u);
+  const source = recalled.sources[0];
+  const turnBinding = source.chunk.turnEvidence.find((item) => item.turnIndex === 0);
+  assert.ok(turnBinding);
+  const turnEvidence = source.evidenceCatalog.find((evidence) =>
+    evidence.evidenceId === turnBinding.evidenceId);
+  assert.ok(turnEvidence);
+  assert.equal(turnEvidence.display, "turn 0");
+  assert.ok(source.chunk.transcript.includes(
+    `<<past-turn index="0" evidence-id="${turnEvidence.evidenceId}">>`,
+  ));
+  const candidateContent = "Team Memory submission chunk memory state SQLite3 Git CAS promotion journal: Run npm run test:release before publishing.";
+
+  const stageFile = path.join(fixture.repository, "agent-stage.json");
+  await writeFile(stageFile, `${JSON.stringify({
+    format: "threadshare-memory-candidate-draft-batch@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    candidates: [{
+      content: candidateContent,
+      type: "work_method",
+      priority: 80,
+      confidence: "high",
+      scene: "release-workflow",
+      statements: [{
+        statementId: "release-check",
+        text: candidateContent,
+        evidenceIds: [turnEvidence.evidenceId],
+      }],
+    }],
+  })}\n`);
+  const staged = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "stage"], {
+      repository: fixture.repository,
+      request: "agent-stage.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(staged.status, "adjudication-required");
+  assert.equal(staged.adjudicationTask.format, "threadshare-memory-adjudication-task@v1");
+  assert.equal(staged.reviewItems.length, 0);
+  const stagedReplay = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "stage"], {
+      repository: fixture.repository,
+      request: "agent-stage.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.deepEqual(stagedReplay.adjudicationTask, staged.adjudicationTask);
+
+  const adjudicationFile = path.join(fixture.repository, "agent-adjudication.json");
+  await writeFile(adjudicationFile, `${JSON.stringify({
+    format: "threadshare-memory-adjudication-result@v1",
+    taskId: staged.adjudicationTask.taskId,
+    binding: staged.adjudicationTask.binding,
+    adjudications: staged.adjudicationTask.drafts.map((draft) => ({
+      draftRef: draft.candidateId,
+      action: "store",
+      targetIds: [],
+      mergedFields: null,
+    })),
+  })}\n`);
+  const adjudicated = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "stage"], {
+      repository: fixture.repository,
+      request: "agent-adjudication.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(adjudicated.status, "staged");
+  assert.equal(adjudicated.candidates[0].candidateStatus, "quarantined");
+  const adjudicatedReplay = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "stage"], {
+      repository: fixture.repository,
+      request: "agent-adjudication.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.deepEqual(adjudicatedReplay.candidates, adjudicated.candidates);
+
+  const reviewed = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(reviewed.items.length, 1);
+  const candidate = reviewed.items[0];
+  const prepareFile = path.join(fixture.repository, "agent-prepare.json");
+  await writeFile(prepareFile, `${JSON.stringify({
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "entry",
+    candidates: [{
+      candidateId: candidate.candidateId,
+      expectedRevision: candidate.revision,
+      statements: candidate.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  })}\n`);
+  const prepared = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "prepare"], {
+      repository: fixture.repository,
+      request: "agent-prepare.json",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(prepared.format, "threadshare-memory-prepare@v1");
+  assert.equal(prepared.plan.changes.length, 1);
+  assert.match(prepared.plan.changes[0].content, /npm run test:release/u);
+
+  const promoted = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "promote"], {
+      repository: fixture.repository,
+      plan: prepared.plan.planId,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(promoted.status, "applied");
+  assert.match(
+    await readFile(path.join(fixture.repository, prepared.plan.changes[0].targetPath), "utf8"),
+    /npm run test:release/u,
+  );
+});
+
+test("Agent-native empty stage advances the chunk as an explicit no-op", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const recalled = await executeMemoryMcp("recall", { request }, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  const source = recalled.sources[0];
+  const staged = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-candidate-draft-batch@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    candidates: [],
+  }, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  assert.equal(staged.noOp, true);
+  assert.deepEqual(staged.candidates, []);
+
+  const status = await executeMemoryMcp("status", {}, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  assert.equal(status.chunks.extracted, 1);
+  assert.equal(status.candidates.quarantined, 0);
+  const repeated = await executeMemoryMcp("recall", { request }, {
+    ...fixture.options,
+    repository: fixture.repository,
+  });
+  assert.deepEqual(repeated.sources, []);
+});
+
+test("Agent-native adjudication can skip a draft covered by approved memory", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const existingId = "existing-release-check";
+  const existingText = serializeMemoryEntry({
+    frontmatter: {
+      id: existingId,
+      type: "work_method",
+      status: "approved",
+      priority: 80,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: null,
+      occurred: [],
+      evidence: { commits: [], paths: [] },
+      superseded_by: null,
+    },
+    body: "Run npm run test:release before publishing.\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    `${existingId}.md`,
+  ), existingText);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "assemble"], {
+      repository: fixture.repository,
+      provider: "codex",
+    }),
+    fixture.options,
+  );
+
+  const options = { ...fixture.options, repository: fixture.repository };
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const recalled = await executeMemoryMcp("recall", { request }, options);
+  const source = recalled.sources[0];
+  const evidenceId = source.evidenceCatalog.find((evidence) => evidence.kind === "turn").evidenceId;
+  const staged = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-candidate-draft-batch@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    candidates: [{
+      content: "Run npm run test:release before publishing.",
+      type: "work_method",
+      priority: 80,
+      confidence: "high",
+      scene: null,
+      statements: [{
+        statementId: "release-check",
+        text: "Run npm run test:release before publishing.",
+        evidenceIds: [evidenceId],
+      }],
+    }],
+  }, options);
+  const covering = staged.adjudicationTask.pool.find((item) =>
+    item.sourceKind === "approved" && item.id === existingId);
+  assert.ok(covering);
+
+  const adjudicated = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-adjudication-result@v1",
+    taskId: staged.adjudicationTask.taskId,
+    binding: staged.adjudicationTask.binding,
+    adjudications: [{
+      draftRef: staged.adjudicationTask.drafts[0].candidateId,
+      action: "skip",
+      targetIds: [covering.id],
+      mergedFields: null,
+    }],
+  }, options);
+  assert.equal(adjudicated.candidates[0].candidateStatus, "discarded");
+  assert.deepEqual(adjudicated.reviewItems, []);
+  assert.equal(adjudicated.next, null);
+});
+
+test("Agent-native MCP exposes the same recall-to-promote workflow as the CLI", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const options = { ...fixture.options, repository: fixture.repository };
+  const request = JSON.parse(await readFile(fixture.requestFile, "utf8"));
+  const recalled = await executeMemoryMcp("recall", { request }, options);
+  const source = recalled.sources[0];
+  const evidenceId = source.evidenceCatalog.find((evidence) => evidence.kind === "turn").evidenceId;
+  const staged = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-candidate-draft-batch@v1",
+    taskId: source.taskId,
+    binding: source.binding,
+    candidates: [{
+      content: "Run npm run test:release before publishing.",
+      type: "work_method",
+      priority: 80,
+      confidence: "high",
+      scene: "release-workflow",
+      statements: [{
+        statementId: "release-check",
+        text: "Run npm run test:release before publishing.",
+        evidenceIds: [evidenceId],
+      }],
+    }],
+  }, options);
+  assert.equal(staged.status, "adjudication-required");
+  assert.equal(staged.reviewItems.length, 0);
+  const adjudicated = await executeMemoryMcp("stage", {
+    format: "threadshare-memory-adjudication-result@v1",
+    taskId: staged.adjudicationTask.taskId,
+    binding: staged.adjudicationTask.binding,
+    adjudications: staged.adjudicationTask.drafts.map((draft) => ({
+      draftRef: draft.candidateId,
+      action: "store",
+      targetIds: [],
+      mergedFields: null,
+    })),
+  }, options);
+  assert.equal(adjudicated.reviewItems.length, 1);
+  const candidate = (await executeMemoryMcp("review", { kind: "entry" }, options)).items[0];
+  const prepared = await executeMemoryMcp("prepare", {
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "entry",
+    candidates: [{
+      candidateId: candidate.candidateId,
+      expectedRevision: candidate.revision,
+      statements: candidate.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  }, options);
+  assert.equal(prepared.plan.changes.length, 1);
+  const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);
+  assert.equal(promoted.status, "applied");
+});
+
+test("Agent-native synthesis promotes approved L1 into a reviewed scene without a runner", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t);
+  await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "init"], { repository: fixture.repository }),
+    fixture.options,
+  );
+  const entry = serializeMemoryEntry({
+    frontmatter: {
+      id: "release-verification",
+      type: "work_method",
+      status: "approved",
+      priority: 80,
+      confidence: "high",
+      provenance_strength: "direct",
+      claim_support: "human-confirmed",
+      limitations: [],
+      scope: "repo",
+      scene: "release-workflow",
+      occurred: [],
+      evidence: { commits: [], paths: ["package.json"] },
+      superseded_by: null,
+    },
+    body: "Run npm run test:release before publishing.\n",
+  });
+  await writeFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "entries",
+    "release-verification.md",
+  ), entry);
+  const options = { ...fixture.options, repository: fixture.repository };
+  const synthesis = await executeMemoryMcp("synthesize", { full: true }, options);
+  assert.equal(synthesis.format, "threadshare-memory-synthesis@v1");
+  assert.equal(synthesis.entryCount, 1);
+  assert.equal(synthesis.task.entries[0].entryId, "release-verification");
+  const patch = {
+    format: "threadshare-memory-consolidation-patch@v1",
+    taskId: synthesis.task.taskId,
+    binding: synthesis.task.binding,
+    operations: [{
+      operationId: "create-release-workflow",
+      op: "create",
+      target: "scene",
+      name: "release-workflow",
+      newContent: [
+        "-----META-START-----",
+        "created: 2026-08-22",
+        "updated: 2026-08-22",
+        "summary: Release workflow",
+        "-----META-END-----",
+        "## Release workflow",
+        "Run npm run test:release before publishing.",
+      ].join("\n"),
+      basedOnEntryIds: ["release-verification"],
+      mergeSources: [],
+      rationale: "Keep the confirmed release check reusable across future sessions.",
+    }],
+  };
+  const staged = await executeMemoryMcp("stage", patch, options);
+  assert.equal(staged.candidates.length, 1);
+  assert.equal(staged.reviewItems[0].candidateKind, "consolidation-patch");
+  const candidate = (await executeMemoryMcp(
+    "review",
+    { kind: "consolidation" },
+    options,
+  )).items[0];
+  const prepared = await executeMemoryMcp("prepare", {
+    format: "threadshare-memory-prepare-request@v1",
+    kind: "consolidation",
+    candidates: [{
+      candidateId: candidate.candidateId,
+      expectedRevision: candidate.revision,
+      statements: candidate.assessments.map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+    }],
+  }, options);
+  assert.equal(prepared.plan.changes[0].targetPath,
+    ".threadshare/memory/scenes/release-workflow.md");
+  const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);
+  assert.equal(promoted.status, "applied");
+  assert.match(await readFile(path.join(
+    fixture.repository,
+    ".threadshare",
+    "memory",
+    "scenes",
+    "release-workflow.md",
+  ), "utf8"), /heat: 1/u);
+});
+
 async function extractCandidate(fixture) {
   const pendingInvocation = parseMemoryInvocation(["memory", "extract"], {
     repository: fixture.repository,
@@ -669,6 +1334,68 @@ async function extractCandidate(fixture) {
   return { pending, delivered, adjudicated };
 }
 
+test("an extraction manifest produces one adjudication over the shared candidate snapshot", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t, {
+    turns: Array.from({ length: 6 }, (_, index) => ({
+      turnIndex: index,
+      events: [
+        { role: "user", text: `Question ${index} ${"u".repeat(6_000)}` },
+        { role: "assistant", text: `Answer ${index} ${"a".repeat(6_000)}` },
+      ],
+    })),
+  });
+  const preview = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      request: "memory-request.json",
+      limit: "2",
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(preview.plans.length, 2);
+  assert.match(preview.manifestDigest, /^[0-9a-f]{64}$/u);
+
+  const extracted = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      "approve-manifest": preview.manifestDigest,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(extracted.delivered.length, 2);
+  assert.equal(extracted.plans.length, 1);
+  assert.equal(extracted.plans[0].taskKind, "adjudication");
+  assert.equal(extracted.manifestDigest, null);
+
+  const adjudicated = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "extract"], {
+      repository: fixture.repository,
+      runner: "claude",
+      "approve-plan": extracted.plans[0].planDigest,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(adjudicated.delivered[0].adjudication, "applied");
+  const status = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "status"], {
+      repository: fixture.repository,
+      format: "json",
+    }),
+    fixture.options,
+  );
+  assert.equal(status.candidates.draft, 0);
+  assert.equal(status.candidates.quarantined, 1);
+  assert.equal(status.candidates.discarded, 1);
+});
+
 test("Insights extraction binds Delivery Trace and advances the chunk cursor only after submit", {
   skip: INSIGHTS_E2E_SKIP,
   timeout: 120_000,
@@ -678,7 +1405,9 @@ test("Insights extraction binds Delivery Trace and advances the chunk cursor onl
     parseMemoryInvocation(["memory", "extract"], {
       repository: fixture.repository,
       runner: "claude",
-      request: "memory-request.json",
+      since: "2026-08-10T08:00:00.000Z",
+      until: "2026-08-10T10:00:00.000Z",
+      providers: "codex",
       format: "json",
     }),
     fixture.options,
@@ -904,6 +1633,33 @@ test("review confirmation promotes a sanitized entry without creating Git histor
   assert.equal(afterHead, beforeHead);
 });
 
+test("review keeps a generated entry slug valid when its title is truncated", {
+  skip: INSIGHTS_E2E_SKIP,
+  timeout: 120_000,
+}, async (t) => {
+  const fixture = await createMemoryCommandFixture(t, {
+    turns: [{
+      turnIndex: 0,
+      events: [
+        { role: "user", text: "THREADSHARE_TEST_SLUG_TRUNCATION" },
+        { role: "assistant", text: "Record the reusable repository guidance." },
+      ],
+    }],
+  });
+  await extractCandidate(fixture);
+
+  const review = await executeMemoryCommand(
+    parseMemoryInvocation(["memory", "review"], { repository: fixture.repository }),
+    { ...fixture.options, confirmStatement: async () => true },
+  );
+
+  assert.notEqual(review.plan, null);
+  assert.equal(
+    review.plan.files[0].targetPath,
+    `.threadshare/memory/entries/${"a".repeat(59)}.md`,
+  );
+});
+
 test("the real CLI wires TTY statement confirmation into memory review", {
   skip: INSIGHTS_E2E_SKIP,
   timeout: 120_000,
@@ -951,7 +1707,7 @@ test("the real CLI wires TTY statement confirmation into memory review", {
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
-      if (!answered && stderr.includes("Confirm this statement? [y/N]:")) {
+      if (!answered && stderr.includes("Confirm this statement, discard its candidate, or defer? [y/d/N]:")) {
         answered = true;
         child.stdin.end("y\n");
       }
@@ -963,7 +1719,7 @@ test("the real CLI wires TTY statement confirmation into memory review", {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /Statement: Release tests are grouped under npm run test release\./);
   assert.match(result.stderr, /Evidence \(turn\): turn 0/);
-  assert.match(result.stderr, /Confirm this statement\? \[y\/N\]:/);
+  assert.match(result.stderr, /Confirm this statement, discard its candidate, or defer\? \[y\/d\/N\]:/);
   assert.match(result.stdout, /Promotion plan/);
 });
 

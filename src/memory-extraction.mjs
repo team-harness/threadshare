@@ -29,6 +29,7 @@ import {
   memoryDigestHex,
 } from "./memory-contracts.mjs";
 import {
+  ADJUDICATION_PROMPT_VERSION,
   ADJUDICATION_PROMPT,
   EXTRACTION_PROMPT,
   PROMPT_VERSION,
@@ -256,20 +257,32 @@ export function collectPayloadDigests(chunk) {
 // ---------------------------------------------------------------------------
 
 /**
- * Deterministic transcript: TRANSCRIPT_PREAMBLE, one `<<past-role>>` block per
- * event in stable order, closed by the `<<end-of-transcript>>` anchor.
+ * Deterministic transcript: TRANSCRIPT_PREAMBLE, an explicit `<<past-turn>>`
+ * boundary, one `<<past-role>>` block per event in stable order, and the
+ * `<<end-of-transcript>>` anchor. Current ExtractionTasks pass the exact
+ * turn-to-evidence mapping; callers without it still get indexed boundaries.
  */
-export function serializeTranscript(chunk) {
+export function serializeTranscript(chunk, turnEvidence = []) {
   if (!chunk || !Array.isArray(chunk.events) || chunk.events.length === 0) {
     throw new MemoryExtractionError("chunk must contain events", "invalid-chunk");
   }
-  const blocks = chunk.events.map((event) => {
+  const evidenceByTurn = new Map(turnEvidence.map((item) => [item.turnIndex, item.evidenceId]));
+  const blocks = [];
+  let previousTurnIndex = null;
+  for (const event of chunk.events) {
     if (!TRANSCRIPT_ROLES.includes(event.role)) {
       throw new MemoryExtractionError(
         `unsupported transcript role ${String(event.role)}`, "invalid-event-role");
     }
-    return `<<past-${event.role}>>\n${event.text}`;
-  });
+    if (event.turnIndex !== previousTurnIndex) {
+      const evidenceId = evidenceByTurn.get(event.turnIndex);
+      blocks.push(
+        `<<past-turn index="${event.turnIndex}"${evidenceId === undefined ? "" : ` evidence-id="${evidenceId}"`}>>`,
+      );
+      previousTurnIndex = event.turnIndex;
+    }
+    blocks.push(`<<past-${event.role}>>\n${event.text}`);
+  }
   return `${TRANSCRIPT_PREAMBLE}\n\n${blocks.join("\n\n")}\n\n${END_OF_TRANSCRIPT}`;
 }
 
@@ -436,6 +449,30 @@ export function computeSourceInputDigest({
   });
 }
 
+function bindTurnEvidence(chunk, evidenceCatalog) {
+  const catalogByPointer = new Map(
+    evidenceCatalog
+      .filter((entry) => entry.kind === "turn")
+      .map((entry) => [entry.pointerDigest, entry.evidenceId]),
+  );
+  const seen = new Set();
+  const turnEvidence = [];
+  for (const event of chunk.events) {
+    if (seen.has(event.turnIndex)) continue;
+    seen.add(event.turnIndex);
+    const pointerDigest = memoryDigestHex({ kind: "turn", turnIndex: event.turnIndex });
+    const evidenceId = catalogByPointer.get(pointerDigest);
+    if (evidenceId === undefined) {
+      throw new MemoryExtractionError(
+        `turn ${event.turnIndex} lacks an evidence catalog entry`,
+        "missing-turn-evidence",
+      );
+    }
+    turnEvidence.push({ turnIndex: event.turnIndex, evidenceId });
+  }
+  return turnEvidence;
+}
+
 /**
  * Assemble a schema-valid ExtractionTask@v1 plus its canonical stdin bytes
  * (the exact Runner stdin). The transcript is serialized here from the chunk;
@@ -460,10 +497,12 @@ export function buildExtractionTask({
   schemaVersion = MEMORY_CANDIDATE_DRAFT_BATCH_FORMAT,
   chunkerVersion = CHUNKER_VERSION,
 }) {
-  const transcript = serializeTranscript(chunk);
+  const turnEvidence = bindTurnEvidence(chunk, evidenceCatalog);
+  const transcript = serializeTranscript(chunk, turnEvidence);
   const taskChunk = {
     turnRange: chunk.turnRange,
     coverage: chunk.coverage,
+    turnEvidence,
     transcript,
   };
   const context = { sceneIndexSummary };
@@ -739,7 +778,7 @@ export function buildAdjudicationTask({
   draftBatchDigest = null,
   recallQueryDigest = null,
   resultSetDigest = null,
-  promptVersion = PROMPT_VERSION,
+  promptVersion = ADJUDICATION_PROMPT_VERSION,
   schemaVersion = MEMORY_ADJUDICATION_RESULT_FORMAT,
 }) {
   if (!recall || !Array.isArray(recall.recallSets) || !Array.isArray(recall.pool)) {

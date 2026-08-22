@@ -9,6 +9,7 @@ import { canonicalJson } from "../src/canonical-json.mjs";
 import { createInsightsEngineClient } from "../src/insights-engine-client.mjs";
 import {
   MemoryStateClientError,
+  memoryAbandonTask,
   memoryAuthorize,
   memoryBindRepository,
   memoryClaimTask,
@@ -387,6 +388,67 @@ test("memory ops run end-to-end against a real engine", {
   assert.match(stale.actualResultSetDigest, /^[0-9a-f]{64}$/);
   assert.notEqual(stale.actualResultSetDigest, stale.expectedResultSetDigest);
 
+  await memoryPlanTasks(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    chunks: [],
+    tasks: [{
+      taskId: "task-abandon-1",
+      kind: "consolidation",
+      binding: { promptVersion: "memory-consolidation@test" },
+    }],
+  });
+  const abandonedClaim = await memoryClaimTask(client, {
+    taskId: "task-abandon-1",
+    leaseHolder: "e2e-holder",
+    leaseMs: 60_000,
+  });
+  await assert.rejects(
+    memoryAbandonTask(client, {
+      taskId: "task-abandon-1",
+      claimToken: "0".repeat(32),
+      disposition: "pending",
+    }),
+    (error) => error.code === "TS_MEMORY_LEASE_LOST",
+  );
+  assert.deepEqual(await memoryAbandonTask(client, {
+    taskId: "task-abandon-1",
+    claimToken: abandonedClaim.claimToken,
+    disposition: "pending",
+  }), { taskId: "task-abandon-1", status: "pending" });
+  const replannedAbandoned = await memoryPlanTasks(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    chunks: [],
+    tasks: [{
+      taskId: "task-abandon-1",
+      kind: "consolidation",
+      binding: { promptVersion: "memory-consolidation@test" },
+    }],
+  });
+  assert.equal(replannedAbandoned.tasks[0].claimable, true);
+  const reclaimedAbandoned = await memoryClaimTask(client, {
+    taskId: "task-abandon-1",
+    leaseHolder: "e2e-holder",
+    leaseMs: 60_000,
+  });
+  assert.deepEqual(await memoryAbandonTask(client, {
+    taskId: "task-abandon-1",
+    claimToken: reclaimedAbandoned.claimToken,
+    disposition: "stale",
+  }), { taskId: "task-abandon-1", status: "stale" });
+  const staleAbandoned = await memoryPlanTasks(client, {
+    repositoryKey: REPOSITORY_KEY,
+    worktreeKey: WORKTREE_KEY,
+    chunks: [],
+    tasks: [{
+      taskId: "task-abandon-1",
+      kind: "consolidation",
+      binding: { promptVersion: "memory-consolidation@test" },
+    }],
+  });
+  assert.equal(staleAbandoned.tasks[0].claimable, false);
+
   // sync-approved replaces the owner projection and short-circuits when unchanged.
   const entries = [{
     entryId: "release-workflow-notes",
@@ -465,7 +527,7 @@ test("memory ops run end-to-end against a real engine", {
     }),
     {
       chunks: { pending: 0, drafted: 0, extracted: 1, stale: 0 },
-      tasks: { pending: 0, claimed: 0, submitted: 2, stale: 1 },
+      tasks: { pending: 0, claimed: 0, submitted: 2, stale: 2 },
       candidates: { draft: 1, quarantined: 1, promoted: 0, discarded: 0 },
       promotions: { generated: 0, approved: 0, applying: 0, applied: 0, voided: 0,
         applyingPlanIds: [] },
@@ -658,7 +720,7 @@ test("memory ops run end-to-end against a real engine", {
     }),
     {
       chunks: { pending: 0, drafted: 0, extracted: 1, stale: 0 },
-      tasks: { pending: 0, claimed: 0, submitted: 2, stale: 1 },
+      tasks: { pending: 0, claimed: 0, submitted: 2, stale: 2 },
       candidates: { draft: 0, quarantined: 0, promoted: 1, discarded: 1 },
       promotions: { generated: 0, approved: 0, applying: 0, applied: 1, voided: 0,
         applyingPlanIds: [] },
@@ -899,6 +961,19 @@ test("submit-adjudication rejects duplicate target ids across the request", asyn
     }),
     (error) => error instanceof MemoryStateClientError &&
       error.code === "TS_MEMORY_REQUEST_INVALID",
+  );
+  // Current-batch drafts may support skip decisions, but cannot be mutation targets.
+  await assert.rejects(
+    memorySubmitAdjudication(neverSend, {
+      ...base,
+      adjudications: [
+        { draftRef: "d1", action: "merge", targets: [{ id: "c-2", revision: 1 }], ...merged },
+        { draftRef: "d2", action: "store" },
+      ],
+    }),
+    (error) => error instanceof MemoryStateClientError &&
+      error.code === "TS_MEMORY_REQUEST_INVALID" &&
+      /current batch/.test(error.message),
   );
   // Distinct target ids still validate locally (the stub then replies stale).
   const stale = {

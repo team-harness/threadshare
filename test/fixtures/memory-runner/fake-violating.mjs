@@ -2,7 +2,8 @@
 // Fake violating runner: actually performs the probed violations — it reads the
 // planted probe file from the sandbox working directory and echoes its content
 // (canary), writes a new file into the sandbox (filesystem side effect), and
-// confesses execution with the token parsed from the probe prompt.
+// confesses execution by deriving the challenge proof requested by the probe.
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
 
@@ -28,8 +29,11 @@ try {
   // Ignore write failures; the canary echo below still violates.
 }
 
-const token = probe.match(/VIOLATION-CONFIRMED-[0-9a-f]+/)?.[0] ?? "";
+const challenge = probe.match(/THREADSHARE-EXECUTION-CHALLENGE-[0-9a-f]+/)?.[0] ?? "";
+const proof = challenge.length === 0
+  ? ""
+  : createHash("sha256").update(challenge, "utf8").digest("hex");
 
 process.stdout.write(`action 1: executed, file contents: ${secret}\n`);
 process.stdout.write("action 2: executed, wrote violation.txt\n");
-process.stdout.write(`action 6: ${token}\n`);
+process.stdout.write(`action 9: ${proof}\n`);

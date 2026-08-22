@@ -1,7 +1,7 @@
 # Threadshare 团队记忆与经验总结 提案
 
-状态：Active（rev8；Phase 1/2 已实现并通过真实 Codex 验收，Phase 3 未启动）
-日期：2026-08-21（rev8；五轮设计审查意见、自查增补与 Phase 1/2 实施反馈均已吸收，见附录 B）
+状态：Active（rev12；Phase 1/2 与 Agent-native Team Memory 已完成，Phase 3 未启动）
+日期：2026-08-22（rev12；当前 Agent 直接读取有界材料，CLI/MCP 语义同构）
 适用范围：本机 Threadshare Insights 与新增的仓库内记忆库；云端共享面在本提案中保持**未设计**状态（见 Phase 3）
 
 设计输入：
@@ -14,12 +14,12 @@
 
 ## 1. 决策摘要
 
-在 Threadshare 上新增一条"**冻结的会话证据 → 授权的受限 Runner 提炼 → 库内隔离区审批 → git 团队共享 → Agent 按需装配**"的事后提炼链路：
+在 Threadshare 上新增两条汇入同一状态机的事后提炼链路："**冻结的会话证据 → 授权的独立 Runner 批量提炼**"，以及"**完整有界 Turn → 当前 Agent 与用户交互提炼**"；两者都经过库内候选状态与精确 PromotionPlan，再进入 git 团队共享与 Agent 按需装配：
 
 1. **L0 已存在**：provider 会话文件 + insights 索引天然就是 L0 层。
 2. **新增四类提炼产物**：L1 原子记忆、L2 场景文档、L3 团队守则（doctrine）、Skill（SKILL.md 兼容格式，agent-neutral 存放）。
-3. **提炼由受限 Runner 执行，且资格靠一致性测试证明**：历史内容只交付给通过 **deny-all conformance test** 的隔离 Runner。Phase 1 启用 Claude 与 Codex profile；Codex 额外使用一次性 `HOME/CODEX_HOME`、空 MCP 配置、显式 feature deny、`--ignore-user-config/--ignore-rules` 与 `--ephemeral`，并把 exact model/HTTPS endpoint 固化进 profile digest。宿主无可验证 Runner 时，Threadshare 拒绝交付历史内容。
-4. **transcript 出网需绑定精确输入并显式授权**：每次提炼前生成 `RunnerExecutionPlan@v1`，绑定 task、输入 digest、全部输入 coverage、provider/model/endpoint、发送字节数，以及**分开申报**的本机会话持久化与服务端留存；runner 参数只创建 pending plan，交互确认或 `--approve-plan <digest>` 才授权；批量提炼可用 `AuthorizationManifest@v1` 一次确认一组**逐个列明**的 plan digest（每个 plan 仍只对自身 digest 生效、单独失效）。MCP 不得自行授权。Runner 强制本机 no-session-persistence；**Threadshare 不承诺也不暗示模型服务端的留存策略**（providerRetention 默认 unknown，如实展示）。
+3. **Agent-native 是默认交互路径**：当前 Codex/Claude Agent 被视为用户选择的受信本机代理。`memory recall` 直接返回完整有界 Turn，`memory synthesize` 直接返回 approved L1 与当前 Scene/Doctrine；不使用 Broker、WebAuthn、读取前 approval bundle、隐藏 Runner 或 declassification。Threadshare 不声称防御当前 Agent 对已读内容的滥用。
+4. **独立 Runner 只用于可选批处理**：`memory extract/consolidate --runner` 保留 Phase 1 的 deny-all conformance、`RunnerExecutionPlan@v1`、精确 digest 确认和 no-session-persistence。该约束只保护额外启动的批处理进程，不是 Agent-native 路径的前置条件。
 5. **提炼阶段的全部状态在单一事务库内**：任务、提交、候选（draft/quarantined）、原始 evidence refs、chunk 游标全部是 `memory-state.sqlite3` 的表，单事务提交；**不再有事务外的 quarantine/、evidence-refs/ 文件目录**。审批后的 git 写入走独立的可恢复 promotion journal，不声称与提炼同事务。
 6. **提取与裁决拆为两阶段任务**（消除循环依赖）：`ExtractionTask → CandidateDraftBatch → 双 FTS + RRF 召回 → AdjudicationTask → AdjudicationResult → 事务性入隔离区`，两阶段各有 taskId / lease / binding / 幂等提交。
 7. **关联来源与陈述支持分离**：Delivery Trace 只派生 `provenance_strength`（关联来源强度），绝不把 direct/observed 当作自然语言 statement 成立的证明；每条 statement 另有 `claim_support: unverified | typed-fact | human-confirmed`。任意 LLM 生成陈述默认 unverified；只有确定性 typed fact 或逐条人工确认才能晋升。
@@ -28,6 +28,7 @@
 10. **晋升有 git 内容 CAS**：`PromotionPlan@v1` 绑定 repository/worktree owner、目标文件 blob hash、净化内容 digest 与净化策略版本；漂移必须重新生成 diff 并再次批准；Phase 1 的 promote **只修改工作区**，不自动 stage/commit/push。
 11. **git 为团队记忆的真相源，只存净化内容，agent-neutral**；Claude/Codex 装配是显式 adapter。
 12. **共享面未设计**：需独立 ADR / endpoint / storage wrapper；不复用现有 shares API。
+13. **新增 Agent 在环交互路径，CLI/MCP 必须语义同构**：Threadshare 把绑定的有界 source 直接交给当前 Agent；Agent 负责阅读、提议、追问和在用户确认后调用 `stage/prepare/promote`，Threadshare 负责证据绑定、状态、digest、CAS 与写入。稳定操作不得只存在于单一入口。完整设计见 `docs/team-memory-interactive-design.md`。
 
 ## 2. 背景与问题
 
@@ -60,30 +61,27 @@
 
 由此确定六个核心决策：
 
-### D1：受限 Runner 的资格靠 conformance test 证明；transcript 出网靠输入绑定授权
+### D1：两种执行模式，共享同一候选与晋升状态机
 
-**Runner 资格（对 F7 / F9）**：
+**Agent-native 模式（默认交互）**：
 
-- `RestrictedExtractionRunner@v1` profile 随包分发，但 **profile 声明不构成资格**；资格由 **deny-all conformance test** 证明：Threadshare 在交付任何历史内容之前，先以对抗性探针任务运行该 profile（探针 prompt 诱导执行 shell / 读写文件 / 调用 MCP / 发起任务外网络请求），验证全部被拒且无副作用，通过后记录 `{profile, cliVersion, testVersion}` 指纹；CLI 版本或 profile 变化即失效重测；
-- **Phase 1 启用 Claude 与 Codex profile**。Claude 使用 `--tools "" --bare --safe-mode --no-session-persistence --strict-mcp-config`；Codex profile v2 使用显式 model/HTTPS endpoint、空 `mcp_servers`、执行/浏览器/插件等 feature deny、`--ignore-user-config/--ignore-rules`、`--ephemeral` 与一次性 home。宿主环境缩减为认证、代理、证书与 locale 白名单，不透传任意项目 secret、`NODE_OPTIONS` 或动态加载变量；v2 使旧 conformance 指纹自动失效重测。参数面只是前置条件，两者仍须真实通过 conformance；
-- **硬失败规则：宿主环境不能提供通过 conformance test 的 Runner 时，Threadshare 必须拒绝向任何 Agent 交付历史内容**；不降级、不回退到 ambient Agent；
-- transcript 经 stdin 交付、结果经 stdout 回收；超时与输出上限强制执行；**Runner 必须以本机 no-session-persistence 模式运行**（`localSessionPersistence: none`），避免提炼运行自身生成新的可索引会话（防反馈回路）。
+- 用户在当前 Codex/Claude 对话中描述时间窗和主题。`memory recall` / `threadshare_memory_recall` 直接返回完整有界 Turn chunk、evidence catalog 与输出契约；`chunk.turnEvidence[]` 和 transcript 内的 `<<past-turn index="…" evidence-id="…">>` 提供逐 Turn 精确映射，不让 Agent 猜 `ev-*` 顺序；不先返回 content-free offer，也不启动第二个 Agent；
+- 当前 Agent 可以拥有宿主授予的 shell、文件和网络能力。Threadshare 不使用 Broker/WebAuthn 区分用户与 Agent，也不增加读取授权或 declassification；用户选择该 Agent 即接受它读取这些材料；
+- Agent 先与用户讨论拟议文字，再提交最终 `CandidateDraftBatch@v1`；`review/prepare/promote` 通过精确 revision/digest/target CAS 固定写入内容，但不构成独立的人类身份认证。
 
-**出网授权（对 F10）**：Runner 无本机工具，但会把未裁剪的 transcript 发往模型端点——这是内容离开本机，必须显式授权：
+**Runner batch 模式（可选自动化，对 F7 / F9 / F10）**：
 
-- 每次提炼执行前，Threadshare 先确定性序列化将交给 Runner 的完整 stdin，再生成 **`RunnerExecutionPlan@v1`**：`taskKind + taskId + runnerInputDigest + inputCoverageDigest`、全部输入来源 coverage（包含 transcript、draft、候选池摘要）、provider、model、精确发送字节数、网络目的地，以及**两级分开申报的留存**——`localSessionPersistence: none`（Runner 本机不留会话，CLI 参数可保证）与 `providerRetention: unknown | no-retention | provider-policy`（模型服务端留存，**Threadshare 无法凭 CLI 参数保证**，默认 unknown，如实展示，不得伪装为本机可保证属性）；
-- `planDigest = sha256(canonical plan without authorization decision)`。`memory extract --runner <claude|codex> --request <file|->` 只生成并展示 pending plan，不交付内容；Codex 新 preview 还需绑定 `--runner-model` 与 `--runner-endpoint`。交互式确认或非交互 `--approve-plan <planDigest>` 才授权该**唯一输入**。task input、候选池、coverage、endpoint、model 或留存字段任一变化都产生新 digest，必须重新确认；
-- **批量授权（自查增补）**：批量提炼时逐任务唯一 digest × 两阶段任务会导致确认次数爆炸（50 个 chunk ≈ 100 次确认）。可生成 `AuthorizationManifest@v1`——逐个列明各 pending plan 的 digest、taskKind 与字节数，一次交互确认批准清单内全部 digest；每个 plan 仍只对自身 digest 生效，任一 plan 的输入变化只作废该 plan、不影响清单内其他已批准 plan；**不存在"整包授权覆盖未来任务"的语义**；manifest 批准同样写入审计日志；
-- **MCP 不得自行授权**：ambient 宿主 Agent 经 MCP 触发提炼只能创建 pending plan，等待用户在 CLI 侧确认；MCP 响应永不携带 transcript；
-- 全部授权决定写入审计日志。
+- `memory extract/consolidate --runner <claude|codex>` 仍使用 Phase 1 的 deny-all conformance profile、`RunnerExecutionPlan@v1`、输入 digest、provider/model/endpoint/bytes/retention disclosure 与显式 `--approve-plan`/manifest；
+- Runner 经 stdin 接收内容、stdout 返回结果，强制 no-session-persistence、超时和输出上限。CLI/profile 变化触发 conformance 重测；
+- extraction 与 adjudication 是两个独立 delivery，后者必须单独确认。一次 manifest 最多覆盖 8 个已列明 extraction plan，不授权未来任务。
 
-路径校验、schema 校验、原子写入与全部 git 操作由 Threadshare 主进程执行。`<<past-*>>` 标记只用于提取质量（防 role-capture），不承担权限职责。
+两种模式都使用同一个明确时间窗、worktree + eligible + active + hard-sealed 选材、完整 Turn chunk、Delivery Trace/source binding、candidate/assessment 状态和 PromotionPlan。路径校验、schema 校验与全部工作区写入由 Threadshare 主进程执行。
 
 ### D2：仓库内文件为团队记忆真相源；原始引用只存本机事务库；真相源 agent-neutral
 
 - git 内：净化正文、稳定 `id`、可公开证据（仓库身份 + 完整 commit hash、仓库相对路径）、confidence / provenance_strength / claim_support / limitations；
 - 原始 provider session id、turn key、revision、payload digest 等溯源引用**存 `memory-state.sqlite3` 的 evidence_refs 表**（库文件 0600），不再使用独立文件目录（F11：文件无法参与 SQLite 事务）；`portable: false` 只表示不可迁移，不表示不敏感——敏感引用一律不进 git；
-- **用户显式批准 PromotionPlan 是进入 git 的唯一通道**（见 D5）；lint 与 PR review 是补充防线；
+- **`prepare → promote` 是 Threadshare 写入 git 真相源的唯一状态机通道**（见 D5）；Agent-native 模式约定 Agent 只在用户确认后调用，但不另行认证用户；lint 与 PR review 是补充防线；
 - 真相源目录不含任何 provider 专属路径（F1）：Skill 存 `.threadshare/memory/skills/`；到具体 Agent 的落位（CLAUDE.md import、`.claude/skills/` 等）由 `threadshare memory assemble --provider <x>` 显式 adapter 生成，装配产物视为可再生成的派生物。
 
 ### D3：approved memory 与在途候选各有单一持久化投影
@@ -108,6 +106,8 @@ AdjudicationTask@v1（draft batch + 统一候选池及各自 revision）
 ```
 
 两阶段各有独立 taskId / lease / binding / 幂等提交（taskId + responseDigest）语义。此前 rev3 的单任务契约要求 Runner 在提交候选的同一响应里完成裁决，而召回又只能发生在候选提交之后且 Runner 无检索工具——该循环依赖在 rev4 中消除。
+
+批量边界为每个 extraction task 最多 8 个 candidate、每次 CLI run 最多 8 个 chunk，因此共享 adjudication 最多 64 个 draft，与 `MEMORY_MAX_RECALL_DRAFTS` 一致。不能为同一 run 的各 chunk 分别冻结裁决快照：前一个裁决会改变 candidate projection，使后续 sibling plan 自己制造 stale；旧版多 plan artifact 在重新批准 manifest 时只重规划为一个共享 plan，不启动 Runner，原 plan 标记 superseded。
 
 **CAS 粒度（对 F6）**：`snapshotSeq` 仅作组装 provenance；stale 判定比较 `databaseUuid + owner binding + sourceInputDigest + 逐项 turn/payload revision + 引用的 delivery-edge revision + prompt/schema/chunker 版本`。`sourceInputDigest` 是源输入的 canonical digest，不包含自身；`RunnerExecutionPlan.runnerInputDigest` 另对最终序列化 stdin 字节取 digest，避免自引用。只有相关输入变化才判 stale；无关会话同步不使在途任务失效。
 
@@ -137,20 +137,32 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
 
 跨仓库/组织共享需独立 ADR + 独立 endpoint + 独立 storage wrapper 与显式裁剪层；**不复用现有 `POST /api/v1/shares`**（F8）。
 
+### D7：Agent 在环工作流与 CLI/MCP 语义同构
+
+用户可以在 Codex/Claude 对话中直接描述回看条件，不需要手写 `memory-filter.json`，也不需要为当前 Agent 再指定 `--runner`。Threadshare 把自然语言条件规范化为有界 selection，并直接返回完整 Turn chunk、opaque evidence catalog、source binding 与输出契约。当前 Agent 阅读材料、向用户展示拟议 candidate、合入补充后再提交最终 draft。
+
+交互路径与 batch Runner 路径共用 extraction/adjudication/candidate/promotion 状态机。当前 Agent 被视为用户授权的本机代理；Threadshare 不使用 Broker/WebAuthn，不限制它的 ambient capability，也不声称抵御恶意本机 Agent。第一次 `stage` 提交 `CandidateDraftBatch@v1` 并返回绑定当前记忆池的 `AdjudicationTask@v1`；Agent 与用户比较后，第二次 `stage` 提交精确 `AdjudicationResult@v1`，只有 `store/update/merge` 保留项才进入隔离区。`review` 返回精确 candidate revision、statement/citation digest；用户确认后 Agent 调用 `prepare`，最终确认后调用 `promote`。这是防 stale 和审 A 写 B 的状态绑定，不是不可伪造的用户授权。
+
+所有稳定 Team Memory 操作由共享 operation registry 定义，CLI 与 MCP 只是 Adapter。Registry 固定 operation version、stability、schema、side-effect class、capability vector 与 approval policy；同 capability fixture 下，两端必须产生相同业务投影、状态/file digest、稳定错误和 CAS。不可用 stub 不算实现。完整协议与 parity 验收矩阵见 `docs/team-memory-interactive-design.md`。
+
 ## 4. 总体架构
 
 主数据流：
 
 ```
-显式有界筛选请求 + 唯一 RepositoryBinding + 冻结的 Insights Turn chunks（sourceInputDigest 绑定）
-  → RunnerExecutionPlan@v1（绑定精确 task input；CLI 确认 digest；MCP 只能 pending）
-  → ExtractionTask@v1 → 受限 Runner（通过 conformance test，ephemeral）
-  → CandidateDraftBatch@v1 → 事务 1：draft + evidence assessment + candidate FTS
+显式有界筛选请求 + 唯一 RepositoryBinding + 冻结的 Insights source binding
+  ├─ batch：完整 Turn chunks → RunnerExecutionPlan@v1 → 受限 Runner
+  │    → CandidateDraftBatch@v1
+  └─ Agent-native：完整有界 Turn + evidence catalog → 当前 Agent ↔ 用户
+       → 最终 CandidateDraftBatch@v1 → stage（草稿）
+  → 事务 1：draft + evidence assessment + candidate FTS
   → approved memory FTS + candidate FTS → BM25 候选 → versioned RRF top-5
-  → AdjudicationTask@v1 → Runner → AdjudicationResult@v1
+  → batch：AdjudicationTask@v1 → Runner → AdjudicationResult@v1
+    Agent-native：AdjudicationTask@v1 → 当前 Agent ↔ 用户 → stage（AdjudicationResult@v1）
   → 事务 2：候选 revision/FTS CAS、裁决、quarantined、chunk 游标推进
-  → memory review：逐条确认 unverified claim → 生成 owner-bound PromotionPlan@v1
-  → 用户显式批准 → promotion journal 写工作区（只改文件，不碰 git 历史）
+  → memory review：展示精确 statement/citation digest
+  → 用户确认 → Agent prepare → owner-bound PromotionPlan@v1
+  → 用户最终确认 → Agent promote → promotion journal 写工作区（只改文件，不碰 git 历史）
   → 用户常规 git commit / PR
   → insights sync 摄入 → Memory FTS 投影
   → Agent recall（assemble adapter 装配 + memory_search 工具）
@@ -166,11 +178,11 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
 ┌── 提炼工作流（新增）────────────────────────────────────────┐
 │ Threadshare 主进程：owner 解析、选材、分块、任务包、双投影召回│
 │   claim/lease、CAS、evidence assessment、净化、PromotionPlan、│
-│   promotion journal、conformance test、输入绑定授权           │
-│ 受限 Runner（LLM 推理；通过 deny-all conformance test；      │
-│   ephemeral；stdin/stdout）：提取、裁决、归纳                │
-│ ambient 宿主 Agent（仅编排/审阅，经 MCP；不见 transcript；   │
-│   不能授权出网）                                             │
+│   promotion journal、conformance test、输入绑定确认           │
+│ 当前宿主 Agent（CLI 或 MCP）：直接读取有界 source、提取、讨论、│
+│   提交 candidate/patch、调用 prepare/promote                  │
+│ 可选 batch Runner（deny-all conformance；ephemeral；stdin/stdout）│
+│   负责无人值守提取、裁决、归纳                               │
 └──────────────┬───────────────────────────────────────────────┘
                ▼
 ┌── 状态与记忆库 ──────────────────────────────────────────────┐
@@ -178,7 +190,7 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
 │   tasks / submissions / chunks / candidates + candidate_fts / │
 │   evidence_refs / assessments / promotion_journal / auth log   │
 │ 仓库内（净化，agent-neutral）：entries/ scenes/ doctrine.md   │
-│   skills/  index.json（派生）                                 │
+│   skills/  index.json（预留骨架；当前非权威索引）             │
 └──────────────┬───────────────────────────────────────────────┘
                │ git push/pull = 团队同步；PR = 复核留痕
                ▼
@@ -303,7 +315,7 @@ authorization_log: planDigest, taskId, runnerInputDigest,
 
 **`RestrictedExtractionRunner@v1`**（runner profile）：`{ adapter: claude-cli | codex-cli, version, argvTemplate（参数白名单）, toolPolicy: none, network: model-only, ephemeral: required, timeoutMs, maxOutputBytes, conformance: { testVersion, passedAt, cliVersionFingerprint } }`。**conformance 记录缺失或指纹失配 → 该 profile 不可用**。Codex profile 的 argv 固化 exact model/HTTPS endpoint、空 MCP 配置与全部 deny flags；运行时只复制认证材料到一次性 home，不加载用户配置、规则、Skills 或插件，结束后删除。
 
-**`RunnerExecutionPlan@v1`**：`{ planDigest, taskKind, taskId, runnerInputDigest, inputCoverageDigest, inputCoverage: [ { sourceKind, opaqueSourceId, revision, contentDigest, bytes, truncated } ], runnerProfile, provider, model, endpoint, bytesToSend, localSessionPersistence: none, providerRetention: unknown | no-retention | provider-policy, authorization: pending | approved }`。`runnerInputDigest = sha256(exact stdin bytes)`；planDigest 覆盖除 authorization 决定外的完整 canonical plan。批准只对该 digest 生效，执行前重新计算 stdin digest 并比对。MCP 只能产生 `pending`；CLI 交互确认或 `--approve-plan <digest>` 转为 approved。`providerRetention` 如实展示，不得伪装为本机可保证属性。
+**`RunnerExecutionPlan@v1`**：`{ planDigest, taskKind, taskId, runnerInputDigest, inputCoverageDigest, inputCoverage: [ { sourceKind, opaqueSourceId, revision, contentDigest, bytes, truncated } ], runnerProfile, provider, model, endpoint, bytesToSend, localSessionPersistence: none, providerRetention: unknown | no-retention | provider-policy, authorization: pending | approved }`。`runnerInputDigest = sha256(exact stdin bytes)`；planDigest 覆盖除 authorization 决定外的完整 canonical plan。批准只对该 digest 生效，执行前重新计算 stdin digest 并比对。batch MCP preview 只能产生 `pending`，CLI 交互确认或 `--approve-plan <digest>` 转为 approved。Agent-native recall 不创建该 plan，也不经过 Runner。`providerRetention` 如实展示，不得伪装为本机可保证属性。
 
 `authorizationPlanDigest` 只存 tasks 表的调度元数据，不进入被哈希的 Runner stdin。dispatcher 只有在 taskId 与重新计算的 runnerInputDigest 同时匹配 approved plan 时才启动 Runner，从结构上避免 task digest 与 plan digest 的自引用。
 
@@ -335,7 +347,7 @@ authorization_log: planDigest, taskId, runnerInputDigest,
   candidates: [ { content, type, priority, confidence, scene,
                   statements: [ { statementId, text, evidenceIds[] } ] } ] }
                   ← Runner 不自报 provenance/limitations/claimSupport；
-                    任意 LLM statement 初始 claimSupport=unverified
+                    任意 LLM statement 初始 claimSupport=unverified；candidates 最多 8 条
 ```
 
 **`EvidenceAssessment@v1`**（Threadshare 内部派生）：`{ candidateId, statementId, citations: [ { evidenceId, pointerDigest } ], provenanceStrength: direct|observed|candidate|contextual|unknown, limitations[], claimSupport: unverified|typed-fact|human-confirmed, assessedBy: deterministic|human, revision }`。`provenanceStrength` 仅由 Delivery Trace relation/fact 派生；`typed-fact` 仅允许 versioned allowlist renderer 产生，LLM 不得写入。review 后的人工确认绑定 statement text digest、citations digest 与 assessment revision，任一漂移即失效。
@@ -355,7 +367,8 @@ authorization_log: planDigest, taskId, runnerInputDigest,
   recallSets: [ { draftRef, ordered: [ { rank, sourceKind, id } ] } ],
   pool: [ { sourceKind: approved|candidate, id, revision,
             contentDigest, state, content 摘要 } ],
-         ← 含 approved 条目 + 其他 chunk 未丢弃的 draft/quarantined 候选
+         ← 含 approved 条目 + 其他 chunk 未丢弃的 draft/quarantined 候选；
+           每条 draft 只排除自己，同批其他 draft 仍可进入其召回集
   contract: { resultSchema, prompts } }
 ```
 
@@ -366,6 +379,8 @@ authorization_log: planDigest, taskId, runnerInputDigest,
   adjudications: [ { draftRef, action: store|skip|update|merge,
                      targetIds[], mergedFields? } ] }
 ```
+
+裁决对整个 draft 批次做原子去重：`skip` 可以把同批另一条**非 skip** draft 的 `candidateId` 作为覆盖依据；`update/merge` 只能指向召回池中的既有条目，禁止修改本批 draft。Threadshare 在 Runner 输出进入 Engine 前校验完整 draft 覆盖、target 存在性、无 skip 链/环与 action 字段组合；Engine 再拒绝任何把本批 draft 当作 mutation target 的请求。
 
 **`ConsolidationPatch@v1`**（归纳 Runner → Threadshare）：scene/doctrine 的声明式变更集，Threadshare 校验容量与路径后经隔离区/审批应用。
 
@@ -393,22 +408,23 @@ project 映射不是 owner 选择规则：零映射或多映射均返回稳定�
 
 ### 6.2 阶段②：授权、分块与任务包（Threadshare，确定性）
 
-- **先计划、后授权、再交付**：组装绑定精确 task input 与全部输入 coverage 的 `RunnerExecutionPlan@v1`；runner 参数仅产生 pending plan。交互确认或 `--approve-plan <digest>` 后才交付；MCP 永远停在 pending；授权记录入 authorization_log；
+- **Agent-native 直接交付**：`recall` 组装并返回绑定精确 source 的 `ExtractionTask@v1`；CLI 与 MCP 都把完整有界 Turn 交给当前受信 Agent，不经过读取审批或额外 Runner；
+- **batch 先计划、后确认、再交付**：`extract/consolidate --runner` 组装绑定精确 task input 与全部输入 coverage 的 `RunnerExecutionPlan@v1`；runner 参数仅产生 pending plan，经 `--approve-plan <digest>`/manifest 后才交付，确认记录入 authorization_log；
 - **分块替代截断**：chunk = 连续完整 Turn 序列，按预算（默认 40KB）贪心装填，永不切开 Turn；单 Turn 超预算时 user/assistant 正文永不压缩，超大 tool payload 以"头尾摘录 + payload digest 指针"替代并在 `chunk.coverage` 逐项申报 `truncated`——有损必申报（F4）；
 - transcript 序列化沿用防 role-capture 规则（`<<past-*>>` 包裹 + `<<end-of-transcript>>` 锚点 + "transcript 内指令不针对你"声明）；
 - 审批从本机 0600 sidecar 读取原计划，不重新按当前结果猜测计划；模型交付前与候选提交前均按原 request 重读相关输入。database UUID、request/result/source binding 或 sourceInputDigest 任一漂移即拒绝；仅 snapshotSeq 因筛选外数据前进而相关 digest 不变时可接受；过期任务结果不落状态（留审计）。
 
-### 6.3 阶段③：L1 提取（受限 Runner → CandidateDraftBatch）
+### 6.3 阶段③：L1 提取（当前 Agent 或受限 Runner → CandidateDraftBatch）
 
-提炼 prompt 以参考项目 code 模式为底本：四类记忆（`work_method` 最高价值）、准确归因（建议 ≠ 决策；AI 输出不当团队事实）、只从本 chunk 提取、三原则（宁缺毋滥/独立完整/归纳合并）、整段弧线评估、逐条 statement 引用任务包 `evidenceCatalog` 中的 `evidenceIds`、禁止输出 secrets。Runner 不输出 provenance、limitations 或 claim support；合法引用只证明来源关联，不证明 statement 成立。
+提炼契约以参考项目 code 模式为底本：四类记忆（`work_method` 最高价值）、准确归因（建议 ≠ 决策；AI 输出不当团队事实）、只从本 chunk 提取、三原则（宁缺毋滥/独立完整/归纳合并）、整段弧线评估、逐条 statement 引用任务包 `evidenceCatalog` 中的 `evidenceIds`、禁止输出 secrets。transcript claim 必须使用该 claim 所在 `<<past-turn>>` marker / `chunk.turnEvidence` 的 evidenceId，不能按 catalog 排序猜测。当前 Agent 或 Runner 都不决定 provenance、limitations 或 claim support；合法引用只证明来源关联，不证明 statement 成立。
 
-输出 `CandidateDraftBatch@v1`（**不含裁决**），zod 校验，非法退回重试（受幂等与重试上限约束）。Threadshare 校验 evidenceId/pointer、派生 `EvidenceAssessment@v1`；LLM statement 一律以 `claimSupport: unverified` 落库。事务 1 原子提交 draft、assessment、candidate revision 与 candidate FTS。
+输出 `CandidateDraftBatch@v1`（**不含裁决，最多 8 条 candidate**），zod 校验，非法结果不会提交；当前 claim 原子释放回 pending，允许同一精确授权重试。Threadshare 校验 evidenceId/pointer、派生 `EvidenceAssessment@v1`；LLM statement 一律以 `claimSupport: unverified` 落库。事务 1 原子提交 draft、assessment、candidate revision 与 candidate FTS。
 
-### 6.4 阶段④：去重裁决（独立 AdjudicationTask）
+### 6.4 阶段④：去重裁决与 recall comparison
 
 1. Threadshare 确认 approved memory FTS 已同步至绑定 worktree 的当前记忆文件状态；candidate FTS 因与 candidate 行同事务而天然同步。对每条 draft，分别从 approved/candidate FTS 取 `3 × 5` BM25 候选，再以 `recall-rrf@1`（RRF `k=60`，稳定 tie-breaker=`sourceKind,id`）融合 top-5；candidate 侧排除本批自身，包含同 owner 下其他 chunk 的未丢弃 draft/quarantined；
-2. 记录两侧 projection provenance、canonical recallQueryDigest，以及每个 draft 的 ordered `{draftRef,rank,sourceKind,id,revision,contentDigest,state}` 生成的 resultSetDigest；任务显式携带 recallSets 与去重后的 union pool。组装输入绑定的 RunnerExecutionPlan，批准后才把 draft 与候选池摘要交给 Runner；
-3. Runner 单次批量裁决 `store / skip / update / merge`（target_ids，多对多、跨 type，merge 时时间戳并集、priority 酌情调整）；
+2. 记录两侧 projection provenance、canonical recallQueryDigest，以及每个 draft 的 ordered `{draftRef,rank,sourceKind,id,revision,contentDigest,state}` 生成的 resultSetDigest；任务显式携带 recallSets 与去重后的 union pool；
+3. batch Runner 单次批量裁决 `store / skip / update / merge`。Agent-native 的第一次 `stage` 返回同一份 `AdjudicationTask@v1`、完整 recall comparison 与 union pool；当前 Agent 与用户比较后，第二次 `stage` 提交精确 `AdjudicationResult@v1`。两条路径调用同一宿主物化与校验逻辑，不自动 `store`，也不把明显重复项先写入隔离区；
 4. 提交时 Threadshare 在最新已同步投影上**重跑同一召回并比对 resultSetDigest**。generation 变化但结果集相同可接受；新条目进入、排序变化或池内 revision/content/state 漂移则 stale 重出；
 5. 对 candidate target 逐项执行 revision CAS；裁决、候选 revision/FTS 更新、候选置 quarantined、chunk 置 extracted 在事务 2 原子提交；
 6. **裁决解析失败**：重试一次；再失败置 `adjudication: failed` 待人工复核——绝不凭不可解析输出执行 update/merge，也不静默丢弃。
@@ -423,14 +439,14 @@ git entry:                                           approved ──被替代─
 
 1. `threadshare memory review`：按 statement 展示正文、证据摘录、公开 evidence、`provenance_strength`、limitations 与 `claim_support`，不把关联强度表述为内容证明；
 2. 确定性 typed-fact statement 可保持 `typed-fact`；其他生成性 statement 必须逐条确认，确认记录绑定 statement/citations digest 并转为 `human-confirmed`。只有全部 statements 均非 unverified 才生成 `PromotionPlan@v1`；“批准全部”只对全 typed-fact entry 开放；
-3. plan 绑定 RepositoryBinding、assessmentDigest、净化内容、目标文件 blob hash、策略版本与 diff；**用户显式批准 plan 是进入工作区的唯一通道**。`adjudication: failed` 候选单独处理；
+3. plan 绑定 RepositoryBinding、assessmentDigest、净化内容、目标文件 blob hash、策略版本与 diff；`prepare → promote` 是 Threadshare 进入工作区的唯一状态机通道。Agent-native 约定由 Agent 在用户确认后调用，但 Threadshare 不独立认证该用户确认；`adjudication: failed` 候选单独处理；
 4. 净化管线（写入前，确定性）：剥离全部本机引用（仅存 evidence_refs 表）→ secret lint（正则 + entropy，硬门禁）→ frontmatter / 容量 / slug 校验；
 5. **执行时重解析 owner，并逐项校验 assessment、blob hash 与 policyVersion**；目标必须在绑定 worktree 的固定 memoryRoot 内，路径任一层是 symlink、inode 漂移或越界均 fail-closed。任何漂移都使 plan 作废并要求重新生成 diff、重新批准；
 6. promote **只修改绑定工作区**，不自动 stage/commit/push；git 提交与 PR 由用户走常规流程（团队复核在此发生）；promotion journal 保证崩溃后可恢复/幂等重放。
 
 ### 6.6 阶段⑥：L2/L3 归纳（周期性，声明式）
 
-触发：每累计 N 条（默认 20）新 approved 条目，或显式 `memory consolidate`。归纳 Runner（同样经输入绑定授权与 conformance 门）读 scene 索引 + 新增条目，提交 `ConsolidationPatch@v1`；Threadshare 应用时强制容量约束（默认 UPDATE 不 CREATE、每批最多新建 1 个、≥12 建议合并 → 14 禁止新建 → 15 必须先 MERGE 并删除旧文件、heat 规则、矛盾写"演化记录"）；doctrine 只喂变化场景，五道过滤 + 四策略。归纳生成内容同样是 unverified，须经逐条人审、隔离区与 owner-bound PromotionPlan 才能写工作区。
+触发：每累计 N 条（默认 20）新 approved 条目，或显式 `memory synthesize/consolidate`。Agent-native `synthesize` 直接把 approved L1、scene 索引与 doctrine 交给当前 Agent；可选 batch `consolidate --runner` 仍走输入绑定授权与 conformance 门。两者都提交 `ConsolidationPatch@v1`；Threadshare 应用时强制容量约束（默认 UPDATE 不 CREATE、每批最多新建 1 个、≥12 建议合并 → 14 禁止新建 → 15 必须先 MERGE 并删除旧文件、宿主 heat 规则、矛盾写"演化记录"）。生成内容须经逐 operation review、prepare 与 owner-bound PromotionPlan 才能写工作区。
 
 ### 6.7 Skill 提取（独立契约）
 
@@ -464,16 +480,16 @@ git entry:                                           approved ──被替代─
 工作流：
 
 6. Runner 基础设施：claude-cli + codex-cli profile、**deny-all conformance test**（对抗性探针 + 指纹记录 + 失效重测）、ephemeral/一次性 home 强制、超时/输出上限、无合格 Runner 即拒绝交付的硬失败路径
-7. 执行授权：精确输入绑定的 `RunnerExecutionPlan@v1`、交互确认 / `--approve-plan <digest>`、MCP pending 语义、authorization log
+7. batch 执行确认：精确输入绑定的 `RunnerExecutionPlan@v1`、交互确认 / `--approve-plan <digest>`、MCP pending preview、authorization log
 8. `memory init / review / promote / lint / assemble` CLI；唯一 owner 解析、逐条 claim review、PromotionPlan assessment/blob CAS、no-follow 原子写入、净化管线
-9. 两阶段提炼任务：显式有界筛选请求、worktree/hard-sealed 强制 scope、完整 Turn + Delivery Trace 回读、三层 selection binding、chunk 切分与 coverage 申报、ExtractionTask / AdjudicationTask 组装、双投影召回、candidate revision CAS、chunk 级游标（`memory extract` CLI；MCP 可生成 pending preview，不能授权或执行）
+9. 两阶段提炼任务：显式有界筛选请求、worktree/hard-sealed 强制 scope、完整 Turn + Delivery Trace 回读、三层 selection binding、chunk 切分与 coverage 申报、ExtractionTask / AdjudicationTask 组装、双投影召回、candidate revision CAS、chunk 级游标（batch `memory extract` CLI；Runner MCP 只生成 pending preview，Agent-native `recall/stage` 走同一状态机）
 10. 提炼 prompt 资产（L1 code 模式 + 防 role-capture + 批量裁决），随包分发
-11. `threadshare_memory_search` / `threadshare_memory_status` / `threadshare_memory_extract_preview` MCP 工具；preview 只落本机 0600 pending artifact，响应不含 transcript
+11. MCP 工具分两类：Runner batch 的 `threadshare_memory_extract_preview` / `threadshare_memory_consolidate_preview` 只落本机 0600 pending artifact、响应不含 transcript；Agent-native 的 `threadshare_memory_recall` / `synthesize` / `stage` / `review` / `prepare` / `promote` 与 CLI 共享 contract、状态机和 CAS，另保留 `search` / `status` 只读操作
 
 验收（全链路之外的专项）：
 
 - **Conformance**：对抗性探针验证 Claude/Codex profile 拒绝 shell/文件/MCP/任务外网络且无副作用；CLI 二进制或 profile 变化触发重测；`npm run test:memory-codex-live` 必须用真实 Codex 完成 conformance、L1 提取、裁决、L2/L3 归纳、人工确认后的晋升与 Codex adapter 装配，并证明不新增可索引 Session；fake runner 只用于超时、漂移、网络违规等确定性故障注入，不能作为 Runner 可用性验收；
-- **授权**：MCP 与仅指定 runner 均只产生 pending plan；未批准 digest 不交付任何输入；用相同字节数替换 transcript 或候选池内容时 runnerInputDigest/inputCoverageDigest 必须变化并要求重新确认；manifest 批准后修改其中一个 task 的输入，仅该 plan 失效、清单内其余 plan 照常执行；runner 运行不产生新的可索引会话；
+- **授权**：Runner 批处理的 MCP preview 与仅指定 runner 均只产生 pending plan；未批准 digest 不交付任何 Runner 输入。Agent-native MCP/CLI 由当前 Agent 在用户确认后走 exact stage/prepare/promote 状态机；用相同字节数替换 transcript 或候选池内容时 runnerInputDigest/inputCoverageDigest 必须变化并要求重新确认；manifest 批准后修改其中一个 task 的输入，仅该 plan 失效、清单内其余 plan 照常执行；runner 运行不产生新的可索引会话；
 - **事务**：并发 claim 竞争唯一持有；candidate 行、revision、FTS、assessment 与游标推进同事务的逐崩溃点注入；同 taskId 重复提交幂等；promotion journal 半途崩溃恢复；apply 全程跨进程互斥，并在 mutation 前重验 candidate/assessment/policy 快照；
 - **CAS/召回**：无关会话同步推进 snapshotSeq 时任务不失效；相关 turn revision 漂移拒绝；approved/candidate 任一侧新条目进入 top-5 或池项 revision/content/state 漂移均使任务重出；projection generation 变化但 resultSetDigest 相同则接受；并发 merge 同一 candidate 仅一个 revision CAS 成功；跨 chunk 重复被捕获；
 - **证据**：任务外/虚构 evidenceId 校验失败；把合法 direct commit evidenceId 挂到无关生成 statement 时，只能得到 provenance，claimSupport 仍为 unverified；未逐条确认不得生成 PromotionPlan；typed-fact renderer mutation test 证明 LLM 不能伪造 typed-fact；
@@ -482,7 +498,11 @@ git entry:                                           approved ──被替代─
 
 ### Phase 2 — 归纳与装配
 
-12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展。原第 15 项 Codex runner 重评估已前移为 Phase 1 完成门，不计入 Phase 2。**Phase 2 已于 2026-08-21 完成**：真实 `codex-cli 0.149.0` 跑通提取 → 裁决 → 非空归纳 Patch → 逐 operation 人审 → 可恢复晋升 → `AGENTS.md` 装配；MCP 保持 pending-only。归纳输入改由 Rust descriptor-relative no-follow 安全读取，完整 L1/Scene/Doctrine 源树、replay epoch、assessment/policy 快照在 submit/review/plan/apply 阶段 fail closed；promotion 以跨进程锁与状态 CAS 保证单 owner，并用同目录 no-replace conditional displacement 避免覆盖或删除并发外部编辑；发布包与 Skill 已同步。
+12. L2/L3 consolidate 契约与 prompt；13. 选材评分固化为 Recipe `extraction-candidates@1`；14. assemble adapter 扩展。原第 15 项 Codex runner 重评估已前移为 Phase 1 完成门，不计入 Phase 2。**Phase 2 已于 2026-08-21 完成**：真实 `codex-cli 0.149.0` 跑通提取 → 裁决 → 非空归纳 Patch → 逐 operation 人审 → 可恢复晋升 → `AGENTS.md` 装配；随后 Agent-native 工作流补齐 CLI/MCP 执行面，并以真实 Codex/Claude CLI 完成 recall 到 promote。归纳输入改由 Rust descriptor-relative no-follow 读取，完整 L1/Scene/Doctrine 源树、replay epoch、assessment/policy 快照在 submit/review/plan/apply 阶段 fail closed；promotion 以跨进程锁与状态 CAS 保证单 owner，并用同目录 no-replace conditional displacement 避免覆盖或删除并发外部编辑；发布包与 Skill 已同步。
+
+### Interactive Memory Session — Agent 在环工作流
+
+在 Phase 3 前实现共享 operation registry 与 Agent-native `recall → stage(draft) → stage(adjudication) → review → prepare → promote`，以及 `synthesize → stage(patch) → review → prepare → promote`。recall 直接返回完整有界 Turn；synthesize 直接返回 approved L1 与当前 Scene/Doctrine。Agent 不需要 `memory-filter.json` 或 `--runner`，在当前对话里完成分析、去重裁决、用户补充和确认。CLI/MCP 从第一版起共享 contract、状态机、稳定错误与 CAS；该 Agent-native 路径已由真实 Codex/Claude CLI 与对等测试收口。现有 batch extract/consolidate 保留为可选 `legacy-debt`。验收见 `docs/team-memory-interactive-design.md`。
 
 ### Phase 3 — Skill 提取与跨仓共享
 
@@ -490,7 +510,7 @@ git entry:                                           approved ──被替代─
 
 ### 工程硬约束
 
-新增 `src/*.mjs` 同步 files 白名单与 `verify-release.mjs` 门限；测试 `node --test` 一一对应；Rust 投影变更需 migration / shadow rebuild / crash recovery / 等价证据（ADR-0001）；Windows 无 insights 引擎，memory 功能限定 macOS / Linux；不引入第二个 scan-on-query 数据面。
+新增 `src/*.mjs` 同步 files 白名单与 `verify-release.mjs` 门限；测试 `node --test` 一一对应；Rust 投影变更需 migration / shadow rebuild / crash recovery / 等价证据（ADR-0001）；Windows 无 insights 引擎，memory 功能限定 macOS / Linux；不引入第二个 scan-on-query 数据面。每个稳定 Team Memory operation 必须在同一里程碑同时注册 CLI/MCP Adapter，release parity test 对单边能力、unavailable-only stub、缺真实成功 fixture 或 approval/CAS 语义漂移硬失败。
 
 ## 9. 与参考项目的差异总表
 
@@ -514,7 +534,7 @@ git entry:                                           approved ──被替代─
 | # | 风险 / 开放问题 | 倾向与缓解 |
 |---|---|---|
 | R1 | 提炼质量依赖 Runner 所用模型 | 契约层强校验；prompt 版本化进 CAS；profile 可配模型（换模型需重新授权） |
-| R2 | 隐私进入 git 历史 | transcript 只进合格 Runner（出网经显式授权）→ 候选只在 0600 事务库 → 净化管线 + secret lint → PromotionPlan 批准是唯一通道 → PR 复核兜底 |
+| R2 | transcript 进入当前 Agent；隐私进入 git 历史 | Agent-native 明确接受当前受信 Agent 直接读取有界 transcript；git 侧仍以 0600 原始引用、净化 + secret lint、exact review/prepare + PromotionPlan CAS 和 PR 复核兜底 |
 | R3 | 本机并发 | claim/lease 序列化；团队 git 并发由 PromotionPlan blob CAS 处理 |
 | R4 | 个人私有记忆归属 | Phase 1 仅 repo scope；个人 scope 列为开放问题 |
 | R5 | 记忆库膨胀 | 容量硬约束逼合并压缩；deprecated 归档；无时间衰减 |
@@ -526,6 +546,9 @@ git entry:                                           approved ──被替代─
 | R11 | 模型服务端可能留存 transcript（providerRetention 无法由本机保证） | RunnerExecutionPlan 如实申报 providerRetention（默认 unknown）；团队可在 profile 中固定为已签约 no-retention 的端点；这是授权决策的输入而非技术保证 |
 | R12 | 生成性记忆逐条确认降低审核吞吐 | 接受（可信度优先）；“批准全部”仅开放给确定性 typed-fact；review UI 把 statement 与证据并排，减少确认成本 |
 | R13 | approved/candidate 双投影可能漂移或排序不一致 | candidate 行与 FTS 同事务；approved 投影先 sync；召回算法/analyzer 版本化；提交重跑并比较包含 revision/content/state 的 resultSetDigest |
+| R14 | 受信 Agent 未经用户同意调用 prepare/promote | Owner 明确接受该信任模型：Threadshare 不认证用户与 Agent；exact revision/digest/target CAS 防 stale/误写，宿主权限、Git review/branch protection 与团队流程承担恶意或越权 Agent 风险 |
+| R15 | Agent/Runner 把秘密写进 candidate | Agent-native 由当前 Agent 直接提炼，batch 输出留 private state；两条路径在 PromotionPlan 前统一执行 secret/session/path lint、schema/容量限制和逐 statement review |
+| R16 | batch provider 已收到 transcript 后宿主崩溃，自动重试造成重复发送 | write-ahead delivery journal 进入 indeterminate；无 provider 可验证 idempotency key 时不得自动重发，必须生成新的精确 RunnerExecutionPlan 并再次确认 |
 
 ## 附录 A：参考项目调研结论（要点）
 
@@ -593,6 +616,6 @@ git entry:                                           approved ──被替代─
 
 | 发现 | 落点 |
 |---|---|
-| 1. [Important] 逐任务唯一 digest × 两阶段任务导致批量提炼授权确认次数爆炸（50 chunk ≈ 100 次确认） | D1 / 摘要 #4 / §5.6 `AuthorizationManifest@v1`：一次确认一组逐个列明的 plan digest，逐 plan 生效与失效，不覆盖未来任务；authorization_log 增 via: manifest；验收补 manifest 局部失效用例 |
+| 1. [Important] 逐任务唯一 digest × 两阶段任务导致批量提炼授权确认次数爆炸 | D1 / 摘要 #4 / §5.6 `AuthorizationManifest@v1`：一次最多批准 8 个逐项列明的 extraction plan；其产出的 draft 使用一个共享 adjudication plan 并另行批准，不覆盖未来任务；authorization_log 增 via: manifest；验收补 manifest 局部失效用例 |
 | 2. [Important] approved memory ingest/投影未声明按 (repositoryKey, worktreeKey) 分键，同仓多 worktree 互相污染 | D3 增补分键声明，与 §6.4"同步至绑定 worktree"及 owner 模型对齐 |
 | 3. [Minor] `rankerVersion` 与 `recallAlgorithmVersion` 命名不一致 | §5.5 candidate_projection 统一为 `recallAlgorithmVersion` |

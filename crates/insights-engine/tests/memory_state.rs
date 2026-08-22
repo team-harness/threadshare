@@ -1657,7 +1657,23 @@ fn recall_orders_by_rrf_with_deterministic_tiebreaks() {
         10_100,
     );
 
-    let recall = recall_request("d1", "cand-draft", "alpha migration playbook");
+    let recall: RecallRequest = request(json!({
+        "repositoryKey": REPO,
+        "worktreeKey": TREE,
+        "drafts": [
+            {
+                "draftRef": "d1",
+                "candidateId": "cand-draft",
+                "queryText": "alpha migration playbook",
+            },
+            {
+                "draftRef": "d2",
+                "candidateId": "cand-pool",
+                "queryText": "alpha migration playbook",
+            },
+        ],
+    }));
+    recall.validate().unwrap();
     let first = storage.recall(&recall).unwrap();
     let ordered = &first.recall_sets[0].ordered;
     // Identical texts give equal per-list BM25; list rank ties are broken by
@@ -1671,12 +1687,54 @@ fn recall_orders_by_rrf_with_deterministic_tiebreaks() {
     assert_eq!(ordered[2].id, "entry-b");
     // The batch's own draft never recalls itself.
     assert!(ordered.iter().all(|hit| hit.id != "cand-draft"));
+    let second_draft_ordered = &first.recall_sets[1].ordered;
+    assert!(
+        second_draft_ordered
+            .iter()
+            .any(|hit| hit.source_kind == "candidate" && hit.id == "cand-draft")
+    );
+    assert!(second_draft_ordered.iter().all(|hit| hit.id != "cand-pool"));
+    assert!(
+        first
+            .pool
+            .iter()
+            .any(|item| item.source_kind == "candidate" && item.id == "cand-draft")
+    );
 
     let second = storage.recall(&recall).unwrap();
     assert_eq!(second.result_set_digest, first.result_set_digest);
     assert_eq!(second.recall_query_digest, first.recall_query_digest);
     assert_eq!(first.approved_projection.generation, 1);
     assert_eq!(first.candidate_projection.generation, 1);
+}
+
+#[test]
+fn adjudication_protocol_rejects_mutating_a_draft_from_the_current_batch() {
+    let value: SubmitAdjudicationRequest = request(json!({
+        "taskId": "task-adj",
+        "claimToken": "claim-token",
+        "responseDigest": hex64('d'),
+        "recall": {
+            "repositoryKey": REPO,
+            "worktreeKey": TREE,
+            "drafts": [
+                { "draftRef": "d1", "candidateId": "cand-1", "queryText": "alpha" },
+                { "draftRef": "d2", "candidateId": "cand-2", "queryText": "alpha" },
+            ],
+        },
+        "expectedResultSetDigest": hex64('e'),
+        "adjudications": [
+            {
+                "draftRef": "d1",
+                "action": "merge",
+                "targets": [{ "id": "cand-2", "revision": 1 }],
+                "mergedPayload": { "content": "merged" },
+                "mergedSearchableText": "merged",
+            },
+            { "draftRef": "d2", "action": "store" },
+        ],
+    }));
+    assert!(value.validate().unwrap_err().contains("current batch"));
 }
 
 fn setup_adjudication_fixture(storage: &mut MemoryStorage) -> (String, String) {

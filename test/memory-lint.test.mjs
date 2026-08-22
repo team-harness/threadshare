@@ -304,6 +304,25 @@ test("lintEntryForPromotion exempts evidence hashes but not hex secrets in the b
   assert.ok(codes(leaked.findings).includes("MEMORY_LINT_HIGH_ENTROPY"));
 });
 
+test("lintEntryForPromotion exempts a validated structured id without exempting the body", () => {
+  const id = "team-memory-submission-chunk-memory-state-sqlite3-git-cas-pr";
+  const text = validEntryText("Keep the transaction and promotion journal separate.\n")
+    .replace("id: auth-module-do-not-refactor", `id: ${id}`);
+  const idStart = text.indexOf(id);
+  assert.ok(codes(lintMemoryText(text).filter((finding) => finding.index === idStart))
+    .includes("MEMORY_LINT_HIGH_ENTROPY"));
+
+  const allowed = lintEntryForPromotion(text);
+  assert.equal(allowed.ok, true);
+
+  const secret = "A7fK9mQ2xVbZ8cRt4YwPl6NhE3sDgU1oZq5J";
+  const leaked = text.replace(
+    "Keep the transaction and promotion journal separate.",
+    `Keep ${secret} in the body.`,
+  );
+  assert.equal(lintEntryForPromotion(leaked).ok, false);
+});
+
 test("lintEntryForPromotion blocks entries with invalid frontmatter", () => {
   const result = lintEntryForPromotion("---\nid: broken\n---\nbody\n");
   assert.equal(result.ok, false);

@@ -5,20 +5,34 @@ import { TextDecoder } from "node:util";
 
 import { sanitizeDiagnosticProblem } from "./cli-contract.mjs";
 import { createInsightsAgentSpec } from "./insights-agent-spec.mjs";
+import { MAX_PROTOCOL_PAYLOAD_BYTES } from "./insights-engine-protocol.mjs";
 import { executeInsightsQuery, insightsQueryDiagnostic } from "./insights-query.mjs";
+import {
+  MEMORY_MCP_TOOL_NAMES,
+  memoryOperationById,
+  memoryOperationForMcpTool,
+} from "./memory-operation-registry.mjs";
 
 const PROTOCOL_VERSION = "2025-11-25";
-const MAX_MESSAGE_BYTES = 128 * 1024;
+// Memory stage/prepare requests carry the complete source binding. Keep the
+// JSON-RPC line cap aligned with the same protocol-sized limit used by the CLI
+// memory reader; ordinary Insights queries still enforce their own 64 KiB
+// semantic request limit after transport parsing.
+const MAX_MESSAGE_BYTES = MAX_PROTOCOL_PAYLOAD_BYTES;
 const TOOL_NAMES = Object.freeze([
   "threadshare_insights_spec",
   "threadshare_insights_query",
   "threadshare_insights_recipe",
   "threadshare_insights_evidence",
-  "threadshare_memory_search",
-  "threadshare_memory_status",
-  "threadshare_memory_extract_preview",
-  "threadshare_memory_consolidate_preview",
+  ...MEMORY_MCP_TOOL_NAMES,
 ]);
+const MEMORY_TOOL_NAMES = Object.freeze(Object.fromEntries(
+  [
+    "search", "status", "extract", "consolidate", "review", "recall", "synthesize",
+    "stage", "prepare", "promote",
+  ]
+    .map((id) => [id, memoryOperationById(id).mcp.tool]),
+));
 
 function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
@@ -34,7 +48,10 @@ async function readSchema(name) {
 }
 
 async function toolCatalog() {
-  const [spec, query, recipe, evidence, gitDiffEvidence, memorySearch, memoryExtraction] = await Promise.all([
+  const [
+    spec, query, recipe, evidence, gitDiffEvidence, memorySearch, memoryExtraction,
+    memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch, memoryPrepare,
+  ] = await Promise.all([
     readSchema("threadshare-insights-agent-spec.v1.schema.json"),
     readSchema("threadshare-insights-query-request.v2.schema.json"),
     readSchema("threadshare-insights-recipe-request.v1.schema.json"),
@@ -42,6 +59,10 @@ async function toolCatalog() {
     readSchema("threadshare-insights-git-diff-evidence-request.v1.schema.json"),
     readSchema("threadshare-memory-search-request.v1.schema.json"),
     readSchema("threadshare-memory-extraction-request.v1.schema.json"),
+    readSchema("threadshare-memory-candidate-draft-batch.v1.schema.json"),
+    readSchema("threadshare-memory-adjudication-result.v1.schema.json"),
+    readSchema("threadshare-memory-consolidation-patch.v1.schema.json"),
+    readSchema("threadshare-memory-prepare-request.v1.schema.json"),
   ]);
   const readOnlyAnnotations = {
     readOnlyHint: true,
@@ -103,14 +124,14 @@ async function toolCatalog() {
       annotations: readOnlyAnnotations,
     },
     {
-      name: TOOL_NAMES[4],
+      name: MEMORY_TOOL_NAMES.search,
       title: "Search approved local Team Memory",
       description: "Search the owner repository's approved Team Memory; returns items with generation and coverage.",
       inputSchema: memorySearch,
       annotations: readOnlyAnnotations,
     },
     {
-      name: TOOL_NAMES[5],
+      name: MEMORY_TOOL_NAMES.status,
       title: "Summarize local Team Memory state",
       description: "Return owner Team Memory counters; no transcript is ever returned.",
       inputSchema: {
@@ -121,7 +142,7 @@ async function toolCatalog() {
       annotations: readOnlyAnnotations,
     },
     {
-      name: TOOL_NAMES[6],
+      name: MEMORY_TOOL_NAMES.extract,
       title: "Preview a bounded local Team Memory extraction",
       description: "Create private pending runner plans from filtered Insights history. Never authorizes delivery, starts a runner, or returns transcript bytes.",
       inputSchema: {
@@ -133,7 +154,7 @@ async function toolCatalog() {
           runner: { enum: ["claude", "codex"] },
           model: { type: "string", minLength: 1, maxLength: 200 },
           endpoint: { type: "string", format: "uri", pattern: "^https://" },
-          limit: { type: "integer", minimum: 1, maximum: 50, default: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 8, default: 1 },
           request: memoryExtraction,
         },
         allOf: [{
@@ -149,7 +170,7 @@ async function toolCatalog() {
       },
     },
     {
-      name: TOOL_NAMES[7],
+      name: MEMORY_TOOL_NAMES.consolidate,
       title: "Preview local Team Memory consolidation",
       description: "Create one private pending L2/L3 consolidation plan. Never authorizes delivery, starts a runner, or returns approved-memory, scene, or doctrine text.",
       inputSchema: {
@@ -177,6 +198,112 @@ async function toolCatalog() {
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.review,
+      title: "Review staged Team Memory candidates",
+      description: "List exact candidate revisions, statements, evidence summaries, and confirmation digests without changing state.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { enum: ["entry", "consolidation"], default: "entry" },
+        },
+      },
+      annotations: readOnlyAnnotations,
+    },
+    {
+      name: MEMORY_TOOL_NAMES.recall,
+      title: "Recall bounded repository conversations for the current Agent",
+      description: "Return complete bounded Turn chunks, evidence ids, and the extraction contract. The current Agent analyzes the source directly; no runner is launched.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["request"],
+        properties: {
+          request: memoryExtraction,
+          limit: { type: "integer", minimum: 1, maximum: 8, default: 1 },
+        },
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.synthesize,
+      title: "Synthesize approved Team Memory into scenes and doctrine",
+      description: "Return approved L1 entries plus current scenes/doctrine as a bounded ConsolidationTask for the current Agent; no runner is launched.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ifDue: { type: "boolean", default: false },
+          full: { type: "boolean", default: false },
+        },
+        not: {
+          properties: { ifDue: { const: true }, full: { const: true } },
+          required: ["ifDue", "full"],
+        },
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.stage,
+      title: "Stage or adjudicate Agent-authored Team Memory candidates",
+      description: "A CandidateDraftBatch returns an AdjudicationTask with the current memory pool; an exact AdjudicationResult then applies store/skip/update/merge and quarantines only retained candidates.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        oneOf: [memoryCandidateBatch, memoryAdjudicationResult, memoryConsolidationPatch],
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.prepare,
+      title: "Prepare confirmed Team Memory candidates",
+      description: "Confirm exact candidate statement digests and return a CAS-bound worktree promotion plan without applying it.",
+      inputSchema: memoryPrepare,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: MEMORY_TOOL_NAMES.promote,
+      title: "Apply a prepared Team Memory promotion",
+      description: "Apply one exact promotion plan to .threadshare/memory using target-blob CAS and the recoverable promotion journal.",
+      inputSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["plan"],
+        properties: {
+          plan: { type: "string", minLength: 1, maxLength: 128 },
+        },
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
         idempotentHint: true,
         openWorldHint: false,
       },
@@ -241,7 +368,7 @@ function toolInvocation(name, args) {
   if (name === TOOL_NAMES[3]) {
     return { invocation: { action: "evidence-v2", requestSource: "-" }, request: args };
   }
-  if (name === TOOL_NAMES[4]) {
+  if (name === MEMORY_TOOL_NAMES.search) {
     if (!exactKeys(args, ["query", "limit"]) || typeof args.query !== "string" ||
         args.query.length === 0 ||
         (Object.hasOwn(args, "limit") &&
@@ -252,7 +379,7 @@ function toolInvocation(name, args) {
     }
     return { memory: { action: "search", args } };
   }
-  if (name === TOOL_NAMES[5]) {
+  if (name === MEMORY_TOOL_NAMES.status) {
     if (!exactKeys(args, [])) {
       throw Object.assign(new Error("memory status arguments must be empty"), {
         code: "TS_INSIGHTS_REQUEST_INVALID",
@@ -260,11 +387,56 @@ function toolInvocation(name, args) {
     }
     return { memory: { action: "status", args } };
   }
-  if (name === TOOL_NAMES[6]) {
+  if (name === MEMORY_TOOL_NAMES.recall) {
+    if (!exactKeys(args, ["request", "limit"]) || !plainObject(args.request) ||
+        (Object.hasOwn(args, "limit") &&
+         (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 8))) {
+      throw Object.assign(new Error(
+        "memory recall requires a canonical bounded request and optional 1..8 chunk limit",
+      ), { code: "TS_INSIGHTS_REQUEST_INVALID" });
+    }
+    return { memory: { action: "recall", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.review) {
+    if (!exactKeys(args, ["kind"]) ||
+        (Object.hasOwn(args, "kind") && args.kind !== "entry" && args.kind !== "consolidation")) {
+      throw Object.assign(new Error("memory review kind must be entry or consolidation"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "review", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.stage) {
+    return { memory: { action: "stage", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.synthesize) {
+    if (!exactKeys(args, ["ifDue", "full"]) ||
+        (Object.hasOwn(args, "ifDue") && typeof args.ifDue !== "boolean") ||
+        (Object.hasOwn(args, "full") && typeof args.full !== "boolean") ||
+        (args.ifDue === true && args.full === true)) {
+      throw Object.assign(new Error("memory synthesize accepts either ifDue or full"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "synthesize", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.prepare) {
+    return { memory: { action: "prepare", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.promote) {
+    if (!exactKeys(args, ["plan"]) || typeof args.plan !== "string" ||
+        args.plan.length === 0 || args.plan.length > 128) {
+      throw Object.assign(new Error("memory promote requires one plan id"), {
+        code: "TS_INSIGHTS_REQUEST_INVALID",
+      });
+    }
+    return { memory: { action: "promote", args } };
+  }
+  if (name === MEMORY_TOOL_NAMES.extract) {
     if (!exactKeys(args, ["runner", "model", "endpoint", "limit", "request"]) ||
         (args.runner !== "claude" && args.runner !== "codex") || !plainObject(args.request) ||
         (Object.hasOwn(args, "limit") &&
-         (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 50)) ||
+         (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 8)) ||
         (Object.hasOwn(args, "model") &&
          (typeof args.model !== "string" || args.model.length === 0 || args.model.length > 200)) ||
         (Object.hasOwn(args, "endpoint") && typeof args.endpoint !== "string") ||
@@ -276,7 +448,7 @@ function toolInvocation(name, args) {
     }
     return { memory: { action: "extract-preview", args } };
   }
-  if (name === TOOL_NAMES[7]) {
+  if (name === MEMORY_TOOL_NAMES.consolidate) {
     if (!exactKeys(args, ["runner", "model", "endpoint", "ifDue", "full"]) ||
         (args.runner !== "claude" && args.runner !== "codex") ||
         (Object.hasOwn(args, "model") &&
@@ -329,7 +501,7 @@ async function* readMessages(input) {
   for await (const chunk of input) {
     pending = Buffer.concat([pending, Buffer.from(chunk)]);
     if (pending.byteLength > MAX_MESSAGE_BYTES && pending.indexOf(0x0a) === -1) {
-      throw new Error("MCP message exceeds 128 KiB");
+      throw new Error(`MCP message exceeds ${MAX_MESSAGE_BYTES} bytes`);
     }
     for (;;) {
       const newline = pending.indexOf(0x0a);
@@ -337,9 +509,14 @@ async function* readMessages(input) {
       const line = pending.subarray(0, newline);
       pending = pending.subarray(newline + 1);
       if (line.byteLength === 0) continue;
-      if (line.byteLength > MAX_MESSAGE_BYTES) throw new Error("MCP message exceeds 128 KiB");
+      if (line.byteLength > MAX_MESSAGE_BYTES) {
+        throw new Error(`MCP message exceeds ${MAX_MESSAGE_BYTES} bytes`);
+      }
       yield decoder.decode(line);
     }
+  }
+  if (pending.byteLength > MAX_MESSAGE_BYTES) {
+    throw new Error(`MCP message exceeds ${MAX_MESSAGE_BYTES} bytes`);
   }
   if (pending.byteLength > 0) yield decoder.decode(pending);
 }
@@ -367,7 +544,7 @@ export function createInsightsMcpServer(options = {}) {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "threadshare-insights", version: "1.0.0" },
-          instructions: "Users ask natural-language questions. Call threadshare_insights_spec for bounded reads. Team Memory extraction over MCP can only create private pending plans; approval and runner execution remain CLI-only.",
+          instructions: "Users ask natural-language questions. Call threadshare_insights_spec for bounded reads. For Agent-native Team Memory use recall or synthesize and discuss the result with the user. L1 draft staging returns an AdjudicationTask; compare its pool, stage an exact store/skip/update/merge AdjudicationResult, then review, prepare, and promote. These operations have the same semantics as the CLI. Runner-based extract/consolidate remain optional batch workflows.",
         },
       };
     }
@@ -393,13 +570,7 @@ export function createInsightsMcpServer(options = {}) {
       } catch (error) {
         // Argument-shape rejections stay in-band as stable tool errors so one
         // bad request never tears down the JSON-RPC stream.
-        const memoryAction = message.params.name === TOOL_NAMES[4]
-          ? "search"
-          : message.params.name === TOOL_NAMES[5]
-            ? "status"
-            : message.params.name === TOOL_NAMES[6]
-              ? "extract-preview"
-              : message.params.name === TOOL_NAMES[7] ? "consolidate-preview" : null;
+        const memoryAction = memoryOperationForMcpTool(message.params.name)?.mcp.action ?? null;
         return {
           jsonrpc: "2.0", id: message.id,
           result: memoryAction === null

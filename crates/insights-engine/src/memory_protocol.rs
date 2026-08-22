@@ -106,6 +106,15 @@
 //!   "epoch": int } }, "claimToken": hex32 }`
 //! - errors: `TS_MEMORY_TASK_NOT_FOUND`, `TS_MEMORY_TASK_NOT_CLAIMABLE`.
 //!
+//! ## `abandon-task`
+//! Releases only the current claim token. `pending` makes the exact task
+//! retryable; `stale` permanently closes a superseded task. A stale or foreign
+//! claim cannot be changed.
+//! - request: `{ "taskId": string, "claimToken": hex32,
+//!   "disposition": "pending"|"stale" }`
+//! - result: `{ "taskId": string, "status": "pending"|"stale" }`
+//! - errors: `TS_MEMORY_TASK_NOT_FOUND`, `TS_MEMORY_LEASE_LOST`.
+//!
 //! ## `submit-extraction`
 //! Single transaction: claim-token CAS (`status='claimed' AND claimToken
 //! matches AND lease not expired`, else `TS_MEMORY_LEASE_LOST`) → submission
@@ -422,13 +431,14 @@ use serde_json::Value;
 use crate::memory_state::{MemoryError, MemoryStorage};
 
 /// Phase 1 + Phase 2 op names (`MEMORY_COMMAND.op`), lowercase kebab-case.
-pub const MEMORY_OPS: [&str; 21] = [
+pub const MEMORY_OPS: [&str; 22] = [
     "open",
     "bind-repository",
     "list-memory-files",
     "read-memory-file",
     "plan-tasks",
     "claim-task",
+    "abandon-task",
     "submit-extraction",
     "submit-consolidation",
     "consolidation-baseline",
@@ -713,6 +723,25 @@ pub struct ClaimTaskRequest {
     pub lease_ms: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AbandonTaskRequest {
+    pub task_id: String,
+    pub claim_token: String,
+    pub disposition: String,
+}
+
+impl AbandonTaskRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        valid_identifier(&self.task_id, "taskId")?;
+        valid_identifier(&self.claim_token, "claimToken")?;
+        require(
+            matches!(self.disposition.as_str(), "pending" | "stale"),
+            "disposition must be pending or stale",
+        )
+    }
+}
+
 impl ClaimTaskRequest {
     pub fn validate(&self) -> Result<(), String> {
         valid_identifier(&self.task_id, "taskId")?;
@@ -905,7 +934,6 @@ impl SubmitExtractionRequest {
         valid_identifier(&self.task_id, "taskId")?;
         valid_identifier(&self.claim_token, "claimToken")?;
         valid_hex64(&self.response_digest, "responseDigest")?;
-        require(!self.drafts.is_empty(), "drafts must not be empty")?;
         require(
             self.drafts.len() <= MAX_PAYLOAD_ITEMS
                 && self.evidence_refs.len() <= MAX_PAYLOAD_ITEMS
@@ -1102,6 +1130,10 @@ impl SubmitAdjudicationRequest {
             match adjudication.action.as_str() {
                 "store" | "skip" => {
                     require(
+                        adjudication.targets.is_empty(),
+                        "store/skip adjudications must not carry mutation targets",
+                    )?;
+                    require(
                         adjudication.merged_payload.is_none()
                             && adjudication.merged_searchable_text.is_none(),
                         "store/skip adjudications must not carry merged fields",
@@ -1128,6 +1160,16 @@ impl SubmitAdjudicationRequest {
             }
             for target in &adjudication.targets {
                 valid_identifier(&target.id, "adjudications[].targets[].id")?;
+                if matches!(adjudication.action.as_str(), "update" | "merge") {
+                    require(
+                        !self
+                            .recall
+                            .drafts
+                            .iter()
+                            .any(|draft| draft.candidate_id == target.id),
+                        "update/merge targets must not reference a draft in the current batch",
+                    )?;
+                }
                 require(
                     target.revision >= 1,
                     "adjudications[].targets[].revision must be at least 1",
@@ -1583,6 +1625,13 @@ pub struct ClaimTaskOutcome {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AbandonTaskOutcome {
+    pub task_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateStateWire {
     pub candidate_id: String,
     pub revision: i64,
@@ -1814,6 +1863,7 @@ pub fn validate_command_payload(op: &str, payload: &Value) -> Result<(), String>
         "read-memory-file" => parse(payload, ReadMemoryFileRequest::validate),
         "plan-tasks" => parse(payload, PlanTasksRequest::validate),
         "claim-task" => parse(payload, ClaimTaskRequest::validate),
+        "abandon-task" => parse(payload, AbandonTaskRequest::validate),
         "submit-extraction" => parse(payload, SubmitExtractionRequest::validate),
         "submit-consolidation" => parse(payload, SubmitConsolidationRequest::validate),
         "consolidation-baseline" => parse(payload, ConsolidationBaselineRequest::validate),
@@ -1917,6 +1967,11 @@ pub fn handle_memory_command(
             let request: ClaimTaskRequest = parse_request(payload)?;
             request.validate().map_err(MemoryError::invalid)?;
             to_wire(&storage.claim_task(&request, now_unix_ms)?)
+        }
+        "abandon-task" => {
+            let request: AbandonTaskRequest = parse_request(payload)?;
+            request.validate().map_err(MemoryError::invalid)?;
+            to_wire(&storage.abandon_task(&request)?)
         }
         "submit-extraction" => {
             let request: SubmitExtractionRequest = parse_request(payload)?;

@@ -202,6 +202,12 @@ const claimTaskRequest = z.object({
   leaseMs: positiveInteger.max(MEMORY_MAX_LEASE_MS),
 }).strict();
 
+const abandonTaskRequest = z.object({
+  taskId: identifier,
+  claimToken,
+  disposition: z.enum(["pending", "stale"]),
+}).strict();
+
 const submitExtractionRequest = z.object({
   taskId: identifier,
   claimToken: identifier,
@@ -210,7 +216,7 @@ const submitExtractionRequest = z.object({
     candidateId: identifier,
     payload: plainObject,
     searchableText: boundedText,
-  }).strict()).min(1).max(MEMORY_MAX_PAYLOAD_ITEMS),
+  }).strict()).max(MEMORY_MAX_PAYLOAD_ITEMS),
   evidenceRefs: z.array(z.object({
     candidateId: identifier,
     statementId: identifier,
@@ -399,6 +405,16 @@ const submitAdjudicationRequest = z.object({
       });
     }
     for (const [targetIndex, target] of adjudication.targets.entries()) {
+      if (
+        (adjudication.action === "update" || adjudication.action === "merge") &&
+        request.recall.drafts.some((draft) => draft.candidateId === target.id)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "update/merge targets must not reference a draft in the current batch",
+          path: ["adjudications", index, "targets", targetIndex, "id"],
+        });
+      }
       if (targetIds.has(target.id)) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -409,6 +425,13 @@ const submitAdjudicationRequest = z.object({
       targetIds.add(target.id);
     }
     if (adjudication.action === "store" || adjudication.action === "skip") {
+      if (adjudication.targets.length !== 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "store/skip adjudications must not carry mutation targets",
+          path: ["adjudications", index, "targets"],
+        });
+      }
       if (adjudication.mergedPayload !== null || adjudication.mergedSearchableText !== null) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -636,6 +659,11 @@ const claimTaskResult = z.object({
     }).strict(),
   }).strict(),
   claimToken,
+}).strict();
+
+const abandonTaskResult = z.object({
+  taskId: identifier,
+  status: z.enum(["pending", "stale"]),
 }).strict();
 
 const candidateState = z.object({
@@ -904,6 +932,7 @@ const OP_SPECS = Object.freeze({
   "read-memory-file": { request: readMemoryFileRequest, result: readMemoryFileResult },
   "plan-tasks": { request: planTasksRequest, result: planTasksResult },
   "claim-task": { request: claimTaskRequest, result: claimTaskResult },
+  "abandon-task": { request: abandonTaskRequest, result: abandonTaskResult },
   "submit-extraction": { request: submitExtractionRequest, result: submitExtractionResult },
   "submit-consolidation": { request: submitConsolidationRequest,
     result: submitConsolidationResult },
@@ -983,6 +1012,10 @@ export function memoryPlanTasks(engine, input, options = {}) {
 
 export function memoryClaimTask(engine, input, options = {}) {
   return runMemoryOp(engine, "claim-task", input, options);
+}
+
+export function memoryAbandonTask(engine, input, options = {}) {
+  return runMemoryOp(engine, "abandon-task", input, options);
 }
 
 export function memorySubmitExtraction(engine, input, options = {}) {

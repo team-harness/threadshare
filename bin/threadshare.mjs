@@ -1133,7 +1133,16 @@ async function main() {
       kind: options.kind,
       plan: options.plan,
       provider: options.provider,
+      providers: options.providers,
+      query: options.query,
       request: options.request,
+      "result-evidence": options["result-evidence"],
+      "session-keys": options["session-keys"],
+      since: options.since,
+      "skill-capability-keys": options["skill-capability-keys"],
+      "tool-capability-keys": options["tool-capability-keys"],
+      "capability-terminal-states": options["capability-terminal-states"],
+      until: options.until,
     };
     const controller = new AbortController();
     const onSignal = () => controller.abort();
@@ -1155,7 +1164,10 @@ async function main() {
       try {
         const result = await executeMemoryCommand(invocation, {
           signal: controller.signal,
-          ...(reviewer === null ? {} : { confirmStatement: reviewer.confirmStatement }),
+          ...(reviewer === null ? {} : {
+            confirmStatement: reviewer.confirmStatement,
+            discardCandidate: reviewer.discardCandidate,
+          }),
         });
         process.stdout.write(formatMemoryCommandResult(result, invocation));
         if (result.action === "lint" && result.blocked) process.exitCode = 1;

@@ -216,74 +216,75 @@ Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导�
 
 ### 构建团队共享记忆
 
-Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归属于仓库的共享记忆。它不会默认回看
-全部 Insights：每次生成新计划都必须提供明确的 UTC 时间窗（最长 366 天），还可按全文、provider、
-opaque session、Tool、Skill、结果证据和能力终态过滤。Threadshare 始终强制叠加当前 worktree 的
-project scope 与 `hard-sealed`，调用方不能覆盖这两个边界。
+Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归属于仓库的共享记忆。在已有 Codex 或
+Claude Code 对话中，用户直接说：“用 Threadshare 回看最近两周这个仓库关于发布失败的聊天，整理成团队
+经验。”当前 Agent 会自己调用 Agent-native 流程，不需要再选择 `--runner`。
 
-```json
-{
-  "format": "threadshare-memory-extraction-request@v1",
-  "window": {
-    "after": "2026-08-01T00:00:00.000Z",
-    "before": "2026-08-22T00:00:00.000Z"
-  },
-  "query": "发布验证",
-  "filters": {
-    "providers": ["claude", "codex"],
-    "resultEvidence": ["provider-completed"]
-  }
-}
-```
-
-`--runner` 选择本机受限 CLI 适配器：`claude` 会启动已安装的 Claude Code `claude` CLI，
-`codex` 会启动已安装的 `codex` CLI。下面第一组流程使用 Claude：
+下面是等价 CLI 流程。人只提供普通筛选参数；`stage` 和 `prepare` 所需 JSON 由 Agent 生成并通过 stdin
+传入，不是要求用户创建或维护的文件。
 
 ```bash
 threadshare memory init
-threadshare memory extract --runner claude --request memory-filter.json
-# 用户批准上一步展示的精确 extraction plan 后：
-threadshare memory extract --runner claude --approve-plan <extraction-digest>
-# adjudication 是另一次数据发送，必须单独批准：
-threadshare memory extract --runner claude --approve-plan <adjudication-digest>
-threadshare memory review
-threadshare memory promote --plan <plan-id>
-# 再次精确批准，把 approved L1 归纳成 L2/L3：
-threadshare memory consolidate --runner claude
-threadshare memory consolidate --runner claude --approve-plan <consolidation-digest>
-threadshare memory review --kind consolidation
-threadshare memory promote --plan <plan-id>
+threadshare memory recall \
+  --since 2026-08-01T00:00:00.000Z \
+  --until 2026-08-22T00:00:00.000Z \
+  --query "发布验证" \
+  --providers claude,codex \
+  --result-evidence provider-completed \
+  --format json
+# Agent 每次分析一个返回 source，和用户讨论最终文字，再通过 stdin 传 CandidateDraftBatch@v1。
+# Threadshare 返回带当前 memory 池的 AdjudicationTask@v1：
+threadshare memory stage --request - --format json
+# Agent 对照池与用户确认 store/skip/update/merge，再通过 stdin 传 AdjudicationResult@v1：
+threadshare memory stage --request - --format json
+threadshare memory review --format json
+# 用户确认精确 candidate 后，Agent 传入 PrepareRequest@v1：
+threadshare memory prepare --request - --format json
+# 用户确认最终文件计划后：
+threadshare memory promote --plan <plan-id> --format json
+
+# 在同一 Agent 对话中生成 L2/L3 Scene 与 Doctrine：
+threadshare memory synthesize --if-due --format json
+threadshare memory stage --request - --format json
+threadshare memory review --kind consolidation --format json
+threadshare memory prepare --request - --format json
+threadshare memory promote --plan <plan-id> --format json
 threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
 ```
 
-改用本机 Codex CLI 时，新 preview 必须绑定精确 model 与 HTTPS endpoint；后续批准复用私有保存的
-profile，不能覆盖这两个值：
+本机 Insights MCP server 暴露完全相同的稳定操作：`threadshare_memory_recall`、
+`threadshare_memory_synthesize`、`threadshare_memory_stage`、`threadshare_memory_review`、
+`threadshare_memory_prepare`、`threadshare_memory_promote`。recall 直接把完整有界 Turn chunk 返回给当前
+Agent；synthesize 返回 approved L1 与当前 scenes/doctrine。CLI 与 MCP 共用 source binding、candidate
+revision、statement/citation digest、target blob CAS 和可恢复 promotion journal。
+
+除非能确认当前 Agent context 容得下全部 chunk，否则保持 recall 默认一次 1 个 chunk。候选 stage
+有意分两步：第一次返回当前 approved/candidate 池，第二次提交精确裁决后才会 store、skip、update 或 merge。
+每个 Turn 同时通过 `chunk.turnEvidence` 和 transcript 内的
+`<<past-turn index="..." evidence-id="...">>` 标记绑定证据。Agent 必须引用这份精确映射，不能按
+`ev-*` 标识符的排列顺序猜测。
+
+`--runner` 只用于可选的独立批处理。`claude` 启动已安装的 Claude Code CLI；`codex` 启动 Codex CLI，
+新 preview 还需指定精确 model 与 HTTPS endpoint：
 
 ```bash
+threadshare memory extract --runner claude --since <utc> --until <utc>
+threadshare memory extract --runner claude --approve-plan <extraction-digest>
+threadshare memory extract --runner claude --approve-plan <adjudication-digest>
+
 threadshare memory extract --runner codex \
   --runner-model <model> \
   --runner-endpoint <https-url> \
-  --request memory-filter.json
-threadshare memory extract --runner codex --approve-plan <extraction-digest>
-threadshare memory extract --runner codex --approve-plan <adjudication-digest>
-threadshare memory consolidate --runner codex \
-  --runner-model <model> \
-  --runner-endpoint <https-url>
-threadshare memory consolidate --runner codex --approve-plan <consolidation-digest>
+  --since <utc> \
+  --until <utc>
 ```
 
-每个 runner 阶段除模型连接外均为 deny-all；只有用户批准该阶段的精确 digest 与字节摘要后，Threadshare
-才发送 transcript。`review` 要求真实 TTY 并逐条确认生成的 statement；非交互调用只能查看待审内容，
-不能批准。`promote` 只把净化后的正文写入 `.threadshare/memory/` 并刷新 approved 搜索投影，不会
-stage、commit 或 push。归纳默认只处理基线后新增或变化的 approved L1；`--if-due` 使用 20 条触发门，
-`--full` 可在空 Patch 或可疑基线后重放全部 approved L1。团队成员从 Git 拉取记忆后，分别对实际使用的
-provider 运行 `assemble`，即可刷新 `CLAUDE.md` 或 `AGENTS.md` 的生成块与本机搜索投影。MCP 的
-`threadshare_memory_extract_preview` 和 `threadshare_memory_consolidate_preview` 都只能创建 0600 pending
-artifact，不能授权、启动 Runner 或返回对话/记忆正文。筛选命中超过 200 个 Turn 时会拒绝，不会静默取
-前缀；唯一的会话评分实现位于 Insights `extraction-candidates@1` Recipe，它强制 eligible、active、
-`hard-sealed` 与完整 Delivery Trace coverage，并在候选提交前复核精确 source binding。无关 snapshot
-推进不会让计划失效。
+每次 recall 必须有明确的 `--since` 和 `--until`（最长 366 天），并可按全文、provider、opaque session、
+Tool、Skill、结果证据和能力终态过滤。Threadshare 始终叠加当前 worktree、eligible、active、
+`hard-sealed` 与完整 Delivery Trace coverage；命中超过 200 个 Turn 时直接拒绝，不静默截断。Agent-native
+recall 会有意把这些有界 transcript 交给当前受信 Agent；Threadshare 不增加 Broker，也不另行认证用户本人。
+`promote` 只写 `.threadshare/memory/**` 并刷新 approved 投影，不会 stage、commit 或 push。
 
 ### 使用其他 Threadshare 服务端
 

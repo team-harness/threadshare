@@ -4,7 +4,7 @@ import path from "node:path";
 import { canonicalJson } from "./canonical-json.mjs";
 import { normalizeInsightsRecipeRequest } from "./insights-query.mjs";
 
-const MEMORY_EXTRACTION_REQUEST_FORMAT = "threadshare-memory-extraction-request@v1";
+export const MEMORY_EXTRACTION_REQUEST_FORMAT = "threadshare-memory-extraction-request@v1";
 const INSIGHTS_EVIDENCE_REQUEST_FORMAT = "threadshare-insights-evidence-request@v2";
 const DELIVERY_TRACE_REQUEST_FORMAT = "threadshare-insights-delivery-trace-request@v1";
 const RECIPE_REQUEST_FORMAT = "threadshare-insights-recipe-request@v1";

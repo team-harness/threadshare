@@ -10,7 +10,11 @@ import {
   MEMORY_EXTRACTION_TASK_FORMAT,
   parseMemoryContract,
 } from "../src/memory-contracts.mjs";
-import { PROMPT_VERSION, TRANSCRIPT_PREAMBLE } from "../src/memory-prompts.mjs";
+import {
+  ADJUDICATION_PROMPT_VERSION,
+  PROMPT_VERSION,
+  TRANSCRIPT_PREAMBLE,
+} from "../src/memory-prompts.mjs";
 import {
   CHUNKER_VERSION,
   DEFAULT_CHUNK_BUDGET_BYTES,
@@ -168,6 +172,7 @@ test("serializeTranscript is deterministic with full role markers", () => {
   for (const role of ["user", "assistant", "tool_call", "tool_result"]) {
     assert.ok(first.includes(`<<past-${role}>>\n`), `missing <<past-${role}>> marker`);
   }
+  assert.match(first, /<<past-turn index="0">>/u);
   assert.ok(first.endsWith("<<end-of-transcript>>"));
 });
 
@@ -436,6 +441,15 @@ test("buildExtractionTask emits a schema-valid task with canonical stdin bytes",
   assert.deepEqual(task.binding.deliveryEdgeRevisions, [HEX("1")]);
   assert.equal(task.binding.selection.requestDigest, HEX("2"));
   assert.ok(task.chunk.transcript.startsWith(TRANSCRIPT_PREAMBLE));
+  assert.deepEqual(task.chunk.turnEvidence.map((item) => item.turnIndex), [3, 4]);
+  for (const item of task.chunk.turnEvidence) {
+    const catalogEntry = task.evidenceCatalog.find((entry) => entry.evidenceId === item.evidenceId);
+    assert.equal(catalogEntry.kind, "turn");
+    assert.equal(catalogEntry.display, `turn ${item.turnIndex}`);
+    assert.ok(task.chunk.transcript.includes(
+      `<<past-turn index="${item.turnIndex}" evidence-id="${item.evidenceId}">>`,
+    ));
+  }
   // Same inputs -> byte-identical stdin.
   assert.equal(extractionFixture().stdinBytes, stdinBytes);
 });
@@ -546,7 +560,7 @@ test("buildAdjudicationTask emits a schema-valid task bound to the recall result
   }));
   assert.deepEqual(task.binding.poolItemRevisions,
     [{ sourceKind: "approved", id: "entry-a", revision: 2 }]);
-  assert.equal(task.contract.prompts.promptVersion, PROMPT_VERSION);
+  assert.equal(task.contract.prompts.promptVersion, ADJUDICATION_PROMPT_VERSION);
 });
 
 test("resultSetDigest shifts when pool item revision drifts; missing pool item throws", () => {

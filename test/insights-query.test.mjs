@@ -18,6 +18,7 @@ import {
   normalizeInsightsRecipeRequest,
   normalizeInsightsSearchRequest,
   normalizeInsightsUsageRequest,
+  MAX_MEMORY_REQUEST_BYTES,
   parseInsightsQueryInvocation,
   projectInsightsActivity,
   projectInsightsCapabilities,
@@ -807,6 +808,22 @@ test("request input rejects more than 64 KiB before parsing", async () => {
     }),
     (error) => error?.code === "TS_INSIGHTS_REQUEST_INVALID",
   );
+});
+
+test("memory-sized request input can carry a complete agent binding", async () => {
+  const input = JSON.stringify({
+    format: "threadshare-memory-candidate-draft-batch@v1",
+    binding: { deliveryEdgeRevisions: ["a".repeat(64)].concat(
+      Array.from({ length: 1_100 }, () => "b".repeat(64)),
+    ) },
+  });
+  assert.ok(Buffer.byteLength(input, "utf8") > 64 * 1024);
+  const parsed = await readInsightsQueryRequest("-", {
+    input: Readable.from([input]),
+    maxBytes: MAX_MEMORY_REQUEST_BYTES,
+  });
+  assert.equal(parsed.format, "threadshare-memory-candidate-draft-batch@v1");
+  assert.equal(parsed.binding.deliveryEdgeRevisions.length, 1_101);
 });
 
 test("request input rejects invalid UTF-8 from stdin and files", async () => {

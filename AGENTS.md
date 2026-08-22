@@ -71,3 +71,15 @@ Recovery rules:
 - A cancelled run is incomplete. Rerun it before any higher release. If a higher version already reached npm, never backfill the lower version.
 
 Do not commit generated deployment state, `node_modules`, storage credentials, `.void/`, `.wrangler/`, `fc/.licell/`, `fc/dist/`, or `fc/static-assets.ts`.
+
+<!-- BEGIN THREADSHARE MEMORY (generated; do not edit by hand) -->
+
+## Team memory
+
+_No approved team doctrine yet._
+
+### Scenes
+
+- .threadshare/memory/scenes/team-memory-design.md (heat 1) — Threadshare memory pipeline
+
+<!-- END THREADSHARE MEMORY -->

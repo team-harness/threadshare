@@ -209,6 +209,16 @@ function evidenceHashSpans(entryText, frontmatter) {
   return spans;
 }
 
+function frontmatterIdSpan(entryText, frontmatter) {
+  const terminator = entryText.indexOf(FRONTMATTER_TERMINATOR);
+  if (terminator === -1) return [];
+  const marker = `\nid: ${frontmatter.id}\n`;
+  const markerIndex = entryText.indexOf(marker, 3);
+  if (markerIndex === -1 || markerIndex >= terminator) return [];
+  const start = markerIndex + "\nid: ".length;
+  return [{ start, end: start + frontmatter.id.length }];
+}
+
 /**
  * Promotion gate for a single entry file: sanitization lint plus frontmatter
  * validation via memory-format. `ok` is true only when the entry parses and no
@@ -217,7 +227,7 @@ function evidenceHashSpans(entryText, frontmatter) {
  * allowedSpans, so structured evidence hashes never block promotion while the
  * same material in the body still does.
  */
-export function lintEntryForPromotion(entryText) {
+export function lintEntryForPromotion(entryText, { allowedSpans = [] } = {}) {
   if (typeof entryText !== "string") throw new TypeError("lintEntryForPromotion requires a string");
   let parsed = null;
   let formatFinding = null;
@@ -233,8 +243,14 @@ export function lintEntryForPromotion(entryText) {
       excerpt: String(error.message).slice(0, 120),
     };
   }
-  const allowedSpans = parsed === null ? [] : evidenceHashSpans(entryText, parsed.frontmatter);
-  const findings = lintMemoryText(entryText, { allowedSpans });
+  const structuredSpans = parsed === null
+    ? allowedSpans
+    : [
+        ...allowedSpans,
+        ...frontmatterIdSpan(entryText, parsed.frontmatter),
+        ...evidenceHashSpans(entryText, parsed.frontmatter),
+      ];
+  const findings = lintMemoryText(entryText, { allowedSpans: structuredSpans });
   if (formatFinding !== null) findings.push(formatFinding);
   const ok = findings.every((item) => item.severity !== "block");
   return { ok, findings };

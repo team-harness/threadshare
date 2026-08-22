@@ -139,6 +139,7 @@ void/stale 收口：未发生 mutation 的 void 直接把 consolidation run 置 
 - 场景优先 UPDATE，矛盾写“演化记录”，不抹掉旧事实；不得输出或建议 heat，宿主只依据 op/mergeSources 计算它。
 - doctrine 只吸收发生变化的 scene，并通过五道过滤：跨场景、长期稳定、可执行、非重复、非敏感。
 - doctrine 使用四策略：新增稳定原则、收紧已有原则、合并重复原则、记录被新证据替代的原则。
+- scene 正文使用一个标题和最多 8 条短 bullet（每条最多 100 Unicode code points，总目标 900、宿主硬上限 1500）；doctrine 最多 6 条短 bullet（总目标 800、宿主硬上限 1200）。Runner 输出前自检，宿主仍独立按 code point 校验并拒绝超限结果。
 - 只输出一个 `ConsolidationPatch@v1` JSON；无变化输出空 operations。
 
 ### 3.2 CLI
@@ -211,7 +212,7 @@ scene 导航按 `heat DESC, name ASC` 排序，最多 15 条；若理论输入�
 | Recipe 等价 | Rust golden vector 覆盖权重、四舍五入、tie-break；Node 不含权重实现 |
 | coverage | Delivery Graph 不可用时 Recipe fail closed |
 | adapter | Claude/Codex marker 外内容保留、heat 排序、重复执行不改字节 |
-| 安全 | MCP pending-only；未批准不交付；L1/scene/doctrine 任一父级 symlink 在 Runner 启动前拒绝；真实 Codex consolidation 无副作用 |
+| 安全 | Runner 批处理的 MCP preview 保持 pending-only、未批准不交付；Agent-native MCP 与 CLI 共享 exact state machine；L1/scene/doctrine 任一父级 symlink 在 Runner 启动前拒绝；真实 Codex consolidation 无副作用 |
 
 必须增加的负例：write 阶段失败时 delete 尚未执行且已写文件可回滚；displacement/install/progress/cleanup 各崩溃窗口均可 forward/rollback 重放；`pending` 文件即使碰巧等于输出也不得被认作已应用，`applied` 新文件被外部删除后不得重建；在 conditional mutation 的校验与 rename 之间替换 write/delete 目标时外部字节必须原样保留且计划 fail loud/rollback；promotion 终态不再保存被删除正文；v1 半完成 legacy plan 保留 progress 且漂移时直接 void；Runner 执行期间 scene 内容变化或新增 scene 使 submit 失败；submit 后修改/删除 approved L1 使 review、promotion-plan 或 apply 失败；replay epoch 在 candidate 或 plan 后推进使 promotion-plan/apply 拒绝且不改文件；review 后 scene 集合变化使 promotion-plan 失败；plan 批准后新增非目标 scene 使 apply 整份 void；批准后 assessment/policy 漂移在 mutation 前 void，且 approved/applying 候选不能 confirm/discard/被裁决合并；另一进程持有 apply 锁时新 apply fail closed；零 assessment consolidation candidate 被拒；混合 candidateKind plan 被拒；`allowDegraded=true` 被硬拒；Delivery Graph partial 被硬拒；Runner 自报 heat 被宿主重写；空 Patch 提交后在输入完全未变时 `--full` 产生新 taskId 并可重新交付；`.threadshare` / `memory` 父级 symlink 对 approved entry、scene、doctrine 三类读取都在 Runner 启动前拒绝；marker 缺失/重复不改用户文件。
 
@@ -226,7 +227,7 @@ Rust/Node validator 必须共享 golden vectors，覆盖 CJK、代理对 emoji�
 2026-08-21 的最终候选验收证据（已包含 replay epoch、descriptor-relative Runner 输入读取、完整 L1 源树 CAS、assessment/policy 快照与跨进程 promotion 锁）：
 
 - `npm run test:memory-codex-live` 使用真实 `codex-cli 0.149.0` 与真实模型连接，87.30 秒跑通 conformance、L1 提取、裁决、非空 consolidation、逐 operation 确认、promotion 与 Codex assemble；源 Session 集合未变化，一次性 Runner 目录全部清除。
-- `npm run test:insights-engine` 从 Rust fmt/test/clippy/build 到 Node 端到端与证据校验全部通过；Rust lib 115 tests、memory-state 43/43、Node 348/348。memory-state 覆盖 v1→v2 原子迁移、legacy 半完成 plan 与 artifact 非终态恢复、write/delete conditional displacement 与竞态/崩溃恢复、forward/rollback displacement 后进度提交前恢复、pending/applied 状态边界、终态原文清除、空 Patch 后同输入 full replay、父级 symlink、完整 L1/Scene/Doctrine/replay CAS、assessment/policy 漂移和并发 apply 互斥。
-- Node 22.22.3 下，`npm run test:cli` 381/381、`test:viewer` 7/7、`test:api` 32/32、`test:release` 76/76、`test:fc` 19/19 全部通过；Cloudflare build 与 Skill validation 通过。
+- `npm run test:insights-engine` 从 Rust fmt/test/clippy/build 到 Node 端到端与证据校验全部通过；Rust lib 116 tests、main 14 tests、memory-state 44/44、Node 363/363。memory-state 覆盖 v1→v2 原子迁移、legacy 半完成 plan 与 artifact 非终态恢复、write/delete conditional displacement 与竞态/崩溃恢复、forward/rollback displacement 后进度提交前恢复、pending/applied 状态边界、终态原文清除、空 Patch 后同输入 full replay、父级 symlink、完整 L1/Scene/Doctrine/replay CAS、assessment/policy 漂移和并发 apply 互斥。
+- Node 22.22.3 下，`npm run test:cli` 395/395、`test:viewer` 7/7、`test:api` 32/32、`test:release` 76/76、`test:fc` 19/19 全部通过；Cloudflare build 与 Skill validation 通过。
 - Node 22.22.3 / npm 12.0.2 的 `npm pack --dry-run --ignore-scripts --json` 得到精确 95 文件、368,751 bytes compressed、1,721,713 bytes unpacked；低于 368 KiB / 1.75 MiB 硬上限，平台包仍保持精确四文件门。
 - `extraction-candidates@1` 的 Rust golden test 覆盖超过 50 条 failure chain、歧义 repository mapping fail closed；Rust/Node 共用 Unicode normalization/count/digest/boundary vectors，Node 已移除第二份评分权重。

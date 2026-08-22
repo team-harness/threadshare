@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-prepare-request.v1.schema.json",
+  "title": "Threadshare Team Memory prepare request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "candidates"],
+  "properties": {
+    "format": { "const": "threadshare-memory-prepare-request@v1" },
+    "kind": { "enum": ["entry", "consolidation"], "default": "entry" },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId", "expectedRevision", "statements"],
+        "properties": {
+          "candidateId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "expectedRevision": { "type": "integer", "minimum": 1 },
+          "statements": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["statementId", "statementTextDigest", "citationsDigest"],
+              "properties": {
+                "statementId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                },
+                "statementTextDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "citationsDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

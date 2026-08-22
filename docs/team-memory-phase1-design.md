@@ -29,7 +29,7 @@
 | `memory-command.mjs` | CLI 编排：`memory init / extract / review / promote / lint / assemble / status`；puts 全流程串起来 |
 | `memory-prompts.mjs` | 提炼/裁决/归纳 prompt 资产（版本化常量，promptVersion 进 CAS） |
 
-MCP：`insights-mcp.mjs` 增补 `threadshare_memory_search`（只读）、`threadshare_memory_status`（只读概览）与 `threadshare_memory_extract_preview`（只创建本机 pending plan；不能授权/执行；响应不携带 transcript）。
+MCP：`insights-mcp.mjs` 保留 `threadshare_memory_search` / `threadshare_memory_status` 只读操作；Runner batch 的 `threadshare_memory_extract_preview` / `threadshare_memory_consolidate_preview` 只创建本机 pending plan，不能授权/执行且不携带 transcript；Agent-native 的 `recall`、`synthesize`、`stage`、`review`、`prepare`、`promote` 与 CLI 共享同一语义模块。
 
 ### Rust（`crates/insights-engine/src/`）
 
@@ -181,6 +181,7 @@ CREATE TABLE authorization_log (
 | `bind-repository` | upsert repository_bindings | 绝对路径只进库 |
 | `plan-tasks` | 写入 chunks（pending）与 tasks（pending），幂等 | Node 完成选材/分块后批量落库 |
 | `claim-task` | tx-claim；返回 task 全量 binding + claim_token | submitted/stale 不可重领 |
+| `abandon-task` | 当前 claim_token 持有者释放失败任务 | pending 可精确重试；stale 永久终结被替代任务 |
 | `submit-extraction` | tx-extraction-submit（含 token CAS 前置） | 入参含 drafts + assessments + evidence_refs |
 | `recall` | 双 FTS + RRF；返回 per-draft ordered recallSets + union pool + digests + 双投影 provenance | 只读 |
 | `submit-adjudication` | 单 `BEGIN IMMEDIATE` 事务内：重跑召回 + digest 比对 + revision CAS + 应用 | stale 返回结构化拒绝 |
@@ -215,9 +216,11 @@ threadshare memory init                          # 初始化 .threadshare/memory
 threadshare memory status [--repository <path>]  # 游标/候选/任务概览
 threadshare memory extract [--repository <path>] --runner <claude|codex>
                            [--runner-model <model> --runner-endpoint <https-url>]
-                           [--request <file|->]
+                           (--since <utc> --until <utc> [--query <text>]
+                            [--providers <claude,codex>] [其他逗号分隔过滤参数]
+                            | --request <file|->)
                            [--approve-plan <digest>] [--approve-manifest <digest>]
-                           [--limit <n>] [--format json]
+                           [--limit <1..8>] [--format json]
 threadshare memory review  [--format json]       # 逐条确认 + 生成 PromotionPlan
 threadshare memory promote --plan <planId>       # 应用已批准 plan（只改工作区）
 threadshare memory lint [<path>...]              # 独立净化检查
@@ -226,7 +229,7 @@ threadshare memory reverify-runner --runner <claude|codex>
                            [--runner-model <model> --runner-endpoint <https-url>]
 ```
 
-MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 generation 与 coverage）；`threadshare_memory_status`（只读概览）；`threadshare_memory_extract_preview`（入参 runner + request + limit，Codex 另需 exact model/HTTPS endpoint；只落 0600 pending artifact，并提示走 CLI 批准）。
+MCP 工具：`threadshare_memory_search`（入参 query/limit，出参带 generation 与 coverage）；`threadshare_memory_status`（只读概览）；Runner batch 的 `threadshare_memory_extract_preview` / `threadshare_memory_consolidate_preview`（只落 0600 pending artifact，并提示走 CLI 批准）；Agent-native 的 `threadshare_memory_recall` / `synthesize` / `stage` / `review` / `prepare` / `promote`（与 CLI 对等）。
 
 ## 6. 测试与验收（node --test + cargo test + 真实 Codex CLI）
 
@@ -273,10 +276,10 @@ Phase 1 的 Stage 2–8 与收尾门均已完成，随后才进入 Phase 2。Pha
 - **AuthorizationManifest@v1**：`{ format, manifestDigest: hex64|null, plans: [{ planDigest: hex64, taskKind, taskId, bytesToSend: int }], totalBytes: int, authorization: "pending"|"approved" }`。
 - **MemoryExtractionRequest@v1**：`{ format, window: { after, before }, query?, filters?: { providers?, sessionKeys?, toolCapabilityKeys?, skillCapabilityKeys?, resultEvidence?, capabilityTerminalStates? } }`。window 必填、canonical UTC、非空且 ≤366 天；调用方不能传 projectKeys/closure。Threadshare 注入唯一 worktree project keys 与 `hard-sealed`；完整匹配 >200 Turns 时拒绝，不取前缀。
 - **ExtractionTask@v1**：`{ format, taskId, lease: { holder: string, expiresAt: int }, binding: { databaseUuid: string, owner: { repositoryKey, worktreeKey }, sourceInputDigest: hex64, selection: { requestDigest: hex64, resultSetDigest: hex64, sourceBindingDigest: hex64 }, turnRevisions: hex64[], payloadDigests: hex64[], deliveryEdgeRevisions: hex64[], promptVersion, schemaVersion, chunkerVersion, provenance: { snapshotSeq: decimal-string, evaluatedAt: string } }, session: { project: string|null, repositoryKey: hex64, timeWindow: { start: string, end: string }|null }, evidenceCatalog: [{ evidenceId, kind: "commit"|"turn"|"path", pointerDigest: hex64, display: string }], chunk: { turnRange: { start: int, end: int }, coverage: [{ sourceKind: "turn"|"tool-payload", ref: string, completeness: "full"|"truncated", bytes: int }], transcript: string }, context: { sceneIndexSummary: string|null }, contract: { draftSchema: "threadshare-memory-candidate-draft-batch@v1", prompts: { promptVersion: string, extraction: string } } }`。
-- **CandidateDraftBatch@v1**：`{ format, taskId, binding（原样回传）, candidates: [{ content: string, type: "work_fact"|"work_task"|"work_method"|"work_artifact", priority: int(0..100), confidence: "high"|"medium"|"low", scene: string|null, statements: [{ statementId, text, evidenceIds: string[] }] }] }`。
+- **CandidateDraftBatch@v1**：`{ format, taskId, binding（原样回传）, candidates: [{ content: string, type: "work_fact"|"work_task"|"work_method"|"work_artifact", priority: int(0..100), confidence: "high"|"medium"|"low", scene: string|null, statements: [{ statementId, text, evidenceIds: string[] }] }] }`；每批最多 8 条 candidate。一次 CLI run 最多 8 个 chunk，全部 draft 合并到一个共享 recall snapshot 与一个后续 adjudication plan（总上限 64），避免 sibling adjudication 相互推进 candidate projection 并制造 stale。召回时每条 draft 只排除自身，同批其他 draft 仍可命中，因此跨 chunk 重复不会因共享快照而漏掉。
 - **EvidenceAssessment@v1**：`{ format, candidateId, statementId, citations: [{ evidenceId, pointerDigest: hex64 }], provenanceStrength: "direct"|"observed"|"candidate"|"contextual"|"unknown", limitations: string[], claimSupport: "unverified"|"typed-fact"|"human-confirmed", assessedBy: "deterministic"|"human", statementTextDigest: hex64, revision: int }`。
 - **AdjudicationTask@v1**：`{ format, taskId, lease, binding: { databaseUuid, memoryStateUuid, owner, draftBatchDigest: hex64, approvedProjection: { generation: int, analyzerVersion: string }, candidateProjection: { generation: int, analyzerVersion: string }, recallAlgorithmVersion: string, recallQueryDigest: hex64, resultSetDigest: hex64, poolItemRevisions: [{ sourceKind: "approved"|"candidate", id, revision: int }], promptVersion, schemaVersion }, drafts: [CandidateDraftBatch.candidates 同构 + candidateId], recallSets: [{ draftRef, ordered: [{ rank: int, sourceKind, id }] }], pool: [{ sourceKind, id, revision: int, contentDigest: hex64, state: string, summary: string }], contract: { resultSchema: "threadshare-memory-adjudication-result@v1", prompts: { promptVersion, adjudication: string } } }`。
-- **AdjudicationResult@v1**：`{ format, taskId, binding（原样回传）, adjudications: [{ draftRef, action: "store"|"skip"|"update"|"merge", targetIds: string[], mergedFields: { content?, type?, priority?, scene?, occurred?: string[] }|null }] }`。
+- **AdjudicationResult@v1**：`{ format, taskId, binding（原样回传）, adjudications: [{ draftRef, action: "store"|"skip"|"update"|"merge", targetIds: string[], mergedFields: { content?, type?, priority?, scene?, occurred?: string[] }|null }] }`。同批重复项通过 `skip → 非 skip draft candidateId` 收敛；`update/merge` 只能修改既有 pool item，Node 与 Rust 都拒绝把本批 draft 作为 mutation target。
 - **ConsolidationPatch@v1**：`{ format, taskId, binding（原样回传）, operations: [{ op: "create"|"update"|"merge"|"delete", target: "scene"|"doctrine", name: string, newContent: string|null, basedOnEntryIds: string[], mergeSources: string[] }] }`。
 - **PromotionPlan@v1**：`{ format, planId, owner: RepositoryBinding@v1, candidateIds: string[], assessmentDigest: hex64, perFile: [{ targetPath: string, targetBlobHash: hex40|null, sanitizedContentDigest: hex64 }], policyVersion: string, diff: string }`。
 

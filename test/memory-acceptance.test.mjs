@@ -46,7 +46,7 @@ async function extractAndAdjudicate(fixture) {
   assert.equal(adjudicated.delivered[0].adjudication, "applied");
 }
 
-test("cross-chunk recall works and manifest input drift invalidates only one plan", {
+test("cross-chunk recall uses one shared adjudication and input drift blocks the whole batch", {
   skip: INSIGHTS_E2E_SKIP,
   timeout: 120_000,
 }, async (t) => {
@@ -71,40 +71,44 @@ test("cross-chunk recall works and manifest input drift invalidates only one pla
     fixture.options,
   );
   assert.equal(extracted.delivered.length, 2);
-  assert.equal(extracted.plans.length, 2);
-  assert.match(extracted.manifestDigest, /^[0-9a-f]{64}$/);
+  assert.equal(extracted.plans.length, 1);
+  assert.equal(extracted.plans[0].taskKind, "adjudication");
+  assert.equal(extracted.manifestDigest, null);
 
   const runnerPlans = path.join(fixture.options.paths.stateDirectory, "memory", "runner-plans");
-  const secondArtifact = JSON.parse(await readFile(
-    path.join(runnerPlans, `${extracted.plans[1].planDigest}.json`),
+  const sharedArtifactPath = path.join(
+    runnerPlans,
+    `${extracted.plans[0].planDigest}.json`,
+  );
+  const sharedArtifact = JSON.parse(await readFile(
+    sharedArtifactPath,
     "utf8",
   ));
-  const secondTask = JSON.parse(Buffer.from(secondArtifact.stdinBase64, "base64").toString("utf8"));
-  assert.ok(
-    secondTask.pool.some((item) => item.sourceKind === "candidate"),
-    "the second chunk must recall the first chunk's candidate",
+  const sharedTask = JSON.parse(
+    Buffer.from(sharedArtifact.stdinBase64, "base64").toString("utf8"),
+  );
+  assert.equal(
+    sharedTask.pool.filter((item) => item.sourceKind === "candidate").length,
+    2,
+    "the shared adjudication must recall candidates from both chunks",
   );
 
-  const firstArtifactPath = path.join(runnerPlans, `${extracted.plans[0].planDigest}.json`);
-  const firstArtifact = JSON.parse(await readFile(firstArtifactPath, "utf8"));
   const changedInput = Buffer.concat([
-    Buffer.from(firstArtifact.stdinBase64, "base64"),
+    Buffer.from(sharedArtifact.stdinBase64, "base64"),
     Buffer.from(" ", "utf8"),
   ]);
-  firstArtifact.stdinBase64 = changedInput.toString("base64");
-  await writeFile(firstArtifactPath, `${JSON.stringify(firstArtifact)}\n`, { mode: 0o600 });
+  sharedArtifact.stdinBase64 = changedInput.toString("base64");
+  await writeFile(sharedArtifactPath, `${JSON.stringify(sharedArtifact)}\n`, { mode: 0o600 });
 
-  const adjudicated = await executeMemoryCommand(
-    extractionInvocation(fixture.repository, {
-      "approve-manifest": extracted.manifestDigest,
-    }),
-    fixture.options,
+  await assert.rejects(
+    executeMemoryCommand(
+      extractionInvocation(fixture.repository, {
+        "approve-plan": extracted.plans[0].planDigest,
+      }),
+      fixture.options,
+    ),
+    (error) => error?.code === "MEMORY_RUNNER_PLAN_MISMATCH",
   );
-  assert.equal(adjudicated.failed.length, 1);
-  assert.equal(adjudicated.failed[0].planDigest, extracted.plans[0].planDigest);
-  assert.equal(adjudicated.failed[0].code, "MEMORY_RUNNER_PLAN_MISMATCH");
-  assert.equal(adjudicated.delivered.length, 1);
-  assert.equal(adjudicated.delivered[0].taskId, extracted.plans[1].taskId);
 
   const status = await executeMemoryCommand(
     parseMemoryInvocation(["memory", "status"], {
@@ -113,8 +117,8 @@ test("cross-chunk recall works and manifest input drift invalidates only one pla
     }),
     fixture.options,
   );
-  assert.equal(status.candidates.draft, 1);
-  assert.equal(status.candidates.quarantined, 1);
+  assert.equal(status.candidates.draft, 2);
+  assert.equal(status.candidates.quarantined, 0);
 });
 
 test("approved Git memory contains no provider id or local evidence pointer", {
