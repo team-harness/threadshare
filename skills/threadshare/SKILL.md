@@ -48,6 +48,11 @@ the user wants fresh results, ask before running the maintenance action `threads
 queries never index implicitly. `sync` initializes a missing index and otherwise applies only changed
 Sessions. Reserve `threadshare insights reindex` for an explicit complete rebuild or origin-secret recovery.
 
+For a human-facing walkthrough and scenario selection, see
+[`docs/insights-usage-guide.md`](../../docs/insights-usage-guide.md) and
+[`docs/insights-memory-scenarios.md`](../../docs/insights-memory-scenarios.md) in the repository. This
+Skill remains the workflow contract; `threadshare insights <action> --help` remains the parameter source.
+
 The user states the analysis question in natural language. Do not ask them to choose an action, Recipe,
 resource, schema version, filter field, or evidence target. First run `threadshare insights spec --format
 json` (or call `threadshare_insights_spec` over MCP), match the question to an intent, then execute that
@@ -107,6 +112,10 @@ implicitly.
 Use `threadshare_memory_search` for read-only recall of approved memory in the current repository.
 If coverage is partial, stop and ask the user to run the explicit local maintenance flow; do not treat
 partial results as a complete candidate pool.
+
+The [Team Memory usage guide](../../docs/team-memory-usage-guide.md) contains the end-to-end human
+workflow, confirmation points, CLI/MCP mapping, and scenario examples. Use it for orientation, then
+follow the stable operation and diagnostic rules below.
 
 When the user asks to turn past conversations into Team Memory, use the current Agent-native workflow.
 Do not ask the user to prepare JSON and do not specify `--runner`. Prefer the MCP tools when connected;

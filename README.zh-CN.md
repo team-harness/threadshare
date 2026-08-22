@@ -1,6 +1,6 @@
 # Threadshare
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [使用手册](./docs/README.md)
 
 Threadshare 让 Agent 历史真正可复用：既能把 Codex、Claude Code 和 Paseo 会话发布为只读 Web
 链接，也能让 Agent 查询本地索引，发现 Tool 失败、工作流模式、历史解法和有证据的开发洞察。
@@ -139,6 +139,9 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 Local Insights 可以让 Agent 从已记录的 Codex 和 Claude 工作中发现跨 Session 的规律。用户只需用
 自然语言提出具体问题；Agent 会选择查询、检查覆盖范围，并只读取回答问题所需的证据。
 
+按任务一步步操作请看 [Insights 使用手册](./docs/insights-usage-guide.md)；需要判断某个问题应该停在
+Insights、进入 Team Memory，还是使用 `share`，请看 [Insights + Team Memory 场景手册](./docs/insights-memory-scenarios.md)。
+
 ```bash
 threadshare insights sync
 ```
@@ -218,7 +221,9 @@ Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导�
 
 Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归属于仓库的共享记忆。在已有 Codex 或
 Claude Code 对话中，用户直接说：“用 Threadshare 回看最近两周这个仓库关于发布失败的聊天，整理成团队
-经验。”当前 Agent 会自己调用 Agent-native 流程，不需要再选择 `--runner`。
+经验。”当前 Agent 会直接引导回看、讨论、确认和写入流程。
+
+完整的确认步骤、CLI/MCP 对等关系和排障方式见 [Team Memory 使用手册](./docs/team-memory-usage-guide.md)。
 
 下面是等价 CLI 流程。人只提供普通筛选参数；`stage` 和 `prepare` 所需 JSON 由 Agent 生成并通过 stdin
 传入，不是要求用户创建或维护的文件。
@@ -243,7 +248,7 @@ threadshare memory prepare --request - --format json
 # 用户确认最终文件计划后：
 threadshare memory promote --plan <plan-id> --format json
 
-# 在同一 Agent 对话中生成 L2/L3 Scene 与 Doctrine：
+# 在同一 Agent 对话中生成 Scene 与 Doctrine：
 threadshare memory synthesize --if-due --format json
 threadshare memory stage --request - --format json
 threadshare memory review --kind consolidation --format json
@@ -256,8 +261,8 @@ threadshare memory assemble --provider codex
 本机 Insights MCP server 暴露完全相同的稳定操作：`threadshare_memory_recall`、
 `threadshare_memory_synthesize`、`threadshare_memory_stage`、`threadshare_memory_review`、
 `threadshare_memory_prepare`、`threadshare_memory_promote`。recall 直接把完整有界 Turn chunk 返回给当前
-Agent；synthesize 返回 approved L1 与当前 scenes/doctrine。CLI 与 MCP 共用 source binding、candidate
-revision、statement/citation digest、target blob CAS 和可恢复 promotion journal。
+Agent；synthesize 返回已批准记忆与当前 scenes/doctrine。CLI 与 MCP 共用 source 校验、确认流程和可恢复
+promotion 流程。
 
 除非能确认当前 Agent context 容得下全部 chunk，否则保持 recall 默认一次 1 个 chunk。候选 stage
 有意分两步：第一次返回当前 approved/candidate 池，第二次提交精确裁决后才会 store、skip、update 或 merge。
@@ -282,8 +287,8 @@ threadshare memory extract --runner codex \
 
 每次 recall 必须有明确的 `--since` 和 `--until`（最长 366 天），并可按全文、provider、opaque session、
 Tool、Skill、结果证据和能力终态过滤。Threadshare 始终叠加当前 worktree、eligible、active、
-`hard-sealed` 与完整 Delivery Trace coverage；命中超过 200 个 Turn 时直接拒绝，不静默截断。Agent-native
-recall 会有意把这些有界 transcript 交给当前受信 Agent；Threadshare 不增加 Broker，也不另行认证用户本人。
+`hard-sealed` 与完整 Delivery Trace coverage；命中超过 200 个 Turn 时直接拒绝，不静默截断。recall
+会把这些有界 transcript 交给当前 Agent 讨论；Threadshare 不会静默扩大回看范围。
 `promote` 只写 `.threadshare/memory/**` 并刷新 approved 投影，不会 stage、commit 或 push。
 
 ### 使用其他 Threadshare 服务端

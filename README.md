@@ -1,6 +1,6 @@
 # Threadshare
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [Usage guides](./docs/README.md)
 
 Threadshare makes AI-agent history useful: share Codex, Claude Code, and Paseo sessions as read-only
 web links, or let your Agent query a local index for Tool failures, workflow patterns, prior solutions,
@@ -141,6 +141,9 @@ Local Insights lets your Agent investigate patterns across your recorded Codex a
 concrete question in natural language. The Agent chooses the queries, checks coverage, and reads only
 the evidence needed for its answer.
 
+For a task-oriented walkthrough, see the [Insights usage guide](./docs/insights-usage-guide.md) and the
+[Insights + Team Memory scenario cookbook](./docs/insights-memory-scenarios.md).
+
 ```bash
 threadshare insights sync
 ```
@@ -226,8 +229,12 @@ Skill caused a Turn to succeed or fail.
 Team Memory retrospectively selects local Insights Turns and turns them into reviewed,
 repository-owned memory. In an existing Codex or Claude Code conversation, ask the current Agent in
 natural language, for example: "Use Threadshare to review this repository's release failures from the
-last two weeks and turn them into team experience." The Agent calls the Agent-native lifecycle itself;
-do not choose another `--runner`.
+last two weeks and turn them into team experience." The Agent can guide the interactive review and
+confirmation flow directly from the current conversation.
+
+The complete confirmation flow, CLI/MCP mapping, and troubleshooting steps are in
+the [Team Memory usage guide](./docs/team-memory-usage-guide.md). The [scenario cookbook](./docs/insights-memory-scenarios.md)
+helps choose between Insights, Memory, and `share`.
 
 The equivalent CLI flow is shown below. People supply normal filter parameters. The JSON consumed by
 `stage` and `prepare` is produced by the Agent and piped through stdin; it is not a file the user must
@@ -254,7 +261,7 @@ threadshare memory prepare --request - --format json
 # After the user confirms the resulting file plan:
 threadshare memory promote --plan <plan-id> --format json
 
-# Build L2/L3 scenes and doctrine through the same Agent conversation:
+# Build scenes and doctrine through the same Agent conversation:
 threadshare memory synthesize --if-due --format json
 threadshare memory stage --request - --format json
 threadshare memory review --kind consolidation --format json
@@ -267,9 +274,9 @@ threadshare memory assemble --provider codex
 The local Insights MCP server exposes the same stable operations:
 `threadshare_memory_recall`, `threadshare_memory_synthesize`, `threadshare_memory_stage`,
 `threadshare_memory_review`, `threadshare_memory_prepare`, and `threadshare_memory_promote`. Recall
-returns complete bounded Turn chunks directly to the current Agent. Synthesize returns approved L1
-entries plus current scenes/doctrine. CLI and MCP use the same source bindings, candidate revisions,
-statement/citation digests, target-blob CAS, and recoverable promotion journal.
+returns complete bounded Turn chunks directly to the current Agent. Synthesize returns approved memory
+entries plus current scenes/doctrine. CLI and MCP use the same source checks, confirmations, and
+recoverable promotion flow.
 
 Keep recall at its default one-chunk limit unless the Agent context is known to hold every requested
 chunk. Candidate staging is deliberately two-step: the first call returns the current memory pool;
@@ -297,9 +304,8 @@ threadshare memory extract --runner codex \
 Every recall requires explicit `--since` and `--until` timestamps (at most 366 days apart), with optional
 query, provider, opaque session, Tool, Skill, result-evidence, and capability-state filters. Threadshare
 always adds the current worktree scope plus eligible, active, `hard-sealed`, and complete Delivery Trace
-coverage. More than 200 matching Turns is rejected instead of silently truncated. Agent-native recall
-intentionally gives those bounded transcripts to the current trusted Agent; Threadshare does not add a
-Broker or separately authenticate the human. `promote` writes only below `.threadshare/memory/`, refreshes
+coverage. More than 200 matching Turns is rejected instead of silently truncated. Recall gives those
+bounded transcripts to the current Agent for discussion; `promote` writes only below `.threadshare/memory/`, refreshes
 the approved projection, and never stages, commits, or pushes.
 
 ### Use Another Threadshare Server
