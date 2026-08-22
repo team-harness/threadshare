@@ -17,6 +17,7 @@ import { createInsightsSbom } from "../scripts/generate-insights-sbom.mjs";
 import { smokeInsightsEngine } from "../scripts/smoke-insights-engine.mjs";
 import { smokeInstalledCore } from "../scripts/smoke-installed-core.mjs";
 import {
+  assertInstalledMcpToolCatalog,
   createInstalledSmokeTraceSourceDelta,
   smokeInstalledInsights,
 } from "../scripts/smoke-installed-insights.mjs";
@@ -31,6 +32,7 @@ import {
   createBeginTraceSourceMessage,
   traceSourceDigestDocument,
 } from "../src/insights-engine-protocol.mjs";
+import { MEMORY_MCP_TOOL_NAMES } from "../src/memory-operation-registry.mjs";
 
 const version = "0.6.1";
 const sourceSha = "a".repeat(40);
@@ -46,6 +48,26 @@ test("installed Insights smoke trace fixture satisfies the current protocol", ()
   assert.equal(begin.intent, null);
   assert.deepEqual(delta.intentNodes, []);
   assert.deepEqual(delta.intentRefs, []);
+});
+
+test("installed Insights smoke requires the complete Memory MCP catalog", () => {
+  const coreTools = [
+    "threadshare_insights_spec",
+    "threadshare_insights_query",
+    "threadshare_insights_recipe",
+    "threadshare_insights_evidence",
+  ];
+  const expected = [...coreTools, ...MEMORY_MCP_TOOL_NAMES];
+
+  assert.doesNotThrow(() => assertInstalledMcpToolCatalog(expected, MEMORY_MCP_TOOL_NAMES));
+  assert.throws(
+    () => assertInstalledMcpToolCatalog(expected.slice(0, -1), MEMORY_MCP_TOOL_NAMES),
+    /catalog is incomplete/,
+  );
+  assert.throws(
+    () => assertInstalledMcpToolCatalog([...expected, "threadshare_memory_unregistered"], MEMORY_MCP_TOOL_NAMES),
+    /catalog is incomplete/,
+  );
 });
 
 async function writeFixtureRoot(root) {

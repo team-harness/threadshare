@@ -14,6 +14,12 @@ import { pathToFileURL } from "node:url";
 const ROOT_PACKAGE = "@team-harness/threadshare";
 const SMOKE_ORIGIN_SECRET_EPOCH = "11111111-2222-4333-8444-555555555555";
 const execFile = promisify(execFileCallback);
+const CORE_MCP_TOOL_NAMES = Object.freeze([
+  "threadshare_insights_spec",
+  "threadshare_insights_query",
+  "threadshare_insights_recipe",
+  "threadshare_insights_evidence",
+]);
 const AGENT_QUERY_FORMATS = Object.freeze([
   "threadshare-insights-agent-spec@v1",
   "threadshare-insights-overview@v1",
@@ -143,6 +149,13 @@ function validateInstalledQuery(validators, value) {
   if (!validate || !validate(value)) {
     const detail = validate?.errors?.map((item) => `${item.instancePath} ${item.message}`).join("; ");
     throw new Error(`installed Insights query returned invalid ${value?.format ?? "output"}: ${detail}`);
+  }
+}
+
+export function assertInstalledMcpToolCatalog(toolNames, memoryToolNames) {
+  const expected = [...CORE_MCP_TOOL_NAMES, ...memoryToolNames];
+  if (JSON.stringify(toolNames) !== JSON.stringify(expected)) {
+    throw new Error("installed Insights MCP tool catalog is incomplete");
   }
 }
 
@@ -311,14 +324,10 @@ export async function smokeInstalledAgentQueries({
     ], queryOptions);
     const byId = new Map(firstMcp.map((message) => [message.id, message]));
     const toolNames = byId.get(1)?.result?.tools?.map(({ name }) => name);
-    if (JSON.stringify(toolNames) !== JSON.stringify([
-      "threadshare_insights_spec",
-      "threadshare_insights_query",
-      "threadshare_insights_recipe",
-      "threadshare_insights_evidence",
-    ])) {
-      throw new Error("installed Insights MCP tool catalog is incomplete");
-    }
+    const { MEMORY_MCP_TOOL_NAMES } = await import(
+      pathToFileURL(path.join(rootDirectory, "src", "memory-operation-registry.mjs")).href
+    );
+    assertInstalledMcpToolCatalog(toolNames, MEMORY_MCP_TOOL_NAMES);
     const mcpOutputs = [2, 3, 4].map((id) => {
       const result = byId.get(id)?.result;
       if (result?.isError !== false) {
