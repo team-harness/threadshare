@@ -148,6 +148,20 @@ otherwise invoke the equivalent CLI commands.
    --format json`; use `--full` after an empty or suspect baseline. Discuss and submit the returned task
    as `ConsolidationPatch@v1`, then use the same stage → review(kind=consolidation) → prepare → promote
    sequence. Threadshare computes heat; never invent or override it.
+6. When the reusable result is a procedure instead of one atomic memory claim, propose a
+   `SkillCandidate@v1` after the user has reviewed its name, description, body, evidence, and limits.
+   Analyze the recall response in this order: `skillContext`, then `memoryContext` scenes/doctrine/
+   approved entries, then the historical Turn sources as final evidence. If either context is truncated,
+   narrow the recall query instead of assuming omitted memory is absent. Reuse the returned Skill
+   `contentDigest` for update, echo `memoryContext.bindingDigest` as `memoryContextDigest`, and never
+   calculate either authority from Agent-supplied state. Every statement must still cite evidence ids
+   from the same historical Turn source; a Scene or entry summary is not a replacement for evidence.
+   Submit it through the same stage operation, then use `review(kind=skill) → prepare(kind=skill) →
+   promote`. Use `action=create` only when the canonical Skill does not exist; for an update, bind the
+   current source SHA-256 as `expectedContentDigest`. Never propose delete. After promotion, run the
+   explicitly requested `threadshare_memory_assemble` or `memory assemble --provider claude|codex`
+   to project the agent-neutral source into `.claude/skills/` or `.codex/skills/`; stop on projection
+   conflicts instead of overwriting them.
 
 The current Agent intentionally receives the bounded transcript and approved memory source. Threadshare
 does not add a Broker or separately authenticate the human; confirmation is represented by the Agent's
@@ -158,7 +172,7 @@ approved local projection; it never stages, commits, or pushes.
 Use `memory extract/consolidate --runner <claude|codex>` only when the user explicitly wants the separate
 batch workflow. Those legacy preview/digest operations are not needed inside an existing Agent chat.
 After pulling approved memory from Git, run `memory assemble --provider claude` and/or `--provider codex`
-to refresh the generated provider block and local approved projection.
+to refresh the generated provider block, provider Skill projections, and local approved projection.
 
 ## Choose A Start Turn
 

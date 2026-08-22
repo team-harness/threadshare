@@ -60,14 +60,15 @@ CLI 与 MCP 通过 `src/memory-operation-registry.mjs` 暴露同一组稳定操�
 | `status` | owner | 状态计数 | 无 |
 | `recall` | 有界筛选请求、chunk limit | `AgentRecall@v1` | 0600 source artifact、task planning |
 | `synthesize` | incremental / `--if-due` / `--full` | `ConsolidationTask@v1` | 0600 source artifact、task planning |
-| `stage` | `CandidateDraftBatch@v1`、`AdjudicationResult@v1` 或 `ConsolidationPatch@v1` | adjudication task 或 quarantined candidate | 私有状态事务 |
+| `stage` | `SkillCandidate@v1`、`CandidateDraftBatch@v1`、`AdjudicationResult@v1` 或 `ConsolidationPatch@v1` | adjudication task 或 quarantined candidate | 私有状态事务 |
 | `review` | candidate kind | 精确 candidate/revision/assessment/digest | 无 |
 | `prepare` | 精确 candidate revision 与 statement digests | `PromotionPlan@v1` | confirmation/plan 状态 |
 | `promote` | plan id | apply result | worktree |
+| `assemble` | provider | provider context 与 Skill 投影结果 | worktree |
 
 适配器只能处理 CLI 参数、stdin/JSON 和 MCP envelope；它们不能各自计算 evidence strength、digest、heat、路径、owner 或 CAS。
 
-稳定操作必须同时有真实 CLI 和 MCP 成功路径。`init`、`lint`、`assemble`、Runner 批处理以及 MCP-only `search` 仍登记为 `legacy-debt`，不冒充已经完成的全量产品 parity。
+稳定操作必须同时有真实 CLI 和 MCP 成功路径。Skill 复用 `stage/review/prepare/promote/assemble`，因此两种 transport 同时获得提取、晋升与装配能力。`init`、`lint`、Runner 批处理以及 MCP-only `search` 仍登记为 `legacy-debt`，不冒充已经完成的全量产品 parity。
 
 ## 4. 交互协议
 

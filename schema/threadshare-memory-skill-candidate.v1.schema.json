@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadshare.team-harness.com/schema/threadshare-memory-skill-candidate.v1.schema.json",
+  "title": "Threadshare Memory SkillCandidate@v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "taskId", "binding", "memoryContextDigest", "skill", "statements"],
+  "properties": {
+    "format": { "const": "threadshare-memory-skill-candidate@v1" },
+    "taskId": { "$ref": "#/$defs/identifier" },
+    "binding": { "$ref": "#/$defs/extractionBinding" },
+    "memoryContextDigest": { "$ref": "#/$defs/hex64" },
+    "skill": { "$ref": "#/$defs/skill" },
+    "statements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/statement" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryKey", "worktreeKey"],
+      "properties": { "repositoryKey": { "$ref": "#/$defs/hex64" }, "worktreeKey": { "$ref": "#/$defs/hex64" } }
+    },
+    "extractionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["databaseUuid", "owner", "sourceInputDigest", "selection", "turnRevisions", "payloadDigests", "deliveryEdgeRevisions", "promptVersion", "schemaVersion", "chunkerVersion", "provenance"],
+      "properties": {
+        "databaseUuid": { "type": "string", "minLength": 1 },
+        "owner": { "$ref": "#/$defs/owner" },
+        "sourceInputDigest": { "$ref": "#/$defs/hex64" },
+        "selection": {
+          "type": "object", "additionalProperties": false,
+          "required": ["requestDigest", "resultSetDigest", "sourceBindingDigest"],
+          "properties": { "requestDigest": { "$ref": "#/$defs/hex64" }, "resultSetDigest": { "$ref": "#/$defs/hex64" }, "sourceBindingDigest": { "$ref": "#/$defs/hex64" } }
+        },
+        "turnRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "payloadDigests": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "deliveryEdgeRevisions": { "type": "array", "items": { "$ref": "#/$defs/hex64" } },
+        "promptVersion": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "chunkerVersion": { "type": "string", "minLength": 1 },
+        "provenance": {
+          "type": "object", "additionalProperties": false,
+          "required": ["snapshotSeq", "evaluatedAt"],
+          "properties": { "snapshotSeq": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }, "evaluatedAt": { "type": "string", "minLength": 1 } }
+        }
+      }
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "body", "action", "expectedContentDigest"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^<>\\r\\n]+$" },
+        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "action": { "enum": ["create", "update"] },
+        "expectedContentDigest": { "anyOf": [{ "$ref": "#/$defs/hex64" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "create" } } }, "then": { "properties": { "expectedContentDigest": { "type": "null" } } } },
+        { "if": { "properties": { "action": { "const": "update" } } }, "then": { "properties": { "expectedContentDigest": { "$ref": "#/$defs/hex64" } } } }
+      ]
+    },
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statementId", "text", "evidenceIds"],
+      "properties": {
+        "statementId": { "$ref": "#/$defs/identifier" },
+        "text": { "type": "string", "minLength": 1 },
+        "evidenceIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    }
+  }
+}

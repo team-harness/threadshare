@@ -212,6 +212,7 @@ const submitExtractionRequest = z.object({
   taskId: identifier,
   claimToken: identifier,
   responseDigest: hex64,
+  finalize: z.boolean().default(false),
   drafts: z.array(z.object({
     candidateId: identifier,
     payload: plainObject,
@@ -508,7 +509,7 @@ const searchRequest = z.object({
 const reviewQueueRequest = z.object({
   ...ownerFields,
   limit: positiveInteger.max(200).default(50),
-  kind: z.enum(["entry", "consolidation"]).default("entry"),
+  kind: z.enum(["entry", "skill", "consolidation"]).default("entry"),
 }).strict();
 
 const statusRequest = z.object({ ...ownerFields }).strict();
@@ -791,7 +792,7 @@ const searchResult = z.object({
 const reviewQueueResult = z.object({
   items: z.array(z.object({
     candidateId: identifier,
-    candidateKind: z.enum(["entry", "consolidation-patch"]),
+    candidateKind: z.enum(["entry", "skill", "consolidation-patch"]),
     chunkRef: identifier,
     revision: positiveInteger,
     contentDigest: hex64,

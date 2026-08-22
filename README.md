@@ -271,12 +271,24 @@ threadshare memory assemble --provider claude
 threadshare memory assemble --provider codex
 ```
 
+To turn a repeatable procedure into an Agent Skill, ask the current Codex or Claude conversation to
+review a bounded Insights window and propose a `SkillCandidate@v1`. Recall is memory-first: it returns
+relevant existing Skills, then current scenes/doctrine and approved entries, before the bounded historical
+Turns used as the final evidence source. The Memory context carries a digest that the candidate must echo,
+so entry/scene/doctrine drift is rejected through promotion. The shared lifecycle is
+`stage → review --kind skill → prepare(kind=skill) → promote`. After approval,
+`assemble --provider claude|codex` projects the agent-neutral source to `.claude/skills/` or
+`.codex/skills/`. `memory lint .threadshare/memory/skills/<name>/SKILL.md` verifies a canonical
+Skill explicitly before assembly or commit. See
+[Skill extraction and assembly](./docs/team-memory-skill-design.md).
+
 The local Insights MCP server exposes the same stable operations:
 `threadshare_memory_recall`, `threadshare_memory_synthesize`, `threadshare_memory_stage`,
-`threadshare_memory_review`, `threadshare_memory_prepare`, and `threadshare_memory_promote`. Recall
-returns complete bounded Turn chunks directly to the current Agent. Synthesize returns approved memory
-entries plus current scenes/doctrine. CLI and MCP use the same source checks, confirmations, and
-recoverable promotion flow.
+`threadshare_memory_review`, `threadshare_memory_prepare`, `threadshare_memory_promote`, and
+`threadshare_memory_assemble`. Recall
+returns complete bounded Turn chunks plus the same Skill and Memory context directly to the current
+Agent. Synthesize returns approved memory entries plus current scenes/doctrine. CLI and MCP use the
+same source checks, confirmations, and recoverable promotion flow.
 
 Keep recall at its default one-chunk limit unless the Agent context is known to hold every requested
 chunk. Candidate staging is deliberately two-step: the first call returns the current memory pool;

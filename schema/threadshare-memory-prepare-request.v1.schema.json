@@ -7,7 +7,7 @@
   "required": ["format", "candidates"],
   "properties": {
     "format": { "const": "threadshare-memory-prepare-request@v1" },
-    "kind": { "enum": ["entry", "consolidation"], "default": "entry" },
+    "kind": { "enum": ["entry", "skill", "consolidation"], "default": "entry" },
     "candidates": {
       "type": "array",
       "minItems": 1,

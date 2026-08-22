@@ -91,6 +91,7 @@ const expectedPackageFiles = [
   "schema/threadshare-memory-promotion-plan.v1.schema.json",
   "schema/threadshare-memory-runner-execution-plan.v1.schema.json",
   "schema/threadshare-memory-search-request.v1.schema.json",
+  "schema/threadshare-memory-skill-candidate.v1.schema.json",
   "skills/threadshare/SKILL.md",
   "skills/threadshare/agents/openai.yaml",
   "src/agent-transcript.mjs",
@@ -131,6 +132,7 @@ const expectedPackageFiles = [
   "src/memory-prompts.mjs",
   "src/memory-repository.mjs",
   "src/memory-runner.mjs",
+  "src/memory-skill.mjs",
   "src/memory-state-client.mjs",
   "src/paseo-session-bridge.mjs",
   "src/provider-evidence.mjs",
@@ -1486,4 +1488,13 @@ test("Engine CI gates all six reproducible target builds on the contract suite",
   assert.match(commands, /MACOSX_DEPLOYMENT_TARGET="13\.0"/);
   assert.match(commands, /> "engine\/\$\{\{ matrix\.target \}\}\/version\.json"/);
   assert.doesNotMatch(source, /secrets\s*(?:\.|\[)|npm publish/i);
+});
+
+test("Linux promotion uses the kernel syscall without a musl renameat2 symbol dependency", async () => {
+  const source = await readFile(
+    path.join(root, "crates", "insights-engine", "src", "memory_promotion.rs"),
+    "utf8",
+  );
+  assert.match(source, /libc::syscall\(\s*libc::SYS_renameat2,/);
+  assert.doesNotMatch(source, /libc::renameat2\(/);
 });

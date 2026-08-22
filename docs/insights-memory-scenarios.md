@@ -159,6 +159,34 @@ Fail closed 的目的就是避免“审的是 A，最后写的是 B”。不要�
 
 CLI 和 MCP 的状态、校验、错误码和写入结果应等价；换 transport 不应跳过用户确认。批量预览和只读搜索不代表完整的确认写入流程。
 
+## 场景八：把发布步骤装配成 Agent Skill
+
+### 用户请求
+
+```text
+回看最近两周这个仓库的发布失败，提炼一个以后可以重复执行的 release-checks Skill。先给我候选和证据，确认后再装配给 Codex。
+```
+
+### 推荐流程
+
+1. Agent 调用 `memory recall`，先查看 `skillContext` 中的相关现有 Skill，再按 `memoryContext` 中的 Scene、Doctrine、approved entry 建立已有共识，最后读取当前仓库、时间窗和主题筛选命中的完整 Turn。
+2. Agent 将 Memory 中已经收敛、并被原始 Turn 证据支持的稳定步骤写成 `SkillCandidate@v1`：回显 `memoryContext.bindingDigest`，参数化具体路径、ID 和临时值；每条 statement 引用 recall 返回的 Turn evidence id；不把 secret、provider session id 或原始日志复制进正文。
+3. 用户补充适用条件后，Agent 调用 `stage`；Threadshare 将候选直接放入 quarantine。用 `memory review --kind skill` 逐条确认 statement，再用 `prepare(kind=skill)` 生成精确 Skill 文件 diff。
+4. 用户确认 PromotionPlan 后调用 `promote`，再运行：
+
+```bash
+threadshare memory assemble --provider codex
+git diff -- .threadshare/memory .codex/skills AGENTS.md
+```
+
+### 结果应该是什么
+
+`release-checks/SKILL.md` 应该是短而可执行的通用步骤，包含触发条件、前置检查、失败处理和限制；不应是某次聊天的逐字摘要。Claude 投影到 `.claude/skills/`，Codex 投影到 `.codex/skills/`，两者都从 agent-neutral 的 `.threadshare/memory/skills/` 生成。
+
+### 更新已有 Skill
+
+用户要求修改已有 Skill 时，Agent 必须使用 `skillContext` 返回的当前文件并提交 `action: "update"` 及当前正文 SHA-256。若 Skill 目标或绑定的 approved entry、scene、doctrine 在 stage、review、prepare 或 promote 前变化，旧候选失效，需要重新 recall/stage；Threadshare 不会覆盖未记录的 provider 投影修改。
+
 ## 场景模板
 
 可以直接把下面的句式交给当前 Codex/Claude Agent：

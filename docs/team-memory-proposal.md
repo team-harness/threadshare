@@ -1,7 +1,7 @@
 # Threadshare 团队记忆与经验总结 提案
 
-状态：Active（rev12；Phase 1/2 与 Agent-native Team Memory 已完成，Phase 3 未启动）
-日期：2026-08-22（rev12；当前 Agent 直接读取有界材料，CLI/MCP 语义同构）
+状态：Active（rev13；Phase 1/2、Agent-native Team Memory 与 Phase 3 Skill 子项已完成；跨仓共享未启动）
+日期：2026-08-22（rev13；SkillCandidate 与 provider Skill 装配已落地）
 适用范围：本机 Threadshare Insights 与新增的仓库内记忆库；云端共享面在本提案中保持**未设计**状态（见 Phase 3）
 
 设计输入：
@@ -250,7 +250,7 @@ superseded_by: null
 
 ### 5.4 Skill：`.threadshare/memory/skills/<name>/SKILL.md`
 
-SKILL.md 兼容格式，agent-neutral 存放；provider 落位由 `assemble --provider <x>` 显式装配。
+SKILL.md 兼容格式，agent-neutral 存放；provider 落位由 `assemble --provider <x>` 显式装配。Claude 投影到 `.claude/skills/<name>/SKILL.md`，Codex 投影到 `.codex/skills/<name>/SKILL.md`；装配遇到未记录的外部修改时 fail closed，不覆盖也不删除旧投影。具体契约与验收见 [team-memory-skill-design.md](./team-memory-skill-design.md)。
 
 ### 5.5 提炼状态：`<state-dir>/memory/memory-state.sqlite3`（0600，事务库，独立于 insights.sqlite3）
 
@@ -450,7 +450,7 @@ git entry:                                           approved ──被替代─
 
 ### 6.7 Skill 提取（独立契约）
 
-沿用参考项目 v2 捕获哲学："When in doubt, capture"；判定标准"同团队下次会受益"；具体 ID/路径是要参数化的占位符；拒绝清单四条（secrets、无诊断路径的裸日志、纯瞬态、已被覆盖改 update）；输出 SkillCandidate 或精确 `Nothing to save.`；去重三层（预注入清单 ≤20 全量、超出 BM25 关键词筛选 → name 唯一 → 撞重转 update）；无 delete；生成内容默认 unverified，经逐条人审、隔离区与 owner-bound PromotionPlan 落至 `.threadshare/memory/skills/`。
+沿用参考项目 v2 捕获哲学："When in doubt, capture"；判定标准"同团队下次会受益"；具体 ID/路径是要参数化的占位符；拒绝清单四条（secrets、无诊断路径的裸日志、纯瞬态、已被覆盖改 update）。已实现 `SkillCandidate@v1`：当前 Agent 从 `memory recall` 的完整有界 Turn 生成 evidence-bound Skill 候选，`stage` 直接在事务中写入 quarantined candidate，随后走 `review(kind=skill) → prepare(kind=skill) → promote`；无 delete，create/update 由当前目标 digest CAS 约束，生成内容默认 unverified。Skill candidate 从 L1 recall 池中隔离，避免将过程文档作为原子记忆去重证据。recall 同时返回现有 Skill 上下文：在 20 个/128 KiB 双重边界内全量注入，否则按 query 对名称/描述/正文做确定性排序并显式 `truncated`；源仓上限 256 个 Skill，Agent 负责语义比较，宿主仍以 name 唯一性和目标 digest CAS 做最终裁决。
 
 ## 7. 召回与使用（消费面）
 
@@ -461,6 +461,7 @@ git entry:                                           approved ──被替代─
 | L3 doctrine | 全文进上下文 | `assemble --provider claude` 生成/维护 CLAUDE.md import（用户显式执行） |
 | L2 scenes | 只注入索引（路径 + heat + summary） | assemble 生成导航块；正文 Agent 用 Read 自取 |
 | L1 entries | 按需检索 | MCP `threadshare_memory_search`（memory FTS，snapshot / coverage 语义）；导航块建议"每轮 ≤3 次"（软约束） |
+| Skill | provider Skill 目录 + 导航索引 | `.threadshare/memory/skills/` 为真相源；assemble 投影到 `.claude/skills/` / `.codex/skills/` |
 | L0 | 已有 | 现有 insights query / recipe / evidence 工具 |
 
 团队同步 = `git pull`；新成员 clone 后执行一次 `assemble` 完成"读档"。
@@ -506,7 +507,7 @@ git entry:                                           approved ──被替代─
 
 ### Phase 3 — Skill 提取与跨仓共享
 
-16. Skill 提取契约；17. 跨仓共享**保持未设计**：立项需独立 ADR + endpoint + storage wrapper 与显式裁剪层，不复用现有 shares API（F8）
+16. **Skill 提取契约已于 2026-08-22 完成**：`SkillCandidate@v1`、CLI/MCP 对等 stage/review/prepare/promote/assemble、secret/provider-path lint、create/update CAS、agent-neutral 真相源与 Claude/Codex Skill 投影均有真实引擎 E2E；17. 跨仓共享**保持未设计**：立项需独立 ADR + endpoint + storage wrapper 与显式裁剪层，不复用现有 shares API（F8）。
 
 ### 工程硬约束
 

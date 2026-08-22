@@ -25,6 +25,7 @@ export const MEMORY_CONSOLIDATION_TASK_FORMAT = "threadshare-memory-consolidatio
 export const MEMORY_CONSOLIDATION_PATCH_FORMAT = "threadshare-memory-consolidation-patch@v1";
 export const MEMORY_PROMOTION_PLAN_FORMAT = "threadshare-memory-promotion-plan@v1";
 export const MEMORY_PREPARE_REQUEST_FORMAT = "threadshare-memory-prepare-request@v1";
+export const MEMORY_SKILL_CANDIDATE_FORMAT = "threadshare-memory-skill-candidate@v1";
 
 const hex64 = z.string().regex(MEMORY_HEX64_PATTERN, "expected lowercase sha256 hex64");
 const hex40 = z.string().regex(MEMORY_HEX40_PATTERN, "expected lowercase git object hex40");
@@ -199,6 +200,27 @@ const statementSchema = z.object({
   evidenceIds: z.array(identifier),
 }).strict();
 
+const skillCandidateDetailsSchema = z.object({
+  name: slug,
+  description: nonEmptyString.max(1024),
+  body: nonEmptyString.refine(
+    (value) => Buffer.byteLength(value, "utf8") <= 64 * 1024,
+    "skill body must be at most 64 KiB",
+  ),
+  action: z.enum(["create", "update"]),
+  expectedContentDigest: hex64.nullable(),
+}).strict().superRefine((skill, context) => {
+  if (/[<>\r\n]/u.test(skill.description)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["description"], message: "description contains forbidden characters" });
+  }
+  if (skill.action === "create" && skill.expectedContentDigest !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedContentDigest"], message: "create must not carry an expected digest" });
+  }
+  if (skill.action === "update" && skill.expectedContentDigest === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedContentDigest"], message: "update requires the current content digest" });
+  }
+});
+
 const draftCandidateShape = {
   content: nonEmptyString,
   type: candidateTypeSchema,
@@ -218,7 +240,7 @@ export const candidateDraftBatchSchema = z.object({
 
 export const memoryPrepareRequestSchema = z.object({
   format: z.literal(MEMORY_PREPARE_REQUEST_FORMAT),
-  kind: z.enum(["entry", "consolidation"]).default("entry"),
+  kind: z.enum(["entry", "skill", "consolidation"]).default("entry"),
   candidates: z.array(z.object({
     candidateId: identifier,
     expectedRevision: positiveInteger,
@@ -264,6 +286,37 @@ export const evidenceAssessmentSchema = z.object({
   statementTextDigest: hex64,
   revision: nonNegativeInteger,
 }).strict();
+
+const skillStatementSchema = statementSchema.extend({
+  evidenceIds: z.array(identifier).min(1),
+});
+
+export const skillCandidateSchema = z.object({
+  format: z.literal(MEMORY_SKILL_CANDIDATE_FORMAT),
+  taskId: identifier,
+  binding: extractionBindingSchema,
+  memoryContextDigest: hex64,
+  skill: skillCandidateDetailsSchema,
+  statements: z.array(skillStatementSchema).min(1).max(64),
+}).strict().superRefine((candidate, context) => {
+  const statementIds = candidate.statements.map((statement) => statement.statementId);
+  if (new Set(statementIds).size !== statementIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["statements"],
+      message: "statement ids must be unique",
+    });
+  }
+  for (const [index, statement] of candidate.statements.entries()) {
+    if (new Set(statement.evidenceIds).size !== statement.evidenceIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["statements", index, "evidenceIds"],
+        message: "evidence ids must be unique per statement",
+      });
+    }
+  }
+});
 
 const adjudicationBindingSchema = z.object({
   databaseUuid: nonEmptyString,
@@ -488,6 +541,7 @@ export const MEMORY_CONTRACT_FORMATS = Object.freeze({
   [MEMORY_CONSOLIDATION_PATCH_FORMAT]: consolidationPatchSchema,
   [MEMORY_PROMOTION_PLAN_FORMAT]: promotionPlanSchema,
   [MEMORY_PREPARE_REQUEST_FORMAT]: memoryPrepareRequestSchema,
+  [MEMORY_SKILL_CANDIDATE_FORMAT]: skillCandidateSchema,
 });
 
 export function parseMemoryContract(value) {

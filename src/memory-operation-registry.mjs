@@ -187,14 +187,19 @@ const RAW_MEMORY_OPERATION_SPECS = [
   {
     id: "assemble",
     version: 1,
-    stability: "legacy-debt",
+    stability: "stable",
     requestSchema: "threadshare-memory-assemble-request@v1",
     responseSchema: "threadshare-memory-assemble@v1",
     sideEffects: "worktree",
     capabilityVector: ["execute"],
     approvalPolicy: "none",
     cli: adapter({ action: "assemble", capabilities: ["execute"], order: 11 }),
-    mcp: adapter(),
+    mcp: adapter({
+      action: "assemble",
+      tool: "threadshare_memory_assemble",
+      capabilities: ["execute"],
+      order: 10,
+    }),
   },
   {
     id: "reverify-runner",

@@ -292,8 +292,10 @@ mod imp {
         source: &CString,
         target: &CString,
     ) -> Result<(), std::io::Error> {
+        // musl does not export renameat2, so call the Linux syscall directly.
         let outcome = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 parent.as_raw_fd(),
                 source.as_ptr(),
                 parent.as_raw_fd(),

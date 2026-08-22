@@ -8,6 +8,7 @@
 |---|---|---|
 | 从历史 Agent 工作中找规律、失败链或交付证据 | [Insights 使用手册](./insights-usage-guide.md) | `threadshare insights` |
 | 把历史聊天提炼成仓库团队记忆 | [Team Memory 使用手册](./team-memory-usage-guide.md) | `threadshare memory recall` |
+| 把可重复步骤提炼并装配成 Agent Skill | [Skill 提取与装配设计](./team-memory-skill-design.md) | `memory recall/stage/review/prepare/promote/assemble` |
 | 按具体工作场景照着做 | [Insights + Memory 场景手册](./insights-memory-scenarios.md) | 自然语言请求或 CLI |
 | 需要深入了解协议和安全边界 | [Team Memory 提案](./team-memory-proposal.md)、[实现设计文档](./team-memory-phase1-design.md) | 开发者参考 |
 
