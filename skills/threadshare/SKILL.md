@@ -1,15 +1,43 @@
 ---
 name: threadshare
-description: Find, analyze, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions, or build and search repository Team Memory, through the Threadshare CLI. Use when a user asks to list, inspect, analyze, publish, export, validate, or share an agent conversation; requests a link to the current session; needs agent-readable thread JSON or Markdown; or wants reviewed shared memory from past work.
+description: Find, analyze, preflight, share, read, expire, or revoke Codex, Codex Cloud, Claude Code, and Codex/Claude-backed Paseo conversation sessions, or build and search repository Team Memory, through Threadshare MCP tools or CLI. Use when a user asks to list, inspect, analyze, publish, export, validate, or share an agent conversation; requests a link to the current session; needs agent-readable thread JSON or Markdown; or wants reviewed shared memory from past work.
 ---
 
 # Threadshare
 
-Use the `threadshare` CLI to export visible conversation content and publish it as a read-only link. The CLI defaults to `https://cloud-thread.team-harness.com`.
+Interpret the user's natural-language goal first, then use Threadshare through MCP or CLI. Do not ask the
+user to choose a command, provider adapter, Recipe, schema, MCP tool, request file, or runner when the
+current context can resolve it. Sharing defaults to `https://cloud-thread.team-harness.com`.
 
 Treat `threadshare <command> --help` as the canonical parameter reference; this Skill defines workflow and safety decisions, not a second option specification. On a regular failure, read the stable code and the `Problem`, `Usage`, and `Next` lines on stderr before changing the command. An invalid `share --dry-run --json` is the only failure that returns JSON on stdout. Never automatically retry `TS_PUBLISH_OUTCOME_UNKNOWN` or `TS_PUBLISH_POLICY_UNCONFIRMED`; preserve any `Result` URL and follow the diagnostic's cleanup guidance.
 
-## Choose The Command
+## Start From User Intent
+
+- “Share this conversation” means resolve the current native session, preflight the exact visible range,
+  publish it, verify the result, and return the Viewer URL.
+- “Share from where we discussed X” means list safe start-turn previews, let the user choose, preserve the
+  original boundary, then preflight and publish that range.
+- “Analyze this session” means use the local-only single-session analysis path.
+- “Investigate past work” means route the natural-language question through Insights and return bounded,
+  evidence-backed conclusions without writing repository memory.
+- “Turn past work into team experience” means use interactive Team Memory recall, discuss and adjudicate
+  candidates, then review, prepare, and promote only after the corresponding confirmations.
+- “Create a reusable Skill” means inspect existing Skills and approved Memory before historical Turns,
+  propose an evidence-bound Skill, and assemble it for a provider only after promotion.
+- “Read this Threadshare link” means use the bounded Agent transcript unless complete structured fields are
+  necessary. “Revoke it” requires an explicit request and the exact capability token.
+
+When the goal is ambiguous between sharing raw conversation and retaining a conclusion, ask about the desired
+result: a Viewer link uses Share; a one-time historical answer uses Insights; repository-owned reusable
+knowledge uses Team Memory.
+
+## Choose The Execution Surface
+
+Prefer connected Threadshare MCP tools for Insights and interactive Team Memory. Use the CLI when MCP is not
+connected, for sharing, or when the user explicitly wants terminal automation. MCP and CLI must preserve the
+same source checks, state transitions, and confirmation points; transport selection never authorizes a write.
+
+The CLI equivalents are:
 
 - Share a Codex or Codex Cloud session: `threadshare share codex <session-id-or-jsonl-file> --json`
 - Share a Claude Code session: `threadshare share claude <session-id-or-jsonl-file> --json`
@@ -117,7 +145,7 @@ The [Team Memory usage guide](../../docs/team-memory-usage-guide.md) contains th
 workflow, confirmation points, CLI/MCP mapping, and scenario examples. Use it for orientation, then
 follow the stable operation and diagnostic rules below.
 
-When the user asks to turn past conversations into Team Memory, use the current Agent-native workflow.
+When the user asks to turn past conversations into Team Memory, use the current interactive workflow.
 Do not ask the user to prepare JSON and do not specify `--runner`. Prefer the MCP tools when connected;
 otherwise invoke the equivalent CLI commands.
 

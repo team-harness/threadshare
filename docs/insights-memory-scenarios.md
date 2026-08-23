@@ -4,7 +4,7 @@
 
 ## 选择表
 
-| 你想做什么 | 推荐路径 | 是否写仓库 |
+| 你想做什么 | Agent 选择的能力 | 是否写仓库 |
 |---|---|---:|
 | 找出某类失败、频率或趋势 | Insights Query/Recipe | 否 |
 | 追踪一个需求如何到达 Commit | Insights Delivery Trace | 否 |
@@ -12,6 +12,27 @@
 | 汇总多条经验成场景/守则 | Memory `synthesize` | 是（确认后） |
 | 让新 Agent 读取已批准经验 | Memory `synthesize` / `assemble` | 更新投影 |
 | 分享完整聊天原文 | `threadshare share` | 不进入 Memory |
+
+用户只需要描述目标，不需要先选择表中的能力。Agent 应在当前上下文中完成判断，并说明结果会不会上传、
+会不会写仓库。
+
+## 场景：分享当前聊天
+
+### 用户请求
+
+```text
+用 Threadshare 把当前聊天分享出来。先预检，确认有效后把只读 Viewer 链接给我。
+```
+
+### 推荐流程
+
+1. Agent 解析当前 Codex、Claude 或 Paseo 会话；有多个候选时让用户按脱敏预览选择。
+2. Agent 对精确范围执行 dry run，不在例行核验中打印 transcript。
+3. dry run 有效后发布，核验 share id 与 Viewer URL，再把链接交给用户。
+4. 用户只想分享其中一段时，Agent 先展示用户消息起点候选，并用原始 boundary 排除分享请求本身。
+
+分享会把选中的可见会话上传到服务端；它不是 Insights 查询，也不会进入 Team Memory。生命周期、范围选择
+和 CLI 等价流程见[分享使用手册](./sharing-usage-guide.md)。
 
 ## 场景一：发布失败复盘，沉淀成团队经验
 

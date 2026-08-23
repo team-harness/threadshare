@@ -1,57 +1,84 @@
 # Threadshare
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [使用手册](./docs/README.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [使用手册](https://github.com/team-harness/threadshare/blob/main/docs/README.md)
 
 Threadshare 让 Agent 历史真正可复用：既能把 Codex、Claude Code 和 Paseo 会话发布为只读 Web
 链接，也能让 Agent 查询本地索引，发现 Tool 失败、工作流模式、历史解法和有证据的开发洞察。
 
-安装 CLI 后即可使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) 提供的默认托管服务，无需先部署服务端。
+一次性安装 CLI 后，直接让正在对话的 Codex 或 Claude Agent 分享当前聊天、调查本机历史，或沉淀经过
+确认的团队经验。分享默认使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com)
+托管服务，无需先部署服务端。
 
 需要自有域名、存储或基础设施控制时，可以独立部署同一套 Viewer、API 和 `threadshare-history@v1` 通用协议。Threadshare 不依赖特定 Agent provider 或云平台。
 
-## 快速开始
+## 从 Agent 对话开始
 
-Threadshare 需要 Node.js 20 或更高版本。
+Threadshare 的主要使用方式，是在已经打开的 Codex 或 Claude Code 对话中直接描述目标。Agent 应自行
+发现 Threadshare、解析当前会话或仓库、选择 MCP 或 CLI，并在发布内容或写入团队记忆前回到对话中确认。
 
-### 1. 安装 CLI
+### 直接说你想做什么
+
+| 目标 | 可以直接对 Codex 或 Claude 说 |
+|---|---|
+| 分享当前聊天 | “用 Threadshare 把当前聊天分享出来。先预检，再把只读 Viewer 链接给我。” |
+| 只分享其中一段 | “从我们开始讨论发布失败的那条消息起分享；先列出候选起点让我选。” |
+| 调查历史工作 | “用 Threadshare 分析最近一个月这个仓库的发布失败，找出反复模式并给出可复核证据。” |
+| 沉淀团队经验 | “回看最近两周这个仓库的发布失败，提出团队经验；我确认后再写入。” |
+| 生成 Agent Skill | “把已批准的发布经验整理成 release-checks Skill，先展示步骤、证据和限制。” |
+
+你不需要先找 session ID、选择 Insights Recipe、准备 JSON、挑 MCP tool 或指定 `--runner`；这些都是
+Agent 的执行细节。按任务查看[使用手册](https://github.com/team-harness/threadshare/blob/main/docs/README.md)，
+分享流程另见[分享使用手册](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md)。
+
+### 一次性接入 Agent
+
+Threadshare 需要 Node.js 20 或更高版本：
 
 ```bash
 npm install --global @team-harness/threadshare
 ```
 
-### 2. 查找会话
-
-不知道原生 session ID 时，可以列出最近更新的 10 个会话：
+Codex 用户再安装一次仓库自带的 Threadshare Skill，让 Agent 能识别上述请求并自行完成整个工作流：
 
 ```bash
-threadshare sessions codex
-threadshare sessions claude
+npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-每项包含完整 session ID、更新时间、项目、Git 分支，以及经过脱敏的首条可见用户请求预览。该命令只读取本机文件，不上传任何内容。使用 `--offset <n>` 和 `--limit <n>` 分页；Agent 或脚本增加 `--format json`，可获得稳定的单行响应。
+Codex Cloud 在环境初始化时去掉 `--global`。支持 MCP 的 Agent 还可以配置
+`threadshare insights mcp --stdio`，直接获得 Insights 与 Team Memory 工具；MCP 不是必需条件，Skill
+或其他本机 Agent 仍可调用已安装的 CLI，并在需要时读取 `threadshare <command> --help`。
 
-### 3. 分享会话
+### 对话中会发生什么
 
-根据会话所属的 provider 选择命令：
+1. Agent 把自然语言要求转换成有界的会话、时间窗、主题或仓库范围。
+2. Threadshare 返回预检、本机证据或候选计划，不会静默扩大范围。
+3. Agent 用自然语言解释结果，并吸收你的修改和补充。
+4. 分享发布和 Team Memory 写入只在明确确认点执行。
+
+Insights 与 Team Memory 默认留在本机；`share` 才会上传选中的可见会话，并返回不公开列出的 Viewer URL。
+
+### CLI 等价入口
+
+CLI 继续用于人在终端直接操作、脚本和排障。完整参数以 `threadshare <command> --help` 为准。
 
 ```bash
-# Codex 或 Codex Cloud
+# 不知道原生会话 ID 时先发现候选
+threadshare sessions codex
+threadshare sessions claude
+
+# 发布可见会话
 threadshare share codex <session-id-or-jsonl-file>
-
-# Claude Code
 threadshare share claude <session-id-or-jsonl-file>
-
-# 使用 Codex 或 Claude 的 Paseo agent
 threadshare share paseo <agent-id-or-prefix>
 ```
 
-`share` 会导出可见会话内容、执行协议校验、上传到默认托管服务，并输出 Viewer 链接：
+`share` 校验并上传选中的可见内容到默认托管服务，然后输出：
 
 ```text
 https://cloud-thread.team-harness.com/?id=<share-id>
 ```
 
-Agent 或脚本可以增加 `--json`，获得单行 `{"id":"...","url":"..."}` 响应。
+Agent 或脚本增加 `--json`，可获得稳定的单行响应。
 
 ### 上传前预检
 
@@ -139,8 +166,10 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 Local Insights 可以让 Agent 从已记录的 Codex 和 Claude 工作中发现跨 Session 的规律。用户只需用
 自然语言提出具体问题；Agent 会选择查询、检查覆盖范围，并只读取回答问题所需的证据。
 
-按任务一步步操作请看 [Insights 使用手册](./docs/insights-usage-guide.md)；需要判断某个问题应该停在
-Insights、进入 Team Memory，还是使用 `share`，请看 [Insights + Team Memory 场景手册](./docs/insights-memory-scenarios.md)。
+按任务一步步操作请看
+[Insights 使用手册](https://github.com/team-harness/threadshare/blob/main/docs/insights-usage-guide.md)；
+需要判断某个问题应该停在 Insights、进入 Team Memory，还是使用 `share`，请看
+[Insights + Team Memory 场景手册](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md)。
 
 ```bash
 threadshare insights sync
@@ -223,7 +252,8 @@ Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归
 Claude Code 对话中，用户直接说：“用 Threadshare 回看最近两周这个仓库关于发布失败的聊天，整理成团队
 经验。”当前 Agent 会直接引导回看、讨论、确认和写入流程。
 
-完整的确认步骤、CLI/MCP 对等关系和排障方式见 [Team Memory 使用手册](./docs/team-memory-usage-guide.md)。
+完整的确认步骤、CLI/MCP 对等关系和排障方式见
+[Team Memory 使用手册](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-usage-guide.md)。
 
 下面是等价 CLI 流程。人只提供普通筛选参数；`stage` 和 `prepare` 所需 JSON 由 Agent 生成并通过 stdin
 传入，不是要求用户创建或维护的文件。
@@ -231,8 +261,8 @@ Claude Code 对话中，用户直接说：“用 Threadshare 回看最近两周�
 ```bash
 threadshare memory init
 threadshare memory recall \
-  --since 2026-08-01T00:00:00.000Z \
-  --until 2026-08-22T00:00:00.000Z \
+  --since <start-utc> \
+  --until <end-utc> \
   --query "发布验证" \
   --providers claude,codex \
   --result-evidence provider-completed \
@@ -265,7 +295,7 @@ Scene/Doctrine 与 approved entry，最后才是用于原始取证的有界历�
 `stage → review --kind skill → prepare(kind=skill) → promote`；确认后通过
 `assemble --provider claude|codex` 投影到 `.claude/skills/` 或 `.codex/skills/`。装配或提交前可以用
 `memory lint .threadshare/memory/skills/<name>/SKILL.md` 显式校验 canonical Skill。详见
-[Skill 提取与装配](./docs/team-memory-skill-design.md)。
+[Skill 提取与装配](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-skill-design.md)。
 
 本机 Insights MCP server 暴露完全相同的稳定操作：`threadshare_memory_recall`、
 `threadshare_memory_synthesize`、`threadshare_memory_stage`、`threadshare_memory_review`、
@@ -344,17 +374,15 @@ Paseo agent 必须使用完整 UUID 或唯一 UUID 前缀。Threadshare 会通�
 
 目前只支持使用 Codex 或 Claude 的 Paseo agent。运行中的 agent 只能导出原生 provider 已持久化内容的 best-effort 快照，可能不包含仍在写入的尾部。
 
-## 安装 Codex Skill
+## Agent 接入参考
 
-仓库内置 `threadshare` Skill，用来规范 Codex 和 Codex Cloud 如何定位、分享和验证会话，并避免在常规检查中输出聊天正文或本地路径。
+仓库内置的 `threadshare` Skill 会告诉 Codex 和 Codex Cloud 如何定位、分析、分享和验证会话，以及如何
+执行需要逐步确认的 Team Memory 工作流。Skill 优先使用已安装的 CLI，不存在时回退到 `npx`；源文件
+位于 [`skills/threadshare`](./skills/threadshare)。
 
-为 Codex 全局安装：
-
-```bash
-npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
-```
-
-Skill 会优先使用已安装的 CLI，不存在时回退到 `npx`。Codex Cloud 可在环境初始化阶段去掉 `--global`，安装到项目范围。源文件位于 [`skills/threadshare`](./skills/threadshare)。
+MCP client 可以启动 `threadshare insights mcp --stdio`，暴露稳定的 Insights 与交互式 Team
+Memory 操作；分享仍由 CLI 完成。两种执行入口都会向 Agent 返回结构化结果，用户只需描述想得到的
+结果，不需要先选择工具名。
 
 ## 隐私与分享边界
 

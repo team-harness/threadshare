@@ -1,58 +1,92 @@
 # Threadshare
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [Usage guides](./docs/README.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [Usage guides](https://github.com/team-harness/threadshare/blob/main/docs/README.md)
 
 Threadshare makes AI-agent history useful: share Codex, Claude Code, and Paseo sessions as read-only
 web links, or let your Agent query a local index for Tool failures, workflow patterns, prior solutions,
 and evidence-backed development insights.
 
-Install the CLI and share through the hosted service at [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) without deploying anything first.
+After a one-time CLI install, ask the Codex or Claude Agent you are already working with to share the
+current conversation, investigate local history, or retain reviewed team experience. Sharing uses the
+hosted service at [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) without requiring
+you to deploy anything first.
 
 The same viewer, API, and portable `threadshare-history@v1` format can be self-hosted when you need your own domain, storage, or infrastructure controls. Threadshare remains independent of any agent provider or cloud platform.
 
-## Quick Start
+## Start With Your Agent
 
-Threadshare requires Node.js 20 or newer.
+Threadshare is designed to be used from an existing Codex or Claude Code conversation. Tell the Agent
+what outcome you want; it should discover Threadshare, resolve the current session or repository, choose
+MCP or CLI, and ask for confirmation when content will be published or repository memory will change.
 
-### 1. Install the CLI
+### Say What You Want
+
+| Goal | Say this to Codex or Claude |
+|---|---|
+| Share the current conversation | “Use Threadshare to share this conversation. Run a preflight first, then give me the read-only Viewer URL.” |
+| Share only part of it | “Share this conversation from where we started discussing the release failure. Show me candidate starting messages first.” |
+| Investigate past work | “Use Threadshare to analyze this repository's release failures from the last month and show evidence-backed recurring patterns.” |
+| Build Team Memory | “Review this repository's release-failure conversations from the last two weeks. Propose team experience, and write only after I confirm it.” |
+| Create an Agent Skill | “Turn our approved release experience into a reusable release-checks Skill. Show the steps, evidence, and limitations before writing it.” |
+
+You do not need to find a session ID, choose an Insights Recipe, prepare JSON, select an MCP tool, or
+specify `--runner`. Those are execution details for the Agent. See the task-oriented
+[usage guides](https://github.com/team-harness/threadshare/blob/main/docs/README.md), including the dedicated
+[sharing guide](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md).
+
+### One-Time Agent Setup
+
+Threadshare requires Node.js 20 or newer:
 
 ```bash
 npm install --global @team-harness/threadshare
 ```
 
-### 2. Find a Session
-
-When you do not already have the native session ID, list the 10 most recently updated sessions:
+For Codex, install the bundled Threadshare Skill once so the Agent can recognize these requests and
+follow the complete workflow without being given commands:
 
 ```bash
-threadshare sessions codex
-threadshare sessions claude
+npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-Each entry includes the complete session ID, update time, project, Git branch, and a redacted preview of the first visible user request. This command reads local files only and does not upload anything. Use `--offset <n>` and `--limit <n>` to page, or add `--format json` for the stable one-line response expected by agents and scripts.
+For Codex Cloud, omit `--global` during environment setup. An MCP-compatible Agent can additionally be
+configured to launch `threadshare insights mcp --stdio` for Insights and Team Memory tools. MCP is
+optional: the Skill and any other local Agent can invoke the installed CLI and inspect
+`threadshare <command> --help` when needed.
 
-### 3. Share a Conversation
+### What Happens In The Conversation
 
-Choose the provider that owns the session:
+1. The Agent translates your request into a bounded session, time window, topic, or repository scope.
+2. Threadshare returns a preflight, local evidence, or a candidate plan instead of silently widening the scope.
+3. The Agent explains the result in normal language and incorporates your corrections.
+4. Publishing and Team Memory writes happen only at their explicit confirmation points.
+
+Insights and Team Memory remain local by default. `share` is the operation that uploads selected visible
+conversation content and returns an unlisted Viewer URL.
+
+### Direct CLI Equivalent
+
+The CLI remains useful for terminal users, scripts, and troubleshooting. Use
+`threadshare <command> --help` as the complete parameter reference.
 
 ```bash
-# Codex or Codex Cloud
+# Discover a native session when you do not already know its ID
+threadshare sessions codex
+threadshare sessions claude
+
+# Publish a visible conversation
 threadshare share codex <session-id-or-jsonl-file>
-
-# Claude Code
 threadshare share claude <session-id-or-jsonl-file>
-
-# A Codex- or Claude-backed Paseo agent
 threadshare share paseo <agent-id-or-prefix>
 ```
 
-`share` exports visible conversation content, validates it, uploads it to the default hosted service, and prints a Viewer URL:
+`share` validates and uploads the selected visible content to the default hosted service, then prints:
 
 ```text
 https://cloud-thread.team-harness.com/?id=<share-id>
 ```
 
-Add `--json` for the one-line `{"id":"...","url":"..."}` response expected by agents and scripts.
+Add `--json` for the stable one-line response expected by Agents and scripts.
 
 ### Check Before Uploading
 
@@ -141,8 +175,9 @@ Local Insights lets your Agent investigate patterns across your recorded Codex a
 concrete question in natural language. The Agent chooses the queries, checks coverage, and reads only
 the evidence needed for its answer.
 
-For a task-oriented walkthrough, see the [Insights usage guide](./docs/insights-usage-guide.md) and the
-[Insights + Team Memory scenario cookbook](./docs/insights-memory-scenarios.md).
+For a task-oriented walkthrough, see the
+[Insights usage guide](https://github.com/team-harness/threadshare/blob/main/docs/insights-usage-guide.md)
+and the [Insights + Team Memory scenario cookbook](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md).
 
 ```bash
 threadshare insights sync
@@ -233,7 +268,8 @@ last two weeks and turn them into team experience." The Agent can guide the inte
 confirmation flow directly from the current conversation.
 
 The complete confirmation flow, CLI/MCP mapping, and troubleshooting steps are in
-the [Team Memory usage guide](./docs/team-memory-usage-guide.md). The [scenario cookbook](./docs/insights-memory-scenarios.md)
+the [Team Memory usage guide](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-usage-guide.md).
+The [scenario cookbook](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md)
 helps choose between Insights, Memory, and `share`.
 
 The equivalent CLI flow is shown below. People supply normal filter parameters. The JSON consumed by
@@ -243,8 +279,8 @@ author or maintain.
 ```bash
 threadshare memory init
 threadshare memory recall \
-  --since 2026-08-01T00:00:00.000Z \
-  --until 2026-08-22T00:00:00.000Z \
+  --since <start-utc> \
+  --until <end-utc> \
   --query "release verification" \
   --providers claude,codex \
   --result-evidence provider-completed \
@@ -280,7 +316,7 @@ so entry/scene/doctrine drift is rejected through promotion. The shared lifecycl
 `assemble --provider claude|codex` projects the agent-neutral source to `.claude/skills/` or
 `.codex/skills/`. `memory lint .threadshare/memory/skills/<name>/SKILL.md` verifies a canonical
 Skill explicitly before assembly or commit. See
-[Skill extraction and assembly](./docs/team-memory-skill-design.md).
+[Skill extraction and assembly](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-skill-design.md).
 
 The local Insights MCP server exposes the same stable operations:
 `threadshare_memory_recall`, `threadshare_memory_synthesize`, `threadshare_memory_stage`,
@@ -364,17 +400,15 @@ A Paseo agent reference must be a full UUID or a unique UUID prefix. Threadshare
 
 Only Codex- and Claude-backed Paseo agents are supported. A running agent produces a best-effort snapshot of content already persisted by its native provider, so an in-flight tail may be absent.
 
-## Install the Codex Skill
+## Agent Integration Reference
 
-The bundled `threadshare` Skill teaches Codex and Codex Cloud how to locate, share, and verify sessions without printing transcript contents or local paths during routine checks.
+The bundled `threadshare` Skill teaches Codex and Codex Cloud how to locate, analyze, share, and verify
+sessions, and how to run the reviewed Team Memory workflow. It uses the installed CLI when available
+and falls back to `npx`. The source lives in [`skills/threadshare`](./skills/threadshare).
 
-Install it globally for Codex:
-
-```bash
-npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
-```
-
-The Skill uses the installed CLI when available and falls back to `npx`. For Codex Cloud, omit `--global` during environment setup to install it at project scope. The source lives in [`skills/threadshare`](./skills/threadshare).
+MCP clients can launch `threadshare insights mcp --stdio` to expose the stable Insights and interactive
+Team Memory operations. Sharing continues through the CLI. Both execution surfaces return structured
+results for the Agent; the user starts with an outcome in natural language rather than a tool name.
 
 ## Privacy and Sharing Model
 
