@@ -1,8 +1,8 @@
 # Team Memory 使用手册
 
 Team Memory 让当前 Codex 或 Claude Agent 事后回看本机历史，把用户确认过的经验写进仓库。正常使用时，
-用户只描述想回看的范围和期望结果；Agent 负责调用 Threadshare、分析材料、生成协议对象，并在每个写入点
-回到对话中确认。
+用户只描述想回看的范围和期望结果；Agent 负责调用 Threadshare、分析材料和生成协议对象，并在写入前
+用一个批次同时确认保留决策、事实表述、证据和最终文件变化。
 
 ## 1. 直接对 Agent 说
 
@@ -41,11 +41,9 @@ Team Memory 让当前 Codex 或 Claude Agent 事后回看本机历史，把用�
 | 对话阶段 | Agent 展示什么 | 用户决定什么 | 是否写仓库 |
 |---|---|---|---:|
 | 确定范围 | 时间、主题、provider 等筛选 | 回看范围是否正确 | 否 |
-| 阅读与提炼 | 候选文字、原始证据、confidence、limitations | 修改、补充或删除候选 | 否 |
-| 去重裁决 | 与已有记忆/候选的比较 | `store`、`skip`、`update` 或 `merge` | 否 |
-| Statement review | 最终 statement 与证据绑定 | 逐条确认事实表述 | 否 |
-| 文件计划 | 将写入的路径、diff 和 lint 结果 | 是否执行这个精确计划 | 否 |
-| Promote | 实际写入结果 | 后续是否 commit/push | 是 |
+| 阅读与提炼 | 候选、原始证据、confidence、limitations 和去重比较 | 需要时补充或纠正 | 否 |
+| 单次批量确认 | `store/skip/update/merge`、最终 statements、证据、路径、diff、lint | 批准或要求修改整个精确批次 | 否 |
+| Promote | 与已确认 `approvalDigest` 一致的实际写入结果 | 后续是否 commit/push | 是 |
 
 用户可以在任一阶段修改措辞或补充限制。文字变化会使旧确认失效，Agent 应让 Threadshare 重新生成后续
 绑定，不能沿用旧 digest。`promote` 只修改 `.threadshare/memory/**` 和本机 approved projection，
@@ -64,15 +62,18 @@ Recall 默认一次返回一个完整 chunk。Agent 逐个读取，并使用 `ch
 
 ### 3.2 提交和去重
 
-Agent 先把讨论后的候选交给 Threadshare。Threadshare 返回当前 approved/candidate pool，Agent 再和用户
-确认哪些候选应保留、跳过、更新或合并。只有第二次精确裁决才会把保留项放入 quarantine；没有候选时
-会记录显式 no-op，而不是假装处理成功。
+Agent 把候选交给 Threadshare。Threadshare 返回当前 approved/candidate pool，Agent 形成
+`store/skip/update/merge` 建议并放入私有 quarantine；这些内部状态变化不写仓库，也不需要逐步打断用户。
+没有候选时会记录显式 no-op，而不是假装处理成功。存在真实歧义时，Agent 仍应先询问，不能为了减少
+回合数而猜测裁决。
 
 ### 3.3 Review、Prepare、Promote
 
-Threadshare 在 review 时重新计算 statement、citation、policy 和 source binding。用户确认精确 statement
-后，Agent 才 prepare 文件计划；用户再确认计划，Agent 才 promote。仓库或历史输入变化会让旧计划
-stale，流程会 fail closed，避免“审的是 A，写的是 B”。
+Threadshare 在只读 review 时重新计算 statement、citation、policy、source binding、净化后的文件正文
+和 target blob，并返回一个 `approvalDigest`。Agent 一次展示裁决、statements、证据、limitations、diff
+和 lint。用户确认后，Agent 原样提交 `approval.prepareRequest`；prepare 只有在 digest 未变化时才确认
+statement 并生成 plan，随后 Agent 可直接 promote，不再要求重复确认。任何仓库、正文、lint 或历史输入
+变化都会使 digest 失效并要求展示新批次，避免“审的是 A，写的是 B”。
 
 Agent 可以通过 MCP 或 CLI 完成相同步骤。MCP 更适合已经配置工具的对话；CLI 是始终可用的本机等价
 入口。执行通道不改变确认点。
@@ -101,6 +102,7 @@ Entry 适合短、可复用、带适用条件的事实或做法，例如“发�
 
 用户可以直接要求 Agent“整理已有记忆”。Agent 使用 `synthesize` 读取 approved entries 与当前
 scene/doctrine，提出增删改计划，再走相同 review/prepare/promote 确认链。
+Scene、Doctrine 和 Skill 也使用同一个单次批量确认包；Threadshare 物化后的 `heat` 会出现在该 diff 中。
 
 `--if-due` 只在至少 20 条已批准 Entry 新增或变化时继续；`--full` 用于忽略成功基线、重新检查全部
 approved entries。空 Patch 会成为可见 no-op 基线，但不会阻止以后显式 full replay。
@@ -145,8 +147,10 @@ printf '%s\n' '<AdjudicationResult JSON>' \
   | threadshare memory stage --request - --format json
 
 threadshare memory review --format json
-printf '%s\n' '<PrepareRequest JSON>' \
+# Agent 展示 review.approval 一次；用户确认后原样提交：
+printf '%s\n' '<review.approval.prepareRequest JSON>' \
   | threadshare memory prepare --request - --format json
+# prepare 回显相同 approvalDigest 后直接执行：
 threadshare memory promote --plan <plan-id> --format json
 ```
 
@@ -180,8 +184,9 @@ Agent 可以使用 `threadshare_memory_search` 查询已批准 Memory；交互�
 `threadshare_memory_review`、`threadshare_memory_prepare`、`threadshare_memory_promote` 和
 `threadshare_memory_assemble`。
 
-稳定生命周期同时提供 MCP 和 CLI 入口，并保持等价的 source checks、状态、确认结果和错误语义。切换
-transport 不能跳过 review 或最终写入确认。只读查询的具体入口由 Agent 选择，用户仍只描述想找的经验。
+稳定生命周期同时提供 MCP 和 CLI 入口，并保持等价的 source checks、approval preview、状态、确认结果和
+错误语义。切换 transport 不能跳过 review 或唯一的写入确认。只读查询的具体入口由 Agent 选择，用户仍
+只描述想找的经验。
 
 ## 8. `--runner` 只用于独立批处理
 

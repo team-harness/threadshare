@@ -206,7 +206,7 @@ async function toolCatalog() {
     {
       name: MEMORY_TOOL_NAMES.review,
       title: "Review staged Team Memory candidates",
-      description: "List exact candidate revisions, statements, evidence summaries, and confirmation digests without changing state.",
+      description: "Return exact candidate statements, evidence, and a digest-bound file-change preview without changing state. Show that approval preview once before a canonical write.",
       inputSchema: {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         type: "object",
@@ -280,7 +280,7 @@ async function toolCatalog() {
     {
       name: MEMORY_TOOL_NAMES.prepare,
       title: "Prepare confirmed Team Memory candidates",
-      description: "Confirm exact candidate statement digests and return a CAS-bound worktree promotion plan without applying it.",
+      description: "Confirm an exact review batch and return a CAS-bound worktree promotion plan without applying it. When approvalDigest matches the displayed preview, the Agent may promote without another user confirmation.",
       inputSchema: memoryPrepare,
       annotations: {
         readOnlyHint: false,
@@ -574,7 +574,7 @@ export function createInsightsMcpServer(options = {}) {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "threadshare-insights", version: "1.0.0" },
-          instructions: "Users ask natural-language questions. Call threadshare_insights_spec for bounded reads. For Agent-native Team Memory use recall or synthesize and discuss the result with the user. L1 draft staging returns an AdjudicationTask; compare its pool, stage an exact store/skip/update/merge AdjudicationResult, then review, prepare, and promote. These operations have the same semantics as the CLI. Runner-based extract/consolidate remain optional batch workflows.",
+          instructions: "Users ask natural-language questions. Call threadshare_insights_spec for bounded reads. For Agent-native Team Memory use recall or synthesize, stage the Agent's bounded proposal, and call review. Show the returned approval preview once, including decisions, statements, evidence, and exact file changes. After confirmation pass its prepareRequest unchanged to prepare; if approvalDigest is echoed, promote without another prompt. Any drift or changed preview requires a new confirmation. CLI and MCP preserve the same semantics. Runner-based extract/consolidate remain optional batch workflows.",
         },
       };
     }

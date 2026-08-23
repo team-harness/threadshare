@@ -64,19 +64,24 @@ Agent 提交的最小协议是 `schema/threadshare-memory-skill-candidate.v1.sch
 - `create` 要求目标不存在；`update` 必须携带目标当前正文的 SHA-256 `expectedContentDigest`。Skill 没有 delete 操作。
 - `memoryContextDigest` 必须原样回显同一次 recall 的 `memoryContext.bindingDigest`。它绑定全部 approved entry revision、Scene digest/heat 和 Doctrine digest，不由 Agent 计算。
 - 每条 statement 都必须引用至少一个同一 recall source 的 evidence id；statement id 和同一 statement 内的 evidence id 必须唯一。Threadshare 从 source binding 和证据目录重新计算 assessment，Agent 不能自报 digest、strength 或 heat。
-- 生成性 statement 默认是 `unverified`；`review` 中逐条确认后才允许 `prepare`。
+- 生成性 statement 默认是 `unverified`；每条 statement 仍独立绑定确认 digest，但可在一个 approval batch
+  中一起确认后进入 `prepare`。
 
 Threadshare 内部仍复用 v2 memory-state 的 extraction task 和 candidate 表，Skill payload 带有 `candidateKind: "skill"`，因此不需要破坏性数据库迁移。Skill 在 entry recall/去重池中被排除，但 review、promotion CAS 和审计仍走同一状态机。
 
 ## 3. 审核与写入
 
-`memory review --kind skill` 会重新读取当前 Skill 目标并校验 create/update digest，同时展示 statement、证据摘要、限制和确认 digest。目标正文、provider session id、turn key 和 payload 引用不会写入 Git；原始引用仅保存在本机 0600 memory-state 中。
+`memory review --kind skill` 会重新读取当前 Skill 目标并校验 create/update digest，同时返回包含 statement、
+证据摘要、限制、目标 blob 和精确 Skill 文件正文的 `approval` preview。目标正文、provider session id、
+turn key 和 payload 引用不会写入 Git；原始引用仅保存在本机 0600 memory-state 中。
 
-`memory prepare --request -` 的 `kind` 必须是 `skill`，请求内容只引用 review 返回的 candidate revision、statementTextDigest 和 citationsDigest。Prepare 产生精确 PromotionPlan，包含目标 blob CAS 与净化后的正文。只有用户确认该计划后才执行：
+`memory prepare --request -` 的 `kind` 必须是 `skill`。正常 Agent 路径一次展示完整 approval preview；用户
+确认后原样提交其中的 `prepareRequest`。Prepare 在确认 statement 前校验 `approvalDigest`，产生包含目标
+blob CAS 与净化正文的精确 PromotionPlan；回显 digest 一致时直接执行，不重复询问：
 
 ```bash
 threadshare memory review --kind skill --format json
-printf '%s\n' '<PrepareRequest kind=skill>' \
+printf '%s\n' '<review.approval.prepareRequest>' \
   | threadshare memory prepare --request - --format json
 threadshare memory promote --plan <plan-id> --format json
 ```
@@ -120,7 +125,10 @@ Skill 没有单独的 transport 专用操作。CLI 和 MCP 共同使用 `stage`�
 | `memory promote --plan <id>` | `threadshare_memory_promote` |
 | `memory assemble --provider <x>` | `threadshare_memory_assemble({provider:"<x>"})` |
 
-两种入口共享 recall 的 `skillContext`/`memoryContext`、zod/Rust contract、candidate 状态、证据绑定、错误码、PromotionPlan、CAS 和 provider 装配实现。MCP 的 `tools/list` 同时公布带 `memoryContextDigest` 的 `SkillCandidate@v1` 与 `threadshare_memory_assemble`；切换 transport 不会跳过确认或改变写入语义。
+两种入口共享 recall 的 `skillContext`/`memoryContext`、approval preview、zod/Rust contract、candidate 状态、
+证据绑定、错误码、PromotionPlan、CAS 和 provider 装配实现。MCP 的 `tools/list` 同时公布带
+`memoryContextDigest` 的 `SkillCandidate@v1` 与 `threadshare_memory_assemble`；切换 transport 不会跳过
+唯一的批量确认或改变写入语义。
 
 ## 6. 验收
 

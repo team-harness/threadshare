@@ -46,10 +46,10 @@
 
 1. Agent 确认当前 worktree，必要时先执行 `threadshare insights sync --repository .`。
 2. 调用 `memory recall`，带明确时间窗和“发布失败”等主题；默认一次处理一个 chunk。
-3. 逐条展示候选、原始 Turn 的 evidence id、证据强度和限制；接受用户补充。
-4. 依次执行 `stage(draft) → stage(adjudication) → review`。
-5. 用户确认精确 candidate 后 `prepare`，再展示文件 diff。
-6. 用户确认后 `promote`，最后检查 `.threadshare/memory/**` 和需要的 provider projection。
+3. 形成候选和去重建议，依次执行 `stage(draft) → stage(adjudication) → review`；这些步骤只改私有状态。
+4. 一次展示 review 返回的裁决、statements、原始 evidence、限制、精确文件 diff 和 lint。
+5. 用户确认这个 `approvalDigest` 后，原样提交 `approval.prepareRequest`；prepare 回显相同 digest 时直接
+   `promote`，最后检查 `.threadshare/memory/**` 和需要的 provider projection。
 
 ### 结果应该是什么
 
@@ -133,7 +133,8 @@ threadshare memory synthesize --if-due --format json
 printf '%s\n' '<ConsolidationPatch@v1 JSON>' \
   | threadshare memory stage --request - --format json
 threadshare memory review --kind consolidation --format json
-printf '%s\n' '<PrepareRequest@v1 JSON>' \
+# 用户一次确认 review.approval 后：
+printf '%s\n' '<review.approval.prepareRequest JSON>' \
   | threadshare memory prepare --request - --format json
 threadshare memory promote --plan <plan-id> --format json
 ```
@@ -154,10 +155,10 @@ threadshare memory promote --plan <plan-id> --format json
 停止复用旧 candidate、task、assessment 和 plan。重新执行受影响的最小流程：
 
 ```text
-source 变化       → recall / synthesize
-candidate 文字变化 → stage / review
-review 后文件变化  → review / prepare
-plan 后目标变化    → prepare / promote
+source 变化          → recall / synthesize
+candidate 文字变化   → stage / review
+approval preview 变化 → 重新展示并确认
+plan 后目标变化       → review / prepare
 ```
 
 Fail closed 的目的就是避免“审的是 A，最后写的是 B”。不要手动改 digest 或绕过状态机。
@@ -175,8 +176,9 @@ Fail closed 的目的就是避免“审的是 A，最后写的是 B”。不要�
 1. 通过 `threadshare insights mcp --stdio` 完成 `initialize` 和 `tools/list`。
 2. 用 `threadshare_insights_spec` 或 `threadshare_memory_recall` 选择有界输入。
 3. 通过 `threadshare_memory_stage` 两次提交 draft/adjudication。
-4. 通过 `threadshare_memory_review` 展示 evidence 和 digest。
-5. 用户确认后调用 `threadshare_memory_prepare`，再次确认 exact plan，最后调用 `threadshare_memory_promote`。
+4. 通过 `threadshare_memory_review` 一次展示裁决、evidence、statements 和精确文件变化。
+5. 用户确认后把 `approval.prepareRequest` 原样传给 `threadshare_memory_prepare`；返回相同
+   `approvalDigest` 时直接调用 `threadshare_memory_promote`，不再追加确认。
 
 CLI 和 MCP 的状态、校验、错误码和写入结果应等价；换 transport 不应跳过用户确认。批量预览和只读搜索不代表完整的确认写入流程。
 
@@ -192,8 +194,9 @@ CLI 和 MCP 的状态、校验、错误码和写入结果应等价；换 transpo
 
 1. Agent 调用 `memory recall`，先查看 `skillContext` 中的相关现有 Skill，再按 `memoryContext` 中的 Scene、Doctrine、approved entry 建立已有共识，最后读取当前仓库、时间窗和主题筛选命中的完整 Turn。
 2. Agent 将 Memory 中已经收敛、并被原始 Turn 证据支持的稳定步骤写成 `SkillCandidate@v1`：回显 `memoryContext.bindingDigest`，参数化具体路径、ID 和临时值；每条 statement 引用 recall 返回的 Turn evidence id；不把 secret、provider session id 或原始日志复制进正文。
-3. 用户补充适用条件后，Agent 调用 `stage`；Threadshare 将候选直接放入 quarantine。用 `memory review --kind skill` 逐条确认 statement，再用 `prepare(kind=skill)` 生成精确 Skill 文件 diff。
-4. 用户确认 PromotionPlan 后调用 `promote`，再运行：
+3. Agent 调用 `stage`；Threadshare 将候选放入 quarantine。`memory review --kind skill` 返回包含最终
+   statements、证据和精确 Skill 文件 diff 的单次 approval preview。
+4. 用户确认该批次后，Agent 用其 `prepareRequest` 完成 prepare；digest 未变化便直接 `promote`，再运行：
 
 ```bash
 threadshare memory assemble --provider codex

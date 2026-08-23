@@ -67,7 +67,9 @@
 
 - 用户在当前 Codex/Claude 对话中描述时间窗和主题。`memory recall` / `threadshare_memory_recall` 直接返回完整有界 Turn chunk、evidence catalog 与输出契约；`chunk.turnEvidence[]` 和 transcript 内的 `<<past-turn index="…" evidence-id="…">>` 提供逐 Turn 精确映射，不让 Agent 猜 `ev-*` 顺序；不先返回 content-free offer，也不启动第二个 Agent；
 - 当前 Agent 可以拥有宿主授予的 shell、文件和网络能力。Threadshare 不使用 Broker/WebAuthn 区分用户与 Agent，也不增加读取授权或 declassification；用户选择该 Agent 即接受它读取这些材料；
-- Agent 先与用户讨论拟议文字，再提交最终 `CandidateDraftBatch@v1`；`review/prepare/promote` 通过精确 revision/digest/target CAS 固定写入内容，但不构成独立的人类身份认证。
+- Agent 形成拟议文字并进入私有 stage；`review` 返回绑定裁决、statements、证据和精确文件变化的单一
+  `approvalDigest`。用户一次确认后，`prepare/promote` 通过该 digest、revision 和 target CAS 固定写入内容，
+  但不构成独立的人类身份认证。
 
 **Runner batch 模式（可选自动化，对 F7 / F9 / F10）**：
 
@@ -141,7 +143,7 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
 
 用户可以在 Codex/Claude 对话中直接描述回看条件，不需要手写 `memory-filter.json`，也不需要为当前 Agent 再指定 `--runner`。Threadshare 把自然语言条件规范化为有界 selection，并直接返回完整 Turn chunk、opaque evidence catalog、source binding 与输出契约。当前 Agent 阅读材料、向用户展示拟议 candidate、合入补充后再提交最终 draft。
 
-交互路径与 batch Runner 路径共用 extraction/adjudication/candidate/promotion 状态机。当前 Agent 被视为用户授权的本机代理；Threadshare 不使用 Broker/WebAuthn，不限制它的 ambient capability，也不声称抵御恶意本机 Agent。第一次 `stage` 提交 `CandidateDraftBatch@v1` 并返回绑定当前记忆池的 `AdjudicationTask@v1`；Agent 与用户比较后，第二次 `stage` 提交精确 `AdjudicationResult@v1`，只有 `store/update/merge` 保留项才进入隔离区。`review` 返回精确 candidate revision、statement/citation digest；用户确认后 Agent 调用 `prepare`，最终确认后调用 `promote`。这是防 stale 和审 A 写 B 的状态绑定，不是不可伪造的用户授权。
+交互路径与 batch Runner 路径共用 extraction/adjudication/candidate/promotion 状态机。当前 Agent 被视为用户授权的本机代理；Threadshare 不使用 Broker/WebAuthn，不限制它的 ambient capability，也不声称抵御恶意本机 Agent。第一次 `stage` 提交 `CandidateDraftBatch@v1` 并返回绑定当前记忆池的 `AdjudicationTask@v1`；第二次 `stage` 提交精确 `AdjudicationResult@v1`，只有 `store/update/merge` 保留项才进入隔离区。`review` 返回精确 candidate revision、statement/citation digest 与文件 preview；用户一次确认其 `approvalDigest` 后，Agent 原样调用 `prepare`，digest 未漂移便直接 `promote`。这是防 stale 和审 A 写 B 的状态绑定，不是不可伪造的用户授权。
 
 所有稳定 Team Memory 操作由共享 operation registry 定义，CLI 与 MCP 只是 Adapter。Registry 固定 operation version、stability、schema、side-effect class、capability vector 与 approval policy；同 capability fixture 下，两端必须产生相同业务投影、状态/file digest、稳定错误和 CAS。不可用 stub 不算实现。完整协议与 parity 验收矩阵见 `docs/team-memory-interactive-design.md`。
 
@@ -160,9 +162,9 @@ RepositoryBinding（repositoryKey + worktreeKey + memoryRoot）
   → batch：AdjudicationTask@v1 → Runner → AdjudicationResult@v1
     Agent-native：AdjudicationTask@v1 → 当前 Agent ↔ 用户 → stage（AdjudicationResult@v1）
   → 事务 2：候选 revision/FTS CAS、裁决、quarantined、chunk 游标推进
-  → memory review：展示精确 statement/citation digest
-  → 用户确认 → Agent prepare → owner-bound PromotionPlan@v1
-  → 用户最终确认 → Agent promote → promotion journal 写工作区（只改文件，不碰 git 历史）
+  → memory review：展示裁决、statement/citation、证据与精确文件 preview
+  → 用户一次确认 approvalDigest → Agent prepare → digest 无漂移 → owner-bound PromotionPlan@v1
+  → Agent promote → promotion journal 写工作区（只改文件，不碰 git 历史）
   → 用户常规 git commit / PR
   → insights sync 摄入 → Memory FTS 投影
   → Agent recall（assemble adapter 装配 + memory_search 工具）
@@ -545,7 +547,7 @@ git entry:                                           approved ──被替代─
 | R9 | Runner 参数或 CLI 升级重新打开 ambient capability | profile 固化全部 deny 参数；二进制内容/profile digest 变化使签名 conformance 失效；真实 Codex live gate 作为发布前专项验收，失败即拒绝交付 |
 | R10 | conformance test 的探针覆盖不完备 | 测试用例随包版本化、可追加；指纹绑定 CLI 版本，升级即重测；缺陷按安全 issue 流程处理 |
 | R11 | 模型服务端可能留存 transcript（providerRetention 无法由本机保证） | RunnerExecutionPlan 如实申报 providerRetention（默认 unknown）；团队可在 profile 中固定为已签约 no-retention 的端点；这是授权决策的输入而非技术保证 |
-| R12 | 生成性记忆逐条确认降低审核吞吐 | 接受（可信度优先）；“批准全部”仅开放给确定性 typed-fact；review UI 把 statement 与证据并排，减少确认成本 |
+| R12 | 生成性记忆逐条确认降低审核吞吐 | 每条 statement 仍独立绑定 digest，但 UI 将裁决、全部 statements、证据和文件 diff 合成一次 approval batch；任一项变化才重新确认 |
 | R13 | approved/candidate 双投影可能漂移或排序不一致 | candidate 行与 FTS 同事务；approved 投影先 sync；召回算法/analyzer 版本化；提交重跑并比较包含 revision/content/state 的 resultSetDigest |
 | R14 | 受信 Agent 未经用户同意调用 prepare/promote | Owner 明确接受该信任模型：Threadshare 不认证用户与 Agent；exact revision/digest/target CAS 防 stale/误写，宿主权限、Git review/branch protection 与团队流程承担恶意或越权 Agent 风险 |
 | R15 | Agent/Runner 把秘密写进 candidate | Agent-native 由当前 Agent 直接提炼，batch 输出留 private state；两条路径在 PromotionPlan 前统一执行 secret/session/path lint、schema/容量限制和逐 statement review |

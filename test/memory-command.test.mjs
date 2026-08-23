@@ -994,20 +994,58 @@ test("Agent-native recall, stage, prepare, and promote form a runner-free CLI wo
   );
   assert.equal(reviewed.items.length, 1);
   const candidate = reviewed.items[0];
+  assert.equal(reviewed.approval.format, "threadshare-memory-approval-preview@v1");
+  assert.equal(reviewed.approval.changes.length, 1);
+  assert.match(reviewed.approval.changes[0].content, /npm run test:release/u);
+  assert.equal(reviewed.approval.prepareRequest.approvalDigest,
+    reviewed.approval.approvalDigest);
+  assert.deepEqual(reviewed.approval.prepareRequest.candidates, [{
+    candidateId: candidate.candidateId,
+    expectedRevision: candidate.revision,
+    statements: candidate.assessments.map((assessment) => ({
+      statementId: assessment.statementId,
+      statementTextDigest: assessment.statementTextDigest,
+      citationsDigest: assessment.citationsDigest,
+    })),
+  }]);
+
+  await assert.rejects(
+    executeMemoryMcp("prepare", {
+      ...reviewed.approval.prepareRequest,
+      approvalDigest: "0".repeat(64),
+    }, { ...fixture.options, repository: fixture.repository }),
+    (error) => error?.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  const unchanged = (await executeMemoryMcp(
+    "review",
+    { kind: "entry" },
+    { ...fixture.options, repository: fixture.repository },
+  )).items[0];
+  assert.equal(unchanged.assessments[0].claimSupport, "unverified");
+
+  const approvalTarget = path.join(
+    fixture.repository,
+    reviewed.approval.changes[0].targetPath,
+  );
+  await writeFile(approvalTarget, "outside edit after review\n");
+  await assert.rejects(
+    executeMemoryMcp(
+      "prepare",
+      reviewed.approval.prepareRequest,
+      { ...fixture.options, repository: fixture.repository },
+    ),
+    (error) => error?.code === "TS_MEMORY_BINDING_DRIFT",
+  );
+  const targetDrifted = (await executeMemoryMcp(
+    "review",
+    { kind: "entry" },
+    { ...fixture.options, repository: fixture.repository },
+  )).items[0];
+  assert.equal(targetDrifted.assessments[0].claimSupport, "unverified");
+  await unlink(approvalTarget);
+
   const prepareFile = path.join(fixture.repository, "agent-prepare.json");
-  await writeFile(prepareFile, `${JSON.stringify({
-    format: "threadshare-memory-prepare-request@v1",
-    kind: "entry",
-    candidates: [{
-      candidateId: candidate.candidateId,
-      expectedRevision: candidate.revision,
-      statements: candidate.assessments.map((assessment) => ({
-        statementId: assessment.statementId,
-        statementTextDigest: assessment.statementTextDigest,
-        citationsDigest: assessment.citationsDigest,
-      })),
-    }],
-  })}\n`);
+  await writeFile(prepareFile, `${JSON.stringify(reviewed.approval.prepareRequest)}\n`);
   const prepared = await executeMemoryCommand(
     parseMemoryInvocation(["memory", "prepare"], {
       repository: fixture.repository,
@@ -1017,8 +1055,10 @@ test("Agent-native recall, stage, prepare, and promote form a runner-free CLI wo
     fixture.options,
   );
   assert.equal(prepared.format, "threadshare-memory-prepare@v1");
+  assert.equal(prepared.approvalDigest, reviewed.approval.approvalDigest);
   assert.equal(prepared.plan.changes.length, 1);
   assert.match(prepared.plan.changes[0].content, /npm run test:release/u);
+  assert.match(prepared.note, /without another confirmation/u);
 
   const promoted = await executeMemoryCommand(
     parseMemoryInvocation(["memory", "promote"], {
@@ -1130,19 +1170,15 @@ test("SkillCandidate stages, reviews, promotes, and assembles through the shared
   const item = reviewed.items[0];
   assert.equal(item.payload.skill.name, "release-checks");
   assert.equal(item.payload.skill.description, "Run the release checks before publishing.");
-  const prepared = await executeMemoryMcp("prepare", {
-    format: "threadshare-memory-prepare-request@v1",
-    kind: "skill",
-    candidates: [{
-      candidateId: item.candidateId,
-      expectedRevision: item.revision,
-      statements: item.assessments.map((assessment) => ({
-        statementId: assessment.statementId,
-        statementTextDigest: assessment.statementTextDigest,
-        citationsDigest: assessment.citationsDigest,
-      })),
-    }],
-  }, options);
+  assert.equal(reviewed.approval.changes[0].targetPath,
+    ".threadshare/memory/skills/release-checks/SKILL.md");
+  assert.match(reviewed.approval.changes[0].content, /npm run test:release/u);
+  const prepared = await executeMemoryMcp(
+    "prepare",
+    reviewed.approval.prepareRequest,
+    options,
+  );
+  assert.equal(prepared.approvalDigest, reviewed.approval.approvalDigest);
   assert.equal(prepared.plan.changes[0].targetPath,
     ".threadshare/memory/skills/release-checks/SKILL.md");
   const promoted = await executeMemoryCommand(
@@ -1588,20 +1624,13 @@ test("Agent-native MCP exposes the same recall-to-promote workflow as the CLI", 
     })),
   }, options);
   assert.equal(adjudicated.reviewItems.length, 1);
-  const candidate = (await executeMemoryMcp("review", { kind: "entry" }, options)).items[0];
-  const prepared = await executeMemoryMcp("prepare", {
-    format: "threadshare-memory-prepare-request@v1",
-    kind: "entry",
-    candidates: [{
-      candidateId: candidate.candidateId,
-      expectedRevision: candidate.revision,
-      statements: candidate.assessments.map((assessment) => ({
-        statementId: assessment.statementId,
-        statementTextDigest: assessment.statementTextDigest,
-        citationsDigest: assessment.citationsDigest,
-      })),
-    }],
-  }, options);
+  const reviewed = await executeMemoryMcp("review", { kind: "entry" }, options);
+  const prepared = await executeMemoryMcp(
+    "prepare",
+    reviewed.approval.prepareRequest,
+    options,
+  );
+  assert.equal(prepared.approvalDigest, reviewed.approval.approvalDigest);
   assert.equal(prepared.plan.changes.length, 1);
   const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);
   assert.equal(promoted.status, "applied");
@@ -1672,24 +1701,21 @@ test("Agent-native synthesis promotes approved L1 into a reviewed scene without 
   const staged = await executeMemoryMcp("stage", patch, options);
   assert.equal(staged.candidates.length, 1);
   assert.equal(staged.reviewItems[0].candidateKind, "consolidation-patch");
-  const candidate = (await executeMemoryMcp(
+  const reviewed = await executeMemoryMcp(
     "review",
     { kind: "consolidation" },
     options,
-  )).items[0];
-  const prepared = await executeMemoryMcp("prepare", {
-    format: "threadshare-memory-prepare-request@v1",
-    kind: "consolidation",
-    candidates: [{
-      candidateId: candidate.candidateId,
-      expectedRevision: candidate.revision,
-      statements: candidate.assessments.map((assessment) => ({
-        statementId: assessment.statementId,
-        statementTextDigest: assessment.statementTextDigest,
-        citationsDigest: assessment.citationsDigest,
-      })),
-    }],
-  }, options);
+  );
+  const candidate = reviewed.items[0];
+  assert.equal(reviewed.approval.changes[0].targetPath,
+    ".threadshare/memory/scenes/release-workflow.md");
+  assert.match(reviewed.approval.changes[0].content, /heat: 1/u);
+  const prepared = await executeMemoryMcp(
+    "prepare",
+    reviewed.approval.prepareRequest,
+    options,
+  );
+  assert.equal(prepared.approvalDigest, reviewed.approval.approvalDigest);
   assert.equal(prepared.plan.changes[0].targetPath,
     ".threadshare/memory/scenes/release-workflow.md");
   const promoted = await executeMemoryMcp("promote", { plan: prepared.plan.planId }, options);

@@ -241,6 +241,7 @@ export const candidateDraftBatchSchema = z.object({
 export const memoryPrepareRequestSchema = z.object({
   format: z.literal(MEMORY_PREPARE_REQUEST_FORMAT),
   kind: z.enum(["entry", "skill", "consolidation"]).default("entry"),
+  approvalDigest: hex64.optional(),
   candidates: z.array(z.object({
     candidateId: identifier,
     expectedRevision: positiveInteger,

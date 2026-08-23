@@ -8,6 +8,10 @@
   "properties": {
     "format": { "const": "threadshare-memory-prepare-request@v1" },
     "kind": { "enum": ["entry", "skill", "consolidation"], "default": "entry" },
+    "approvalDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "candidates": {
       "type": "array",
       "minItems": 1,

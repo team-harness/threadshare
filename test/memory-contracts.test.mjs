@@ -369,6 +369,7 @@ function memoryPrepareRequest() {
   return {
     format: MEMORY_PREPARE_REQUEST_FORMAT,
     kind: "entry",
+    approvalDigest: HEX("e"),
     candidates: [{
       candidateId: "cand-1",
       expectedRevision: 2,

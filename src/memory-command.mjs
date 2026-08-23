@@ -1324,6 +1324,203 @@ function sanitizedSkillFor(item) {
   return { text, gate, name: skill?.name };
 }
 
+const MEMORY_APPROVAL_PREVIEW_FORMAT = "threadshare-memory-approval-preview@v1";
+const MEMORY_APPROVAL_BINDING_FORMAT = "threadshare-memory-approval-binding@v1";
+
+function compareApprovalText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function assessmentAfterConfirmation(assessment) {
+  const alreadySupported =
+    (assessment.claimSupport === "typed-fact" && assessment.assessedBy === "deterministic") ||
+    (assessment.claimSupport === "human-confirmed" && assessment.assessedBy === "human");
+  return alreadySupported
+    ? assessment
+    : { ...assessment, claimSupport: "human-confirmed", assessedBy: "human" };
+}
+
+function prepareCandidateForReviewItem(item) {
+  return {
+    candidateId: item.candidateId,
+    expectedRevision: item.revision,
+    statements: [...item.assessments]
+      .sort((left, right) => compareApprovalText(left.statementId, right.statementId))
+      .map((assessment) => ({
+        statementId: assessment.statementId,
+        statementTextDigest: assessment.statementTextDigest,
+        citationsDigest: assessment.citationsDigest,
+      })),
+  };
+}
+
+function approvalPreviewFor(owner, kind, items, perFile) {
+  const candidates = items
+    .map(prepareCandidateForReviewItem)
+    .sort((left, right) => compareApprovalText(left.candidateId, right.candidateId));
+  const changes = perFile
+    .map((file) => {
+      const content = file.sanitizedContent === null
+        ? null
+        : Buffer.from(file.sanitizedContent, "base64").toString("utf8");
+      const bytes = content === null ? 0 : Buffer.byteLength(content, "utf8");
+      return {
+        targetPath: file.targetPath,
+        operation: file.operation,
+        targetBlobHash: file.targetBlobHash,
+        sanitizedDigest: content === null ? null : sha256Hex(Buffer.from(content, "utf8")),
+        bytes,
+        content,
+      };
+    })
+    .sort((left, right) => compareApprovalText(left.targetPath, right.targetPath));
+  const binding = {
+    format: MEMORY_APPROVAL_BINDING_FORMAT,
+    owner,
+    kind,
+    policyVersion: POLICY_VERSION,
+    candidates,
+    files: changes.map(({ content: _content, ...file }) => file),
+  };
+  const approvalDigest = memoryDigestHex(binding);
+  return {
+    format: MEMORY_APPROVAL_PREVIEW_FORMAT,
+    approvalDigest,
+    prepareRequest: {
+      format: "threadshare-memory-prepare-request@v1",
+      kind,
+      approvalDigest,
+      candidates,
+    },
+    changes,
+  };
+}
+
+async function previewPromotionGroup(context, item) {
+  const confirmedStatements = item.assessments.map(assessmentAfterConfirmation);
+  if (item.candidateKind === "consolidation-patch") {
+    const files = consolidationFilesFromOperations(item.payload.operations ?? []).map((file) => {
+      if (!item.reviewTargetBlobHashes?.has(file.targetPath)) {
+        throw memoryDiagnostic(
+          "TS_MEMORY_BINDING_DRIFT",
+          `Consolidation target ${file.targetPath} was not part of the reviewed snapshot.`,
+          "Discard or regenerate the consolidation patch.",
+        );
+      }
+      const targetBlobHash = item.reviewTargetBlobHashes.get(file.targetPath);
+      if (file.operation === "delete" && targetBlobHash === null) {
+        throw memoryDiagnostic(
+          "TS_MEMORY_BINDING_DRIFT",
+          `Consolidation delete target ${file.targetPath} no longer exists.`,
+          "Discard or regenerate the consolidation patch.",
+        );
+      }
+      return {
+        targetPath: file.targetPath,
+        operation: file.operation,
+        sanitizedContent: file.content === null
+          ? null
+          : Buffer.from(file.content, "utf8").toString("base64"),
+        targetBlobHash,
+      };
+    });
+    return { item, confirmedStatements, files, skillMemoryContextDigest: null, blocked: null };
+  }
+  if (item.candidateKind === "skill") {
+    const skill = sanitizedSkillFor(item);
+    if (!skill.gate.ok) {
+      return {
+        item,
+        confirmedStatements,
+        files: [],
+        skillMemoryContextDigest: null,
+        blocked: {
+          candidateId: item.candidateId,
+          blockedByLint: true,
+          lintFindings: skill.gate.findings.map((finding) => ({
+            code: finding.code,
+            severity: finding.severity,
+            excerpt: finding.excerpt,
+          })),
+        },
+      };
+    }
+    const targetPath = skillTargetPath(skill.name);
+    if (!item.reviewTargetBlobHashes?.has(targetPath)) {
+      throw memoryDiagnostic(
+        "TS_MEMORY_BINDING_DRIFT",
+        `Skill target ${targetPath} was not part of the reviewed snapshot.`,
+        "Discard or regenerate the Skill candidate.",
+      );
+    }
+    return {
+      item,
+      confirmedStatements,
+      files: [{
+        targetPath,
+        operation: "write",
+        sanitizedContent: Buffer.from(skill.text, "utf8").toString("base64"),
+        targetBlobHash: item.reviewTargetBlobHashes.get(targetPath),
+      }],
+      skillMemoryContextDigest: item.payload.memoryContextDigest,
+      blocked: null,
+    };
+  }
+  const entry = sanitizedEntryFor(item, confirmedStatements);
+  const gate = lintEntryForPromotion(entry.text, { allowedSpans: entry.allowedSpans });
+  if (!gate.ok) {
+    return {
+      item,
+      confirmedStatements,
+      files: [],
+      skillMemoryContextDigest: null,
+      blocked: {
+        candidateId: item.candidateId,
+        blockedByLint: true,
+        lintFindings: gate.findings.map((finding) => ({
+          code: finding.code,
+          severity: finding.severity,
+          excerpt: finding.excerpt,
+        })),
+      },
+    };
+  }
+  const targetPath = `${MEMORY_ROOT}/entries/${entry.id}.md`;
+  const absolute = path.join(context.rootRealpath, targetPath);
+  const targetBlobHash = await pathExists(absolute)
+    ? gitBlobOid(await readFile(absolute))
+    : null;
+  return {
+    item,
+    confirmedStatements,
+    files: [{
+      targetPath,
+      operation: "write",
+      sanitizedContent: Buffer.from(entry.text, "utf8").toString("base64"),
+      targetBlobHash,
+    }],
+    skillMemoryContextDigest: null,
+    blocked: null,
+  };
+}
+
+async function buildApprovalPreview(context, kind, items) {
+  const groups = [];
+  for (const item of items) groups.push(await previewPromotionGroup(context, item));
+  const eligible = groups.filter((group) => group.blocked === null);
+  return {
+    approval: eligible.length === 0
+      ? null
+      : approvalPreviewFor(
+          context.owner,
+          kind,
+          eligible.map((group) => group.item),
+          eligible.flatMap((group) => group.files),
+        ),
+    blocked: groups.flatMap((group) => group.blocked === null ? [] : [group.blocked]),
+  };
+}
+
 async function reviewWithContext(context, invocation, options) {
     const queue = await memoryReviewQueue(context.engine, {
       ...context.owner,
@@ -1388,6 +1585,19 @@ async function reviewWithContext(context, invocation, options) {
         reviewItems.push(item);
       }
     }
+    const preview = await buildApprovalPreview(
+      context,
+      invocation.kind ?? "entry",
+      reviewItems,
+    );
+    if (invocation.expectedApprovalDigest !== undefined &&
+        preview.approval?.approvalDigest !== invocation.expectedApprovalDigest) {
+      throw memoryDiagnostic(
+        "TS_MEMORY_BINDING_DRIFT",
+        "The reviewed Team Memory batch changed after the user confirmed it.",
+        "Show the latest memory review approval preview and ask for confirmation again.",
+      );
+    }
     if (!interactive) {
       return {
         action: "review",
@@ -1398,10 +1608,14 @@ async function reviewWithContext(context, invocation, options) {
           statements: item.assessments.length,
         })),
         items: reviewItems,
+        approval: preview.approval,
+        blocked: preview.blocked,
         plan: null,
         note: reviewItems.length === 0
           ? "No candidates are awaiting review."
-          : "Review the exact candidate revision and statement digests; after user confirmation call memory prepare.",
+          : preview.approval === null
+            ? "No candidate has a promotable approval preview; resolve the reported blocks first."
+            : "Show the exact approval preview once. After user confirmation, pass its prepareRequest to memory prepare, then promote without another confirmation if the digest is unchanged.",
       };
     }
     const pending = [];
@@ -1608,6 +1822,21 @@ async function reviewWithContext(context, invocation, options) {
       };
     }
 
+    const actualApproval = approvalPreviewFor(
+      context.owner,
+      invocation.kind ?? "entry",
+      confirmedCandidates.map(({ item }) => item).filter((item) => candidateIds.includes(item.candidateId)),
+      perFile,
+    );
+    if (invocation.expectedApprovalDigest !== undefined &&
+        actualApproval.approvalDigest !== invocation.expectedApprovalDigest) {
+      throw memoryDiagnostic(
+        "TS_MEMORY_BINDING_DRIFT",
+        "The Team Memory file plan changed while the approved batch was being prepared.",
+        "Run memory review again and ask the user to confirm the new approval preview.",
+      );
+    }
+
     const planned = await memoryPromotionPlan(context.engine, {
       owner: context.owner,
       candidateIds,
@@ -1628,6 +1857,7 @@ async function reviewWithContext(context, invocation, options) {
       interactive,
       discarded,
       pending,
+      approval: actualApproval,
       plan: {
         planId: planned.planId,
         planDigest: planned.planDigest,
@@ -5026,6 +5256,7 @@ async function prepareAgentCandidates(context, input, invocation, options) {
     kind: request.kind,
     format: "json",
     agentPrepare: true,
+    expectedApprovalDigest: request.approvalDigest,
     expectedCandidates: new Map(request.candidates.map((candidate) => [
       candidate.candidateId,
       candidate,
@@ -5039,9 +5270,12 @@ async function prepareAgentCandidates(context, input, invocation, options) {
     action: "prepare",
     format: "threadshare-memory-prepare@v1",
     confirmedCandidates: request.candidates.map((candidate) => candidate.candidateId),
+    approvalDigest: request.approvalDigest ?? null,
     note: result.plan === null
       ? result.note
-      : "The exact promotion plan is ready. Apply it with memory promote after the user confirms this final result.",
+      : request.approvalDigest === undefined
+        ? "The exact promotion plan is ready. Apply it with memory promote after the user confirms this final result."
+        : "The user-approved batch was prepared without drift. Apply it with memory promote without another confirmation.",
   };
 }
 

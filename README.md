@@ -265,7 +265,8 @@ Team Memory retrospectively selects local Insights Turns and turns them into rev
 repository-owned memory. In an existing Codex or Claude Code conversation, ask the current Agent in
 natural language, for example: "Use Threadshare to review this repository's release failures from the
 last two weeks and turn them into team experience." The Agent can guide the interactive review and
-confirmation flow directly from the current conversation.
+confirmation flow directly from the current conversation. The normal Agent path asks for one batched
+confirmation covering the retain/skip decisions, exact statements and evidence, and final file changes.
 
 The complete confirmation flow, CLI/MCP mapping, and troubleshooting steps are in
 the [Team Memory usage guide](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-usage-guide.md).
@@ -292,9 +293,11 @@ threadshare memory stage --request - --format json
 # store/skip/update/merge, then passes AdjudicationResult@v1 on stdin:
 threadshare memory stage --request - --format json
 threadshare memory review --format json
-# After the user confirms the exact candidate, the Agent passes PrepareRequest@v1:
+# Review returns one approval preview with exact statements, evidence, target paths,
+# sanitized content, target-blob CAS, and approvalDigest. The Agent shows it once.
+# After the user confirms that batch, pass approval.prepareRequest unchanged:
 threadshare memory prepare --request - --format json
-# After the user confirms the resulting file plan:
+# If prepare echoes the same approvalDigest, promote without another prompt:
 threadshare memory promote --plan <plan-id> --format json
 
 # Build scenes and doctrine through the same Agent conversation:
@@ -312,7 +315,7 @@ review a bounded Insights window and propose a `SkillCandidate@v1`. Recall is me
 relevant existing Skills, then current scenes/doctrine and approved entries, before the bounded historical
 Turns used as the final evidence source. The Memory context carries a digest that the candidate must echo,
 so entry/scene/doctrine drift is rejected through promotion. The shared lifecycle is
-`stage → review --kind skill → prepare(kind=skill) → promote`. After approval,
+`stage → review --kind skill → one approval batch → prepare(kind=skill) → promote`. After approval,
 `assemble --provider claude|codex` projects the agent-neutral source to `.claude/skills/` or
 `.codex/skills/`. `memory lint .threadshare/memory/skills/<name>/SKILL.md` verifies a canonical
 Skill explicitly before assembly or commit. See
@@ -325,6 +328,9 @@ The local Insights MCP server exposes the same stable operations:
 returns complete bounded Turn chunks plus the same Skill and Memory context directly to the current
 Agent. Synthesize returns approved memory entries plus current scenes/doctrine. CLI and MCP use the
 same source checks, confirmations, and recoverable promotion flow.
+`review` supplies the same digest-bound approval preview on both transports. An unchanged digest lets
+the Agent continue from the user's single confirmation; any content, lint, source, or target drift
+requires a new preview and confirmation.
 
 Keep recall at its default one-chunk limit unless the Agent context is known to hold every requested
 chunk. Candidate staging is deliberately two-step: the first call returns the current memory pool;

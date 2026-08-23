@@ -221,7 +221,8 @@ threadshare memory extract [--repository <path>] --runner <claude|codex>
                             | --request <file|->)
                            [--approve-plan <digest>] [--approve-manifest <digest>]
                            [--limit <1..8>] [--format json]
-threadshare memory review  [--format json]       # 逐条确认 + 生成 PromotionPlan
+threadshare memory review  [--format json]       # 只读 approval preview；TTY 兼容逐条确认
+threadshare memory prepare --request <file|->    # 绑定一次批量确认并生成 PromotionPlan
 threadshare memory promote --plan <planId>       # 应用已批准 plan（只改工作区）
 threadshare memory lint [<path>...]              # 独立净化检查
 threadshare memory assemble --provider claude    # 装配 adapter

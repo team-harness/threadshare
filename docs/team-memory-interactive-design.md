@@ -149,23 +149,30 @@ Agent 先读取待确认内容：
 threadshare memory review --format json
 ```
 
-`review` 无副作用，返回完整 candidate payload、revision、statement text、evidence summary、`statementTextDigest` 和 `citationsDigest`。
+`review` 无副作用，返回完整 candidate payload、revision、statement text、evidence summary、
+`statementTextDigest`、`citationsDigest`，以及精确 `approval` preview。该 preview 的 digest 同时绑定 owner、
+candidate/revision、statement/citation、policy、目标 blob 和净化后文件 digest；`changes` 包含用户实际会看到
+的路径、操作和正文。
 
-用户确认后，Agent 把这些值原样组成 `threadshare-memory-prepare-request@v1`，通过 stdin 或 MCP 调用 `prepare`：
+正常 Agent 路径只展示这一个批次。用户确认后，Agent 将 `approval.prepareRequest` 原样通过 stdin 或 MCP
+调用 `prepare`：
 
 ```bash
 threadshare memory prepare --request - --format json
 ```
 
-`prepare` 是“把本次对话确认记录进状态机”的调用，不是身份认证。它只接受当前 revision 的完整 statement 集；缺项、增项、旧 digest 或 citation 漂移都会拒绝。成功后返回精确 `PromotionPlan` 和文件变化。
+`prepare` 是“把本次对话确认记录进状态机”的调用，不是身份认证。它先重新生成只读 preview，并在任何
+statement 确认发生前校验 `approvalDigest`；缺项、增项、旧 digest、citation、目标 blob、净化正文或 policy
+漂移都会拒绝。成功后返回精确 `PromotionPlan`、文件变化并回显同一 `approvalDigest`。
 
-Agent 把计划展示给用户。用户最终确认后：
+回显 digest 与用户确认值一致时，Agent 直接执行，不再追加一次同内容确认：
 
 ```bash
 threadshare memory promote --plan <plan-id> --format json
 ```
 
 MCP 使用同名 `threadshare_memory_review`、`threadshare_memory_prepare` 和 `threadshare_memory_promote`，业务结果、CAS 和错误必须一致。
+未携带 `approvalDigest` 的 v1 PrepareRequest 保持兼容，继续使用原先“prepare 后再确认 plan”的低层流程。
 
 ### 4.4 Synthesize：从 L1 归纳 Scene / Doctrine
 
@@ -180,7 +187,7 @@ threadshare memory synthesize --full --format json
 返回的 `ConsolidationTask@v1` 包含选中的 approved L1、当前 scenes/doctrine 和精确 binding。Agent 与用户讨论后提交 `ConsolidationPatch@v1` 给同一个 `stage`，再走：
 
 ```text
-review --kind consolidation → prepare(kind=consolidation) → promote
+review --kind consolidation → one approval batch → prepare(kind=consolidation) → promote
 ```
 
 Scene `heat` 由 Threadshare 计算，Agent 提供的值不参与排序或写入。CREATE=`1`，UPDATE=`old+1`，MERGE=`sum(old)+1`。

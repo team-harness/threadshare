@@ -279,6 +279,8 @@ test("Memory MCP exposes Agent-native operations plus optional pending batch pre
     "threadshare-memory-adjudication-result@v1",
     "threadshare-memory-consolidation-patch@v1",
   ]);
+  const prepareTool = memoryTools.find((tool) => tool.name === "threadshare_memory_prepare");
+  assert.equal(prepareTool.inputSchema.properties.approvalDigest.pattern, "^[0-9a-f]{64}$");
   assert.equal(memoryTools[0].annotations.readOnlyHint, true);
   assert.equal(memoryTools[1].annotations.readOnlyHint, true);
   assert.deepEqual(memoryTools[2].annotations, {
@@ -402,6 +404,7 @@ test("Agent-native Memory MCP routes recall, stage, review, prepare, and promote
   const prepare = {
     format: "threadshare-memory-prepare-request@v1",
     kind: "entry",
+    approvalDigest: "a".repeat(64),
     candidates: [{
       candidateId: "candidate-1",
       expectedRevision: 2,
