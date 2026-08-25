@@ -424,6 +424,8 @@ Recipe request 统一包含：
 
 以 capability key、input fingerprint、correlation digest 和事件顺序构建 attempt chain：
 
+可用 `filters.capabilityKeys` 将结果限定到一个或多个 Tool/Skill；过滤在 chain 层命中，返回的 attempt 明细仍保留该 chain 的完整事件序列。
+
 - `resolved`：同一 chain 后续有 confirmed completed result；
 - `never-succeeded`：可观察 chain 内没有成功；
 - `abandoned`：Turn/session 结束前没有 terminal result；

@@ -22,7 +22,7 @@ use threadshare_insights_engine::memory_protocol::handle_memory_command;
 use threadshare_insights_engine::memory_state::{MemoryError, MemoryStorage};
 use threadshare_insights_engine::protocol::{
     MAX_FRAME_BYTES, MessageKind, PROTOCOL_FORMAT, PROTOCOL_VERSION, ProtocolError,
-    accepted_contract_from_hello, bounded_message, read_frame, request_id,
+    accepted_contract_from_hello, bounded_message, read_canonical_frame, request_id,
     validate_begin_against_contract, validate_protocol_message, write_frame,
 };
 use threadshare_insights_engine::query::{
@@ -1502,8 +1502,8 @@ fn run_server_stream<R: Read, W: Write>(
     let mut server = EngineServer::new(storage).map_err(|error| {
         ProtocolError::new(error.code, "the bundled SQLite contract is invalid", true)
     })?;
-    while let Some(message) = read_frame(reader)? {
-        let message_request_id = request_id(&message).unwrap_or("0").to_owned();
+    while let Some(message) = read_canonical_frame(reader)? {
+        let message_request_id = unvalidated_request_id(&message).unwrap_or("0").to_owned();
         match server.handle_message(message) {
             Ok(response) => write_frame(writer, &response)?,
             Err(error) => {
@@ -1516,6 +1516,12 @@ fn run_server_stream<R: Read, W: Write>(
         }
     }
     Ok(())
+}
+
+fn unvalidated_request_id(message: &Value) -> Option<&str> {
+    let request_id = message.get("requestId")?.as_str()?;
+    let parsed = request_id.parse::<u64>().ok()?;
+    (parsed.to_string() == request_id).then_some(request_id)
 }
 
 fn run_server(storage: EngineStorage) -> Result<(), ProtocolError> {
@@ -1531,10 +1537,10 @@ fn report_storage_initialization_error(error: StorageError) -> Result<(), Protoc
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    let Some(message) = read_frame(&mut reader)? else {
+    let Some(message) = read_canonical_frame(&mut reader)? else {
         return Ok(());
     };
-    let message_request_id = request_id(&message).unwrap_or("0").to_owned();
+    let message_request_id = unvalidated_request_id(&message).unwrap_or("0").to_owned();
     let response = engine_error_response(&fatal(error.into()), &message_request_id);
     write_frame(&mut writer, &response)
 }
@@ -1582,13 +1588,14 @@ fn main() {
 mod tests {
     use super::{
         EngineServer, State, evidence_event_wire, evidence_paths_wire, parse_arguments_from,
-        query_engine_error, search_request, search_results_wire, usage_order_by,
-        validate_protocol_message,
+        query_engine_error, run_server_stream, search_request, search_results_wire, usage_order_by,
+        validate_protocol_message, write_frame,
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use threadshare_insights_engine::agent_query::UsageOrderBy;
     use threadshare_insights_engine::delivery_graph_repository::RepositoryDelta;
@@ -1598,6 +1605,7 @@ mod tests {
         ToolStateCounts,
     };
     use threadshare_insights_engine::fact_model::CapabilityTerminalState;
+    use threadshare_insights_engine::protocol::read_frame;
     use threadshare_insights_engine::query::{
         ClosureFilter, QueryDiagnostic, QueryError, ResultEvidenceFilter, SearchDedupe,
         SearchOrderBy, SearchResponse, SearchResult, SearchTrace,
@@ -1826,6 +1834,70 @@ mod tests {
         assert!(response.get("sessions").is_none());
         assert!(response.get("facts").is_none());
         assert!(matches!(server.state, State::Ready { .. }));
+    }
+
+    #[test]
+    fn semantic_request_errors_stay_in_band_and_keep_the_server_ready() {
+        fn append_canonical_frame(output: &mut Vec<u8>, message: &Value) {
+            let payload = canonical_json(message);
+            output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            output.extend_from_slice(payload.as_bytes());
+        }
+
+        let mut input = Vec::new();
+        write_frame(&mut input, &message("hello")).unwrap();
+        append_canonical_frame(
+            &mut input,
+            &json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "READ_INSIGHTS_RECIPE",
+                "requestId": "2",
+                "request": {
+                    "format": "threadshare-insights-recipe-request@v1",
+                    "name": "failure-chains@1",
+                    "window": {
+                        "after": "2026-08-01T00:00:00.000Z",
+                        "before": "2026-09-01T00:00:00.000Z"
+                    },
+                    "comparisonWindow": null,
+                    "filters": {},
+                    "limit": 0,
+                    "allowDegraded": false,
+                    "evaluatedAt": "2026-08-25T00:00:00.000Z"
+                }
+            }),
+        );
+        write_frame(
+            &mut input,
+            &json!({
+                "format": "threadshare-insights-protocol@v1",
+                "type": "READ_ENGINE_STATUS",
+                "requestId": "3",
+            }),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        run_server_stream(
+            &mut Cursor::new(input),
+            &mut output,
+            EngineStorage::open_in_memory().unwrap(),
+        )
+        .unwrap();
+        let mut responses = Vec::new();
+        let mut cursor = Cursor::new(output);
+        while let Some(response) = read_frame(&mut cursor).unwrap() {
+            responses.push(response);
+        }
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["type"], "READY");
+        assert_eq!(responses[1]["type"], "ERROR");
+        assert_eq!(responses[1]["requestId"], "2");
+        assert_eq!(responses[1]["code"], "TS_INSIGHTS_PROTOCOL_INVALID_FRAME");
+        assert_eq!(responses[1]["fatal"], false);
+        assert_eq!(responses[2]["type"], "ENGINE_STATUS");
+        assert_eq!(responses[2]["requestId"], "3");
     }
 
     #[test]

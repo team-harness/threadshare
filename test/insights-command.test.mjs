@@ -23,6 +23,7 @@ import { readProviderSessionDelta } from "../src/provider-evidence.mjs";
 import {
   createInsightsE2EFixture,
   INSIGHTS_E2E_SKIP,
+  readInsightsDatabaseAudit,
 } from "./helpers/insights-e2e.mjs";
 
 const cli = fileURLToPath(new URL("../bin/threadshare.mjs", import.meta.url));
@@ -854,6 +855,49 @@ test("real sidecar sync initializes once and then reconciles only changed source
   assert.equal(observerFailure.mode, "incremental");
   assert.equal(observerFailure.report.failed, 0);
   assert.equal(observerFailure.report.unchanged, 1);
+});
+
+test("CLI runs failure-chains@1 with a capabilityKeys filter through the real Engine", {
+  timeout: 60_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "93939393-9393-4393-8393-939393939393",
+  );
+  await reconcileInsights(fixture.reconcileOptions);
+  const audit = await readInsightsDatabaseAudit(fixture.paths.databaseFile);
+  const capabilityKey = audit.stableIdentity.capabilities[0].capabilityKey;
+  const request = {
+    format: "threadshare-insights-recipe-request@v1",
+    window: {
+      after: "2026-08-01T00:00:00.000Z",
+      before: "2026-09-01T00:00:00.000Z",
+    },
+    filters: { capabilityKeys: [capabilityKey] },
+    limit: 20,
+  };
+  const result = spawnSync(process.execPath, [
+    cli,
+    "insights", "recipe", "failure-chains@1",
+    "--request", "-",
+    "--format", "json",
+  ], {
+    encoding: "utf8",
+    input: JSON.stringify(request),
+    env: {
+      ...process.env,
+      THREADSHARE_CONFIG: fixture.paths.configFile,
+      THREADSHARE_INSIGHTS_HOME: fixture.paths.stateDirectory,
+      THREADSHARE_INSIGHTS_ENGINE_PATH: engine,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.name, "failure-chains@1");
+  assert.deepEqual(response.items, []);
 });
 
 test("real sidecar sync registers and incrementally commits an explicit repository", {

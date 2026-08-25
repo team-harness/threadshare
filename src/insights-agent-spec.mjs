@@ -75,7 +75,9 @@ const SPEC = deepFreeze({
           recipe: "failure-chains@1",
           purpose: "Classify recorded attempt chains as recovered, never succeeded, or abandoned.",
           requiredInputs: ["window"],
-          optionalFilters: ["providers", "projectKeys", "sessionKeys", "eventKinds", "text"],
+          optionalFilters: [
+            "providers", "projectKeys", "capabilityKeys", "sessionKeys", "eventKinds", "text",
+          ],
         },
         {
           action: "evidence",
@@ -86,6 +88,7 @@ const SPEC = deepFreeze({
       ],
       answerRules: [
         "Report absolute failure count and failure rate separately.",
+        "Batch selected capability keys into one failure-chains request instead of issuing concurrent recipe scans.",
         "Do not describe containing-Turn outcomes as caused by a Tool terminal state.",
         "A ranked prefix is not the full failure distribution; report truncation and coverage.",
       ],

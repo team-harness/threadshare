@@ -921,6 +921,23 @@ test("Engine evidence drift maps to public cursor and revision diagnostics", () 
     insightsQueryDiagnostic({ code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true }, "recipe").code,
     "TS_INSIGHTS_ENGINE_DISCONNECTED",
   );
+  const invalidFrame = new Error("private protocol detail");
+  Object.assign(invalidFrame, {
+    code: "TS_INSIGHTS_PROTOCOL_INVALID_FRAME",
+    remote: true,
+    fatal: false,
+  });
+  assert.equal(
+    insightsQueryDiagnostic(invalidFrame, "recipe").code,
+    "TS_INSIGHTS_REQUEST_INVALID",
+  );
+  assert.match(
+    insightsQueryDiagnostic(
+      { code: "TS_INSIGHTS_ENGINE_DISCONNECTED", fatal: true },
+      "recipe",
+    ).next,
+    /do not retry in a loop/u,
+  );
 });
 
 test("Usage and Activity require explicit bounded UTC windows", () => {

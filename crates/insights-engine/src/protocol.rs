@@ -4865,7 +4865,7 @@ fn read_exact_after_first<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<
     })
 }
 
-pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Value>, ProtocolError> {
+pub fn read_canonical_frame<R: Read>(reader: &mut R) -> Result<Option<Value>, ProtocolError> {
     let mut prefix = [0_u8; 4];
     match reader.read(&mut prefix[..1]) {
         Ok(0) => return Ok(None),
@@ -4932,6 +4932,13 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Value>, ProtocolErro
             true,
         ));
     }
+    Ok(Some(value))
+}
+
+pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Value>, ProtocolError> {
+    let Some(value) = read_canonical_frame(reader)? else {
+        return Ok(None);
+    };
     validate_protocol_message(&value).map_err(|mut error| {
         error.fatal = true;
         error

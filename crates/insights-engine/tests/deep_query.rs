@@ -612,6 +612,26 @@ fn recipes_return_failure_file_and_token_evidence_without_inferred_token_attribu
 }
 
 #[test]
+fn failure_chains_filter_by_capability_key() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    let delta = fixture_delta_v2_with_typed_resources();
+    let session_key = delta.session.session_key;
+    storage.apply_session_facts(delta).unwrap();
+
+    let mut matching = recipe_request(RecipeName::FailureChains, session_key);
+    matching.filters.capability_keys = vec![key(0xee).to_string()];
+    let matching_response = storage.read_recipe(&matching).unwrap();
+    assert_eq!(matching_response.items.len(), 1);
+    assert_eq!(matching_response.items[0]["status"], "resolved");
+
+    let mut unrelated = recipe_request(RecipeName::FailureChains, session_key);
+    unrelated.filters.capability_keys = vec![key(0xef).to_string()];
+    let unrelated_response = storage.read_recipe(&unrelated).unwrap();
+    assert!(unrelated_response.items.is_empty());
+    assert_eq!(unrelated_response.total_item_count, "0");
+}
+
+#[test]
 fn every_non_null_recipe_evidence_target_is_directly_readable() {
     let mut storage = EngineStorage::open_in_memory().unwrap();
     let delta = fixture_delta_v2_with_typed_resources();

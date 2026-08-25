@@ -2232,6 +2232,10 @@ export function insightsQueryDiagnostic(error, action) {
   let code = direct.has(error?.code) ? error.code : "TS_OPERATION_FAILED";
   if (error?.code === "QUERY_TOO_LONG") code = "TS_QUERY_TOO_LONG";
   if (error?.code === "QUERY_TOO_BROAD") code = "TS_QUERY_TOO_BROAD";
+  if (error?.code === "TS_INSIGHTS_PROTOCOL_INVALID_FRAME" && error?.remote === true &&
+      error?.fatal !== true) {
+    code = "TS_INSIGHTS_REQUEST_INVALID";
+  }
   if (error?.code === "TURN_REVISION_MISMATCH") code = "TS_INSIGHTS_TURN_CHANGED";
   if (error?.code === "TS_INSIGHTS_EVIDENCE_CHANGED") code = "TS_INSIGHTS_PAYLOAD_CHANGED";
   if (error?.code === "EVIDENCE_INVALID_CURSOR" || error?.code === "USAGE_INVALID_CURSOR") {
@@ -2281,7 +2285,7 @@ export function insightsQueryDiagnostic(error, action) {
         : code === "TS_INSIGHTS_ENGINE_TIMEOUT"
           ? "Narrow the time window or filters, then retry the Insights query."
         : code === "TS_INSIGHTS_ENGINE_DISCONNECTED"
-          ? "Retry once; if it recurs, run `threadshare insights status --verify`."
-        : `Check \`threadshare insights --help\` and retry insights ${action ?? "query"}.`,
+          ? "Retry once; if it recurs, report TS_INSIGHTS_ENGINE_DISCONNECTED with `threadshare --version`; do not retry in a loop."
+          : `Check \`threadshare insights --help\` and retry insights ${action ?? "query"}.`,
   });
 }

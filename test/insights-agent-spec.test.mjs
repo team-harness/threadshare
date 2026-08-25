@@ -76,6 +76,12 @@ test("Agent spec maps natural-language questions to every Insights protocol path
   assert.equal(delivery.answerRules.some((rule) => rule.includes("never Agent authorship")), true);
   assert.equal(delivery.answerRules.some((rule) =>
     rule.includes("cannot restore a Session, code state, or Git state")), true);
+  const failureRecipe = spec.intents
+    .find(({ id }) => id === "failure-recovery")
+    .plan.find(({ recipe }) => recipe === "failure-chains@1");
+  assert.equal(failureRecipe.optionalFilters.includes("capabilityKeys"), true);
+  assert.equal(spec.intents.find(({ id }) => id === "failure-recovery").answerRules.some((rule) =>
+    rule.includes("one failure-chains request")), true);
   assert.equal(spec.actions.every((action) => action.help.startsWith("threadshare insights ")), true);
 });
 

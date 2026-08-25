@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
 
+import { reconcileInsights } from "../src/insights-command.mjs";
 import { createInsightsMcpServer } from "../src/insights-mcp.mjs";
 import { MAX_PROTOCOL_PAYLOAD_BYTES } from "../src/insights-engine-protocol.mjs";
 import {
@@ -10,6 +11,11 @@ import {
 } from "../src/insights-query.mjs";
 import { candidateDraftBatchSchema } from "../src/memory-contracts.mjs";
 import { MEMORY_MCP_TOOL_NAMES } from "../src/memory-operation-registry.mjs";
+import {
+  createInsightsE2EFixture,
+  INSIGHTS_E2E_SKIP,
+  readInsightsDatabaseAudit,
+} from "./helpers/insights-e2e.mjs";
 
 async function runMessages(messages, options = {}) {
   const output = new PassThrough();
@@ -485,4 +491,50 @@ test("Insights MCP returns stable tool errors without breaking the JSON-RPC stre
   assert.equal(byId.get("bad").result.isError, true);
   assert.match(byId.get("bad").result.content[0].text, /TS_INSIGHTS_REQUEST_INVALID/u);
   assert.deepEqual(byId.get("ping").result, {});
+});
+
+test("Insights MCP runs failure-chains@1 with a capabilityKeys filter through the real Engine", {
+  timeout: 60_000,
+  skip: INSIGHTS_E2E_SKIP,
+}, async (t) => {
+  const fixture = await createInsightsE2EFixture(
+    t,
+    "94949494-9494-4494-8494-949494949494",
+  );
+  await reconcileInsights(fixture.reconcileOptions);
+  const audit = await readInsightsDatabaseAudit(fixture.paths.databaseFile);
+  const capabilityKey = audit.stableIdentity.capabilities[0].capabilityKey;
+  const responses = await runMessages([{
+    jsonrpc: "2.0",
+    id: "filtered-failures",
+    method: "tools/call",
+    params: {
+      name: "threadshare_insights_recipe",
+      arguments: {
+        name: "failure-chains@1",
+        request: {
+          format: "threadshare-insights-recipe-request@v1",
+          window: {
+            after: "2026-08-01T00:00:00.000Z",
+            before: "2026-09-01T00:00:00.000Z",
+          },
+          filters: { capabilityKeys: [capabilityKey] },
+          limit: 20,
+        },
+      },
+    },
+  }], {
+    queryOptions: {
+      paths: fixture.paths,
+      readerOptions: {
+        runtimeOptions: fixture.reconcileOptions.runtimeOptions,
+        timeoutMs: fixture.reconcileOptions.timeoutMs,
+      },
+    },
+  });
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].result.isError, false, JSON.stringify(responses[0]));
+  assert.equal(responses[0].result.structuredContent.name, "failure-chains@1");
+  assert.deepEqual(responses[0].result.structuredContent.items, []);
 });

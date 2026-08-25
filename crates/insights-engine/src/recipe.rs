@@ -754,7 +754,10 @@ impl RecipeRequest {
                 reject(self.filters.text.is_some(), "filters.text")?;
                 reject(self.filters.bucket.is_some(), "filters.bucket")?;
             }
-            RecipeName::FailureChains | RecipeName::SolutionRecall => {
+            RecipeName::FailureChains => {
+                reject(self.filters.bucket.is_some(), "filters.bucket")?;
+            }
+            RecipeName::SolutionRecall => {
                 reject(
                     !self.filters.capability_keys.is_empty(),
                     "filters.capabilityKeys",
@@ -1781,7 +1784,27 @@ fn failure_chains(
 fn failure_chain_summary_statement(
     request: &RecipeRequest,
 ) -> Result<(String, Vec<SqlValue>), QueryError> {
-    let (scope, values) = event_scope(request, Some("ace.chain_key IS NOT NULL"))?;
+    let (mut scope, mut values) = event_scope(request, Some("ace.chain_key IS NOT NULL"))?;
+    if !request.filters.capability_keys.is_empty() {
+        scope.push_str(&format!(
+            " AND EXISTS (
+               SELECT 1
+               FROM attempt_chain_events capability_ace
+               JOIN history_events capability_he ON capability_he.event_key=capability_ace.event_key
+               WHERE capability_ace.chain_key=ace.chain_key
+                 AND json_extract(capability_he.metadata_json,'$.capabilityKey') IN ({})
+             )",
+            placeholders(request.filters.capability_keys.len())
+        ));
+        values.extend(
+            request
+                .filters
+                .capability_keys
+                .iter()
+                .cloned()
+                .map(SqlValue::Text),
+        );
+    }
     let source = if request.filters.session_keys.is_empty() {
         "history_events he INDEXED BY history_events_observed
          CROSS JOIN attempt_chain_events ace ON ace.event_key=he.event_key
@@ -4983,6 +5006,22 @@ mod tests {
                 .iter()
                 .any(|detail| detail.contains("history_events_observed")),
             "global failure chains must retain the bounded time-index scan: {global_details:?}"
+        );
+
+        request.filters.capability_keys = vec!["22".repeat(32)];
+        let (sql, values) = failure_chain_summary_statement(&request).unwrap();
+        let filtered_details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            filtered_details
+                .iter()
+                .any(|detail| detail.contains("attempt_chain_events_chain")),
+            "capability-filtered chains must seek the chain index: {filtered_details:?}"
         );
     }
 
