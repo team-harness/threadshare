@@ -937,6 +937,49 @@ fn event_text_match_uses_the_versioned_analyzer_projection() {
 }
 
 #[test]
+fn session_records_expose_conversation_summary_and_match_full_session_text() {
+    let mut storage = EngineStorage::open_in_memory().unwrap();
+    storage
+        .apply_session_facts(fixture_delta_v2_with_typed_resources())
+        .unwrap();
+    let mut request = records_query(
+        DeepResource::Session,
+        &[
+            "sessionKey",
+            "session.title",
+            "session.turnCount",
+            "revision",
+        ],
+        &[
+            ("session.endedAt", Direction::Desc),
+            ("sessionKey", Direction::Asc),
+        ],
+    );
+    request.predicate = Some(DeepPredicate::And {
+        and: vec![
+            DeepPredicate::Leaf {
+                field: "text".to_owned(),
+                operator: PredicateOperator::Match,
+                value: Some(json!("fixture failure")),
+            },
+            DeepPredicate::Leaf {
+                field: "capability.key".to_owned(),
+                operator: PredicateOperator::Eq,
+                value: Some(json!(key(0xee).to_string())),
+            },
+        ],
+    });
+
+    let response = storage.read_deep_query(&request).unwrap();
+    assert_eq!(response.total_match_count.as_deref(), Some("1"));
+    assert_eq!(response.records[0]["session"]["turnCount"], "1");
+    assert_eq!(
+        response.records[0]["session"]["title"],
+        "How is the normalized fact store structured?"
+    );
+}
+
+#[test]
 fn event_records_are_typed_and_payloads_are_references() {
     let mut storage = EngineStorage::open_in_memory().unwrap();
     let delta = fixture_delta_v2();
@@ -1075,6 +1118,8 @@ fn all_deep_record_resources_have_typed_fields_and_stable_orders() {
                 "provider",
                 "session.startedAt",
                 "session.endedAt",
+                "session.title",
+                "session.turnCount",
                 "revision",
             ],
             vec![

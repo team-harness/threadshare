@@ -1,10 +1,20 @@
 const EMPTY_COUNTS = Object.freeze({});
 
 export const INITIAL_STATE = Object.freeze({
-  activeView: "overview",
+  activeView: "search",
   status: null,
   statusState: "loading",
   statusError: null,
+  projectCatalog: Object.freeze({
+    items: Object.freeze([]),
+    loaded: false,
+    loading: false,
+    error: null,
+  }),
+  sources: Object.freeze({
+    filter: "all",
+    selectedId: "codex",
+  }),
   search: Object.freeze({
     query: "",
     provider: "",
@@ -13,15 +23,31 @@ export const INITIAL_STATE = Object.freeze({
     observedBefore: "",
     toolCapabilityKey: "",
     skillCapabilityKey: "",
-    closure: "",
-    resultEvidence: "",
+    completeness: "",
     loading: false,
+    loadingAppend: false,
     error: null,
     response: null,
+    selected: null,
+    messages: Object.freeze([]),
+    messageCursor: null,
+    messageTotal: null,
+    messagesLoading: false,
+    messagesError: null,
+    detailTab: "transcript",
+    selectedTurnKey: null,
   }),
   capabilities: Object.freeze({
     tool: Object.freeze({ items: Object.freeze([]), cursor: null, loading: false, error: null }),
     skill: Object.freeze({ items: Object.freeze([]), cursor: null, loading: false, error: null }),
+  }),
+  experience: Object.freeze({
+    repositories: Object.freeze([]),
+    repositoriesLoaded: false,
+    repositoryKey: "",
+    assets: null,
+    loading: false,
+    error: null,
   }),
   delivery: Object.freeze({
     mode: "date",
@@ -66,6 +92,107 @@ function capabilityPage(state, kind) {
 
 function freezeList(value) {
   return Object.freeze(Array.isArray(value) ? [...value] : []);
+}
+
+const CURRENT_SOURCE_CATALOG = Object.freeze([
+  Object.freeze({
+    sourceAdapterId: "codex",
+    displayName: "Codex",
+    storage: "Local JSONL sessions",
+    runtime: "Built in",
+  }),
+  Object.freeze({
+    sourceAdapterId: "claude",
+    displayName: "Claude Code",
+    storage: "Local JSONL sessions",
+    runtime: "Built in",
+  }),
+]);
+
+const SOURCE_FILTERS = new Set(["all", "snapshot", "eligible"]);
+
+function hasCount(value) {
+  return typeof value === "number"
+    ? Number.isSafeInteger(value) && value > 0
+    : typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value) && value !== "0";
+}
+
+function sumCounts(items, field) {
+  let total = 0n;
+  for (const item of items) {
+    const value = item?.[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+      total += BigInt(value);
+    } else if (typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value)) {
+      total += BigInt(value);
+    }
+  }
+  return total.toString();
+}
+
+function sourceOperations(source) {
+  return Object.freeze([
+    Object.freeze({ id: "sessions", label: "Sessions", state: "supported", detail: "Local discovery and bounded reads" }),
+    Object.freeze({ id: "share", label: "Share", state: "supported", detail: "Portable history export" }),
+    Object.freeze({
+      id: "insights",
+      label: "Insights",
+      state: source.inSnapshot ? "indexed" : "sync-required",
+      detail: source.inSnapshot ? `${source.indexedTurnCount} committed turns` : "No committed source data",
+    }),
+    Object.freeze({
+      id: "memory",
+      label: "Team Memory",
+      state: "gated",
+      detail: source.inSnapshot ? "Eligibility checked at recall" : "Insights sync required",
+    }),
+  ]);
+}
+
+export function sourceCatalogViewModel(status, filter = "all", selectedId = "codex") {
+  const overview = status?.overview;
+  const rollups = new Map((overview?.providers?.items ?? []).map((item) => [item.provider, item]));
+  const sourceDefinitions = [...CURRENT_SOURCE_CATALOG];
+  for (const item of overview?.providers?.items ?? []) {
+    if (sourceDefinitions.some((source) => source.sourceAdapterId === item.provider)) continue;
+    sourceDefinitions.push(Object.freeze({
+      sourceAdapterId: item.provider,
+      displayName: item.provider,
+      storage: "Committed provider records",
+      runtime: "Observed",
+    }));
+  }
+  const sources = sourceDefinitions.map((definition) => {
+    const rollup = rollups.get(definition.sourceAdapterId) ?? {};
+    const source = {
+      ...definition,
+      rawSessionCount: rollup.rawSessionCount ?? "0",
+      eligibleSessionCount: rollup.eligibleSessionCount ?? "0",
+      indexedTurnCount: rollup.indexedTurnCount ?? "0",
+      inSnapshot: hasCount(rollup.rawSessionCount),
+      hasEligibleSessions: hasCount(rollup.eligibleSessionCount),
+    };
+    return Object.freeze({ ...source, operations: sourceOperations(source) });
+  });
+  const normalizedFilter = SOURCE_FILTERS.has(filter) ? filter : "all";
+  const visibleSources = sources.filter((source) => normalizedFilter === "all" ||
+    (normalizedFilter === "snapshot" && source.inSnapshot) ||
+    (normalizedFilter === "eligible" && source.hasEligibleSessions));
+  const selected = visibleSources.find((source) => source.sourceAdapterId === selectedId) ??
+    visibleSources[0] ?? null;
+  return Object.freeze({
+    filter: normalizedFilter,
+    sources: Object.freeze(sources),
+    visibleSources: Object.freeze(visibleSources),
+    selected,
+    snapshotSeq: overview?.snapshotSeq ?? status?.engine?.snapshotSeq ?? null,
+    totals: Object.freeze({
+      supportedSources: String(CURRENT_SOURCE_CATALOG.length),
+      snapshotSources: String(sources.filter((source) => source.inSnapshot).length),
+      eligibleSessions: sumCounts(sources, "eligibleSessionCount"),
+      indexedTurns: sumCounts(sources, "indexedTurnCount"),
+    }),
+  });
 }
 
 function nodeIdentity(value) {
@@ -230,20 +357,167 @@ export function reduceDashboardState(state = INITIAL_STATE, action) {
   switch (action?.type) {
     case "view/select":
       return { ...state, activeView: action.view };
+    case "sources/filter":
+      return {
+        ...state,
+        sources: Object.freeze({
+          ...state.sources,
+          filter: SOURCE_FILTERS.has(action.filter) ? action.filter : "all",
+        }),
+      };
+    case "sources/select":
+      return {
+        ...state,
+        sources: Object.freeze({ ...state.sources, selectedId: action.sourceAdapterId }),
+      };
     case "status/loading":
       return { ...state, statusState: "loading", statusError: null };
     case "status/loaded":
       return { ...state, status: action.status, statusState: "ready", statusError: null };
     case "status/failed":
       return { ...state, statusState: "error", statusError: action.code ?? "TS_OPERATION_FAILED" };
+    case "project-catalog/loading":
+      return {
+        ...state,
+        projectCatalog: Object.freeze({
+          ...state.projectCatalog,
+          loading: true,
+          error: null,
+        }),
+      };
+    case "project-catalog/loaded":
+      return {
+        ...state,
+        projectCatalog: Object.freeze({
+          ...state.projectCatalog,
+          items: freezeList(action.response?.items),
+          loaded: true,
+          loading: false,
+          error: null,
+        }),
+      };
+    case "project-catalog/failed":
+      return {
+        ...state,
+        projectCatalog: Object.freeze({
+          ...state.projectCatalog,
+          loading: false,
+          error: action.code ?? "TS_OPERATION_FAILED",
+        }),
+      };
     case "search/input":
       return { ...state, search: Object.freeze({ ...state.search, [action.field]: action.value }) };
     case "search/loading":
-      return { ...state, search: Object.freeze({ ...state.search, loading: true, error: null }) };
-    case "search/loaded":
-      return { ...state, search: Object.freeze({ ...state.search, loading: false, response: action.response, error: null }) };
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          loading: true,
+          loadingAppend: action.append === true,
+          error: null,
+        }),
+      };
+    case "search/loaded": {
+      const records = action.append
+        ? [...(state.search.response?.records ?? []), ...(action.response?.records ?? [])]
+        : action.response?.records ?? [];
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          loading: false,
+          loadingAppend: false,
+          response: Object.freeze({ ...action.response, records: freezeList(records) }),
+          error: null,
+        }),
+      };
+    }
     case "search/failed":
-      return { ...state, search: Object.freeze({ ...state.search, loading: false, error: action.code ?? "TS_OPERATION_FAILED" }) };
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          loading: false,
+          loadingAppend: false,
+          error: action.code ?? "TS_OPERATION_FAILED",
+        }),
+      };
+    case "conversation/select":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          selected: action.session,
+          messages: Object.freeze([]),
+          messageCursor: null,
+          messageTotal: null,
+          messagesLoading: false,
+          messagesError: null,
+          detailTab: "transcript",
+          selectedTurnKey: null,
+        }),
+      };
+    case "conversation/close":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          selected: null,
+          messages: Object.freeze([]),
+          messageCursor: null,
+          messageTotal: null,
+          messagesLoading: false,
+          messagesError: null,
+          detailTab: "transcript",
+          selectedTurnKey: null,
+        }),
+      };
+    case "conversation/tab":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          detailTab: ["transcript", "execution", "delivery", "insights"].includes(action.tab)
+            ? action.tab
+            : "transcript",
+        }),
+      };
+    case "conversation/turn":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          selectedTurnKey: typeof action.turnKey === "string" ? action.turnKey : null,
+        }),
+      };
+    case "conversation/messages-loading":
+      return {
+        ...state,
+        search: Object.freeze({ ...state.search, messagesLoading: true, messagesError: null }),
+      };
+    case "conversation/messages-loaded":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          messages: freezeList(action.append
+            ? [...state.search.messages, ...(action.response?.records ?? [])]
+            : action.response?.records),
+          messageCursor: action.response?.nextCursor ?? null,
+          messageTotal: action.response?.totalMatchCount ?? null,
+          messagesLoading: false,
+          messagesError: null,
+        }),
+      };
+    case "conversation/messages-failed":
+      return {
+        ...state,
+        search: Object.freeze({
+          ...state.search,
+          messagesLoading: false,
+          messagesError: action.code ?? "TS_OPERATION_FAILED",
+        }),
+      };
     case "capabilities/loading":
       return replaceCapabilityPage(state, action.kind, { loading: true, error: null });
     case "capabilities/loaded": {
@@ -257,6 +531,62 @@ export function reduceDashboardState(state = INITIAL_STATE, action) {
     }
     case "capabilities/failed":
       return replaceCapabilityPage(state, action.kind, { loading: false, error: action.code ?? "TS_OPERATION_FAILED" });
+    case "experience/repositories-loading":
+      return {
+        ...state,
+        experience: Object.freeze({ ...state.experience, loading: true, error: null }),
+      };
+    case "experience/repositories-loaded": {
+      const repositories = freezeList(action.response?.items);
+      const repositoryKey = repositories.some(
+        (repository) => repository.repositoryKey === state.experience.repositoryKey,
+      ) ? state.experience.repositoryKey : repositories[0]?.repositoryKey ?? "";
+      return {
+        ...state,
+        experience: Object.freeze({
+          ...state.experience,
+          repositories,
+          repositoriesLoaded: true,
+          repositoryKey,
+          loading: false,
+          error: null,
+        }),
+      };
+    }
+    case "experience/repository-select":
+      return {
+        ...state,
+        experience: Object.freeze({
+          ...state.experience,
+          repositoryKey: action.repositoryKey,
+          assets: null,
+          error: null,
+        }),
+      };
+    case "experience/assets-loading":
+      return {
+        ...state,
+        experience: Object.freeze({ ...state.experience, loading: true, error: null }),
+      };
+    case "experience/assets-loaded":
+      return {
+        ...state,
+        experience: Object.freeze({
+          ...state.experience,
+          assets: action.response,
+          loading: false,
+          error: null,
+        }),
+      };
+    case "experience/failed":
+      return {
+        ...state,
+        experience: Object.freeze({
+          ...state.experience,
+          loading: false,
+          error: action.code ?? "TS_OPERATION_FAILED",
+        }),
+      };
     case "delivery/repositories-loading":
       return { ...state, delivery: Object.freeze({ ...state.delivery, loading: true, error: null }) };
     case "delivery/repositories-loaded": {
@@ -577,21 +907,38 @@ export function formatAge(value) {
   return `${Math.round(milliseconds / 3_600_000)} hr`;
 }
 
-export function buildSearchRequest(search) {
-  const query = String(search.query ?? "").trim();
-  const start = Date.parse(`${search.observedAtOrAfter ?? ""}T00:00:00.000Z`);
-  const before = Date.parse(`${search.observedBefore ?? ""}T00:00:00.000Z`);
-  const filters = {
-    providers: search.provider ? [search.provider] : [],
-    projectKeys: search.projectKey ? [search.projectKey] : [],
-    observedAtOrAfterUnixMs: Number.isFinite(start) ? String(start) : null,
-    observedBeforeUnixMs: Number.isFinite(before) ? String(before) : null,
-    toolCapabilityKeys: search.toolCapabilityKey ? [search.toolCapabilityKey] : [],
-    skillCapabilityKeys: search.skillCapabilityKey ? [search.skillCapabilityKey] : [],
-    resultEvidence: search.resultEvidence ? [search.resultEvidence] : [],
-    closureStates: search.closure ? [search.closure] : [],
-  };
-  return Object.freeze({ query, filters, limit: 50, pathLimit: 10 });
+export function defaultHistoryDateRange(nowUnixMs = Date.now()) {
+  const now = new Date(nowUnixMs);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("nowUnixMs must be a valid timestamp");
+  const before = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+  ));
+  const after = new Date(before.getTime() - 14 * 24 * 60 * 60 * 1000);
+  return Object.freeze({
+    observedAtOrAfter: after.toISOString().slice(0, 10),
+    observedBefore: before.toISOString().slice(0, 10),
+  });
+}
+
+export function buildConversationRequest(search, cursor = null) {
+  return Object.freeze({
+    after: utcDateTimestamp(search.observedAtOrAfter),
+    before: utcDateTimestamp(search.observedBefore),
+    provider: search.provider || null,
+    projectKey: search.projectKey || null,
+    query: String(search.query ?? "").trim(),
+    toolCapabilityKey: search.toolCapabilityKey || null,
+    skillCapabilityKey: search.skillCapabilityKey || null,
+    completeness: search.completeness || null,
+    cursor,
+    limit: 30,
+  });
+}
+
+export function buildConversationMessagesRequest(sessionKey, cursor = null) {
+  return Object.freeze({ sessionKey, cursor, limit: 20 });
 }
 
 function utcDateTimestamp(value) {
@@ -628,4 +975,61 @@ export function overviewCounts(status) {
   const overview = status?.overview;
   if (overview === null || typeof overview !== "object") return EMPTY_COUNTS;
   return overview;
+}
+
+const PROJECT_KEY_PATTERN = /^[0-9a-f]{64}$/u;
+
+/**
+ * Builds the human-facing project choices without exposing every anonymous
+ * project fingerprint returned by the bounded overview rollup.
+ */
+export function projectFilterViewModel(status, catalog = {}) {
+  const projectPage = overviewCounts(status).projects ?? {};
+  const overviewItems = Array.isArray(projectPage.items) ? projectPage.items : [];
+  const rollups = new Map(
+    overviewItems
+      .filter((item) => PROJECT_KEY_PATTERN.test(item?.projectKey ?? ""))
+      .map((item) => [item.projectKey, item]),
+  );
+  const seen = new Set();
+  const options = [];
+  for (const item of Array.isArray(catalog.items) ? catalog.items : []) {
+    const projectKey = item?.projectKey;
+    if (!PROJECT_KEY_PATTERN.test(projectKey ?? "") || seen.has(projectKey)) continue;
+    seen.add(projectKey);
+    const rollup = rollups.get(projectKey) ?? {};
+    options.push({
+      projectKey,
+      repositoryKey: item.repositoryKey,
+      provider: item.provider,
+      label: item.label,
+      indexedTurnCount: rollup.indexedTurnCount ?? "0",
+      rawSessionCount: rollup.rawSessionCount ?? "0",
+      eligibleSessionCount: rollup.eligibleSessionCount ?? "0",
+    });
+  }
+  options.sort((left, right) =>
+    String(left.label).localeCompare(String(right.label)) ||
+    String(left.provider).localeCompare(String(right.provider)) ||
+    left.projectKey.localeCompare(right.projectKey));
+
+  const anonymousCount = overviewItems.filter((item) => !seen.has(item?.projectKey)).length;
+  let message = null;
+  if (catalog.loading === true) {
+    message = "Loading registered projects...";
+  } else if (catalog.error !== null && catalog.error !== undefined) {
+    message = "Project labels unavailable; paste an exact 64-character project key.";
+  } else if (catalog.loaded !== true) {
+    message = "Project labels are loaded separately from anonymous history rollups.";
+  } else if (options.length === 0) {
+    message = "No registered projects are in this index; paste an exact 64-character project key.";
+  } else if (anonymousCount > 0 || projectPage.truncated === true) {
+    message = "Showing registered projects only; other project identities require an exact key.";
+  }
+  return Object.freeze({
+    options: Object.freeze(options.map((item) => Object.freeze(item))),
+    message,
+    anonymousCount,
+    overviewTruncated: projectPage.truncated === true,
+  });
 }

@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   INITIAL_STATE,
-  buildSearchRequest,
+  buildConversationMessagesRequest,
+  buildConversationRequest,
   createDashboardStore,
+  defaultHistoryDateRange,
   dashboardDiagnosticMessage,
   decimalCount,
   deliveryKindLabel,
@@ -12,8 +14,10 @@ import {
   formatAge,
   formatBytes,
   humanizeDeliveryEdge,
+  projectFilterViewModel,
   relatedTraceNodeKeys,
   reduceDashboardState,
+  sourceCatalogViewModel,
 } from "../src/insights-dashboard/state.js";
 
 test("Dashboard state transitions keep capability pagination and evidence isolated", () => {
@@ -69,8 +73,100 @@ test("Dashboard reducer exposes loading, error, and empty states without mutatio
   assert.equal(loaded.statusError, null);
 });
 
-test("Dashboard search requests keep server-owned time and use bounded filters", () => {
-  assert.deepEqual(buildSearchRequest({
+test("Dashboard search loading state distinguishes a new query from pagination", () => {
+  const fresh = reduceDashboardState(INITIAL_STATE, { type: "search/loading", append: false });
+  const page = reduceDashboardState(INITIAL_STATE, { type: "search/loading", append: true });
+  assert.equal(fresh.search.loading, true);
+  assert.equal(fresh.search.loadingAppend, false);
+  assert.equal(page.search.loadingAppend, true);
+  const settled = reduceDashboardState(page, {
+    type: "search/failed",
+    code: "TS_QUERY_FAILED",
+  });
+  assert.equal(settled.search.loadingAppend, false);
+});
+
+test("Sources view model presents current adapters without inventing discovery state", () => {
+  const status = {
+    engine: { snapshotSeq: "17" },
+    overview: {
+      snapshotSeq: "17",
+      providers: {
+        items: [{
+          provider: "codex",
+          rawSessionCount: "12",
+          eligibleSessionCount: "8",
+          indexedTurnCount: "94",
+        }],
+      },
+    },
+  };
+  const all = sourceCatalogViewModel(status, "all", "codex");
+  assert.deepEqual(all.totals, {
+    supportedSources: "2",
+    snapshotSources: "1",
+    eligibleSessions: "8",
+    indexedTurns: "94",
+  });
+  assert.deepEqual(all.sources.map((source) => ({
+    id: source.sourceAdapterId,
+    inSnapshot: source.inSnapshot,
+    eligible: source.hasEligibleSessions,
+  })), [
+    { id: "codex", inSnapshot: true, eligible: true },
+    { id: "claude", inSnapshot: false, eligible: false },
+  ]);
+  assert.equal(all.selected.sourceAdapterId, "codex");
+  assert.deepEqual(all.selected.operations.map((operation) => operation.state), [
+    "supported", "supported", "indexed", "gated",
+  ]);
+
+  const eligible = sourceCatalogViewModel(status, "eligible", "claude");
+  assert.deepEqual(eligible.visibleSources.map((source) => source.sourceAdapterId), ["codex"]);
+  assert.equal(eligible.selected.sourceAdapterId, "codex");
+  const empty = sourceCatalogViewModel({ overview: { providers: { items: [] } } }, "snapshot", "codex");
+  assert.equal(empty.visibleSources.length, 0);
+  assert.equal(empty.selected, null);
+});
+
+test("Dashboard source selection and scope are explicit state transitions", () => {
+  const filtered = reduceDashboardState(INITIAL_STATE, { type: "sources/filter", filter: "eligible" });
+  const selected = reduceDashboardState(filtered, { type: "sources/select", sourceAdapterId: "claude" });
+  const invalid = reduceDashboardState(selected, { type: "sources/filter", filter: "future-value" });
+  assert.equal(INITIAL_STATE.sources.filter, "all");
+  assert.equal(filtered.sources.filter, "eligible");
+  assert.equal(selected.sources.selectedId, "claude");
+  assert.equal(invalid.sources.filter, "all");
+});
+
+test("Dashboard Experience repository and asset loading stay read-only state", () => {
+  const repositoryKey = "a".repeat(64);
+  const loading = reduceDashboardState(INITIAL_STATE, { type: "experience/repositories-loading" });
+  const repositories = reduceDashboardState(loading, {
+    type: "experience/repositories-loaded",
+    response: { items: [{ repositoryKey, label: "threadshare" }] },
+  });
+  const assetsLoading = reduceDashboardState(repositories, { type: "experience/assets-loading" });
+  const loaded = reduceDashboardState(assetsLoading, {
+    type: "experience/assets-loaded",
+    response: {
+      format: "threadshare-insights-dashboard-memory-assets@v1",
+      assets: [{ kind: "entry", id: "release-checks" }],
+    },
+  });
+  assert.equal(INITIAL_STATE.activeView, "search");
+  assert.equal(repositories.experience.repositoryKey, repositoryKey);
+  assert.equal(loaded.experience.loading, false);
+  assert.equal(loaded.experience.assets.assets[0].id, "release-checks");
+});
+
+test("Dashboard conversation requests are bounded and preserve UTC filters", () => {
+  assert.deepEqual(defaultHistoryDateRange(Date.parse("2026-08-27T16:45:00.000Z")), {
+    observedAtOrAfter: "2026-08-14",
+    observedBefore: "2026-08-28",
+  });
+  assert.throws(() => defaultHistoryDateRange(Number.NaN), /valid timestamp/u);
+  assert.deepEqual(buildConversationRequest({
     query: "  Bash timeout  ",
     provider: "codex",
     projectKey: "f".repeat(64),
@@ -78,39 +174,64 @@ test("Dashboard search requests keep server-owned time and use bounded filters",
     observedBefore: "2026-08-11",
     toolCapabilityKey: "a".repeat(64),
     skillCapabilityKey: "b".repeat(64),
-    closure: "hard-sealed",
-    resultEvidence: "provider-completed",
-  }), {
+    completeness: "full",
+  }, "cursor-page-2"), {
+    after: "2026-08-01T00:00:00.000Z",
+    before: "2026-08-11T00:00:00.000Z",
+    provider: "codex",
+    projectKey: "f".repeat(64),
     query: "Bash timeout",
-    filters: {
-      providers: ["codex"],
-      projectKeys: ["f".repeat(64)],
-      observedAtOrAfterUnixMs: "1785542400000",
-      observedBeforeUnixMs: "1786406400000",
-      toolCapabilityKeys: ["a".repeat(64)],
-      skillCapabilityKeys: ["b".repeat(64)],
-      resultEvidence: ["provider-completed"],
-      closureStates: ["hard-sealed"],
-    },
-    limit: 50,
-    pathLimit: 10,
+    toolCapabilityKey: "a".repeat(64),
+    skillCapabilityKey: "b".repeat(64),
+    completeness: "full",
+    cursor: "cursor-page-2",
+    limit: 30,
   });
-  assert.equal(Object.hasOwn(buildSearchRequest({ query: "x" }), "nowUnixMs"), false);
-  assert.deepEqual(buildSearchRequest({ query: "", provider: "claude" }), {
+  assert.deepEqual(buildConversationRequest({ query: "", provider: "claude" }), {
+    after: null,
+    before: null,
+    provider: "claude",
+    projectKey: null,
     query: "",
-    filters: {
-      providers: ["claude"],
-      projectKeys: [],
-      observedAtOrAfterUnixMs: null,
-      observedBeforeUnixMs: null,
-      toolCapabilityKeys: [],
-      skillCapabilityKeys: [],
-      resultEvidence: [],
-      closureStates: [],
-    },
-    limit: 50,
-    pathLimit: 10,
+    toolCapabilityKey: null,
+    skillCapabilityKey: null,
+    completeness: null,
+    cursor: null,
+    limit: 30,
   });
+  assert.deepEqual(buildConversationMessagesRequest("c".repeat(64), "page-2"), {
+    sessionKey: "c".repeat(64), cursor: "page-2", limit: 20,
+  });
+});
+
+test("Project filter exposes registered labels and never materializes anonymous rollups", () => {
+  const registeredKey = "a".repeat(64);
+  const anonymousKey = "b".repeat(64);
+  const model = projectFilterViewModel({
+    overview: {
+      projects: {
+        items: [
+          { projectKey: registeredKey, rawSessionCount: "4", eligibleSessionCount: "4", indexedTurnCount: "18" },
+          { projectKey: anonymousKey, rawSessionCount: "1", eligibleSessionCount: "1", indexedTurnCount: "1" },
+        ],
+        truncated: true,
+      },
+    },
+  }, {
+    loaded: true,
+    items: [{ projectKey: registeredKey, repositoryKey: "c".repeat(64), provider: "codex", label: "threadshare" }],
+  });
+  assert.deepEqual(model.options, [{
+    projectKey: registeredKey,
+    repositoryKey: "c".repeat(64),
+    provider: "codex",
+    label: "threadshare",
+    indexedTurnCount: "18",
+    rawSessionCount: "4",
+    eligibleSessionCount: "4",
+  }]);
+  assert.equal(model.options.some((item) => item.projectKey === anonymousKey), false);
+  assert.match(model.message, /registered projects only/u);
 });
 
 test("Dashboard scalar formatters tolerate protocol decimal strings", () => {

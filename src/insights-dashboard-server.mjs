@@ -307,8 +307,32 @@ export async function createInsightsDashboardServer(options = {}) {
         sendJson(response, 200, await options.api.capabilities({ kind, cursor, limit }));
         return;
       }
+      if (url.pathname === "/api/v1/history/projects" && request.method === "GET") {
+        if ([...url.searchParams].length !== 0) {
+          throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Invalid history project query");
+        }
+        sendJson(response, 200, await options.api.historyProjects());
+        return;
+      }
       if (url.pathname === "/api/v1/inspector/repositories" && request.method === "GET") {
         sendJson(response, 200, await options.api.inspectorRepositories());
+        return;
+      }
+      if (url.pathname === "/api/v1/experience/repositories" && request.method === "GET") {
+        if ([...url.searchParams].length !== 0) {
+          throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Invalid experience repository query");
+        }
+        sendJson(response, 200, await options.api.experienceRepositories());
+        return;
+      }
+      if (url.pathname === "/api/v1/experience/assets" && request.method === "GET") {
+        const parameters = [...url.searchParams];
+        if (parameters.length !== 1 || parameters[0][0] !== "repositoryKey") {
+          throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Invalid experience asset query");
+        }
+        sendJson(response, 200, await options.api.experienceAssets({
+          repositoryKey: parameters[0][1],
+        }));
         return;
       }
       if (url.pathname === "/api/v1/inspector/edges" && request.method === "POST") {
@@ -317,6 +341,23 @@ export async function createInsightsDashboardServer(options = {}) {
           throw dashboardError("TS_INSIGHTS_DASHBOARD_REQUEST_INVALID", "Inspector edge body must be JSON");
         }
         sendJson(response, 200, await options.api.inspectorEdges(JSON.parse(await readBody(request, MAX_JSON_BYTES))));
+        return;
+      }
+      const conversationAction = new Map([
+        ["/api/v1/conversations", "conversationSessions"],
+        ["/api/v1/conversation-messages", "conversationMessages"],
+      ]).get(url.pathname);
+      if (conversationAction !== undefined && request.method === "POST") {
+        assertOrigin(request, `http://${authority}`);
+        if (request.headers["content-type"]?.split(";", 1)[0] !== "application/json") {
+          throw dashboardError(
+            "TS_INSIGHTS_DASHBOARD_REQUEST_INVALID",
+            "Conversation body must be JSON",
+          );
+        }
+        sendJson(response, 200, await options.api[conversationAction](
+          JSON.parse(await readBody(request, MAX_JSON_BYTES)),
+        ));
         return;
       }
       const inspectorAction = new Map([

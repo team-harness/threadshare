@@ -2,8 +2,10 @@ import {
   INITIAL_STATE,
   buildDeliveryTraceRequest,
   buildInspectorEdgeRequest,
-  buildSearchRequest,
+  buildConversationMessagesRequest,
+  buildConversationRequest,
   createDashboardStore,
+  defaultHistoryDateRange,
   dashboardDiagnosticMessage,
   deliveryKindLabel,
   deliveryTraceViewModel,
@@ -13,9 +15,14 @@ import {
   formatCount,
   humanizeDeliveryEdge,
   overviewCounts,
+  projectFilterViewModel,
+  sourceCatalogViewModel,
 } from "/state.js";
 
-const store = createDashboardStore(INITIAL_STATE);
+const store = createDashboardStore({
+  ...INITIAL_STATE,
+  search: Object.freeze({ ...INITIAL_STATE.search, ...defaultHistoryDateRange() }),
+});
 const elements = Object.freeze({
   statusStrip: document.querySelector("#status-strip"),
   snapshotLabel: document.querySelector("#snapshot-label"),
@@ -25,13 +32,45 @@ const elements = Object.freeze({
   coverageList: document.querySelector("#coverage-list"),
   providerRows: document.querySelector("#provider-rows"),
   diagnosticList: document.querySelector("#diagnostic-list"),
+  historyMetrics: document.querySelector("#history-metrics"),
+  historySnapshot: document.querySelector("#history-snapshot"),
+  historyQualityStrip: document.querySelector("#history-quality-strip"),
+  sourceMetrics: document.querySelector("#source-metrics"),
+  sourcesSnapshot: document.querySelector("#sources-snapshot"),
+  sourceFilterSummary: document.querySelector("#source-filter-summary"),
+  sourceRows: document.querySelector("#source-rows"),
+  sourceDetail: document.querySelector("#source-detail"),
+  experienceRepository: document.querySelector("#experience-repository"),
+  experienceStatus: document.querySelector("#experience-status"),
+  experienceMetrics: document.querySelector("#experience-metrics"),
+  experienceRows: document.querySelector("#experience-rows"),
+  providerFilter: document.querySelector("#provider-filter"),
   projectFilter: document.querySelector("#project-filter"),
   projectOptions: document.querySelector("#project-options"),
   projectFilterState: document.querySelector("#project-filter-state"),
+  searchQuery: document.querySelector("#search-query"),
+  observedAfter: document.querySelector("#after-filter"),
+  observedBefore: document.querySelector("#before-filter"),
+  completenessFilter: document.querySelector("#completeness-filter"),
   searchSummary: document.querySelector("#search-summary"),
-  searchRows: document.querySelector("#search-rows"),
-  pathSummary: document.querySelector("#path-summary"),
-  pathList: document.querySelector("#path-list"),
+  conversationRows: document.querySelector("#conversation-rows"),
+  conversationMore: document.querySelector("#conversation-more"),
+  conversationBackdrop: document.querySelector("#conversation-backdrop"),
+  conversationDetail: document.querySelector("#conversation-detail"),
+  conversationBack: document.querySelector("#conversation-back"),
+  conversationTitle: document.querySelector("#conversation-title"),
+  conversationSubtitle: document.querySelector("#conversation-subtitle"),
+  conversationKey: document.querySelector("#conversation-key"),
+  conversationStateBadge: document.querySelector("#conversation-state-badge"),
+  conversationSessionBar: document.querySelector("#conversation-session-bar"),
+  conversationTurnCount: document.querySelector("#conversation-turn-count"),
+  conversationTurnList: document.querySelector("#conversation-turn-list"),
+  conversationFacts: document.querySelector("#conversation-facts"),
+  conversationEvidence: document.querySelector("#conversation-evidence"),
+  conversationEvidenceState: document.querySelector("#conversation-evidence-state"),
+  conversationMessageStatus: document.querySelector("#conversation-message-status"),
+  conversationMessages: document.querySelector("#conversation-messages"),
+  conversationEarlier: document.querySelector("#conversation-earlier"),
   skillRows: document.querySelector("#skill-rows"),
   toolRows: document.querySelector("#tool-rows"),
   inspector: document.querySelector("#inspector"),
@@ -188,14 +227,14 @@ function renderStatus(state) {
 }
 
 function renderProjectOptions(state) {
-  const projectPage = overviewCounts(state.status).projects ?? { items: [], truncated: false };
-  const projects = projectPage.items ?? [];
-  const signature = `${projectPage.truncated}:${projects.map((item) => item.projectKey).join(":")}`;
+  const model = projectFilterViewModel(state.status, state.projectCatalog);
+  const signature = `${model.message ?? ""}:${model.options.map((item) =>
+    `${item.projectKey}:${item.label}:${item.provider}:${item.indexedTurnCount}`).join(":")}`;
   if (elements.projectOptions.dataset.signature === signature) return;
   const selected = state.search.projectKey;
   clear(elements.projectOptions);
-  for (const project of projects) {
-    const label = `${project.projectKey.slice(0, 10)} / ${formatCount(project.indexedTurnCount)} turns`;
+  for (const project of model.options) {
+    const label = `${project.label} · ${project.provider} / ${formatCount(project.indexedTurnCount)} turns`;
     elements.projectOptions.append(node("option", {
       value: project.projectKey,
       label,
@@ -203,7 +242,8 @@ function renderProjectOptions(state) {
     }));
   }
   elements.projectFilter.value = selected;
-  elements.projectFilterState.hidden = !projectPage.truncated;
+  elements.projectFilterState.textContent = model.message ?? "";
+  elements.projectFilterState.hidden = model.message === null;
   elements.projectOptions.dataset.signature = signature;
 }
 
@@ -226,6 +266,70 @@ function renderCapabilityOptions(state, kind) {
   select.dataset.signature = signature;
 }
 
+function renderSourceOptions(state) {
+  const catalog = sourceCatalogViewModel(state.status, "all", state.sources.selectedId);
+  const signature = `${state.search.provider}:${catalog.sources.map((source) => source.sourceAdapterId).join(":")}`;
+  if (elements.providerFilter.dataset.signature === signature) return;
+  clear(elements.providerFilter);
+  elements.providerFilter.append(node("option", { value: "", text: "All sources" }));
+  for (const source of catalog.sources) {
+    elements.providerFilter.append(node("option", {
+      value: source.sourceAdapterId,
+      text: source.displayName,
+    }));
+  }
+  elements.providerFilter.value = catalog.sources.some((source) =>
+    source.sourceAdapterId === state.search.provider) ? state.search.provider : "";
+  elements.providerFilter.dataset.signature = signature;
+}
+
+function renderHistoryMetrics(state) {
+  const overview = overviewCounts(state.status);
+  clear(elements.historyMetrics);
+  clear(elements.historyQualityStrip);
+  elements.historySnapshot.textContent = state.status?.engine === null || state.status?.engine === undefined
+    ? "Snapshot unavailable"
+    : `Snapshot ${state.status.engine.snapshotSeq} · ${formatAge(state.status.engine.snapshotAgeMs)} old`;
+  if (Object.keys(overview).length === 0) {
+    elements.historyMetrics.append(node("p", { className: "empty-copy", text: "No committed history yet." }));
+    elements.historyQualityStrip.append(
+      badge("No committed snapshot", "pending"),
+      node("span", { text: "Run Insights sync to make conversation history available." }),
+    );
+    return;
+  }
+  elements.historyMetrics.append(
+    metric("Conversations", overview.sessions?.eligible, `${formatCount(overview.sessions?.raw)} observed`),
+    metric("Indexed turns", overview.turns?.indexed, `${formatCount(overview.turns?.open)} open`),
+    metric("Capabilities", overview.capabilities?.total, `${formatCount(overview.capabilities?.tool)} tools · ${formatCount(overview.capabilities?.skill)} skills`),
+    metric("Coverage signals", overview.coverage?.items?.length ?? 0, "Visible data-quality hints"),
+  );
+  const coverageItems = overview.coverage?.items ?? [];
+  const hasCoverageGaps = coverageItems.some((item) => Number(item.count ?? 0) > 0);
+  const snapshot = state.status?.engine?.snapshotSeq ?? overview.snapshotSeq ?? "-";
+  elements.historyQualityStrip.append(
+    node("div", { className: "quality-copy" }, [
+      node("strong", { text: `Snapshot ${snapshot} is the query boundary` }),
+      node("span", { text: hasCoverageGaps
+        ? "Some records carry coverage limits. Inspect the evidence rail before drawing conclusions."
+        : "All visible rows are read from the committed local snapshot." }),
+    ]),
+    badge(hasCoverageGaps ? `${formatCount(coverageItems.length)} data hints` : "Coverage clear", hasCoverageGaps ? "pending" : "ok"),
+  );
+}
+
+function renderSearchControlValues(state) {
+  for (const [element, value] of [
+    [elements.searchQuery, state.search.query],
+    [elements.observedAfter, state.search.observedAtOrAfter],
+    [elements.observedBefore, state.search.observedBefore],
+    [elements.completenessFilter, state.search.completeness],
+  ]) {
+    const next = value ?? "";
+    if (element.value !== next) element.value = next;
+  }
+}
+
 function renderOverview(state) {
   const status = state.status;
   const overview = overviewCounts(status);
@@ -239,15 +343,10 @@ function renderOverview(state) {
   }
   elements.overviewMetrics.append(
     metric("Eligible sessions", overview.sessions?.eligible, `${formatCount(overview.sessions?.raw)} observed`),
-    metric("Excluded sessions", overview.sessions?.excluded, `${formatCount(overview.sessions?.subagentExcluded)} file subagent`),
     metric("Indexed turns", overview.turns?.indexed, `${formatCount(overview.turns?.open)} open`),
     metric("Hard sealed", overview.turns?.hardSealed, `${formatCount(overview.turns?.quiescent)} quiescent`),
-    metric("Tools", overview.capabilities?.tool, `${formatCount(overview.capabilities?.total)} capabilities`),
-    metric("Skills", overview.capabilities?.skill, "observed load evidence"),
-    metric("Strong groups", overview.dedupe?.strongGroup, `${formatCount(overview.dedupe?.weakGroup)} weak`),
-    metric("Provisional dedupe", overview.dedupe?.observedEofProvisionalSession, `${formatCount(overview.dedupe?.unknownSession)} unknown`),
-    metric("Unknown scope", overview.scopes?.unknown, `${formatCount(overview.sessions?.unknown)} unknown sessions`),
-    metric("Rolled back", overview.turns?.rolledBack, "excluded from search"),
+    metric("Capabilities", overview.capabilities?.total, `${formatCount(overview.capabilities?.tool)} tools / ${formatCount(overview.capabilities?.skill)} skills`),
+    metric("Repeated patterns", overview.dedupe?.strongGroup, `${formatCount(overview.dedupe?.weakGroup)} weak groups`),
   );
   elements.overviewUpdated.textContent = status.engine === null ? "" : `Snapshot age ${formatAge(status.engine.snapshotAgeMs)}`;
 
@@ -321,59 +420,639 @@ function renderOverview(state) {
   if (diagnostics.length === 0) elements.diagnosticList.append(node("p", { className: "empty-copy", text: "No recent diagnostics." }));
 }
 
-function scoreText(score) {
-  if (score === null || score === undefined) return "-";
-  return (Number(score.relevancePpm ?? 0) / 10_000).toFixed(1);
+function renderExperienceRepositoryOptions(state) {
+  const experience = state.experience;
+  const signature = experience.repositories
+    .map((repository) => `${repository.repositoryKey}:${repository.label}`)
+    .join("|");
+  if (elements.experienceRepository.dataset.signature === signature) {
+    elements.experienceRepository.value = experience.repositoryKey;
+    elements.experienceRepository.disabled = experience.loading || experience.repositories.length === 0;
+    return;
+  }
+  clear(elements.experienceRepository);
+  if (experience.repositories.length === 0) {
+    elements.experienceRepository.append(node("option", {
+      value: "",
+      text: experience.repositoriesLoaded ? "No registered repository" : "Loading repositories",
+    }));
+  } else {
+    for (const repository of experience.repositories) {
+      elements.experienceRepository.append(node("option", {
+        value: repository.repositoryKey,
+        text: repository.label,
+      }));
+    }
+  }
+  elements.experienceRepository.value = experience.repositoryKey;
+  elements.experienceRepository.disabled = experience.loading || experience.repositories.length === 0;
+  elements.experienceRepository.dataset.signature = signature;
+}
+
+function assetTypeLabel(kind) {
+  if (kind === "entry") return "Entry";
+  if (kind === "scene") return "Scene";
+  if (kind === "doctrine") return "Doctrine";
+  if (kind === "skill") return "Skill";
+  return "Asset";
+}
+
+function renderExperience(state) {
+  renderExperienceRepositoryOptions(state);
+  const experience = state.experience;
+  const response = experience.assets;
+  clear(elements.experienceMetrics);
+  clear(elements.experienceRows);
+  elements.experienceStatus.classList.toggle("is-error", experience.error !== null);
+  if (experience.loading && response === null) {
+    elements.experienceStatus.textContent = "Reading reviewed assets...";
+    elements.experienceRows.append(emptyRow(5, "Loading Team Memory assets"));
+    return;
+  }
+  if (experience.error !== null) {
+    elements.experienceStatus.textContent = dashboardDiagnosticMessage(experience.error);
+    elements.experienceRows.append(emptyRow(5, "Reviewed assets could not be read."));
+    return;
+  }
+  if (!experience.repositoriesLoaded) {
+    elements.experienceStatus.textContent = "";
+    elements.experienceRows.append(emptyRow(5, "Select Experience to load registered repositories."));
+    return;
+  }
+  if (experience.repositoryKey === "") {
+    elements.experienceStatus.textContent = "No registered repository.";
+    elements.experienceRows.append(emptyRow(5, "No reviewed Team Memory assets."));
+    return;
+  }
+  if (response === null) {
+    elements.experienceStatus.textContent = "";
+    elements.experienceRows.append(emptyRow(5, "Reviewed assets have not been loaded."));
+    return;
+  }
+  const diagnosticCount = (response.diagnostics ?? []).reduce(
+    (total, item) => total + Number(item.count ?? 0),
+    0,
+  );
+  elements.experienceStatus.textContent = response.initialized
+    ? `${formatCount(response.assets?.length)} reviewed assets${response.truncated ? " / bounded result" : ""}${diagnosticCount > 0 ? ` / ${formatCount(diagnosticCount)} invalid or skipped` : ""}`
+    : "Team Memory is not initialized for this repository.";
+  elements.experienceMetrics.append(
+    metric("Approved entries", response.counts?.entries, "reviewed statements"),
+    metric("Scenes", response.counts?.scenes, "synthesized context"),
+    metric("Doctrine", response.counts?.doctrine, "team-wide guidance"),
+    metric("Skills", response.counts?.skills, "reusable procedures"),
+  );
+  for (const asset of response.assets ?? []) {
+    const evidence = asset.evidenceStrength ?? (asset.kind === "entry" ? "unknown" : "reviewed asset");
+    const limit = asset.heat === null
+      ? asset.limitations.length === 0 ? "-" : asset.limitations.join(", ")
+      : `heat ${formatCount(asset.heat)}`;
+    elements.experienceRows.append(node("tr", {}, [
+      node("td", {}, [
+        node("strong", { text: asset.title }),
+        node("span", { className: "row-detail", text: asset.summary || asset.id, title: asset.summary || asset.id }),
+      ]),
+      cell(assetTypeLabel(asset.kind)),
+      cell(asset.state),
+      cell(evidence),
+      cell(limit),
+    ]));
+  }
+  if ((response.assets ?? []).length === 0) {
+    elements.experienceRows.append(emptyRow(5, "No reviewed Team Memory assets."));
+  }
+}
+
+function sourceStateBadge(source, statusState) {
+  if (statusState === "loading") return badge("Checking snapshot", "pending");
+  if (statusState === "error") return badge("Status unavailable", "danger");
+  if (source.hasEligibleSessions) return badge("Eligible data", "ok");
+  if (source.inSnapshot) return badge("No eligible sessions", "pending");
+  return badge("Not indexed", "neutral");
+}
+
+function operationBadge(operation) {
+  if (operation.state === "supported") return badge("Supported", "ok");
+  if (operation.state === "indexed") return badge("Indexed", "ok");
+  if (operation.state === "sync-required") return badge("Sync required", "pending");
+  return badge("Evidence gate", "neutral");
+}
+
+function renderSources(state) {
+  const catalog = sourceCatalogViewModel(
+    state.status,
+    state.sources.filter,
+    state.sources.selectedId,
+  );
+  elements.sourcesSnapshot.textContent = catalog.snapshotSeq === null
+    ? state.statusState === "error" ? "Snapshot unavailable" : "Loading committed snapshot"
+    : `Committed snapshot ${catalog.snapshotSeq}`;
+  clear(elements.sourceMetrics);
+  if (state.status === null && state.statusState === "loading") {
+    elements.sourceMetrics.append(node("p", { className: "empty-copy", text: "Loading source totals." }));
+  } else {
+    elements.sourceMetrics.append(
+      metric("Supported sources", catalog.totals.supportedSources, "current release"),
+      metric("In snapshot", catalog.totals.snapshotSources, "committed source data"),
+      metric("Eligible sessions", catalog.totals.eligibleSessions, "main sessions"),
+      metric("Indexed turns", catalog.totals.indexedTurns, "active turns"),
+    );
+  }
+  for (const button of document.querySelectorAll("[data-source-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.sourceFilter === catalog.filter));
+  }
+  elements.sourceFilterSummary.textContent = `${formatCount(catalog.visibleSources.length)} of ${formatCount(catalog.sources.length)} sources`;
+
+  clear(elements.sourceRows);
+  for (const source of catalog.visibleSources) {
+    const select = node("button", {
+      className: "source-select",
+      type: "button",
+      text: source.displayName,
+      title: `Inspect ${source.displayName}`,
+    });
+    select.append(node("code", { text: source.sourceAdapterId }));
+    select.addEventListener("click", () => store.dispatch({
+      type: "sources/select",
+      sourceAdapterId: source.sourceAdapterId,
+    }));
+    const row = node("tr", {
+      className: source.sourceAdapterId === catalog.selected?.sourceAdapterId ? "is-selected" : "",
+    }, [
+      node("td", {}, [select]),
+      node("td", {}, [sourceStateBadge(source, state.statusState)]),
+      cell(formatCount(source.rawSessionCount), "numeric"),
+      cell(formatCount(source.eligibleSessionCount), "numeric"),
+      cell(formatCount(source.indexedTurnCount), "numeric"),
+    ]);
+    elements.sourceRows.append(row);
+  }
+  if (catalog.visibleSources.length === 0) {
+    elements.sourceRows.append(emptyRow(5, "No sources match this scope."));
+  }
+
+  clear(elements.sourceDetail);
+  const source = catalog.selected;
+  if (source === null) {
+    elements.sourceDetail.append(node("p", { className: "empty-copy", text: "Select another source scope." }));
+    return;
+  }
+  const heading = node("div", { className: "source-detail-heading" }, [
+    node("div", {}, [
+      node("p", { className: "eyebrow", text: source.sourceAdapterId }),
+      node("h2", { text: source.displayName }),
+    ]),
+    sourceStateBadge(source, state.statusState),
+  ]);
+  const operations = node("div", { className: "source-operation-list" });
+  for (const operation of source.operations) {
+    operations.append(node("div", { className: "source-operation" }, [
+      node("div", {}, [
+        node("strong", { text: operation.label }),
+        node("span", { text: operation.detail }),
+      ]),
+      operationBadge(operation),
+    ]));
+  }
+  elements.sourceDetail.append(
+    heading,
+    node("div", { className: "detail-list source-facts" }, [
+      detailRow("Storage", source.storage),
+      detailRow("Runtime", source.runtime),
+      detailRow("Observed sessions", formatCount(source.rawSessionCount)),
+      detailRow("Eligible sessions", formatCount(source.eligibleSessionCount)),
+    ]),
+    node("div", { className: "source-operation-heading", text: "Available operations" }),
+    operations,
+  );
+  if (source.inSnapshot) {
+    const search = node("button", { className: "primary-button source-action", type: "button", text: "Search this source" });
+    search.addEventListener("click", () => {
+      store.dispatch({ type: "search/input", field: "provider", value: source.sourceAdapterId });
+      store.dispatch({ type: "view/select", view: "search" });
+      document.querySelector("#workspace").focus({ preventScroll: true });
+    });
+    elements.sourceDetail.append(search);
+  }
 }
 
 function renderSearch(state) {
   const search = state.search;
   const response = search.response;
-  clear(elements.searchRows);
-  clear(elements.pathList);
+  for (const button of document.querySelectorAll("[data-history-scope]")) {
+    const active = (search.completeness || "all") === button.dataset.historyScope;
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+  clear(elements.conversationRows);
   if (search.loading) {
-    elements.searchSummary.textContent = "Searching committed snapshot...";
-    elements.searchRows.append(emptyRow(5, "Searching"));
+    elements.searchSummary.textContent = search.loadingAppend
+      ? "Loading more conversations..."
+      : "Searching the committed snapshot...";
+    if (response === null) elements.conversationRows.append(emptyRow(6, "Loading conversations"));
+    elements.conversationMore.disabled = true;
+    renderConversationDetail(search);
     return;
   }
   if (search.error) {
-    elements.searchSummary.textContent = search.error;
-    elements.searchRows.append(emptyRow(5, "Search did not complete."));
+    elements.searchSummary.textContent = dashboardDiagnosticMessage(search.error);
+    elements.conversationRows.append(emptyRow(6, "Conversation history did not load."));
+    elements.conversationMore.hidden = true;
+    renderConversationDetail(search);
     return;
   }
   if (response === null) {
     elements.searchSummary.textContent = "";
-    elements.searchRows.append(emptyRow(5, "Enter a query to search indexed turns."));
-    elements.pathSummary.textContent = "";
+    elements.conversationRows.append(emptyRow(6, "Loading recent conversations."));
+    elements.conversationMore.hidden = true;
+    renderConversationDetail(search);
     return;
   }
-  const results = response.results ?? [];
-  elements.searchSummary.textContent = `${formatCount(results.length)} results / ${formatCount(response.searchTrace?.candidateCount)} candidates / snapshot ${response.snapshot?.snapshotSeq ?? "-"}`;
-  for (const result of results) {
-    const button = node("button", { className: "turn-button", type: "button", text: result.problemExcerpt || "Untitled turn" });
-    button.addEventListener("click", () => loadEvidence(result, null, false));
-    elements.searchRows.append(node("tr", {}, [
-      node("td", {}, [button, node("span", { className: "row-detail", text: result.observedTimestamp ?? "Timestamp unavailable" })]),
-      cell(result.provider), cell(result.closureState), cell(result.resultEvidence), cell(scoreText(result.score), "numeric"),
-    ]));
-  }
-  if (results.length === 0) elements.searchRows.append(emptyRow(5, "No indexed turns matched this query."));
-
-  const paths = response.evidencePaths;
-  elements.pathSummary.textContent = paths === undefined
-    ? ""
-    : paths.insufficientSample
-      ? `${formatCount(paths.eligibleTurnCount)} eligible turns / insufficient sample`
-      : `${formatCount(paths.families?.length)} families / ${formatCount(paths.independentGroupCount)} independent groups`;
-  for (const family of paths?.families ?? []) {
-    const pathButton = node("button", { className: "path-button", type: "button" }, [
-      node("span", { className: "path-sequence", text: (family.nodes ?? []).map((item) => `${item.providerScopedName} x${item.repeatBucket}`).join("  >  ") }),
-      node("span", { className: "path-meta", text: `${formatCount(family.turnCount)} turns / ${formatCount(family.independentGroupCount)} groups` }),
+  const sessions = response.records ?? [];
+  const snapshot = response.snapshot?.seq ?? "-";
+  elements.searchSummary.textContent = `${formatCount(response.totalMatchCount)} conversations / ${formatCount(sessions.length)} shown / snapshot ${snapshot}`;
+  for (const session of sessions) {
+    const title = session.session?.title?.trim() || "Untitled conversation";
+    const button = node("button", {
+      className: "conversation-button",
+      type: "button",
+      text: title,
+      title,
+    });
+    button.addEventListener("click", () => openConversation(session));
+    const row = node("tr", {
+      className: search.selected?.sessionKey === session.sessionKey ? "is-selected" : "",
+      dataset: { sessionKey: session.sessionKey },
+      tabindex: "0",
+      "aria-selected": search.selected?.sessionKey === session.sessionKey ? "true" : "false",
+    }, [
+      node("td", {}, [
+        node("strong", { text: readableTimestamp(session.session?.endedAt) }),
+        node("span", {
+          className: "row-detail",
+          text: conversationDuration(session.session?.startedAt, session.session?.endedAt),
+        }),
+      ]),
+      node("td", {}, [
+        button,
+        node("span", {
+          className: "row-detail",
+          text: `${session.session?.turnCount ?? 0} turns · ${session.sessionKey.slice(0, 12)}`,
+        }),
+      ]),
+      node("td", {}, [
+        badge(readableSlug(session.provider), session.provider === "codex" ? "ok" : "neutral"),
+        node("span", { className: "row-detail", text: session.originScope === "main" ? "Main session" : readableSlug(session.originScope || "unknown") }),
+      ]),
+      node("td", {}, [
+        node("code", {
+          className: "context-key",
+          text: session.projectKey?.slice(0, 16) ?? "No project context",
+          title: session.projectKey ?? "",
+        }),
+        node("span", { className: "row-detail", text: session.projectKey ? "Registered project context" : "Context not recorded" }),
+      ]),
+      node("td", { className: "turn-count-cell" }, [
+        node("strong", { text: formatCount(session.session?.turnCount) }),
+        node("span", { className: "row-detail", text: "indexed turns" }),
+      ]),
+      node("td", {}, [
+        badge(
+          session.completeness === "full" ? "Complete" : "Partial",
+          session.completeness === "full" ? "ok" : "pending",
+        ),
+        node("span", { className: "row-detail", text: session.completeness === "full" ? "Evidence boundary closed" : "Coverage needs review" }),
+      ]),
     ]);
-    pathButton.addEventListener("click", () => store.dispatch({ type: "inspector/family", family }));
-    elements.pathList.append(pathButton);
+    row.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element) || event.target.closest("button") === null) openConversation(session);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openConversation(session);
+      }
+    });
+    elements.conversationRows.append(row);
   }
-  if ((paths?.families ?? []).length === 0) elements.pathList.append(node("p", { className: "empty-copy", text: "No evidence-backed Tool path for this result set." }));
+  if (sessions.length === 0) {
+    elements.conversationRows.append(emptyRow(6, "No conversations matched these filters."));
+  }
+  elements.conversationMore.hidden = response.nextCursor === null;
+  elements.conversationMore.disabled = search.loading;
+  renderConversationDetail(search);
+}
+
+function conversationDuration(startedAt, endedAt) {
+  const start = Date.parse(startedAt ?? "");
+  const end = Date.parse(endedAt ?? "");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "Duration unavailable";
+  const minutes = Math.max(1, Math.round((end - start) / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder === 0 ? `${hours} hr` : `${hours} hr ${remainder} min`;
+}
+
+function messageRoleLabel(role) {
+  if (role === "user") return "User";
+  if (role === "assistant") return "Agent";
+  if (role === "system") return "System";
+  return readableSlug(role || "Message");
+}
+
+function clipText(value, limit = 96) {
+  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+  if (text.length <= limit) return text;
+  return `${[...text].slice(0, Math.max(0, limit - 1)).join("")}…`;
+}
+
+function messageContent(message) {
+  const content = message?.message?.content;
+  return typeof content?.inline === "string"
+    ? content.inline || "(Empty message)"
+    : `Message content is stored as paged evidence (${formatBytes(content?.byteLength)}).`;
+}
+
+function conversationTurnGroups(messages) {
+  const groups = new Map();
+  for (const message of messages) {
+    const key = typeof message.turnKey === "string" ? message.turnKey : `event:${message.eventKey}`;
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      groups.set(key, { key, messages: [message] });
+    } else {
+      existing.messages.push(message);
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      messages: [...group.messages].sort((left, right) => {
+        const leftTime = Date.parse(left.observedAt ?? "");
+        const rightTime = Date.parse(right.observedAt ?? "");
+        const time = (Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER) -
+          (Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER);
+        return time || String(left.eventKey).localeCompare(String(right.eventKey));
+      }),
+    }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.messages[0]?.observedAt ?? "");
+      const rightTime = Date.parse(right.messages[0]?.observedAt ?? "");
+      const time = (Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER) -
+        (Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER);
+      return time || String(left.key).localeCompare(String(right.key));
+    });
+}
+
+function conversationTurnTitle(group) {
+  const prompt = group.messages.find((message) => message.message?.role === "user");
+  return clipText(prompt ? messageContent(prompt) : messageContent(group.messages[0]), 68) || "Untitled turn";
+}
+
+function conversationMessageNode(message) {
+  const role = message.message?.role ?? "unknown";
+  const content = message.message?.content;
+  return node("article", {
+    className: `conversation-message role-${role}`,
+  }, [
+    node("div", { className: "message-avatar", "aria-hidden": "true", text: role === "assistant" ? "✦" : role === "user" ? "●" : "·" }),
+    node("div", { className: "conversation-message-body" }, [
+      node("header", {}, [
+        node("strong", { text: messageRoleLabel(role) }),
+        node("time", { text: readableTimestamp(message.observedAt) }),
+      ]),
+      node("div", { className: "conversation-message-copy", text: messageContent(message) }),
+      content?.complete === false
+        ? node("span", { className: "message-limitation", text: "Partial retained content · inspect coverage before reuse" })
+        : node("span", { className: "message-limitation", text: "" }),
+    ]),
+  ]);
+}
+
+function renderConversationTurnRail(groups, selectedTurnKey) {
+  clear(elements.conversationTurnList);
+  elements.conversationTurnCount.textContent = formatCount(groups.length);
+  for (const [index, group] of groups.entries()) {
+    const first = group.messages[0];
+    const item = node("button", {
+      className: `conversation-turn-item${group.key === selectedTurnKey ? " is-selected" : ""}`,
+      type: "button",
+      "aria-current": group.key === selectedTurnKey ? "true" : "false",
+    }, [
+      node("span", { className: "conversation-turn-number", text: String(index + 1).padStart(2, "0") }),
+      node("span", { className: "conversation-turn-copy" }, [
+        node("strong", { text: conversationTurnTitle(group) }),
+        node("small", { text: `${group.messages.length} messages · ${readableTimestamp(first?.observedAt)}` }),
+      ]),
+    ]);
+    item.addEventListener("click", () => {
+      store.dispatch({ type: "conversation/turn", turnKey: group.key });
+      requestAnimationFrame(() => document.querySelector(`[data-turn-key="${CSS.escape(group.key)}"]`)?.scrollIntoView({ block: "nearest" }));
+    });
+    elements.conversationTurnList.append(item);
+  }
+  if (groups.length === 0) elements.conversationTurnList.append(node("p", { className: "empty-copy", text: "No turns loaded" }));
+}
+
+function renderConversationTranscript(groups, selectedTurnKey) {
+  clear(elements.conversationMessages);
+  for (const [index, group] of groups.entries()) {
+    const card = node("article", {
+      className: `conversation-turn-card${group.key === selectedTurnKey ? " is-selected" : ""}`,
+      dataset: { turnKey: group.key },
+    }, [
+      node("header", { className: "conversation-turn-card-heading" }, [
+        node("div", {}, [
+          node("span", { className: "turn-label", text: `Turn ${String(index + 1).padStart(2, "0")}` }),
+          node("h3", { text: conversationTurnTitle(group) }),
+          node("span", { className: "row-detail", text: `${group.messages.length} retained messages` }),
+        ]),
+        node("div", { className: "turn-card-meta" }, [
+          badge(group.messages.some((message) => message.message?.role === "user") ? "User initiated" : "Agent activity", "neutral"),
+          badge(group.messages.some((message) => message.message?.content?.complete === false) ? "Partial" : "Complete", group.messages.some((message) => message.message?.content?.complete === false) ? "pending" : "ok"),
+        ]),
+      ]),
+      node("div", { className: "turn-card-context" }, [
+        node("span", { text: "Source order retained" }),
+        node("span", { text: readableTimestamp(group.messages[0]?.observedAt) }),
+      ]),
+      node("div", { className: "conversation-turn-messages" }, group.messages.map(conversationMessageNode)),
+      node("footer", { className: "conversation-turn-card-footer" }, [
+        node("span", { text: `${group.messages.length} messages linked to this Turn` }),
+        node("span", { text: "Visible content only" }),
+      ]),
+    ]);
+    elements.conversationMessages.append(card);
+  }
+  if (groups.length === 0) elements.conversationMessages.append(node("p", { className: "empty-copy", text: "No visible messages were retained for this conversation." }));
+}
+
+function conversationInsightRows(selected, messages, groups) {
+  const userCount = messages.filter((message) => message.message?.role === "user").length;
+  const assistantCount = messages.filter((message) => message.message?.role === "assistant").length;
+  const partialCount = messages.filter((message) => message.message?.content?.complete === false).length;
+  const totalCharacters = messages.reduce((total, message) => total + [...messageContent(message)].length, 0);
+  return [
+    ["Visible messages", formatCount(messages.length), "Retained message records in this snapshot"],
+    ["Turn groups", formatCount(groups.length), "Grouped by recorded turn key"],
+    ["User / Agent", `${formatCount(userCount)} / ${formatCount(assistantCount)}`, "Role labels from visible records"],
+    ["Retained text", `${formatCount(totalCharacters)} chars`, "Unicode code points; tool payloads may be referenced"],
+    ["Coverage", selected.completeness === "full" ? "Complete" : "Partial", selected.completeness === "full" ? "Snapshot reports a closed evidence boundary" : "Some content or terminal evidence is incomplete"],
+  ];
+}
+
+function renderConversationTab(tab, selected, messages, groups) {
+  clear(elements.conversationMessages);
+  elements.conversationEarlier.hidden = tab !== "transcript" || store.getState().search.messageCursor === null;
+  if (tab === "transcript") {
+    renderConversationTranscript(groups, store.getState().search.selectedTurnKey ?? groups[0]?.key ?? null);
+    return;
+  }
+  const panel = node("section", { className: "conversation-tab-panel" });
+  if (tab === "execution") {
+    panel.append(
+      node("div", { className: "tab-panel-heading" }, [
+        node("span", { className: "eyebrow", text: "EXECUTION TRACE" }),
+        node("h3", { text: "Recorded work around this conversation" }),
+        node("p", { text: "Execution facts remain separate from transcript text. Use the Delivery view when you need repository or commit evidence." }),
+      ]),
+      node("div", { className: "conversation-signal-grid" }, [
+        metric("Turns", selected.session?.turnCount ?? groups.length, "Session rollup"),
+        metric("Visible messages", messages.length, "Current page"),
+        metric("Provider", readableSlug(selected.provider), "Recorded source"),
+      ]),
+      node("div", { className: "boundary-note" }, [
+        badge("Read-only evidence", "neutral"),
+        node("span", { text: "This dashboard does not infer an action from message text. Process facts are exposed through the Delivery workspace." }),
+      ]),
+    );
+  } else if (tab === "delivery") {
+    panel.append(
+      node("div", { className: "tab-panel-heading" }, [
+        node("span", { className: "eyebrow", text: "CODE & DELIVERY" }),
+        node("h3", { text: "Repository links are inspected separately" }),
+        node("p", { text: "A conversation can be a useful pointer, but it is not authorship proof. Follow the recorded delivery edges for commits, files, and limitations." }),
+      ]),
+      node("div", { className: "conversation-delivery-summary" }, [
+        detailRow("Project context", selected.projectKey?.slice(0, 20) ?? "Not recorded"),
+        detailRow("Provider", readableSlug(selected.provider)),
+        detailRow("Evidence boundary", selected.completeness === "full" ? "Complete" : "Partial"),
+      ]),
+      node("button", { className: "primary-button", type: "button", text: "Open Delivery workspace" }),
+    );
+    panel.querySelector("button").addEventListener("click", () => {
+      store.dispatch({ type: "conversation/close" });
+      store.dispatch({ type: "view/select", view: "inspector" });
+      document.querySelector("#workspace").focus({ preventScroll: true });
+    });
+  } else {
+    const rows = node("div", { className: "conversation-insight-list" });
+    for (const [label, value, detail] of conversationInsightRows(selected, messages, groups)) {
+      rows.append(node("div", { className: "conversation-insight-row" }, [
+        node("span", { className: "insight-row-label", text: label }),
+        node("strong", { text: value }),
+        node("small", { text: detail }),
+      ]));
+    }
+    panel.append(
+      node("div", { className: "tab-panel-heading" }, [
+        node("span", { className: "eyebrow", text: "OBSERVED INSIGHTS" }),
+        node("h3", { text: "What this snapshot can support" }),
+        node("p", { text: "These are descriptive signals from retained records, not a productivity score or causal conclusion." }),
+      ]),
+      rows,
+    );
+  }
+  elements.conversationMessages.append(panel);
+}
+
+function renderConversationEvidence(selected, messages, groups) {
+  clear(elements.conversationFacts);
+  clear(elements.conversationEvidence);
+  const complete = selected.completeness === "full";
+  elements.conversationEvidenceState.replaceChildren(badge(complete ? "Complete" : "Review limits", complete ? "ok" : "pending"));
+  elements.conversationFacts.append(
+    detailRow("Provider", readableSlug(selected.provider)),
+    detailRow("Started", readableTimestamp(selected.session?.startedAt)),
+    detailRow("Last activity", readableTimestamp(selected.session?.endedAt)),
+    detailRow("Duration", conversationDuration(selected.session?.startedAt, selected.session?.endedAt)),
+    detailRow("Turns", formatCount(selected.session?.turnCount ?? groups.length)),
+    detailRow("Project", selected.projectKey?.slice(0, 20) ?? "Not recorded"),
+  );
+  elements.conversationEvidence.append(
+    node("div", { className: "evidence-summary-block" }, [
+      node("div", { className: "evidence-summary-title" }, [
+        node("span", { className: "eyebrow", text: "SNAPSHOT FACTS" }),
+        badge(complete ? "Boundary closed" : "Boundary open", complete ? "ok" : "pending"),
+      ]),
+      node("div", { className: "evidence-summary-grid" }, [
+        detailRow("Visible messages", formatCount(messages.length)),
+        detailRow("Turn groups", formatCount(groups.length)),
+        detailRow("Session scope", selected.originScope === "main" ? "Main" : readableSlug(selected.originScope || "unknown")),
+        detailRow("Revision", selected.revision?.slice(0, 12) ?? "Not recorded"),
+      ]),
+      node("p", { className: "boundary-note", text: complete
+        ? "All visible rows are bounded by the committed snapshot. Message payloads may still be paged."
+        : "This conversation has a coverage limitation. Keep the limitation attached when using it for memory or delivery analysis." }),
+    ]),
+  );
+}
+
+function renderConversationDetail(search) {
+  const selected = search.selected;
+  const open = selected !== null;
+  elements.conversationDetail.classList.toggle("is-closed", !open);
+  elements.conversationDetail.setAttribute("aria-hidden", open ? "false" : "true");
+  elements.conversationBackdrop.classList.toggle("is-hidden", !open);
+  elements.conversationBackdrop.setAttribute("aria-hidden", open ? "false" : "true");
+  document.querySelector("#app").classList.toggle("conversation-open", open);
+  if (!open) return;
+
+  elements.conversationTitle.textContent = selected.session?.title?.trim() || "Untitled conversation";
+  const messages = [...search.messages].sort((left, right) => {
+    const leftTime = Date.parse(left.observedAt ?? "");
+    const rightTime = Date.parse(right.observedAt ?? "");
+    const time = (Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER) -
+      (Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER);
+    return time || String(left.eventKey).localeCompare(String(right.eventKey));
+  });
+  const groups = conversationTurnGroups(messages);
+  const selectedTurnKey = search.selectedTurnKey ?? groups[0]?.key ?? null;
+  elements.conversationSubtitle.textContent = `${readableSlug(selected.provider)} · ${formatCount(selected.session?.turnCount ?? groups.length)} turns · ${conversationDuration(selected.session?.startedAt, selected.session?.endedAt)}`;
+  elements.conversationKey.textContent = `Session ${selected.sessionKey?.slice(0, 16) ?? "-"}`;
+  clear(elements.conversationStateBadge);
+  elements.conversationStateBadge.append(badge(selected.completeness === "full" ? "Complete" : "Partial", selected.completeness === "full" ? "ok" : "pending"));
+  clear(elements.conversationSessionBar);
+  elements.conversationSessionBar.append(
+    node("div", { className: "session-bar-primary" }, [
+      node("span", { className: "session-bar-label", text: "Session" }),
+      node("strong", { text: `${readableSlug(selected.provider)} · Main session` }),
+    ]),
+    badge(selected.originScope === "main" ? "Main" : readableSlug(selected.originScope || "unknown"), "neutral"),
+    node("span", { className: "session-bar-model", text: selected.projectKey ? `Project ${selected.projectKey.slice(0, 16)}` : "Project context unavailable" }),
+  );
+  for (const tab of document.querySelectorAll("[data-conversation-tab]")) {
+    tab.setAttribute("aria-selected", tab.dataset.conversationTab === search.detailTab ? "true" : "false");
+  }
+  renderConversationTurnRail(groups, selectedTurnKey);
+  renderConversationEvidence(selected, messages, groups);
+  if (search.messagesLoading && messages.length === 0) {
+    clear(elements.conversationMessages);
+    elements.conversationMessages.append(node("p", { className: "empty-copy", text: "Loading messages..." }));
+  } else if (search.messagesError !== null && messages.length === 0) {
+    clear(elements.conversationMessages);
+    elements.conversationMessages.append(node("p", {
+      className: "empty-copy is-error",
+      text: dashboardDiagnosticMessage(search.messagesError),
+    }));
+  } else {
+    renderConversationTab(search.detailTab, selected, messages, groups);
+  }
+  elements.conversationMessageStatus.textContent = search.messagesLoading && messages.length > 0
+    ? `Loading earlier messages / ${formatCount(messages.length)} shown`
+    : `${formatCount(messages.length)} of ${formatCount(search.messageTotal)} visible messages`;
+  elements.conversationEarlier.hidden = search.detailTab !== "transcript" || search.messageCursor === null;
+  elements.conversationEarlier.disabled = search.messagesLoading;
 }
 
 function capabilityResultSummary(item) {
@@ -836,9 +1515,14 @@ function render(state) {
   }
   renderStatus(state);
   renderProjectOptions(state);
+  renderSourceOptions(state);
   renderCapabilityOptions(state, "tool");
   renderCapabilityOptions(state, "skill");
+  renderSearchControlValues(state);
+  renderHistoryMetrics(state);
   renderOverview(state);
+  renderExperience(state);
+  renderSources(state);
   renderSearch(state);
   renderCapabilities(state, "tool");
   renderCapabilities(state, "skill");
@@ -874,14 +1558,96 @@ async function loadCapabilities(kind, append = false) {
   }
 }
 
-async function runSearch() {
-  const request = buildSearchRequest(store.getState().search);
-  store.dispatch({ type: "search/loading" });
+async function loadProjectCatalog() {
+  const catalog = store.getState().projectCatalog;
+  if (catalog.loading || catalog.loaded) return;
+  store.dispatch({ type: "project-catalog/loading" });
   try {
-    const response = await requestJson("/api/v1/search", { method: "POST", body: JSON.stringify(request) });
-    store.dispatch({ type: "search/loaded", response });
+    const response = await requestJson("/api/v1/history/projects");
+    store.dispatch({ type: "project-catalog/loaded", response });
+  } catch (error) {
+    store.dispatch({ type: "project-catalog/failed", code: errorCode(error) });
+  }
+}
+
+async function loadExperienceAssets(repositoryKey = store.getState().experience.repositoryKey) {
+  const experience = store.getState().experience;
+  if (experience.loading || repositoryKey === "") return;
+  store.dispatch({ type: "experience/assets-loading" });
+  try {
+    const parameters = new URLSearchParams({ repositoryKey });
+    const response = await requestJson(`/api/v1/experience/assets?${parameters}`);
+    if (store.getState().experience.repositoryKey !== repositoryKey) return;
+    store.dispatch({ type: "experience/assets-loaded", response });
+  } catch (error) {
+    store.dispatch({ type: "experience/failed", code: errorCode(error) });
+  }
+}
+
+async function loadExperienceRepositories() {
+  const experience = store.getState().experience;
+  if (experience.loading || experience.repositoriesLoaded) {
+    if (experience.repositoriesLoaded && experience.assets === null) {
+      await loadExperienceAssets(experience.repositoryKey);
+    }
+    return;
+  }
+  store.dispatch({ type: "experience/repositories-loading" });
+  try {
+    const response = await requestJson("/api/v1/experience/repositories");
+    store.dispatch({ type: "experience/repositories-loaded", response });
+    await loadExperienceAssets();
+  } catch (error) {
+    store.dispatch({ type: "experience/failed", code: errorCode(error) });
+  }
+}
+
+async function runSearch(append = false) {
+  const current = store.getState().search;
+  if (current.loading || (append && current.response?.nextCursor === null)) return;
+  const request = buildConversationRequest(
+    current,
+    append ? current.response?.nextCursor ?? null : null,
+  );
+  if (!append) store.dispatch({ type: "conversation/close" });
+  store.dispatch({ type: "search/loading", append });
+  try {
+    const response = await requestJson("/api/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    store.dispatch({ type: "search/loaded", response, append });
   } catch (error) {
     store.dispatch({ type: "search/failed", code: errorCode(error) });
+  }
+}
+
+function openConversation(session) {
+  store.dispatch({ type: "conversation/select", session });
+  elements.conversationDetail.scrollTop = 0;
+  void loadConversationMessages(false);
+}
+
+async function loadConversationMessages(append = false) {
+  const search = store.getState().search;
+  const selected = search.selected;
+  if (selected === null || search.messagesLoading || (append && search.messageCursor === null)) return;
+  const sessionKey = selected.sessionKey;
+  const request = buildConversationMessagesRequest(
+    sessionKey,
+    append ? search.messageCursor : null,
+  );
+  store.dispatch({ type: "conversation/messages-loading" });
+  try {
+    const response = await requestJson("/api/v1/conversation-messages", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    if (store.getState().search.selected?.sessionKey !== sessionKey) return;
+    store.dispatch({ type: "conversation/messages-loaded", response, append });
+  } catch (error) {
+    if (store.getState().search.selected?.sessionKey !== sessionKey) return;
+    store.dispatch({ type: "conversation/messages-failed", code: errorCode(error) });
   }
 }
 
@@ -1096,16 +1862,54 @@ for (const button of document.querySelectorAll("[data-view]")) {
         if (page.items.length === 0 && !page.loading) void loadCapabilities(kind);
       }
     }
+    if (view === "overview") void loadExperienceRepositories();
     if (view === "inspector") void loadDeliveryRepositories();
     document.querySelector("#workspace").focus({ preventScroll: true });
   });
 }
 
-document.querySelector("#refresh-button").addEventListener("click", () => void loadStatus());
+for (const button of document.querySelectorAll("[data-source-filter]")) {
+  button.addEventListener("click", () => {
+    store.dispatch({ type: "sources/filter", filter: button.dataset.sourceFilter });
+  });
+}
+
+document.querySelector("#refresh-button").addEventListener("click", () => {
+  void loadStatus();
+  if (store.getState().activeView === "overview") {
+    void loadExperienceAssets();
+  }
+});
 document.querySelector("#search-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  void runSearch();
+  void runSearch(false);
 });
+document.querySelector("#history-reset").addEventListener("click", () => {
+  const range = defaultHistoryDateRange();
+  for (const [field, value] of Object.entries({
+    query: "",
+    provider: "",
+    projectKey: "",
+    toolCapabilityKey: "",
+    skillCapabilityKey: "",
+    completeness: "",
+    observedAtOrAfter: range.observedAtOrAfter,
+    observedBefore: range.observedBefore,
+  })) {
+    store.dispatch({ type: "search/input", field, value });
+  }
+  void runSearch(false);
+});
+for (const button of document.querySelectorAll("[data-history-scope]")) {
+  button.addEventListener("click", () => {
+    store.dispatch({
+      type: "search/input",
+      field: "completeness",
+      value: button.dataset.historyScope === "all" ? "" : button.dataset.historyScope,
+    });
+    void runSearch(false);
+  });
+}
 for (const [selector, field] of [
   ["#search-query", "query"],
   ["#provider-filter", "provider"],
@@ -1114,16 +1918,30 @@ for (const [selector, field] of [
   ["#before-filter", "observedBefore"],
   ["#tool-filter", "toolCapabilityKey"],
   ["#skill-filter", "skillCapabilityKey"],
-  ["#closure-filter", "closure"],
-  ["#result-filter", "resultEvidence"],
+  ["#completeness-filter", "completeness"],
 ]) {
   document.querySelector(selector).addEventListener("input", (event) => {
     store.dispatch({ type: "search/input", field, value: event.target.value });
   });
 }
+elements.conversationMore.addEventListener("click", () => void runSearch(true));
+elements.conversationEarlier.addEventListener("click", () => void loadConversationMessages(true));
+for (const button of document.querySelectorAll("[data-conversation-tab]")) {
+  button.addEventListener("click", () => {
+    store.dispatch({ type: "conversation/tab", tab: button.dataset.conversationTab });
+  });
+}
+elements.conversationBack.addEventListener("click", () => store.dispatch({ type: "conversation/close" }));
+for (const element of [elements.conversationBackdrop, document.querySelector("#conversation-close")]) {
+  element.addEventListener("click", () => store.dispatch({ type: "conversation/close" }));
+}
 for (const button of document.querySelectorAll("[data-load-more]")) {
   button.addEventListener("click", () => void loadCapabilities(button.dataset.loadMore, true));
 }
+elements.experienceRepository.addEventListener("input", (event) => {
+  store.dispatch({ type: "experience/repository-select", repositoryKey: event.target.value });
+  void loadExperienceAssets(event.target.value);
+});
 for (const button of document.querySelectorAll("[data-delivery-mode]")) {
   button.addEventListener("click", () => {
     store.dispatch({ type: "delivery/input", field: "mode", value: button.dataset.deliveryMode });
@@ -1169,8 +1987,17 @@ window.addEventListener("unhandledrejection", (event) => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void loadStatus({ silent: true });
 });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && store.getState().search.selected !== null) {
+    store.dispatch({ type: "conversation/close" });
+  }
+});
 
 render(store.getState());
 void loadStatus();
+void loadProjectCatalog();
+void loadCapabilities("tool");
+void loadCapabilities("skill");
+void runSearch(false);
 const statusTimer = setInterval(() => void loadStatus({ silent: true }), 30_000);
 window.addEventListener("pagehide", () => clearInterval(statusTimer), { once: true });

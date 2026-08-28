@@ -18,31 +18,53 @@
           <span class="muted" id="snapshot-label">Loading committed snapshot</span>
         </div>
       </div>
+      <div class="workspace-context" aria-label="Current workspace">
+        <span class="workspace-context-kicker">LOCAL WORKSPACE</span>
+        <strong>Conversation intelligence</strong>
+      </div>
       <div class="status-strip" id="status-strip" aria-live="polite"></div>
-      <button class="quiet-button" id="refresh-button" type="button">Refresh</button>
+      <button class="quiet-button topbar-refresh" id="refresh-button" type="button"><span aria-hidden="true">↻</span> Refresh</button>
     </header>
 
     <aside class="sidebar" aria-label="Insights views">
       <nav class="view-nav">
-        <button type="button" data-view="overview" aria-current="page">Overview</button>
-        <button type="button" data-view="search">Search</button>
-        <button type="button" data-view="skill">Skills</button>
-        <button type="button" data-view="tool">Tools</button>
-        <button type="button" data-view="inspector">Delivery</button>
+        <div class="nav-section-label">INSIGHTS</div>
+        <button type="button" data-view="search" aria-current="page">History<span class="nav-icon" aria-hidden="true">▤</span></button>
+        <button type="button" data-view="overview"><span class="nav-icon" aria-hidden="true">◈</span>Experience</button>
+        <button type="button" data-view="inspector"><span class="nav-icon" aria-hidden="true">⌁</span>Delivery</button>
+        <div class="nav-section-label nav-section-label--secondary">SYSTEM</div>
+        <button type="button" data-view="sources"><span class="nav-icon" aria-hidden="true">◌</span>Sources</button>
+        <button type="button" data-view="skill"><span class="nav-icon" aria-hidden="true">✦</span>Skills</button>
+        <button type="button" data-view="tool"><span class="nav-icon" aria-hidden="true">⌘</span>Tools</button>
       </nav>
       <div class="index-meta" id="index-meta"></div>
     </aside>
 
     <main class="workspace" id="workspace" tabindex="-1">
-      <section class="view" data-view-panel="overview" aria-labelledby="overview-heading">
+      <section class="view is-hidden" data-view-panel="overview" aria-labelledby="overview-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Committed facts</p>
-            <h1 id="overview-heading">Index overview</h1>
+            <p class="eyebrow">Evidence-backed analysis</p>
+            <h1 id="overview-heading">Experience</h1>
           </div>
           <span class="muted" id="overview-updated"></span>
         </div>
         <div class="metric-band" id="overview-metrics"></div>
+        <section class="plain-section experience-assets" aria-labelledby="experience-assets-heading">
+          <div class="subheading experience-assets-heading">
+            <div>
+              <h2 id="experience-assets-heading">Reviewed team memory</h2>
+              <span class="muted">Git-visible assets</span>
+            </div>
+            <label class="experience-repository-field"><span>Repository</span><select id="experience-repository"><option value="">No registered repository</option></select></label>
+          </div>
+          <div class="experience-status" id="experience-status" aria-live="polite"></div>
+          <div class="metric-band memory-metrics" id="experience-metrics"></div>
+          <div class="table-wrap experience-table"><table>
+            <thead><tr><th>Asset</th><th>Type</th><th>State</th><th>Evidence</th><th>Limits / Heat</th></tr></thead>
+            <tbody id="experience-rows"></tbody>
+          </table></div>
+        </section>
         <div class="overview-grid">
           <section class="plain-section" aria-labelledby="coverage-heading">
             <div class="subheading">
@@ -71,34 +93,70 @@
         </section>
       </section>
 
-      <section class="view is-hidden" data-view-panel="search" aria-labelledby="search-heading">
+      <section class="view is-hidden" data-view-panel="sources" aria-labelledby="sources-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Historical turns</p>
-            <h1 id="search-heading">Search</h1>
+            <p class="eyebrow">Conversation inputs</p>
+            <h1 id="sources-heading">Sources</h1>
           </div>
+          <span class="muted" id="sources-snapshot"></span>
         </div>
+        <div class="metric-band source-metrics" id="source-metrics"></div>
+        <div class="source-toolbar">
+          <div class="segmented-control source-filter-control" aria-label="Source scope">
+            <button type="button" data-source-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-source-filter="snapshot" aria-pressed="false">In snapshot</button>
+            <button type="button" data-source-filter="eligible" aria-pressed="false">Eligible</button>
+          </div>
+          <span class="muted" id="source-filter-summary" aria-live="polite"></span>
+        </div>
+        <div class="source-workbench">
+          <div class="source-list-pane">
+            <div class="table-wrap source-table"><table>
+              <thead><tr><th>Source</th><th>Status</th><th>Sessions</th><th>Eligible</th><th>Turns</th></tr></thead>
+              <tbody id="source-rows"></tbody>
+            </table></div>
+          </div>
+          <aside class="source-detail" id="source-detail" aria-label="Selected source" aria-live="polite"></aside>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="search" aria-labelledby="search-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ORGANIZATION INSIGHTS / 对话资产</p>
+            <h1 id="search-heading">Conversations</h1>
+            <p class="section-description">参与者与 Agent 的 Conversation、Session 和 Turn 记录</p>
+          </div>
+          <span class="sync-pill" id="history-snapshot"></span>
+        </div>
+        <div class="metric-band history-metrics" id="history-metrics"></div>
+        <div class="history-quality-strip" id="history-quality-strip" aria-live="polite"></div>
         <form class="search-controls" id="search-form">
-          <label class="query-field"><span>Query</span><input id="search-query" name="query" type="search" maxlength="8192" autocomplete="off" placeholder="Tool timeout, failed deploy, parser error"></label>
-          <label><span>Provider</span><select id="provider-filter" name="provider"><option value="">All</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
-          <label><span>Project</span><input id="project-filter" name="project" type="text" list="project-options" maxlength="64" pattern="[0-9a-f]{64}" autocomplete="off" spellcheck="false" placeholder="All or project key"><datalist id="project-options"></datalist><small class="filter-state" id="project-filter-state" hidden>Project suggestions truncated</small></label>
-          <label><span>Closure</span><select id="closure-filter" name="closure"><option value="">All</option><option value="hard-sealed">Hard sealed</option><option value="quiescent">Quiescent</option><option value="open">Open</option></select></label>
-          <label><span>Result</span><select id="result-filter" name="result"><option value="">All</option><option value="provider-completed">Completed</option><option value="abandoned">Abandoned</option><option value="unknown">Unknown</option></select></label>
-          <label><span>From date</span><input id="after-filter" name="after" type="date"></label>
-          <label><span>Before date</span><input id="before-filter" name="before" type="date"></label>
-          <label><span>Tool</span><select id="tool-filter" name="tool"><option value="">All</option></select></label>
-          <label><span>Skill</span><select id="skill-filter" name="skill"><option value="">All</option></select></label>
-          <button class="primary-button" type="submit">Search</button>
+          <label class="after-field"><span>From</span><input id="after-filter" name="after" type="date"></label>
+          <label class="before-field"><span>Before</span><input id="before-filter" name="before" type="date"></label>
+          <label class="project-field"><span>Project</span><input id="project-filter" name="project" type="text" list="project-options" maxlength="64" pattern="[0-9a-f]{64}" autocomplete="off" spellcheck="false" aria-describedby="project-filter-state" placeholder="All projects"><datalist id="project-options"></datalist><small class="filter-state" id="project-filter-state" hidden></small></label>
+          <label class="source-field"><span>Source</span><select id="provider-filter" name="provider"><option value="">All sources</option></select></label>
+          <label class="query-field"><span>Search conversations</span><input id="search-query" name="query" type="search" maxlength="8192" autocomplete="off" placeholder="Prompt, response, failure, or tool output"></label>
+          <label class="status-field"><span>Coverage</span><select id="completeness-filter" name="completeness"><option value="">All</option><option value="full">Complete</option><option value="truncated">Partial</option></select></label>
+          <label class="tool-field"><span>Tool</span><select id="tool-filter" name="tool"><option value="">All</option></select></label>
+          <label class="skill-field"><span>Skill</span><select id="skill-filter" name="skill"><option value="">All</option></select></label>
+          <button class="primary-button history-submit" type="submit"><span aria-hidden="true">⌕</span> Find conversations</button>
+          <button class="quiet-button history-reset" id="history-reset" type="button">Reset</button>
         </form>
-        <div class="search-summary" id="search-summary" aria-live="polite"></div>
-        <div class="table-wrap search-table"><table>
-          <thead><tr><th>Turn</th><th>Provider</th><th>Closure</th><th>Evidence</th><th>Score</th></tr></thead>
-          <tbody id="search-rows"></tbody>
+        <div class="history-list-toolbar">
+          <div class="segmented-control history-scope-control" aria-label="Conversation scope">
+            <button type="button" data-history-scope="all" aria-pressed="true">All</button>
+            <button type="button" data-history-scope="full" aria-pressed="false">Complete</button>
+            <button type="button" data-history-scope="truncated" aria-pressed="false">Partial</button>
+          </div>
+          <div class="search-summary" id="search-summary" aria-live="polite"></div>
+        </div>
+        <div class="table-wrap conversation-table"><table>
+          <thead><tr><th>Last activity</th><th>Conversation</th><th>Source</th><th>Context</th><th>Turns</th><th>Coverage</th></tr></thead>
+          <tbody id="conversation-rows"></tbody>
         </table></div>
-        <section class="plain-section path-section" aria-labelledby="paths-heading">
-          <div class="subheading"><h2 id="paths-heading">Tool paths</h2><span class="muted" id="path-summary"></span></div>
-          <div class="path-list" id="path-list"></div>
-        </section>
+        <button class="quiet-button load-more conversation-more" id="conversation-more" type="button" hidden>Load more conversations</button>
       </section>
 
       <section class="view is-hidden" data-view-panel="skill" aria-labelledby="skill-heading">
@@ -169,6 +227,50 @@
       </div>
       <div id="inspector-body"></div>
       <button class="quiet-button load-more" id="evidence-more" type="button">Load more evidence</button>
+    </aside>
+
+    <div class="conversation-backdrop is-hidden" id="conversation-backdrop" aria-hidden="true"></div>
+    <aside class="conversation-detail is-closed" id="conversation-detail" aria-label="Conversation detail" aria-hidden="true">
+      <header class="conversation-detail-heading">
+        <div class="conversation-detail-title-wrap">
+          <button class="back-button" id="conversation-back" type="button"><span aria-hidden="true">←</span> Back to conversations</button>
+          <div>
+            <p class="eyebrow">CONVERSATION DETAIL / 对话详情</p>
+            <div class="conversation-title-line">
+              <h2 id="conversation-title">Conversation</h2>
+              <span id="conversation-state-badge"></span>
+            </div>
+            <p class="conversation-subtitle" id="conversation-subtitle"></p>
+          </div>
+        </div>
+        <div class="conversation-detail-actions">
+          <code id="conversation-key" class="conversation-key"></code>
+          <button class="icon-button" id="conversation-close" type="button" aria-label="Close conversation detail" title="Close conversation detail">&times;</button>
+        </div>
+      </header>
+      <nav class="conversation-tabs" aria-label="Conversation detail views">
+        <button type="button" data-conversation-tab="transcript" aria-selected="true"><span aria-hidden="true">▣</span> Conversation</button>
+        <button type="button" data-conversation-tab="execution" aria-selected="false"><span aria-hidden="true">⌁</span> Execution trace</button>
+        <button type="button" data-conversation-tab="delivery" aria-selected="false"><span aria-hidden="true">⌘</span> Code &amp; delivery</button>
+        <button type="button" data-conversation-tab="insights" aria-selected="false"><span aria-hidden="true">✧</span> Insights</button>
+      </nav>
+      <div class="conversation-session-bar" id="conversation-session-bar"></div>
+      <div class="conversation-workbench">
+        <aside class="conversation-turn-rail" aria-label="Conversation turns">
+          <div class="conversation-rail-heading"><strong>Turns</strong><span id="conversation-turn-count">0</span></div>
+          <div class="conversation-turn-list" id="conversation-turn-list"></div>
+        </aside>
+        <section class="conversation-transcript" aria-label="Conversation transcript">
+          <div class="conversation-message-status" id="conversation-message-status" aria-live="polite"></div>
+          <button class="quiet-button load-more conversation-earlier" id="conversation-earlier" type="button" hidden>Load earlier messages</button>
+          <div class="conversation-messages" id="conversation-messages"></div>
+        </section>
+        <aside class="conversation-evidence-rail" aria-label="Conversation evidence and insights">
+          <div class="evidence-rail-heading"><span>Current evidence</span><span id="conversation-evidence-state"></span></div>
+          <div class="conversation-facts" id="conversation-facts"></div>
+          <div id="conversation-evidence"></div>
+        </aside>
+      </div>
     </aside>
 
     <div class="toast is-hidden" id="toast" role="status" aria-live="polite"></div>

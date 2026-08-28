@@ -48,16 +48,46 @@ async function dashboardFixture(t, options = {}) {
   const api = {
     status: async () => ({ format: "status@v1", state: "ready" }),
     capabilities: async (input) => ({ snapshotSeq: "1", input, items: [], nextCursor: null }),
+    historyProjects: async () => ({
+      format: "threadshare-insights-dashboard-projects@v1",
+      items: [{
+        projectKey: "b".repeat(64),
+        repositoryKey: "a".repeat(64),
+        provider: "codex",
+        label: "threadshare",
+      }],
+    }),
     search: async (input) => ({ query: input.query, results: [] }),
     evidence: async (input) => ({ turnKey: input.turnKey, entries: [] }),
     inspectorRepositories: async () => ({
       format: "threadshare-insights-dashboard-repositories@v1",
       items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
     }),
+    experienceRepositories: async () => ({
+      format: "threadshare-insights-dashboard-repositories@v1",
+      items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
+    }),
+    experienceAssets: async (input) => ({
+      format: "threadshare-insights-dashboard-memory-assets@v1",
+      repository: { repositoryKey: input.repositoryKey, label: "threadshare" },
+      initialized: true,
+      assets: [],
+      counts: { entries: "1", scenes: "0", doctrine: "0", skills: "0" },
+      diagnostics: [],
+      truncated: false,
+    }),
     inspectorEdges: async (input) => ({
       format: "threadshare-insights-query@v2",
       repositoryKey: input.repositoryKey,
       records: [],
+    }),
+    conversationSessions: async (input) => ({
+      format: "conversation-sessions@v1",
+      input,
+    }),
+    conversationMessages: async (input) => ({
+      format: "conversation-messages@v1",
+      input,
     }),
     inspectorTrace: async (input) => ({ format: "trace@v1", root: input.root }),
     inspectorEvidence: async (input) => ({ format: "evidence@v2", target: input.target }),
@@ -179,12 +209,54 @@ test("Dashboard session enforces CSP, same-origin writes, and no CORS", async (t
   });
   assert.deepEqual(await status.json(), { format: "status@v1", state: "ready" });
 
+  const historyProjects = await fetch(new URL("/api/v1/history/projects", server.url), {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(historyProjects.status, 200);
+  assert.deepEqual(await historyProjects.json(), {
+    format: "threadshare-insights-dashboard-projects@v1",
+    items: [{
+      projectKey: "b".repeat(64),
+      repositoryKey: "a".repeat(64),
+      provider: "codex",
+      label: "threadshare",
+    }],
+  });
+  const invalidHistoryProjects = await fetch(new URL(
+    "/api/v1/history/projects?extra=1",
+    server.url,
+  ), { headers: { Cookie: cookie } });
+  assert.equal(invalidHistoryProjects.status, 400);
+
   const repositories = await fetch(new URL("/api/v1/inspector/repositories", server.url), {
     headers: { Cookie: cookie },
   });
   assert.deepEqual(await repositories.json(), {
     format: "threadshare-insights-dashboard-repositories@v1",
     items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
+  });
+
+  const experienceRepositories = await fetch(new URL("/api/v1/experience/repositories", server.url), {
+    headers: { Cookie: cookie },
+  });
+  assert.deepEqual(await experienceRepositories.json(), {
+    format: "threadshare-insights-dashboard-repositories@v1",
+    items: [{ repositoryKey: "a".repeat(64), label: "threadshare" }],
+  });
+  const experienceAssets = await fetch(new URL(
+    `/api/v1/experience/assets?repositoryKey=${"a".repeat(64)}`,
+    server.url,
+  ), { headers: { Cookie: cookie } });
+  assert.deepEqual((await experienceAssets.json()).counts, {
+    entries: "1", scenes: "0", doctrine: "0", skills: "0",
+  });
+  const invalidExperience = await fetch(new URL(
+    `/api/v1/experience/assets?repositoryKey=${"a".repeat(64)}&extra=1`,
+    server.url,
+  ), { headers: { Cookie: cookie } });
+  assert.equal(invalidExperience.status, 400);
+  assert.deepEqual(await invalidExperience.json(), {
+    error: { code: "TS_INSIGHTS_DASHBOARD_REQUEST_INVALID" },
   });
 
   const edgeRequest = {
@@ -204,6 +276,29 @@ test("Dashboard session enforces CSP, same-origin writes, and no CORS", async (t
     repositoryKey: edgeRequest.repositoryKey,
     records: [],
   });
+
+  for (const [route, body, format] of [
+    ["conversations", {
+      after: null, before: null, provider: null, projectKey: null, query: "release",
+      toolCapabilityKey: null, skillCapabilityKey: null, completeness: null,
+      cursor: null, limit: 30,
+    }, "conversation-sessions@v1"],
+    ["conversation-messages", {
+      sessionKey: "b".repeat(64), cursor: null, limit: 20,
+    }, "conversation-messages@v1"],
+  ]) {
+    const result = await fetch(new URL(`/api/v1/${route}`, server.url), {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "application/json",
+        Origin: server.url.slice(0, -1),
+      },
+      body: JSON.stringify(body),
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(await result.json(), { format, input: body });
+  }
 
   const inspectorRequests = [
     ["trace", { root: { kind: "git-commit", key: "b".repeat(64) } }, { format: "trace@v1", root: { kind: "git-commit", key: "b".repeat(64) } }],

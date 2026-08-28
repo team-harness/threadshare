@@ -52,5 +52,7 @@ Agent 调用 CLI。选择哪条执行通道是 Agent 的工作，不应变成用
 - [Team Memory Phase 1 设计](./team-memory-phase1-design.md)
 - [Team Memory Phase 2 设计](./team-memory-phase2-design.md)
 - [Skill 提取与装配设计](./team-memory-skill-design.md)
+- [Session Source Adapter 扩展设计](./session-source-adapter-design.md)
+- [Conversation Hierarchy 与本机 Dashboard 设计](./conversation-hierarchy-dashboard-design.md)
 - [Deep Query 设计](./insights-deep-query-design.md)
 - [Delivery Trace 设计](./insights-delivery-trace-design.md)

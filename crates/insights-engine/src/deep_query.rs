@@ -2093,7 +2093,14 @@ fn resource_select_sql(resource: DeepResource) -> &'static str {
                     CASE WHEN s.project_key IS NULL THEN NULL ELSE lower(hex(s.project_key)) END,
                     s.session_scope,s.eligibility,s.observed_start,s.observed_end,
                     lower(hex(sc.canonical_digest)),
-                    EXISTS(SELECT 1 FROM session_fact_truncation st WHERE st.session_id=s.session_id)"
+                    EXISTS(SELECT 1 FROM session_fact_truncation st WHERE st.session_id=s.session_id),
+                    (SELECT first_turn.problem_text FROM turns first_turn
+                     WHERE first_turn.session_id=s.session_id
+                       AND first_turn.effective_provider_visibility='active'
+                     ORDER BY first_turn.turn_start_offset,first_turn.turn_id LIMIT 1),
+                    (SELECT COUNT(*) FROM turns session_turn
+                     WHERE session_turn.session_id=s.session_id
+                       AND session_turn.effective_provider_visibility='active')"
         }
         DeepResource::Turn => {
             "SELECT t.observed_timestamp,lower(hex(t.turn_key)),0,
@@ -3233,6 +3240,21 @@ fn optional_hex(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
 
+fn conversation_title(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut characters = normalized.chars();
+    let title = characters.by_ref().take(96).collect::<String>();
+    Some(if characters.next().is_some() {
+        format!("{title}\u{2026}")
+    } else {
+        title
+    })
+}
+
 fn optional_blob_decimal(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Value> {
     row.get::<_, Option<Vec<u8>>>(index)?
         .map(blob_u64)
@@ -3282,6 +3304,14 @@ fn typed_resource_row(
                     "startedAt": row.get::<_, Option<String>>(7)?,
                     "endedAt": row.get::<_, Option<String>>(8)?,
                     "eligibility": row.get::<_, String>(6)?,
+                    "title": conversation_title(row.get::<_, Option<String>>(11)?),
+                    "turnCount": u64::try_from(row.get::<_, i64>(12)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            12,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?.to_string(),
                 }),
             );
             None
@@ -3718,6 +3748,18 @@ pub(crate) fn assemble_coverage(
 
 fn typed_resource_provenance(resource: DeepResource) -> DeepProvenance {
     let fields = match resource {
+        DeepResource::Session => vec![
+            DeepProvenanceField {
+                path: "records.*.session.title".to_owned(),
+                kind: "derived".to_owned(),
+                method: "first-problem-title@1".to_owned(),
+            },
+            DeepProvenanceField {
+                path: "records.*.session.turnCount".to_owned(),
+                kind: "derived".to_owned(),
+                method: "active-turn-count@1".to_owned(),
+            },
+        ],
         DeepResource::ErrorOccurrence => vec![DeepProvenanceField {
             path: "records.*.error.signature".to_owned(),
             kind: "derived".to_owned(),
@@ -3995,9 +4037,21 @@ fn validate_predicate(
             if stats.leaves > MAX_PREDICATE_LEAVES {
                 return Err(invalid("predicate exceeds maximum 64 leaves"));
             }
-            resource_filter_field(resource, field)?;
+            let session_special = resource == DeepResource::Session
+                && matches!(field.as_str(), "text" | "capability.key");
+            if !session_special {
+                resource_filter_field(resource, field)?;
+            }
             if (*operator == PredicateOperator::Match) != (field == "text") {
                 return Err(invalid("match is supported only for the text field"));
+            }
+            if resource == DeepResource::Session
+                && field == "capability.key"
+                && *operator != PredicateOperator::Eq
+            {
+                return Err(invalid(
+                    "session capability.key supports only the eq operator",
+                ));
             }
             validate_leaf_value(*operator, value.as_ref())?;
         }
@@ -4101,6 +4155,8 @@ fn resource_select_field(resource: DeepResource, field: &str) -> Result<(), Quer
                 | "completeness"
                 | "session.startedAt"
                 | "session.endedAt"
+                | "session.title"
+                | "session.turnCount"
                 | "revision"
         ),
         DeepResource::Turn => matches!(
@@ -4247,6 +4303,11 @@ fn resource_filter_field(resource: DeepResource, field: &str) -> Result<&'static
             "CASE WHEN t.turn_key IS NULL THEN NULL ELSE lower(hex(t.turn_key)) END"
         }
         "originScope" if resource == DeepResource::CapabilityUse => "cu.origin_scope",
+        "completeness" if resource == DeepResource::Session => {
+            "CASE WHEN EXISTS(SELECT 1 FROM session_fact_truncation st
+                              WHERE st.session_id=s.session_id)
+                  THEN 'truncated' ELSE 'full' END"
+        }
         "observedAt" => resource_observed_column(resource),
         "capability.key"
             if matches!(
@@ -4367,8 +4428,8 @@ fn compile_leaf(
     value: Option<&Value>,
 ) -> Result<SqlPredicate, QueryError> {
     if operator == PredicateOperator::Match {
-        if resource != DeepResource::Event || field != "text" {
-            return Err(invalid("match is supported only for event text"));
+        if !matches!(resource, DeepResource::Event | DeepResource::Session) || field != "text" {
+            return Err(invalid("match is supported only for event or session text"));
         }
         let query = value
             .and_then(Value::as_str)
@@ -4383,15 +4444,45 @@ fn compile_leaf(
         })?;
         let expression =
             HistoryFtsMatchExpression::from_query_terms(&analyzed.terms).map_err(query_failed)?;
+        let sql = if resource == DeepResource::Event {
+            "EXISTS (
+               SELECT 1 FROM history_event_fts_documents hfd
+               JOIN history_payloads hp ON hp.payload_key=hfd.payload_key
+               JOIN history_event_fts ON history_event_fts.rowid=hfd.document_id
+               WHERE hp.event_key=he.event_key AND history_event_fts MATCH ?
+             )"
+        } else {
+            "s.session_id IN (
+               SELECT session_event.session_id FROM history_events session_event
+               JOIN history_payloads hp ON hp.event_key=session_event.event_key
+               JOIN history_event_fts_documents hfd ON hfd.payload_key=hp.payload_key
+               JOIN history_event_fts ON history_event_fts.rowid=hfd.document_id
+               WHERE session_event.origin_scope='main'
+                 AND history_event_fts MATCH ?
+             )"
+        };
+        return Ok(SqlPredicate {
+            sql: sql.to_owned(),
+            values: vec![SqlValue::Text(expression.as_str().to_owned())],
+        });
+    }
+    if resource == DeepResource::Session && field == "capability.key" {
+        let key = value
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("session capability.key requires a string value"))?;
         return Ok(SqlPredicate {
             sql: "EXISTS (
-                    SELECT 1 FROM history_event_fts_documents hfd
-                    JOIN history_payloads hp ON hp.payload_key=hfd.payload_key
-                    JOIN history_event_fts ON history_event_fts.rowid=hfd.document_id
-                    WHERE hp.event_key=he.event_key AND history_event_fts MATCH ?
+                    SELECT 1 FROM capability_uses session_use
+                    JOIN capabilities session_capability
+                      ON session_capability.capability_id=session_use.capability_id
+                    JOIN turns capability_turn ON capability_turn.turn_id=session_use.turn_id
+                    WHERE session_use.session_id=s.session_id
+                      AND session_use.origin_scope='main'
+                      AND capability_turn.effective_provider_visibility='active'
+                      AND lower(hex(session_capability.capability_key))=?
                   )"
             .to_owned(),
-            values: vec![SqlValue::Text(expression.as_str().to_owned())],
+            values: vec![SqlValue::Text(key.to_owned())],
         });
     }
     let column = resource_filter_field(resource, field)?;
