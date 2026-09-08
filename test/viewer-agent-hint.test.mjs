@@ -3,8 +3,24 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { build } from "vite";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+test("production CSS keeps mobile breakpoints compatible with older WebViews", async () => {
+  const result = await build({
+    root,
+    mode: "cloudflare",
+    logLevel: "silent",
+    build: { write: false },
+  });
+  const outputs = (Array.isArray(result) ? result : [result]).flatMap((item) => item.output);
+  const css = outputs.filter((item) => item.type === "asset" && item.fileName.endsWith(".css"))
+    .map((item) => String(item.source)).join("\n");
+  assert.match(css, /@media\s*\(max-width:\s*900px\)/u);
+  assert.match(css, /@media\s*\(max-width:\s*640px\)/u);
+  assert.doesNotMatch(css, /@media[^{}]*[<>]/u);
+});
 
 test("publishes a safe static Agent hint and best-effort Markdown alternate", async () => {
   const html = await readFile(path.join(root, "index.html"), "utf8");
