@@ -24,6 +24,7 @@ import {
 import { createDocumentService, sweepDocuments } from './src/document-service.mjs';
 import { documentR2Store } from './src/document-r2-store.mjs';
 import { documentAgentResponse } from './src/document-read.mjs';
+import { FLOWCHART_FRAME_CSP, FLOWCHART_FRAME_HTML } from './document-viewer/frame-html.mjs';
 
 interface R2StoredObject {
   body: ReadableStream<Uint8Array> | null;
@@ -191,6 +192,13 @@ export function createWorker({ now = Date.now }: WorkerOptions = {}) {
         const service = createDocumentService(documentR2Store(env.THREADSHARE_BUCKET), { now });
         if (url.pathname.startsWith('/api/')) return (await service(request)) ?? jsonResponse(404, { error: 'Not found' });
         if (!['GET', 'HEAD'].includes(request.method)) return viewerMethodNotAllowed();
+        if (url.pathname === '/document.html' && url.searchParams.get('frame') === 'flowchart') {
+          return new Response(request.method === 'HEAD' ? null : FLOWCHART_FRAME_HTML, { headers: {
+            'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8',
+            'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
+            'content-security-policy': FLOWCHART_FRAME_CSP,
+          } });
+        }
         if (selectAgentTranscript(url.searchParams, request.headers.get('accept') ?? undefined)) {
           try { return await documentAgentResponse(request, service); }
           catch (error) { return new Response('Document unavailable', { status: error.status ?? 500, headers: { 'cache-control': 'no-store' } }); }
@@ -199,7 +207,7 @@ export function createWorker({ now = Date.now }: WorkerOptions = {}) {
         const headers = new Headers(asset.headers);
         headers.set('cache-control', 'no-store'); headers.set('vary', 'Accept');
         headers.set('referrer-policy', 'no-referrer');
-        headers.set('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+        headers.set('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
         return new Response(request.method === 'HEAD' ? null : asset.body, { status: asset.status, headers });
       }
       const isViewerDocument = url.pathname === "/" || url.pathname === "/index.html";

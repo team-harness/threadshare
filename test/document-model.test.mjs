@@ -30,6 +30,17 @@ test("shared Markdown text uses rendered entities, code, Unicode and determinist
   );
 });
 
+test("only Mermaid flowchart fences are marked for browser diagrams without changing review text", () => {
+  const source = "flowchart LR\n  A[Start] --> B{Ready?}";
+  const model = documentModel(
+    `Intro\n\n\`\`\`mermaid\n${source}\n\`\`\`\n\n\`\`\`mermaid\nsequenceDiagram\n A->>B: Hi\n\`\`\`\n\n\`\`\`js\nflowchart LR\n A-->B\n\`\`\``,
+  );
+  assert.equal(model.text, `Intro\n${source}\nsequenceDiagram\n A->>B: Hi\nflowchart LR\n A-->B`);
+  assert.equal((model.html.match(/data-flowchart=""/g) ?? []).length, 1);
+  assert.match(model.html, /A\[Start\] --&gt; B\{Ready\?\}/);
+  assert.deepEqual(model.images, []);
+});
+
 test("reference images are inventoried, code is not, remote images require opt-in", () => {
   const model = documentModel(
     "![x][ref]\n\n[ref]: ./a.png\n\n`![fake](b.png)`\n\n![remote](https://example.com/a.png)",

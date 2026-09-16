@@ -176,6 +176,25 @@ h1 {
   line-height: 1.6;
   border-radius: 6px;
 }
+.flowchart-preview {
+  width: 100%;
+  overflow: auto;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.flowchart-preview iframe {
+  display: block;
+  width: 100%;
+  border: 0;
+  pointer-events: none;
+}
+#document .flowchart-preview + pre[data-flowchart] {
+  margin-top: 0;
+  border-radius: 0 0 6px 6px;
+  font-size: 12px;
+}
 #document code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   background: #edf1ed;

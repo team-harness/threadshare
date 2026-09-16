@@ -8,6 +8,7 @@ import {
   validatePublicComment,
 } from "../src/document-model.mjs";
 import { readDocumentJson } from "../src/document-read.mjs";
+import { isSafeFlowchartSource } from "./flowchart-source.mjs";
 
 const $ = (id) => document.getElementById(id);
 const id = new URL(location.href).searchParams.get("id");
@@ -90,6 +91,85 @@ function enableImagePreview(image) {
     event.preventDefault();
     open();
   });
+}
+async function renderFlowcharts() {
+  const blocks = Array.from($("document").querySelectorAll("pre[data-flowchart]"));
+  if (!blocks.length) return;
+  let mermaid;
+  try {
+    ({ default: mermaid } = await import("mermaid"));
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "sandbox",
+      htmlLabels: false,
+      maxTextSize: 8192,
+      maxEdges: 120,
+      suppressErrorRendering: true,
+      theme: "neutral",
+    });
+  } catch {
+    return; // The original source stays readable without diagram support.
+  }
+  for (const [index, block] of blocks.slice(0, 8).entries()) {
+    const source = block.querySelector("code")?.textContent ?? "";
+    if (!isSafeFlowchartSource(source)) continue;
+    try {
+      const { svg } = await mermaid.render(`document-flowchart-${index}`, source);
+      const template = document.createElement("template");
+      template.innerHTML = svg;
+      const rendered = template.content.querySelector("iframe");
+      const frameSource = rendered?.getAttribute("src") ?? "";
+      const prefix = "data:text/html;charset=UTF-8;base64,";
+      if (!frameSource.startsWith(prefix) || frameSource.length > 2_700_000)
+        continue;
+      const markup = new TextDecoder().decode(
+        Uint8Array.from(atob(frameSource.slice(prefix.length)), (char) => char.charCodeAt(0)),
+      );
+      const content = document.createElement("template");
+      content.innerHTML = markup;
+      const diagram = content.content.querySelector("svg");
+      if (!diagram) continue;
+      const serialized = diagram.outerHTML;
+      if (serialized.length > 2_000_000) continue;
+      const frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.title = "Flowchart";
+      frame.loading = "lazy";
+      frame.referrerPolicy = "no-referrer";
+      frame.src = "/document.html?frame=flowchart";
+      const viewBox = diagram.getAttribute("viewBox")?.trim().split(/[\s,]+/);
+      const height = Number(viewBox?.[3]);
+      frame.style.height = `${Math.min(Math.max(height || 480, 200), 3000)}px`;
+      const preview = document.createElement("div");
+      preview.className = "flowchart-preview";
+      let deadline;
+      let ready = false;
+      const onReady = (event) => {
+        if (event.source !== frame.contentWindow || event.origin !== "null" || event.data?.type !== "threadshare-flowchart-ready") return;
+        ready = true;
+        clearTimeout(deadline);
+        removeEventListener("message", onReady);
+      };
+      const onFailure = () => {
+        if (ready) return;
+        removeEventListener("message", onReady);
+        preview.remove();
+        alignComments();
+      };
+      addEventListener("message", onReady);
+      frame.addEventListener("load", () => {
+        if (ready) return;
+        frame.contentWindow?.postMessage({ type: "threadshare-flowchart", svg: serialized }, "*");
+        deadline = setTimeout(onFailure, 10000);
+        alignComments();
+      });
+      preview.append(frame);
+      block.before(preview);
+      alignComments();
+    } catch {
+      // Invalid or unsupported syntax remains visible as Markdown source.
+    }
+  }
 }
 function showReviews() {
   $("reviews").classList.remove("mobile-closed");
@@ -495,6 +575,7 @@ async function start() {
   }
   status("");
   await loadReviews();
+  await renderFlowcharts();
   setInterval(() => {
     if (!document.hidden && $("composer").hidden) loadReviews();
   }, 30000);

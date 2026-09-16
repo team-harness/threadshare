@@ -64,6 +64,31 @@ function history() {
   };
 }
 
+test("isolates document flowchart frames with their own CSP", async () => {
+  const { handler } = createTestHandler();
+  const frame = await handler({ rawPath: "/document.html?frame=flowchart", httpMethod: "GET" });
+  assert.equal(frame.statusCode, 200);
+  assert.match(frame.headers["content-security-policy"], /default-src 'none'/);
+  assert.match(frame.headers["content-security-policy"], /img-src 'none'/);
+  assert.match(frame.headers["content-security-policy"], /style-src 'unsafe-inline'/);
+  assert.equal(frame.headers["cache-control"], "no-store");
+  assert.match(frame.body, /flowchart-frame\.js/);
+  const denied = await handler({ rawPath: "/document.html?frame=flowchart", httpMethod: "POST" });
+  assert.equal(denied.statusCode, 405);
+});
+
+test("does not cache the unversioned flowchart frame script", async () => {
+  const { handler } = createTestHandler({ assets: {
+    "/flowchart-frame.js": {
+      body: Buffer.from("// flowchart frame").toString("base64"),
+      contentType: "text/javascript; charset=utf-8",
+    },
+  } });
+  const result = await handler({ rawPath: "/flowchart-frame.js", httpMethod: "GET" });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.headers["cache-control"], "no-store");
+});
+
 test("writes a validated history to the generated OSS key and reads it back", async () => {
   const { handler, objects, requests } = createTestHandler({ now: () => NOW });
   const created = await handler({

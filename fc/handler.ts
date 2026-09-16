@@ -30,6 +30,7 @@ import staticAssets from "./static-assets";
 import { documentOssStore } from './document-oss-store';
 import { createDocumentService, sweepDocuments } from '../src/document-service.mjs';
 import { documentAgentResponse } from '../src/document-read.mjs';
+import { FLOWCHART_FRAME_CSP, FLOWCHART_FRAME_HTML } from '../document-viewer/frame-html.mjs';
 
 type Environment = Record<string, string | undefined>;
 type StaticAssets = Record<
@@ -342,7 +343,7 @@ function staticResponse(
   if (!asset) return json(404, { error: "Not found" }, false);
   const viewerDocument = path === "/" || path === "/index.html";
   const headers = normalizedAssetHeaders(asset.headers);
-  headers["cache-control"] = viewerDocument
+  headers["cache-control"] = viewerDocument || path === "/flowchart-frame.js"
     ? "no-store"
     : "public, max-age=31536000, immutable";
   headers["content-type"] = asset.contentType;
@@ -388,6 +389,14 @@ export function createHandler({
         return json(200, result, false);
       }
       if (path.startsWith('/api/v1/documents') || ['/document.html', '/document'].includes(path)) {
+        if (path === '/document.html' && searchParams.get('frame') === 'flowchart') {
+          if (!['GET', 'HEAD'].includes(method)) return viewerMethodNotAllowed();
+          return { statusCode: 200, headers: {
+            'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8',
+            'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
+            'content-security-policy': FLOWCHART_FRAME_CSP,
+          }, body: method === 'HEAD' ? undefined : FLOWCHART_FRAME_HTML };
+        }
         if (event.body && Buffer.byteLength(event.body, event.isBase64Encoded ? 'base64' : 'utf8') > 4 * 1024 * 1024) {
           return json(413, { error: 'Document request is too large' }, false);
         }
@@ -414,7 +423,7 @@ export function createHandler({
           const result = staticResponse('/document.html', method, assets, searchParams);
           result.headers['cache-control'] = 'no-store'; result.headers.vary = 'Accept';
           result.headers['referrer-policy'] = 'no-referrer';
-          result.headers['content-security-policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+          result.headers['content-security-policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
           return result;
         }
         return { statusCode: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) };

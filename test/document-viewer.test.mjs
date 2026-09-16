@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { isSafeFlowchartSource } from "../document-viewer/flowchart-source.mjs";
 import {
   documentModel,
   validateAnchor,
@@ -16,6 +17,49 @@ async function viewerScript() {
   source = source.replace(/import[\s\S]*?from "[^"]+";\n/g, "");
   return source.slice(0, source.lastIndexOf("\nstart().catch"));
 }
+
+test("flowcharts reject instructions and remote media before invoking Mermaid", () => {
+  assert.equal(isSafeFlowchartSource("flowchart LR\n  A[Build] --> B[Release]"), true);
+  for (const source of [
+    'flowchart LR\n A --> B\n %%{init: {"htmlLabels":true}}%%',
+    'flowchart LR\n A@{ img: "https://example.test/pixel" }',
+    'flowchart LR\n A[<img src="https://example.test/pixel">]',
+    'flowchart LR\n click A "https://example.test"',
+    'flowchart LR\n classDef danger fill:url(https://example.test/pixel)',
+    'flowchart LR\n A --> B; click A "//tracker.example/pixel"',
+    'flowchart LR\n A --> B; style A fill:#f00',
+    'flowchart LR\n A --> B; classDef danger fill:#f00',
+    'flowchart LR\n A[//tracker.example/pixel] --> B',
+    'flowchart LR\n A[plain] --> B[data:image/png;base64,abc]',
+  ]) assert.equal(isSafeFlowchartSource(source), false, source);
+});
+
+test("flowchart frame acknowledges only a same-origin parent after displaying an SVG", async () => {
+  const source = await readFile(new URL("../public/flowchart-frame.js", import.meta.url), "utf8");
+  let onMessage;
+  const displayed = [];
+  const acknowledgements = [];
+  const parent = { postMessage: (...args) => acknowledgements.push(args) };
+  const svg = { nodeName: "svg" };
+  const context = {
+    URL,
+    parent,
+    window: { addEventListener: (_type, callback) => { onMessage = callback; } },
+    document: {
+      currentScript: { src: "https://test.local/flowchart-frame.js" },
+      createElement: () => ({ content: { querySelector: () => svg }, innerHTML: "" }),
+      body: { appendChild: (node) => displayed.push(node), textContent: "previous" },
+    },
+  };
+  vm.runInNewContext(source, context);
+  onMessage({ source: parent, origin: "https://other.test", data: { type: "threadshare-flowchart", svg: "<svg/>" } });
+  assert.equal(displayed.length, 0);
+  onMessage({ source: parent, origin: "https://test.local", data: { type: "threadshare-flowchart", svg: "<svg/>" } });
+  assert.deepEqual(displayed, [svg]);
+  assert.equal(context.document.body.textContent, "");
+  assert.equal(acknowledgements[0][0].type, "threadshare-flowchart-ready");
+  assert.equal(acknowledgements[0][1], "https://test.local");
+});
 
 test("composer keeps its displayed passage when selection changes before submit", async () => {
   const elements = new Map();

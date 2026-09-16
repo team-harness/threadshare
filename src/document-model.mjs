@@ -100,7 +100,13 @@ export function documentModel(markdown, assets = [], assetBase = "") {
   md.renderer.rules.hardbreak = () => `${span("\n")}<br>`;
   md.renderer.rules.fence = md.renderer.rules.code_block = (ts, i) => {
     block();
-    return `<pre><code>${span(ts[i].content.replace(/\n$/, ""))}</code></pre>\n`;
+    const token = ts[i];
+    const content = token.content.replace(/\n$/, "");
+    const flowchart =
+      token.type === "fence" &&
+      token.info.trim() === "mermaid" &&
+      /^\s*(?:flowchart|graph)\s+(?:TB|TD|BT|RL|LR)\b/i.test(content);
+    return `<pre${flowchart ? ' data-flowchart=""' : ""}><code>${span(content)}</code></pre>\n`;
   };
   md.renderer.rules.image = (ts, i) => {
     const token = ts[i];

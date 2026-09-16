@@ -76,6 +76,18 @@ test("routes negotiated Viewer documents through the Worker before static assets
   assert.equal(index.status, 200);
   assert.equal(index.headers.get("cache-control"), "no-store");
 
+  const frame = await server.fetch("/document.html?frame=flowchart");
+  assert.equal(frame.status, 200);
+  assert.match(frame.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(frame.headers.get("content-security-policy") ?? "", /img-src 'none'/);
+  assert.match(frame.headers.get("content-security-policy") ?? "", /style-src 'unsafe-inline'/);
+  assert.equal(frame.headers.get("cache-control"), "no-store");
+  assert.match(await frame.text(), /flowchart-frame\.js/);
+  const documentAlias = await server.fetch("/document?frame=flowchart");
+  assert.doesNotMatch(documentAlias.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  const deniedFrame = await server.fetch("/document.html?frame=flowchart", { method: "POST" });
+  assert.equal(deniedFrame.status, 405);
+
   const builtHtml = await readFile(path.join(root, "dist", "index.html"), "utf8");
   const assetPath = /(?:src|href)="(\/assets\/[^"]+)"/u.exec(builtHtml)?.[1];
   assert.ok(assetPath, "the production build must reference a hashed static asset");
