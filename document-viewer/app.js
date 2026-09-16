@@ -288,7 +288,7 @@ function openComposer(anchor) {
   $("selected-text").textContent = anchor.exact;
   $("selection-action").hidden = true;
   $("comment-status").textContent = "";
-  $("comment-body").focus();
+  $("comment-body").focus({ preventScroll: true });
   highlight(anchor);
 }
 $("selection-action").onclick = () => {

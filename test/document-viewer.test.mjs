@@ -77,7 +77,9 @@ test("composer keeps its displayed passage when selection changes before submit"
         classList: { remove() {}, add() {} },
         setAttribute() {},
         addEventListener() {},
-        focus() {},
+        focus(options) {
+          if (id === "comment-body" && !options?.preventScroll) scrollY = 0;
+        },
         blur() {},
         contains: () => true,
         querySelectorAll: () => [],
@@ -144,6 +146,7 @@ test("composer keeps its displayed passage when selection changes before submit"
     'model = documentModel("First passage.\\n\\nSecond passage."); shared = {revision:"revision"}; highlight=()=>{}; renderComments=()=>{}; openComposer(anchorFor(0, 5));',
     context,
   );
+  assert.equal(scrollY, 420, "opening the composer must keep the selected passage in view");
   const displayed = element("selected-text").textContent;
   const node = {
     nodeType: 3,
