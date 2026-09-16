@@ -1,7 +1,24 @@
 # 更新日志
 
-本文件记录 Threadshare 面向用户的重要变化。最上方的“线上版本”记录已经部署到官方托管服务、
-但尚未重新生成 npm 版本号和 Git tag 的变化。
+本文件记录 Threadshare 面向用户的重要变化。
+
+## [0.8.9] - 2026-09-16
+
+### 新增
+
+- Markdown 文档分享：上传固定文档快照及本地图片，生成独立阅读与协同 Review 链接。
+- 无需登录的选区评论：记住评论者名字，同段多人评论并列展示，重新打开页面可读取已有评论。
+- `threadshare document share/read/reviews/revoke`，支持 JSON 与 Agent Markdown 导出，将团队反馈交给 Agent 继续完善原文档。
+- 文档页提供 Agent 阅读入口、反馈交接提示及分享引导；中英文 README 与 Skill 更新协作场景和文档协议说明。
+
+### 修复
+
+- Cloudflare 网页 Agent 导出适配 Workerd 的 Request 行为。
+- 阿里云 FC 使用原生 Node.js 20 事件适配器，无损传输图片上传与下载；文档生命周期清理支持定时执行。
+
+### 展示调整
+
+- README 与默认命令帮助聚焦聊天分享和文档协作；已有 Insights 命令保留，但不作为默认推荐入口。
 
 ## [线上版本] - 2026-08-03
 
