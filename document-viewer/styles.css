@@ -188,6 +188,35 @@ h1 {
   max-width: 100%;
   height: auto;
   border-radius: 4px;
+  cursor: zoom-in;
+}
+.image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  padding: 72px 24px 24px;
+  background: #101b19ed;
+}
+.image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 96px);
+  max-height: calc(100dvh - 96px);
+  object-fit: contain;
+}
+#image-preview-close {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  border: 0;
+  background: #fff;
+  color: #20332d;
+  font-size: 24px;
+  line-height: 1;
+  width: 44px;
+  height: 44px;
 }
 #document table {
   display: block;

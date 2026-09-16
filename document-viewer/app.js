@@ -33,15 +33,64 @@ const status = (message, error = false) => {
   $("status").textContent = message;
   $("status").dataset.error = String(error);
 };
-const api = async (path, init = {}) =>
-  readDocumentJson(
-    await fetch(base + path, {
-      ...init,
-      signal: AbortSignal.timeout(30000),
-      redirect: "error",
-    }),
-    path.startsWith("/comments") ? 4 * 1024 * 1024 : undefined,
-  );
+async function api(path, init = {}) {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 30000);
+  try {
+    return await readDocumentJson(
+      await fetch(base + path, {
+        ...init,
+        signal: controller.signal,
+        redirect: "error",
+      }),
+      path.startsWith("/comments") ? 4 * 1024 * 1024 : undefined,
+    );
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+let previewOrigin;
+let previousOverflow;
+function closeImagePreview() {
+  $("image-preview").hidden = true;
+  $("image-preview-image").removeAttribute("src");
+  document.body.style.overflow = previousOverflow;
+  previewOrigin?.focus({ preventScroll: true });
+  previewOrigin = null;
+}
+$("image-preview-close").onclick = closeImagePreview;
+$("image-preview").addEventListener("click", (event) => {
+  if (event.target === $("image-preview")) closeImagePreview();
+});
+addEventListener("keydown", (event) => {
+  if ($("image-preview").hidden) return;
+  if (event.key === "Escape") closeImagePreview();
+  if (event.key === "Tab") {
+    event.preventDefault();
+    $("image-preview-close").focus();
+  }
+});
+function enableImagePreview(image) {
+  image.tabIndex = 0;
+  image.setAttribute("role", "button");
+  image.setAttribute("aria-label", `Enlarge image: ${image.alt || "image"}`);
+  const open = (event) => {
+    event?.preventDefault();
+    previewOrigin = image;
+    previousOverflow = document.body.style.overflow;
+    $("image-preview-image").src = image.currentSrc || image.src;
+    $("image-preview-image").alt = image.alt;
+    $("image-preview").hidden = false;
+    document.body.style.overflow = "hidden";
+    $("image-preview-close").focus();
+  };
+  image.addEventListener("click", open);
+  image.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    open();
+  });
+}
 function showReviews() {
   $("reviews").classList.remove("mobile-closed");
   $("reviews").hidden = false;
@@ -344,6 +393,8 @@ $("composer").onsubmit = async (event) => {
       headers: { "content-type": "application/json" },
       body: digest,
     });
+    const pageScrollY = scrollY;
+    $("submit").blur();
     comments.set(comment.commentId, comment);
     renderComments();
     try {
@@ -356,6 +407,7 @@ $("composer").onsubmit = async (event) => {
     composing = null;
     pending = null;
     $("reviews-status").textContent = "Comment posted.";
+    requestAnimationFrame(() => scrollTo(0, pageScrollY));
   } catch {
     $("comment-status").textContent =
       "Comment was not confirmed. Retry to safely confirm it without duplicating it.";
@@ -414,10 +466,13 @@ async function start() {
       image.alt = button.textContent;
       image.onload = alignComments;
       image.src = button.dataset.remoteSrc;
+      enableImagePreview(image);
       button.replaceWith(image);
     };
-  for (const image of $("document").querySelectorAll("img"))
+  for (const image of $("document").querySelectorAll("img")) {
     image.addEventListener("load", alignComments);
+    enableImagePreview(image);
+  }
   for (const block of $("document").querySelectorAll(
     "p,h1,h2,h3,h4,h5,h6,pre,td,th",
   )) {

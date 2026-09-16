@@ -8,12 +8,23 @@ import {
   ANCHOR_VERSION,
 } from "../src/document-model.mjs";
 
+async function viewerScript() {
+  let source = await readFile(
+    new URL("../document-viewer/app.js", import.meta.url),
+    "utf8",
+  );
+  source = source.replace(/import[\s\S]*?from "[^"]+";\n/g, "");
+  return source.slice(0, source.lastIndexOf("\nstart().catch"));
+}
+
 test("composer keeps its displayed passage when selection changes before submit", async () => {
   const elements = new Map();
   const listeners = new Map();
+  const frames = [];
+  let scrollY = 420;
   const element = (id) => {
-    if (!elements.has(id))
-      elements.set(id, {
+    if (!elements.has(id)) {
+      const node = {
         hidden: true,
         value: "",
         dataset: {},
@@ -21,11 +32,25 @@ test("composer keeps its displayed passage when selection changes before submit"
         getBoundingClientRect: () => ({ width: 180, height: 40 }),
         classList: { remove() {}, add() {} },
         setAttribute() {},
+        addEventListener() {},
         focus() {},
+        blur() {},
         contains: () => true,
         querySelectorAll: () => [],
         textContent: "",
-      });
+      };
+      if (id === "composer") {
+        let hidden = true;
+        Object.defineProperty(node, "hidden", {
+          get: () => hidden,
+          set(value) {
+            hidden = value;
+            if (value) scrollY = 0; // Simulate browser scroll anchoring on form removal.
+          },
+        });
+      }
+      elements.set(id, node);
+    }
     return elements.get(id);
   };
   let range;
@@ -44,10 +69,16 @@ test("composer keeps its displayed passage when selection changes before submit"
     innerHeight: 600,
     structuredClone,
     crypto: { getRandomValues: crypto.getRandomValues.bind(crypto) },
-    AbortSignal,
+    AbortSignal: {}, // DingTalk WebView has no AbortSignal.timeout.
+    AbortController,
+    setTimeout,
+    clearTimeout,
     Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
     matchMedia: () => ({ matches: false }),
     addEventListener() {},
+    requestAnimationFrame: (callback) => frames.push(callback),
+    get scrollY() { return scrollY; },
+    scrollTo: (_x, top) => { scrollY = top; },
     localStorage: { getItem() {}, setItem() {} },
     getSelection: () => ({
       rangeCount: 1,
@@ -64,13 +95,7 @@ test("composer keeps its displayed passage when selection changes before submit"
       return {};
     },
   });
-  let source = await readFile(
-    new URL("../document-viewer/app.js", import.meta.url),
-    "utf8",
-  );
-  source = source.replace(/import[\s\S]*?from "[^"]+";\n/g, "");
-  source = source.slice(0, source.lastIndexOf("\nstart().catch"));
-  vm.runInContext(source, context);
+  vm.runInContext(await viewerScript(), context);
   vm.runInContext(
     'model = documentModel("First passage.\\n\\nSecond passage."); shared = {revision:"revision"}; highlight=()=>{}; renderComments=()=>{}; openComposer(anchorFor(0, 5));',
     context,
@@ -110,4 +135,113 @@ test("composer keeps its displayed passage when selection changes before submit"
   assert.equal(displayed, "First");
   assert.equal(posted.anchor.exact, displayed);
   assert.equal(posted.anchor.start, 0);
+  for (const frame of frames) frame();
+  assert.equal(scrollY, 420);
+});
+
+test("document requests work without AbortSignal.timeout and retain an abort deadline", async () => {
+  const elements = new Map();
+  const timers = new Map();
+  let timerId = 0;
+  let requests = 0;
+  const context = vm.createContext({
+    document: {
+      getElementById(id) {
+        if (!elements.has(id))
+          elements.set(id, { classList: { add() {} }, setAttribute() {}, addEventListener() {} });
+        return elements.get(id);
+      },
+      addEventListener() {},
+    },
+    location: { href: "https://test.local/document.html?id=x" },
+    URL,
+    AbortSignal: {},
+    AbortController,
+    setTimeout(fn, delay) {
+      assert.equal(delay, 30000);
+      timers.set(++timerId, fn);
+      return timerId;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    localStorage: { getItem() {} },
+    readDocumentJson: async () => ({ ok: true }),
+    fetch: async (_url, init) => {
+      assert.equal(init.signal.aborted, false);
+      assert.equal(typeof init.signal.addEventListener, "function");
+      if (++requests === 2)
+        return new Promise((_, reject) => {
+          init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      return {};
+    },
+  });
+  vm.runInContext(await viewerScript(), context);
+  assert.deepEqual(await vm.runInContext("api('')", context), { ok: true });
+  assert.equal(timers.size, 0);
+  const timedRequest = vm.runInContext("api('')", context);
+  timers.get(timerId)();
+  await assert.rejects(timedRequest, /aborted/);
+  assert.equal(timers.size, 0);
+});
+
+test("document images open an accessible preview and close without navigation", async () => {
+  const markup = await readFile(
+    new URL("../document.html", import.meta.url),
+    "utf8",
+  );
+  assert.match(markup, /id="image-preview"/);
+  assert.match(markup, /id="image-preview-image"[^>]*referrerpolicy="no-referrer"/);
+  const elements = new Map();
+  let focused;
+  const element = (id) => {
+    if (!elements.has(id))
+      elements.set(id, {
+        hidden: true,
+        style: {},
+        classList: { add() {} },
+        setAttribute() {},
+        addEventListener() {},
+        removeAttribute() {},
+        focus() { focused = id; },
+      });
+    return elements.get(id);
+  };
+  const listeners = new Map();
+  const image = {
+    src: "https://test.local/image.png",
+    currentSrc: "https://test.local/image.png",
+    alt: "Diagram",
+    addEventListener(name, fn) { listeners.set(name, fn); },
+    focus() { focused = "image"; },
+    setAttribute(name, value) { this[name] = value; },
+  };
+  const context = vm.createContext({
+    document: {
+      body: { style: { overflow: "" } },
+      getElementById: element,
+      addEventListener() {},
+    },
+    location: { href: "https://test.local/document.html?id=x" },
+    URL,
+    matchMedia: () => ({ matches: false }),
+    addEventListener() {},
+    localStorage: { getItem() {} },
+    image,
+  });
+  vm.runInContext(await viewerScript(), context);
+  vm.runInContext("enableImagePreview(image)", context);
+  assert.equal(image.tabIndex, 0);
+  assert.equal(image.role, "button");
+  let prevented = false;
+  listeners.get("click")({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(element("image-preview").hidden, false);
+  assert.equal(element("image-preview-image").src, image.src);
+  assert.equal(element("image-preview-image").alt, image.alt);
+  assert.equal(focused, "image-preview-close");
+  element("image-preview-close").onclick();
+  assert.equal(element("image-preview").hidden, true);
+  assert.equal(focused, "image");
 });
