@@ -264,8 +264,8 @@ npm run deploy:cloudflare
 npm run build:fc
 cd fc
 licell login
-licell workspace init --type api --app threadshare-fc --runtime nodejs22 \
-  --entry dist/index.cjs --target prod --disable-vpc --region cn-shanghai
+licell workspace init --type api --app threadshare-fc --runtime nodejs20 \
+  --entry dist/native.cjs --target prod --disable-vpc --region cn-shanghai
 licell oss create threadshare-shares-your-name --acl private --public-access-block on
 licell env set THREADSHARE_OSS_BUCKET threadshare-shares-your-name
 licell env set THREADSHARE_OSS_REGION cn-shanghai

@@ -57,3 +57,11 @@ await build({
   platform: "node",
   target: "node22",
 });
+await build({
+  bundle: true,
+  entryPoints: [join(fc, "native-handler.ts")],
+  format: "cjs",
+  outfile: join(output, "native.cjs"),
+  platform: "node",
+  target: "node20",
+});

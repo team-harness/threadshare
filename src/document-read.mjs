@@ -187,7 +187,9 @@ export async function documentAgentResponse(request, service) {
     // One Worker invocation includes list/lifecycle reads as well as comments.
     // Five pages remain below the free R2 internal-subrequest budget.
     maxComments: 500,
-    fetchImpl: (url, options) => service(new Request(url, options)),
+    // This dispatch stays in-process: there is no network redirect to follow.
+    // Workerd rejects RequestInit.redirect="error", unlike Node and browsers.
+    fetchImpl: (url, options) => service(new Request(url, { signal: options.signal })),
   });
   const body = formatDocumentReview(report);
   check(

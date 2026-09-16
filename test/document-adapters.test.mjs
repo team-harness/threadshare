@@ -3,6 +3,7 @@ import test from "node:test";
 import { createHmac } from "node:crypto";
 import { createWorker } from "../worker.ts";
 import { createHandler } from "../fc/handler.ts";
+import { createNativeHandler } from "../fc/native-handler.ts";
 import { documentOssStore } from "../fc/document-oss-store.ts";
 import { sha256, documentModel } from "../src/document-model.mjs";
 import {
@@ -10,6 +11,45 @@ import {
   createDocumentService,
 } from "../src/document-service.mjs";
 import { memoryStore } from "./helpers/document-store.mjs";
+import { build } from "esbuild";
+import { Miniflare } from "miniflare";
+import { fileURLToPath } from "node:url";
+
+test("Web Agent export runs inside workerd without unsupported redirect options", async () => {
+  const bundle = await build({
+    stdin: {
+      resolveDir: fileURLToPath(new URL("..", import.meta.url)),
+      contents: `
+        import { documentAgentResponse } from './src/document-read.mjs';
+        import { DOCUMENT_RENDERER, ANCHOR_VERSION, sha256 } from './src/document-model.mjs';
+        export default { async fetch(request) {
+          const markdown = '# Workerd review';
+          const revision = await sha256(markdown);
+          return documentAgentResponse(request, async (inner) => {
+            if (new URL(inner.url).pathname.endsWith('/comments')) {
+              return Response.json({format:'threadshare-document-comments@v1', revision,
+                comments:[], hasMore:false, nextCursor:null});
+            }
+            return Response.json({format:'threadshare-document@v1',
+              id:new URL(request.url).searchParams.get('id'), title:'Workerd review', revision,
+              createdAt:'2026-09-16T00:00:00.000Z', expiresAt:null, revocable:false,
+              renderer:DOCUMENT_RENDERER, textVersion:ANCHOR_VERSION, assets:[], markdown});
+          });
+        }};
+      `,
+    },
+    bundle: true, write: false, format: "esm", platform: "browser",
+  });
+  const runtime = new Miniflare({modules:true, script:bundle.outputFiles[0].text, compatibilityDate:"2026-07-29"});
+  try {
+    const response = await runtime.dispatchFetch("https://test.local/document?id=00000000-0000-4000-8000-000000000000&format=agent");
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /text\/markdown/);
+    assert.match(await response.text(), /Workerd review/);
+  } finally {
+    await runtime.dispose();
+  }
+});
 
 function r2(store) {
   return {
@@ -86,7 +126,7 @@ function ossFetch(store) {
     throw new Error("unexpected storage request");
   };
 }
-for (const adapter of ["r2", "oss"])
+for (const adapter of ["r2", "oss", "oss-native"])
   test(`${adapter}: binary upload, JSON/Agent reads, concurrent reviews and expiry`, async () => {
     const store = memoryStore();
     let time = Date.now();
@@ -99,23 +139,24 @@ for (const adapter of ["r2", "oss"])
           ASSETS: { fetch: async () => new Response("<html>viewer</html>") },
         });
     } else {
-      const handler = createHandler({
+      const handler = (adapter === "oss-native" ? createNativeHandler : createHandler)({
         environment: env,
         fetchImpl: ossFetch(store),
         now: () => time,
       });
       fetchAdapter = async (request) => {
         const url = new URL(request.url);
-        const response = await handler({
+        const event = {
           httpMethod: request.method,
           path: url.pathname,
           rawQueryString: url.search.slice(1),
           headers: { host: url.host, ...Object.fromEntries(request.headers) },
           body: Buffer.from(await request.arrayBuffer()).toString("base64"),
           isBase64Encoded: true,
-        });
+        };
+        const response = await handler(adapter === "oss-native" ? Buffer.from(JSON.stringify(event)) : event);
         return new Response(
-          response.statusCode === 204 ? null : response.body,
+          response.statusCode === 204 ? null : response.isBase64Encoded ? Buffer.from(response.body, "base64") : response.body,
           { status: response.statusCode, headers: response.headers },
         );
       };

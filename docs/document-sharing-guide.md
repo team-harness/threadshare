@@ -51,6 +51,8 @@ CLI 在上传前读取并冻结全部字节，32 MiB 是逻辑负载上限，不
 
 CLI 和后端需同时包含本次更新。现有聊天分享的路径、5 MiB 限制和格式保持不变。文档使用独立 `/api/v1/documents` API 和 `/document.html?id=<uuid>` 页面。
 
+FC 部署使用托管 `nodejs20` 运行时与 `dist/native.cjs` 入口（`npm run deploy:fc` 已固定这两个参数），通过原生事件的 Base64 标记无损传输图片请求和响应。不要改用会将请求体转换为 UTF-8 字符串的 HTTP 包装层；文字请求通过不代表图片传输正确。
+
 1. Cloudflare：`npm run build:cloudflare` 后使用现有 Wrangler 部署流程；同一私有 R2 bucket 增加文档前缀，配置已包含每 15 分钟清理 cron。
 2. FC：`npm run build:fc` 后使用现有部署流程；同一私有 OSS bucket，IAM 还需要 ListObjects/ListBucket 权限。默认公开地址按 HTTPS + Host 解释；HTTP 入口或会重写 Host 的网关必须设置 `THREADSHARE_PUBLIC_ORIGIN` 为实际公开 origin（例如 `https://review.example.com`），不含路径。配置名为 `threadshare-document-cleanup` 的 Timer 触发器，每 15 分钟调用函数；HTTP 请求不能调用该清理入口。
 3. R2 用条件 PUT，OSS 用签名的 `x-oss-forbid-overwrite:true`。每条评论独立对象，409 冲突不能覆盖旧评论。OSS bucket 不应启用会禁用 forbid-overwrite 语义的版本管理配置；部署前验证条件写入。

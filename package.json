@@ -98,7 +98,7 @@
     "deploy": "npm run deploy:void",
     "deploy:void": "void deploy",
     "deploy:cloudflare": "npm run build:cloudflare && wrangler deploy --config wrangler.jsonc",
-    "deploy:fc": "npm run build:fc && (cd fc && licell deploy)",
+    "deploy:fc": "npm run build:fc && (cd fc && licell deploy --runtime nodejs20 --entry dist/native.cjs --timeout 120)",
     "dev:cloudflare": "npm run build:cloudflare && wrangler dev --local --config wrangler.jsonc",
     "test:fc": "npm run build:fc && node --test test/cloudflare-routing.test.mjs fc/handler.test.cjs",
     "test:cli": "node --test test/agent-transcript.test.mjs test/cli.test.mjs test/history-selection.test.mjs test/insights-agent-spec.test.mjs test/insights-mcp.test.mjs test/insights-query-schema.test.mjs test/insights-query.test.mjs test/insights-reference-engine.test.mjs test/memory-consolidation.test.mjs test/memory-contracts.test.mjs test/memory-extraction.test.mjs test/memory-format.test.mjs test/memory-insights-source.test.mjs test/memory-lint.test.mjs test/memory-operation-registry.test.mjs test/memory-repository.test.mjs test/memory-runner.test.mjs test/memory-skill.test.mjs test/paseo-session-bridge.test.mjs test/session-evidence.test.mjs test/session-facts-golden.test.mjs test/session-listing.test.mjs test/share-preflight.test.mjs test/share-read.test.mjs test/turn-analysis.test.mjs",
