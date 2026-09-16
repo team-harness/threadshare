@@ -2,67 +2,40 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [Usage guides](https://github.com/team-harness/threadshare/blob/main/docs/README.md)
 
-Threadshare makes AI-agent history useful: share Codex, Claude Code, and Paseo sessions as read-only
-web links, or let your Agent query a local index for Tool failures, workflow patterns, prior solutions,
-and evidence-backed development insights.
+Threadshare helps people and AI agents get on the same page—with the context behind a conversation and feedback on a shared document.
 
-After a one-time CLI install, ask the Codex or Claude Agent you are already working with to share the
-current conversation, investigate local history, or retain reviewed team experience. Sharing uses the
-hosted service at [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) without requiring
-you to deploy anything first.
+| What you share | When it helps | How collaboration continues |
+|---|---|---|
+| **Agent conversations** | Bring a teammate up to speed on a discussion, decision, or investigation without retelling the whole story. | Share a Codex, Claude Code, or Paseo conversation as a browser link. People read the context; another Agent can pick up the discussion. |
+| **Markdown documents and images** | Review a proposal, requirements, or plan you drafted with your Agent. | Share the document, collect the team's comments beside selected passages, then bring the feedback back to your Agent to improve the original. |
 
-The same viewer, API, and portable `threadshare-history@v1` format can be self-hosted when you need your own domain, storage, or infrastructure controls. Threadshare remains independent of any agent provider or cloud platform.
+Use [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) by default, or self-host
+when you need your own domain and storage.
 
 ## Start With Your Agent
 
-Threadshare is designed to be used from an existing Codex or Claude Code conversation. Tell the Agent
-what outcome you want; it should discover Threadshare, resolve the current session or repository, choose
-MCP or CLI, and ask for confirmation when content will be published or repository memory will change.
-
-### Say What You Want
-
-| Goal | Say this to Codex or Claude |
+| Collaboration goal | Ask your Agent |
 |---|---|
-| Share the current conversation | “Use Threadshare to share this conversation. Run a preflight first, then give me the read-only Viewer URL.” |
-| Share only part of it | “Share this conversation from where we started discussing the release failure. Show me candidate starting messages first.” |
-| Investigate past work | “Use Threadshare to analyze this repository's release failures from the last month and show evidence-backed recurring patterns.” |
-| Build Team Memory | “Review this repository's release-failure conversations from the last two weeks. Propose team experience, and write only after I confirm it.” |
-| Create an Agent Skill | “Turn our approved release experience into a reusable release-checks Skill. Show the steps, evidence, and limitations before writing it.” |
-
-You do not need to find a session ID, choose an Insights Recipe, prepare JSON, select an MCP tool, or
-specify `--runner`. Those are execution details for the Agent. See the task-oriented
-[usage guides](https://github.com/team-harness/threadshare/blob/main/docs/README.md), including the dedicated
-[sharing guide](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md).
+| Share a conversation | “Use Threadshare to share this chat. Run a preflight first, then give me the link.” |
+| Share a selected portion | “Share from where we discussed the release failure. Let me confirm the starting message first.” |
+| Ask a colleague to review | “Share our design discussion so a colleague can read the context, tradeoffs, and open questions.” |
+| Hand context to an Agent | “Read this Threadshare link, summarize decisions and open questions, and help me continue.” |
+| Review a document | “Share docs/design.md with its images so my teammates can select passages and comment.” |
+| Act on feedback | “Read the reviews on this document link, group the issues, and propose changes before editing.” |
 
 ### One-Time Agent Setup
 
-Threadshare requires Node.js 20 or newer:
+Requires Node.js 20 or newer:
 
 ```bash
 npm install --global @team-harness/threadshare
-```
-
-For Codex, install the bundled Threadshare Skill once so the Agent can recognize these requests and
-follow the complete workflow without being given commands:
-
-```bash
 npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-For Codex Cloud, omit `--global` during environment setup. An MCP-compatible Agent can additionally be
-configured to launch `threadshare insights mcp --stdio` for Insights and Team Memory tools. MCP is
-optional: the Skill and any other local Agent can invoke the installed CLI and inspect
-`threadshare <command> --help` when needed.
-
-### What Happens In The Conversation
-
-1. The Agent translates your request into a bounded session, time window, topic, or repository scope.
-2. Threadshare returns a preflight, local evidence, or a candidate plan instead of silently widening the scope.
-3. The Agent explains the result in normal language and incorporates your corrections.
-4. Publishing and Team Memory writes happen only at their explicit confirmation points.
-
-Insights and Team Memory remain local by default. `share` is the operation that uploads selected visible
-conversation content and returns an unlisted Viewer URL.
+For Codex Cloud, omit `--global` during setup. The Agent locates the session, previews the content,
+and publishes after confirmation. It discovers parameters through `threadshare <command> --help`;
+you do not need a session ID or JSON. See the
+[sharing guide](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md).
 
 ### Direct CLI Equivalent
 
@@ -169,198 +142,41 @@ Paseo sharing requires the local `paseo` CLI and a reachable daemon. Threadshare
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-### Query Local Insights with an Agent
+### Share a Markdown Document for Review
 
-Local Insights lets your Agent investigate patterns across your recorded Codex and Claude work. Ask a
-concrete question in natural language. The Agent chooses the queries, checks coverage, and reads only
-the evidence needed for its answer.
+Write with your Agent, review with your team, then bring the feedback back to your Agent. Use this workflow for design proposals, implementation plans, product requirements, or team guides.
 
-For a task-oriented walkthrough, see the
-[Insights usage guide](https://github.com/team-harness/threadshare/blob/main/docs/insights-usage-guide.md)
-and the [Insights + Team Memory scenario cookbook](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md).
-
-```bash
-threadshare insights sync
-```
-
-Run `sync` once before the first analysis and whenever you want fresher results. Later runs are
-incremental. Use `reindex` only for an explicit complete rebuild or origin-secret recovery.
-For delivery questions about a repository, register that repository once with
-`threadshare insights sync --repository .`. Delivery Trace works from Git and Agent evidence without
-any requirements system. If you explicitly want to connect a repository-owned Markdown checklist or
-plan, add `--intent <repository-relative-file>`; Threadshare never discovers one automatically. Remove
-that optional source with `threadshare insights sync --repository . --clear-intent`. Later plain `sync`
-runs update the remaining registered sources.
-From that checkout, the Agent can omit the opaque repository key; Delivery Trace resolves the
-registered repository containing its current working directory.
-
-Then ask your Agent questions like these:
-
-| Ask your Agent | What the answer can guide |
+| Step | What you do |
 |---|---|
-| Which Skills and Tools do I use most, and in what kinds of work? | Standardize useful workflows, consolidate aliases, and remove low-value integrations. |
-| Which Tool attempts keep failing, and did the same attempt chain later succeed? | Separate high-volume friction from broken integrations, then improve Tool setup, prompts, or documentation. |
-| Which Sessions were research-heavy, implementation-heavy, or missing supporting documentation? | Add design or review checkpoints where implementation is outrunning recorded evidence. |
-| When did Tool density, Skill use, or project switching change? | Compare workflow changes over time and identify coordination or automation overhead. |
-| Where did this exact error happen before, and what evidence-backed step succeeded later? | Reuse a previously successful procedure without treating historical correlation as a guarantee. |
+| 1. Draft together | Tell your Agent: “Help me write a design proposal in docs/design.md, including the diagrams and open questions.” |
+| 2. Share with the team | Tell your Agent: “Use Threadshare to preview and share docs/design.md with its images. Give me the review link.” Send that link to your teammates. |
+| 3. Review in context | Teammates open the link, select passages, and leave comments beside the text. No account is required. Multiple people can comment on the same passage, and comments survive a refresh. |
+| 4. Improve with your Agent | Click **Copy prompt for Agent** at the top or bottom of the page, paste it into your Agent, and ask it to revise the original document using the feedback. |
 
-#### Trace delivery with an Agent
+For example, after reviewing an API proposal, tell your Agent:
 
-After repository sync, ordinary successful `git commit` output can connect an Agent Session to a
-reachable commit.
+> Read this document and its review comments: &lt;document-link&gt;. Group the feedback by passage, flag conflicting suggestions, and propose edits to docs/design.md. After I confirm, make the changes and summarize what was addressed and what still needs a decision.
 
-Full hashes form direct evidence. A short hash forms observed evidence only when it resolves uniquely
-inside the registered repository. No special commit wrapper is required.
+The Agent can read the original text, quoted passages, and comments together. You do not need to copy each comment or explain which paragraph it refers to. Reviewer names are remembered in each browser, but are not verified identities.
 
-| Ask your Agent | What Insights Trace connects | What the answer can guide |
-|---|---|---|
-| Which Agent Sessions are related to this commit, and what does the evidence actually prove? | Session, observed Git result, commit identity, reachability, and the GitHub or GitLab link. | Review the originating context without claiming authorship or exclusive line attribution. |
-| How did this requirement move from plan to delivery? | Intent or checklist item, Sessions, changed files, commits, and on-demand Git diff evidence. | Confirm that implemented work matches the recorded requirement and find missing delivery steps. |
-| Which attempts and file changes preceded the commit that fixed this bug? | Relevant Turns, Tool uses, files, successful commit evidence, and unresolved gaps. | Reuse the successful path and distinguish it from failed or merely correlated attempts. |
-| Why did this commit change these files? | Commit diff, related Session context, implementation decisions, and review evidence. | Check whether the diff follows the stated design and whether review covered the risky paths. |
-| What remains before another Agent continues or the release ships? | Completed and unresolved intents, Sessions with no commit, commits with no recorded Agent context, and affected files. | Build a bounded handoff and surface delivery gaps before release. |
+Each link preserves the reviewed snapshot. Once the revised local file is ready, ask your Agent to share a new version; the earlier link keeps its original document and comments while it remains available.
 
-Each edge is evidence, not a claim of authorship or causation.
-
-The Agent should report its relation, strength, source, facts, and limitations. Candidate and
-contextual edges are investigation leads; they must not be presented as confirmed delivery.
-
-The user does not choose commands, resource names, schemas, or internal analysis plans. A compatible
-Agent reads `threadshare insights spec --format json`, selects bounded queries, and reports the
-snapshot, time window, coverage, truncation, and evidence behind its conclusion.
-
-#### Real report from a local index
-
-The following findings came from one real local index containing more than 3,600 Sessions and 11,000
-Turns. No Session text, paths, stable keys, or evidence identifiers are included here.
-
-| Question | What the Agent found | Development decision |
-|---|---|---|
-| Which Skills are used most? | Review and design-convergence Skills dominated recorded use; the top two represented 48.9% of Skill invocations. | Productize the review and design workflows before adding more low-frequency entry points. |
-| Which Tools keep failing? | `Bash` had the most failures by volume but completed 13,345 of 13,674 calls. `WebFetch` failed 9/9 and a retired MCP search failed 4/4. | Classify recurring `Bash` failures, but remove or replace integrations that never record a successful call. |
-| Did failed attempts recover? | All 50 returned representative failure chains were `never-succeeded`; 34 were `Bash` chains. | Track recovery per attempt chain instead of assuming that a generally reliable Tool recovered a specific failure. |
-| How did the workflow change? | Recorded Turns fell 50.3% between two 13-week windows while Tool calls per Turn rose 36.4%. | Investigate whether work became more deeply automated or accumulated extra orchestration overhead. |
-| Where are token hotspots? | The largest group recorded about 2.84B tokens, with roughly 98% of input tokens served from cache. | Compare uncached input, output, and delivered results before treating total tokens as avoidable cost. |
-
-Read the [complete real-index Agent report](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)
-for the questions, evidence limits, conclusions, and follow-up decisions behind these findings.
-The [Delivery Trace reference](https://github.com/team-harness/threadshare/blob/main/docs/insights-delivery-trace-example.md)
-shows how an Agent follows a requirement through Sessions, files, commits, and on-demand Git diff evidence.
-
-Local Insights queries committed local history without uploading it. Deep Query can return complete
-messages, analysis, Tool input/output, errors, and file paths. Treat its output as sensitive local
-data, and do not share or publish it unless the user explicitly asks.
-
-Local Insights is packaged for macOS and Linux on arm64 and x64. Windows installations retain the
-core Threadshare CLI (`share`, `read`, `export`, and related commands), but local Insights is not
-available in the 0.8.x release line while the owner-only Windows ACL adapter remains unimplemented.
-
-Usage counts are recorded invocations, not inferred independent uses. Agents should distinguish Tool
-terminal states from the outcome of the containing Turn. Co-occurrence does not prove that a Tool or
-Skill caused a Turn to succeed or fail.
-
-### Build Shared Team Memory
-
-Team Memory retrospectively selects local Insights Turns and turns them into reviewed,
-repository-owned memory. In an existing Codex or Claude Code conversation, ask the current Agent in
-natural language, for example: "Use Threadshare to review this repository's release failures from the
-last two weeks and turn them into team experience." The Agent can guide the interactive review and
-confirmation flow directly from the current conversation. The normal Agent path asks for one batched
-confirmation covering the retain/skip decisions, exact statements and evidence, and final file changes.
-
-The complete confirmation flow, CLI/MCP mapping, and troubleshooting steps are in
-the [Team Memory usage guide](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-usage-guide.md).
-The [scenario cookbook](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md)
-helps choose between Insights, Memory, and `share`.
-
-The equivalent CLI flow is shown below. People supply normal filter parameters. The JSON consumed by
-`stage` and `prepare` is produced by the Agent and piped through stdin; it is not a file the user must
-author or maintain.
+For direct CLI use:
 
 ```bash
-threadshare memory init
-threadshare memory recall \
-  --since <start-utc> \
-  --until <end-utc> \
-  --query "release verification" \
-  --providers claude,codex \
-  --result-evidence provider-completed \
-  --format json
-# The Agent analyzes one returned source at a time, discusses wording with the user,
-# then passes CandidateDraftBatch@v1 on stdin. Threadshare returns an AdjudicationTask:
-threadshare memory stage --request - --format json
-# The Agent compares the draft with the returned approved/candidate pool, discusses
-# store/skip/update/merge, then passes AdjudicationResult@v1 on stdin:
-threadshare memory stage --request - --format json
-threadshare memory review --format json
-# Review returns one approval preview with exact statements, evidence, target paths,
-# sanitized content, target-blob CAS, and approvalDigest. The Agent shows it once.
-# After the user confirms that batch, pass approval.prepareRequest unchanged:
-threadshare memory prepare --request - --format json
-# If prepare echoes the same approvalDigest, promote without another prompt:
-threadshare memory promote --plan <plan-id> --format json
-
-# Build scenes and doctrine through the same Agent conversation:
-threadshare memory synthesize --if-due --format json
-threadshare memory stage --request - --format json
-threadshare memory review --kind consolidation --format json
-threadshare memory prepare --request - --format json
-threadshare memory promote --plan <plan-id> --format json
-threadshare memory assemble --provider claude
-threadshare memory assemble --provider codex
+threadshare document share docs/design.md --dry-run --json
+threadshare document share docs/design.md --revoke --expires 7d --json
+threadshare document reviews '<document-url>' --format agent
 ```
 
-To turn a repeatable procedure into an Agent Skill, ask the current Codex or Claude conversation to
-review a bounded Insights window and propose a `SkillCandidate@v1`. Recall is memory-first: it returns
-relevant existing Skills, then current scenes/doctrine and approved entries, before the bounded historical
-Turns used as the final evidence source. The Memory context carries a digest that the candidate must echo,
-so entry/scene/doctrine drift is rejected through promotion. The shared lifecycle is
-`stage → review --kind skill → one approval batch → prepare(kind=skill) → promote`. After approval,
-`assemble --provider claude|codex` projects the agent-neutral source to `.claude/skills/` or
-`.codex/skills/`. `memory lint .threadshare/memory/skills/<name>/SKILL.md` verifies a canonical
-Skill explicitly before assembly or commit. See
-[Skill extraction and assembly](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-skill-design.md).
+Local PNG/JPEG/WebP/GIF images are uploaded with the Markdown. External images load only when the reader
+chooses to load them. Each link is a fixed snapshot: edit locally and share again for a new version.
+Comments are append-only. To revoke a share, save its `revokeToken` privately when sharing.
 
-The local Insights MCP server exposes the same stable operations:
-`threadshare_memory_recall`, `threadshare_memory_synthesize`, `threadshare_memory_stage`,
-`threadshare_memory_review`, `threadshare_memory_prepare`, `threadshare_memory_promote`, and
-`threadshare_memory_assemble`. Recall
-returns complete bounded Turn chunks plus the same Skill and Memory context directly to the current
-Agent. Synthesize returns approved memory entries plus current scenes/doctrine. CLI and MCP use the
-same source checks, confirmations, and recoverable promotion flow.
-`review` supplies the same digest-bound approval preview on both transports. An unchanged digest lets
-the Agent continue from the user's single confirmation; any content, lint, source, or target drift
-requires a new preview and confirmation.
-
-Keep recall at its default one-chunk limit unless the Agent context is known to hold every requested
-chunk. Candidate staging is deliberately two-step: the first call returns the current memory pool;
-only the second, exact adjudication call can retain, skip, update, or merge a draft.
-Each recalled Turn is labeled both in `chunk.turnEvidence` and by an inline
-`<<past-turn index="..." evidence-id="...">>` marker. Agents cite that exact mapping instead of guessing
-from the order of `ev-*` identifiers.
-
-`--runner` is only for the optional separate batch workflow. `claude` launches the installed Claude
-Code CLI; `codex` launches the installed Codex CLI and requires an exact model and HTTPS endpoint when
-creating a new preview:
-
-```bash
-threadshare memory extract --runner claude --since <utc> --until <utc>
-threadshare memory extract --runner claude --approve-plan <extraction-digest>
-threadshare memory extract --runner claude --approve-plan <adjudication-digest>
-
-threadshare memory extract --runner codex \
-  --runner-model <model> \
-  --runner-endpoint <https-url> \
-  --since <utc> \
-  --until <utc>
-```
-
-Every recall requires explicit `--since` and `--until` timestamps (at most 366 days apart), with optional
-query, provider, opaque session, Tool, Skill, result-evidence, and capability-state filters. Threadshare
-always adds the current worktree scope plus eligible, active, `hard-sealed`, and complete Delivery Trace
-coverage. More than 200 matching Turns is rejected instead of silently truncated. Recall gives those
-bounded transcripts to the current Agent for discussion; `promote` writes only below `.threadshare/memory/`, refreshes
-the approved projection, and never stages, commits, or pushes.
+The CLI and server must both include the document-sharing update; this source change does not update an
+older npm installation or deploy the hosted service automatically. See the
+[document sharing guide](https://github.com/team-harness/threadshare/blob/main/docs/document-sharing-guide.md)
+for self-hosting, limits, and Agent review exports. Discover options with `threadshare document --help`.
 
 ### Use Another Threadshare Server
 
@@ -383,6 +199,7 @@ threadshare <command> --help
 Regular failures exit 1 with empty stdout and print a stable error code plus `Problem`, `Usage`, and `Next` on stderr. The deliberate exception is an invalid `share --dry-run --json`, which returns its one-line `valid:false` result on stdout. When an upload may have created a share but cannot confirm the requested lifecycle, the diagnostic includes a `Result` URL; do not retry that publish automatically.
 
 - `share` exports and publishes a native session in one step. `--dry-run` stops before network access; `--report` is valid only with `--dry-run`.
+- `document` shares Markdown and images, reads documents and review comments, or revokes a document share. Discover its `share`, `read`, `reviews`, and `revoke` actions with `threadshare document --help`.
 - `sessions` lists canonical native Codex or Claude sessions without uploading. Text is for people; `--format json` is the stable automation surface. The default and maximum page sizes are 10 and 50.
 - `analyze` builds a local single-session Turn, Tool, Skill, retry, and rollback evidence report without uploading or calling an external model. Text is for people; `--format json` returns `threadshare-session-analysis@v1` for agents.
 - `messages` returns redacted, single-line user-turn previews for an agent-driven start selection. `--format json` is required; the default and maximum page sizes are 10 and 50.
@@ -408,17 +225,13 @@ Only Codex- and Claude-backed Paseo agents are supported. A running agent produc
 
 ## Agent Integration Reference
 
-The bundled `threadshare` Skill teaches Codex and Codex Cloud how to locate, analyze, share, and verify
-sessions, and how to run the reviewed Team Memory workflow. It uses the installed CLI when available
-and falls back to `npx`. The source lives in [`skills/threadshare`](./skills/threadshare).
-
-MCP clients can launch `threadshare insights mcp --stdio` to expose the stable Insights and interactive
-Team Memory operations. Sharing continues through the CLI. Both execution surfaces return structured
-results for the Agent; the user starts with an outcome in natural language rather than a tool name.
+The bundled `threadshare` Skill helps Codex and Codex Cloud locate, preview, share, and read
+conversations and Markdown documents, collect reviews, and apply feedback. It uses the installed CLI when available and falls back to `npx`.
+The source lives in [`skills/threadshare`](./skills/threadshare).
 
 ## Privacy and Sharing Model
 
-Viewer URLs are read-only and unlisted, but they are not access-controlled. Anyone with a URL can read the shared conversation.
+Viewer URLs are unlisted, but not access-controlled. Conversation viewers are read-only; anyone with a document link can read it and append review comments.
 
 By default, a share has no expiration and no revoke capability. `--expires` adds a logical read deadline; `--revoke` creates a client-held capability whose raw value is shown only at creation. Do not place capability tokens in URLs, transcripts, issue trackers, or logs.
 
@@ -471,7 +284,7 @@ cd ..
 npm run deploy:fc
 ```
 
-FC proxies reads and writes to a private OSS bucket. Use a dedicated RAM principal limited to `GetObject`, `PutObject`, and `DeleteObject` on the `shares/` prefix.
+FC proxies reads and writes to a private OSS bucket. Limit the RAM principal's object permissions to the conversation and document prefixes, and grant ListObjects/ListBucket for comment pagination and cleanup. Configure the document cleanup timer and function timeout as described in the [deployment guide](./docs/document-sharing-guide.md#后端与部署).
 
 Local state under `fc/.licell/`, `.void/`, and `.wrangler/` is ignored by Git and must not be committed.
 
@@ -485,6 +298,17 @@ npm run deploy:void
 ```
 
 ## Protocol and API
+
+Conversation sharing and document review have separate versioned contracts:
+
+| Data | Format | Schema |
+|---|---|---|
+| Conversation | `threadshare-history@v1` | [History](./schema/threadshare-history.v1.schema.json) |
+| Immutable document and image manifest | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| One anchored comment | `threadshare-document-comment@v1` | [Document `$defs.comment`](./schema/threadshare-document.v1.schema.json#/$defs/comment) |
+| Bounded document and review export | `threadshare-document-review@v1` | [Review export](./schema/threadshare-document-review.v1.schema.json) |
+
+### Conversation format
 
 New producers convert native conversations to `threadshare-history@v1`. The canonical schema is [`schema/threadshare-history.v1.schema.json`](./schema/threadshare-history.v1.schema.json).
 
@@ -507,7 +331,7 @@ Entries can represent messages, tool calls, thoughts, todos, activity, or compac
 
 The legacy Paseo v1 shape is accepted only for migration. New producers must use `threadshare-history@v1`, and Threadshare does not require Paseo at runtime.
 
-### HTTP API
+### Conversation HTTP API
 
 ```text
 POST   /api/v1/shares       -> { "id": "<uuid>", "expiresAt"?: "...", "revocable"?: true }
@@ -525,6 +349,34 @@ Expiration is checked on every read and triggers best-effort lazy deletion. `DEL
 History reads use `Cache-Control: no-store` so a shared transcript is not retained by intermediary caches.
 
 Configure rate limits at the hosting edge for publicly exposed instances.
+
+### Document and review HTTP API
+
+```text
+POST   /api/v1/documents/uploads                 -> {id, uploadToken, uploadExpiresAt}
+PUT    /api/v1/documents/:id/uploads/markdown     -> 204
+PUT    /api/v1/documents/:id/uploads/assets/:sha  -> 204
+POST   /api/v1/documents/:id/publish              -> {id, revision, expiresAt, revocable}
+GET    /api/v1/documents/:id                      -> threadshare-document@v1
+GET    /api/v1/documents/:id/assets/:sha          -> declared image bytes
+GET    /api/v1/documents/:id/comments             -> threadshare-document-comments@v1
+GET    /api/v1/documents/:id/comments/:commentId  -> threadshare-document-comment@v1
+PUT    /api/v1/documents/:id/comments/:commentId  -> 201 new / 200 identical retry / 409 conflict
+DELETE /api/v1/documents/:id                      -> 204 with a valid Bearer revoke capability
+Viewer                                          -> /document.html?id=<uuid>#comment-<commentId>
+```
+
+Create an upload declaration with `title`, `markdown: {sha256, bytes}`, and `assets: [{source, sha256, bytes, contentType}]`. Optional `expiresInSeconds` and `revokeTokenSha256` belong in this JSON, not the conversation lifecycle headers.
+
+Upload the declared bytes and publish using `Authorization: Bearer <uploadToken>`. The upload token expires after one hour and is separate from the revoke token. Publishing validates the Markdown and all local images before exposing the snapshot.
+
+A comment PUT accepts `{revision, anchor, authorName, body}`. Anchors use UTF-16 offsets in `document-anchor-text@1`, not Markdown source offsets; the server verifies the quoted text and context. Comments are immutable, and names are self-declared.
+
+Comment pages contain `format`, `revision`, `comments`, `hasMore`, and `nextCursor`; use `limit` (1–100) and the opaque `cursor` to continue. CLI review exports add `complete` and traversal metadata under `threadshare-document-review@v1`.
+
+The document URL returns HTML by default, or Markdown with document and review context for `?format=agent` or an explicitly preferred `Accept: text/markdown`. Web exports include at most 500 comments and disclose continuation; never assume a partial export is complete.
+
+Document, image, and comment reads use `no-store`; unavailable, expired, or revoked documents return 404. Browser writes require the same origin. Both FC/OSS and Cloudflare/R2 use this contract. See the [document guide](./docs/document-sharing-guide.md) for limits and deployment requirements.
 
 ### Paseo as a Producer
 

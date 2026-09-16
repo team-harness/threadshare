@@ -27,6 +27,9 @@ import {
   selectAgentTranscript,
 } from "../src/agent-transcript.mjs";
 import staticAssets from "./static-assets";
+import { documentOssStore } from './document-oss-store';
+import { createDocumentService, sweepDocuments } from '../src/document-service.mjs';
+import { documentAgentResponse } from '../src/document-read.mjs';
 
 type Environment = Record<string, string | undefined>;
 type StaticAssets = Record<
@@ -35,6 +38,7 @@ type StaticAssets = Record<
 >;
 
 interface FcEvent {
+  triggerName?: string;
   body?: string;
   headers?: Record<string, string | string[] | undefined>;
   httpMethod?: string;
@@ -372,6 +376,49 @@ export function createHandler({
     const agentSelected =
       viewerDocument && selectAgentTranscript(searchParams, acceptHeader(event));
     try {
+      if (event.triggerName === 'threadshare-document-cleanup') {
+        // FC timer is an invocation event, never an unauthenticated HTTP route.
+        if (event.httpMethod || event.requestContext?.http || event.path || event.rawPath) return json(400, { error: 'Invalid timer event' }, false);
+        const store = documentOssStore(environment, fetchImpl);
+        const saved = await store.get('document-maintenance-cursor.json');
+        const cursor = saved ? JSON.parse(new TextDecoder().decode(saved)).cursor : null;
+        const result = await sweepDocuments(store, { now, cursor,
+          batchSize: Number(environment.THREADSHARE_DOCUMENT_CLEANUP_BATCH_SIZE ?? 50),
+          onProgress: (cursor) => store.saveMaintenanceCursor(cursor), logger });
+        return json(200, result, false);
+      }
+      if (path.startsWith('/api/v1/documents') || ['/document.html', '/document'].includes(path)) {
+        if (event.body && Buffer.byteLength(event.body, event.isBase64Encoded ? 'base64' : 'utf8') > 4 * 1024 * 1024) {
+          return json(413, { error: 'Document request is too large' }, false);
+        }
+        // Explicit public origin also supports gateways that rewrite Host.
+        // Never derive the trusted origin from the browser's Origin header.
+        const configuredOrigin = environment.THREADSHARE_PUBLIC_ORIGIN;
+        const publicUrl = new URL(configuredOrigin ?? `https://${header(event, 'host') ?? 'localhost'}`);
+        if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password || publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash) {
+          return json(500, { error: 'Invalid public origin configuration' }, false);
+        }
+        const origin = publicUrl.origin;
+        const requestHeaders = new Headers();
+        for (const name of ['content-type', 'content-length', 'authorization', 'origin', 'accept']) {
+          const value = header(event, name); if (value) requestHeaders.set(name, value);
+        }
+        const body = event.body === undefined || ['GET', 'HEAD'].includes(method) ? undefined : Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
+        const request = new Request(`${origin}${path}${searchParams.size ? `?${searchParams}` : ''}`, { method, headers: requestHeaders, body });
+        const service = createDocumentService(documentOssStore(environment, fetchImpl), { now, logger });
+        let response: Response;
+        if (path.startsWith('/api/')) response = await service(request) ?? new Response(null, { status: 404 });
+        else if (!['GET', 'HEAD'].includes(method)) return viewerMethodNotAllowed();
+        else if (selectAgentTranscript(searchParams, acceptHeader(event))) response = await documentAgentResponse(request, service);
+        else {
+          const result = staticResponse('/document.html', method, assets, searchParams);
+          result.headers['cache-control'] = 'no-store'; result.headers.vary = 'Accept';
+          result.headers['referrer-policy'] = 'no-referrer';
+          result.headers['content-security-policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+          return result;
+        }
+        return { statusCode: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) };
+      }
       if (path === "/api/v1/shares") {
         if (method === "OPTIONS") {
           return { statusCode: 204, headers: SHARE_CORS_HEADERS };
@@ -455,6 +502,7 @@ export function createHandler({
       return staticResponse(path, method, assets, searchParams);
     } catch (error) {
       logger.error("Threadshare API request failed", error);
+      if (['/document.html', '/document'].includes(path)) return { statusCode: error.status ?? 500, headers: { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' }, body: method === 'HEAD' ? undefined : 'Document unavailable' };
       if (agentSelected) return agentResponse(method, 500);
       return json(500, { error: "Unable to process shared history" }, method !== "DELETE");
     }

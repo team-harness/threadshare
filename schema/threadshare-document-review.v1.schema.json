@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://threadshare.dev/schema/threadshare-document-review.v1.schema.json",
+  "title": "Threadshare bounded document review export",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "document",
+    "url",
+    "collectionStartedAt",
+    "collectionFinishedAt",
+    "startCursor",
+    "complete",
+    "hasMore",
+    "nextCursor",
+    "consistency",
+    "comments"
+  ],
+  "properties": {
+    "format": { "const": "threadshare-document-review@v1" },
+    "document": { "$ref": "threadshare-document.v1.schema.json" },
+    "url": { "type": "string", "format": "uri" },
+    "collectionStartedAt": { "type": "string", "format": "date-time" },
+    "collectionFinishedAt": { "type": "string", "format": "date-time" },
+    "startCursor": { "type": ["string", "null"], "maxLength": 4096 },
+    "complete": {
+      "type": "boolean",
+      "description": "True only for an initial traversal that reached its end; concurrent additions can require refresh."
+    },
+    "hasMore": { "type": "boolean" },
+    "nextCursor": { "type": ["string", "null"], "maxLength": 4096 },
+    "consistency": {
+      "const": "append-only traversal; concurrent comments may require refresh"
+    },
+    "comments": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "threadshare-document.v1.schema.json#/$defs/comment" }
+    }
+  }
+}

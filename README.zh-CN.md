@@ -2,60 +2,38 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [使用手册](https://github.com/team-harness/threadshare/blob/main/docs/README.md)
 
-Threadshare 让 Agent 历史真正可复用：既能把 Codex、Claude Code 和 Paseo 会话发布为只读 Web
-链接，也能让 Agent 查询本地索引，发现 Tool 失败、工作流模式、历史解法和有证据的开发洞察。
+Threadshare 帮助人和 Agent 对齐信息：既能分享讨论背后的上下文，也能围绕一份文档收集反馈、继续完善。
 
-一次性安装 CLI 后，直接让正在对话的 Codex 或 Claude Agent 分享当前聊天、调查本机历史，或沉淀经过
-确认的团队经验。分享默认使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com)
-托管服务，无需先部署服务端。
+| 分享什么 | 解决什么问题 | 如何继续协作 |
+|---|---|---|
+| **Agent 聊天对话** | 让同事快速了解讨论、决策或排查过程，无需从头复述来龙去脉。 | 把 Codex、Claude Code 或 Paseo 对话变成网页链接；人阅读上下文，另一个 Agent 也能接着讨论。 |
+| **Markdown 文档及图片** | 让团队一起评审你与 Agent 共写的方案、需求或计划。 | 分享文档，大家在具体段落旁留下评论，再把反馈带回自己的 Agent，继续完善原文。 |
 
-需要自有域名、存储或基础设施控制时，可以独立部署同一套 Viewer、API 和 `threadshare-history@v1` 通用协议。Threadshare 不依赖特定 Agent provider 或云平台。
+默认使用 [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com)，也支持独立部署。
 
 ## 从 Agent 对话开始
 
-Threadshare 的主要使用方式，是在已经打开的 Codex 或 Claude Code 对话中直接描述目标。Agent 应自行
-发现 Threadshare、解析当前会话或仓库、选择 MCP 或 CLI，并在发布内容或写入团队记忆前回到对话中确认。
-
-### 直接说你想做什么
-
-| 目标 | 可以直接对 Codex 或 Claude 说 |
+| 协作目标 | 可以直接对 Agent 说 |
 |---|---|
-| 分享当前聊天 | “用 Threadshare 把当前聊天分享出来。先预检，再把只读 Viewer 链接给我。” |
-| 只分享其中一段 | “从我们开始讨论发布失败的那条消息起分享；先列出候选起点让我选。” |
-| 调查历史工作 | “用 Threadshare 分析最近一个月这个仓库的发布失败，找出反复模式并给出可复核证据。” |
-| 沉淀团队经验 | “回看最近两周这个仓库的发布失败，提出团队经验；我确认后再写入。” |
-| 生成 Agent Skill | “把已批准的发布经验整理成 release-checks Skill，先展示步骤、证据和限制。” |
-
-你不需要先找 session ID、选择 Insights Recipe、准备 JSON、挑 MCP tool 或指定 `--runner`；这些都是
-Agent 的执行细节。按任务查看[使用手册](https://github.com/team-harness/threadshare/blob/main/docs/README.md)，
-分享流程另见[分享使用手册](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md)。
+| 分享聊天 | “用 Threadshare 分享当前聊天，先预检，再把链接给我。” |
+| 分享片段 | “从我们讨论发布失败的地方开始分享，先让我确认起点。” |
+| 请同事审阅 | “分享方案讨论，让同事看到背景、取舍和待确认问题。” |
+| 交接给 Agent | “读取这个 Threadshare 链接，总结决策和未解决问题，帮我继续推进。” |
+| 审阅文档 | “分享 docs/design.md 和图片，让同事选中文字并评论。” |
+| 处理反馈 | “读取这个文档链接的 Review，归类问题，先给修改建议再动手。” |
 
 ### 一次性接入 Agent
 
-Threadshare 需要 Node.js 20 或更高版本：
+需要 Node.js 20 或更高版本：
 
 ```bash
 npm install --global @team-harness/threadshare
-```
-
-Codex 用户再安装一次仓库自带的 Threadshare Skill，让 Agent 能识别上述请求并自行完成整个工作流：
-
-```bash
 npx --yes skills add team-harness/threadshare --skill threadshare --agent codex --global --yes
 ```
 
-Codex Cloud 在环境初始化时去掉 `--global`。支持 MCP 的 Agent 还可以配置
-`threadshare insights mcp --stdio`，直接获得 Insights 与 Team Memory 工具；MCP 不是必需条件，Skill
-或其他本机 Agent 仍可调用已安装的 CLI，并在需要时读取 `threadshare <command> --help`。
-
-### 对话中会发生什么
-
-1. Agent 把自然语言要求转换成有界的会话、时间窗、主题或仓库范围。
-2. Threadshare 返回预检、本机证据或候选计划，不会静默扩大范围。
-3. Agent 用自然语言解释结果，并吸收你的修改和补充。
-4. 分享发布和 Team Memory 写入只在明确确认点执行。
-
-Insights 与 Team Memory 默认留在本机；`share` 才会上传选中的可见会话，并返回不公开列出的 Viewer URL。
+Codex Cloud 环境初始化时去掉 `--global`。Agent 自行定位会话、预检内容并在确认后发布；
+参数由 `threadshare <command> --help` 发现，用户无需准备 session ID 或 JSON。
+具体流程见[分享使用手册](https://github.com/team-harness/threadshare/blob/main/docs/sharing-usage-guide.md)。
 
 ### CLI 等价入口
 
@@ -161,174 +139,36 @@ Viewer 链接不会公开列出，但它不带访问鉴权。任何获得链接�
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-### 让 Agent 查询本地 Insights
+### 分享 Markdown 文档，邀请协同 Review
 
-Local Insights 可以让 Agent 从已记录的 Codex 和 Claude 工作中发现跨 Session 的规律。用户只需用
-自然语言提出具体问题；Agent 会选择查询、检查覆盖范围，并只读取回答问题所需的证据。
+和 Agent 一起写文档，交给团队评审，再把反馈带回自己的 Agent 继续完善。适合技术方案、实施计划、产品需求和团队使用指南。
 
-按任务一步步操作请看
-[Insights 使用手册](https://github.com/team-harness/threadshare/blob/main/docs/insights-usage-guide.md)；
-需要判断某个问题应该停在 Insights、进入 Team Memory，还是使用 `share`，请看
-[Insights + Team Memory 场景手册](https://github.com/team-harness/threadshare/blob/main/docs/insights-memory-scenarios.md)。
-
-```bash
-threadshare insights sync
-```
-
-第一次分析前运行一次 `sync`；希望结果包含最新工作时再运行。后续 `sync` 是增量更新。只有明确需要
-完整原子重建或恢复 origin secret 时才使用 `reindex`。
-要分析某个仓库的交付关系，先执行一次 `threadshare insights sync --repository .` 注册该仓库。
-之后从该仓库目录调用 Agent 时无需提供不透明的 repository key；Delivery Trace 会解析包含当前目录的已注册仓库。
-Delivery Trace 默认只使用 Git 与 Agent 证据，不依赖任何需求管理系统。只有明确希望连接仓库自己的
-Markdown checklist 或计划文件时，才加 `--intent <仓库相对路径>`；Threadshare 不会自动发现它。
-使用 `threadshare insights sync --repository . --clear-intent` 可以解除这个可选 source，之后普通
-`sync` 只增量更新仍然注册的来源。
-
-然后直接把这些问题交给 Agent：
-
-| 发给 Agent 的问题 | 回答可以指导什么决策 |
+| 步骤 | 你可以怎么做 |
 |---|---|
-| 我最常使用哪些 Skill 和 Tool，通常用在什么工作中？ | 固化有效工作流、合并重复别名、停用低价值集成。 |
-| 哪些 Tool 尝试反复失败，同一尝试链后来成功了吗？ | 区分高频摩擦与失效集成，再改进 Tool 配置、提示词或文档。 |
-| 哪些 Session 偏研究、偏实现，或者缺少配套文档？ | 在实现快于证据沉淀的环节增加设计或审查检查点。 |
-| Tool 密度、Skill 使用或项目切换在什么时候发生了变化？ | 比较工作流迭代，识别协调成本或自动化开销。 |
-| 这个具体错误以前在哪里出现过，后来哪个有证据的步骤成功了？ | 复用历史上成功的候选方案，同时避免把相关性当成必然因果。 |
+| 1. 与 Agent 共写文档 | 对 Agent 说：“帮我把方案写成 docs/design.md，包含示意图和待讨论的问题。” |
+| 2. 分享给团队 | 对 Agent 说：“用 Threadshare 预检并分享 docs/design.md 和图片，把评审链接给我。”然后把链接发给同事。 |
+| 3. 大家一起 Review | 同事打开链接，选中文字，在原文旁留下评论。无需注册或登录；多人可以评论同一段，刷新后评论仍然保留。 |
+| 4. 带回 Agent 继续完善 | 点击页面顶部或底部的 **Copy prompt for Agent**，把提示词粘贴给自己的 Agent，让它结合反馈修改原始文档。 |
 
-#### 让 Agent 追踪交付
+例如，一份 API 设计方案评审结束后，可以这样对 Agent 说：
 
-仓库完成 sync 后，普通 `git commit` 的成功输出就能把 Agent Session 与可达 Commit 关联起来。
+> 读取这份文档及其评审评论：〈文档链接〉。按段落归类反馈，指出相互冲突的建议，先给出 docs/design.md 的修改方案。等我确认后再修改，并总结已处理的问题和仍需讨论的事项。
 
-完整 hash 形成 direct evidence。短 hash 只有在已注册仓库内唯一解析时才形成 observed evidence；
-不需要改用特殊的提交命令。
+Agent 能一起读到原文、被评论的选区和反馈，不需要你逐条复制评论、解释它对应哪段内容。评论者名字会在各自浏览器中记住，但不代表经过身份验证。
 
-| 发给 Agent 的问题 | Insights Trace 会连接什么 | 回答可以指导什么决策 |
-|---|---|---|
-| 哪些 Agent Session 与这个 Commit 有关，证据实际能证明什么？ | Session、观察到的 Git 结果、Commit 身份、可达状态以及 GitHub 或 GitLab 链接。 | 查看产生提交结果时的上下文，但不猜测作者身份或声称每一行都由该 Session 产生。 |
-| 这个需求如何从计划走到交付？ | Intent 或 checklist 项、Session、changed files、Commit，以及按需加载的 Git diff evidence。 | 确认实现符合原始需求，并发现缺失的交付步骤。 |
-| 修复这个 Bug 的 Commit 之前有哪些尝试和文件修改？ | 相关 Turn、Tool use、文件、成功 Commit 证据和仍未解决的缺口。 | 复用成功路径，并把它与失败尝试或仅有相关性的线索区分开。 |
-| 这个 Commit 为什么修改这些文件？ | Commit diff、相关 Session 上下文、实现决策与审查证据。 | 判断 diff 是否遵循设计，以及审查是否覆盖了高风险路径。 |
-| 下一个 Agent 继续或发布前还缺什么？ | 已完成和未解决的 Intent、没有 Commit 的 Session、没有 Agent 上下文的 Commit，以及受影响文件。 | 生成有边界的交接信息，并在发布前暴露交付缺口。 |
+每个链接保留当时评审的文档快照。修改好本地原文后，再让 Agent 分享新版本；旧链接在有效期内仍保留旧文档和原有评论。
 
-每条 edge 都是证据，不是作者身份或因果声明。
-
-Agent 应报告 relation、strength、source、facts 和 limitations。candidate 与 contextual edge
-只能作为调查线索，不能表述成已确认的交付关系。
-
-用户不需要选择命令、resource、schema 或内部分析计划。兼容的 Agent 会读取
-`threadshare insights spec --format json`，选择有边界的查询，并在结论中报告 snapshot、时间窗口、
-coverage、截断状态和证据。
-
-#### 一份真实本地索引报告
-
-下面的结论来自一个包含 3,600 多个 Session、11,000 多个 Turn 的真实本地索引。这里不包含 Session
-正文、本地路径、stable key 或 evidence 标识。
-
-| 问题 | Agent 得到的结论 | 可采取的开发决策 |
-|---|---|---|
-| 哪些 Skill 用得最多？ | Review 和设计收敛类 Skill 占主导，前两项占全部 Skill invocation 的 48.9%。 | 先产品化审查和设计工作流，再增加更多低频入口。 |
-| 哪些 Tool 反复失败？ | `Bash` 失败总数最高，但 13,674 次调用中完成了 13,345 次；`WebFetch` 9/9 失败，退役 MCP 搜索 4/4 失败。 | 对 `Bash` 做失败分类，同时移除或替换从未记录成功的集成。 |
-| 失败尝试后来恢复了吗？ | 返回的 50 条代表性失败链全部为 `never-succeeded`，其中 34 条是 `Bash`。 | 按尝试链跟踪恢复，不能因为 Tool 整体可靠就假定某次失败已恢复。 |
-| 工作方式发生了什么变化？ | 两个 13 周窗口相比，Turn 减少 50.3%，但每个 Turn 的 Tool 调用增加 36.4%。 | 判断工作是否进入更深的自动化，或是否增加了额外编排成本。 |
-| Token 热点在哪里？ | 最大分组记录约 28.4 亿 token，其中约 98% 的 input token 来自缓存。 | 先比较未缓存 input、output 和交付结果，再判断 total token 是否属于可避免成本。 |
-
-阅读[完整的真实索引 Agent 分析报告](https://github.com/team-harness/threadshare/blob/main/docs/insights-analysis-example.md)，
-可以看到每个问题的证据边界、结论和后续决策。
-[Delivery Trace 参考报告](https://github.com/team-harness/threadshare/blob/main/docs/insights-delivery-trace-example.md)
-则展示 Agent 如何从需求沿 Session、文件和 Commit 下钻，并按需读取真实 Git diff 证据。
-
-Local Insights 查询已提交的本地历史，不会上传数据。Deep Query 可以返回完整消息、analysis、Tool
-输入输出、错误和文件路径。应把输出视为本机敏感数据；除非用户明确要求，否则不要 share 或 publish。
-
-本地 Insights 目前为 macOS 与 Linux 的 arm64/x64 提供原生包。Windows 安装仍可使用
-`share`、`read`、`export` 等 Threadshare 核心 CLI；在 owner-only Windows ACL adapter 完成前，
-0.8.x 不提供本地 Insights。
-
-Usage 统计的是索引记录中的 invocation，不是推断出的独立使用次数。Agent 应把 Tool 调用终态与所在
-Turn 的结果分开陈述；共现不能被表述为某个 Tool 或 Skill 导致 Turn 成功或失败。
-
-### 构建团队共享记忆
-
-Team Memory 事后筛选本机 Insights Turn，并将其转成经过审核、归属于仓库的共享记忆。在已有 Codex 或
-Claude Code 对话中，用户直接说：“用 Threadshare 回看最近两周这个仓库关于发布失败的聊天，整理成团队
-经验。”当前 Agent 会直接引导回看、讨论、确认和写入流程。
-
-完整的确认步骤、CLI/MCP 对等关系和排障方式见
-[Team Memory 使用手册](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-usage-guide.md)。
-
-下面是等价 CLI 流程。人只提供普通筛选参数；`stage` 和 `prepare` 所需 JSON 由 Agent 生成并通过 stdin
-传入，不是要求用户创建或维护的文件。
+需要直接使用 CLI 时：
 
 ```bash
-threadshare memory init
-threadshare memory recall \
-  --since <start-utc> \
-  --until <end-utc> \
-  --query "发布验证" \
-  --providers claude,codex \
-  --result-evidence provider-completed \
-  --format json
-# Agent 每次分析一个返回 source，和用户讨论最终文字，再通过 stdin 传 CandidateDraftBatch@v1。
-# Threadshare 返回带当前 memory 池的 AdjudicationTask@v1：
-threadshare memory stage --request - --format json
-# Agent 对照池与用户确认 store/skip/update/merge，再通过 stdin 传 AdjudicationResult@v1：
-threadshare memory stage --request - --format json
-threadshare memory review --format json
-# 用户确认精确 candidate 后，Agent 传入 PrepareRequest@v1：
-threadshare memory prepare --request - --format json
-# 用户确认最终文件计划后：
-threadshare memory promote --plan <plan-id> --format json
-
-# 在同一 Agent 对话中生成 Scene 与 Doctrine：
-threadshare memory synthesize --if-due --format json
-threadshare memory stage --request - --format json
-threadshare memory review --kind consolidation --format json
-threadshare memory prepare --request - --format json
-threadshare memory promote --plan <plan-id> --format json
-threadshare memory assemble --provider claude
-threadshare memory assemble --provider codex
+threadshare document share docs/design.md --dry-run --json
+threadshare document share docs/design.md --revoke --expires 7d --json
+threadshare document reviews '<文档链接>' --format agent
 ```
 
-如果要把可重复执行的步骤沉淀成 Agent Skill，可以直接让当前 Codex 或 Claude 对话回看有界 Insights
-范围并提出 `SkillCandidate@v1`。recall 采用 Memory 优先顺序：先返回相关现有 Skill，再返回当前
-Scene/Doctrine 与 approved entry，最后才是用于原始取证的有界历史 Turn。Memory 上下文带有候选必须
-回显的 digest，因此 entry、scene 或 doctrine 在流程中发生漂移会被拒绝；Agent 先展示证据，再沿用
-`stage → review --kind skill → prepare(kind=skill) → promote`；确认后通过
-`assemble --provider claude|codex` 投影到 `.claude/skills/` 或 `.codex/skills/`。装配或提交前可以用
-`memory lint .threadshare/memory/skills/<name>/SKILL.md` 显式校验 canonical Skill。详见
-[Skill 提取与装配](https://github.com/team-harness/threadshare/blob/main/docs/team-memory-skill-design.md)。
+本地 PNG/JPEG/WebP/GIF 图片随文档上传；外部图片由读者点击后加载。链接对应固定快照，修改本地文档后重新分享即可获得新链接。评论只追加、不编辑删除。需要撤销时，请在分享时安全保存 `revokeToken`。
 
-本机 Insights MCP server 暴露完全相同的稳定操作：`threadshare_memory_recall`、
-`threadshare_memory_synthesize`、`threadshare_memory_stage`、`threadshare_memory_review`、
-`threadshare_memory_prepare`、`threadshare_memory_promote`、`threadshare_memory_assemble`。recall 直接把完整有界 Turn chunk 和同一份
-Skill/Memory 上下文返回给当前 Agent；synthesize 返回已批准记忆与当前 scenes/doctrine。CLI 与 MCP 共用
-source 校验、确认流程和可恢复 promotion 流程。
-
-除非能确认当前 Agent context 容得下全部 chunk，否则保持 recall 默认一次 1 个 chunk。候选 stage
-有意分两步：第一次返回当前 approved/candidate 池，第二次提交精确裁决后才会 store、skip、update 或 merge。
-每个 Turn 同时通过 `chunk.turnEvidence` 和 transcript 内的
-`<<past-turn index="..." evidence-id="...">>` 标记绑定证据。Agent 必须引用这份精确映射，不能按
-`ev-*` 标识符的排列顺序猜测。
-
-`--runner` 只用于可选的独立批处理。`claude` 启动已安装的 Claude Code CLI；`codex` 启动 Codex CLI，
-新 preview 还需指定精确 model 与 HTTPS endpoint：
-
-```bash
-threadshare memory extract --runner claude --since <utc> --until <utc>
-threadshare memory extract --runner claude --approve-plan <extraction-digest>
-threadshare memory extract --runner claude --approve-plan <adjudication-digest>
-
-threadshare memory extract --runner codex \
-  --runner-model <model> \
-  --runner-endpoint <https-url> \
-  --since <utc> \
-  --until <utc>
-```
-
-每次 recall 必须有明确的 `--since` 和 `--until`（最长 366 天），并可按全文、provider、opaque session、
-Tool、Skill、结果证据和能力终态过滤。Threadshare 始终叠加当前 worktree、eligible、active、
-`hard-sealed` 与完整 Delivery Trace coverage；命中超过 200 个 Turn 时直接拒绝，不静默截断。recall
-会把这些有界 transcript 交给当前 Agent 讨论；Threadshare 不会静默扩大回看范围。
-`promote` 只写 `.threadshare/memory/**` 并刷新 approved 投影，不会 stage、commit 或 push。
+CLI 与服务端都需要包含本次文档分享更新；源码实现不会自动升级已安装的 npm 包或部署托管服务。部署、大小限制及 Agent 导出见[文档分享手册](https://github.com/team-harness/threadshare/blob/main/docs/document-sharing-guide.md)，完整参数通过 `threadshare document --help` 发现。
 
 ### 使用其他 Threadshare 服务端
 
@@ -351,6 +191,7 @@ threadshare <command> --help
 普通失败会以 exit 1 退出、保持 stdout 为空，并在 stderr 输出稳定错误 code 以及 `Problem`、`Usage`、`Next`。唯一的既有例外是无效的 `share --dry-run --json`：它会把单行 `valid:false` 结果写入 stdout。如果上传可能已经创建分享、但无法确认请求的生命周期策略，诊断会提供 `Result` URL；不要自动重试该发布。
 
 - `share`：一步完成原生会话导出与发布。`--dry-run` 会在网络访问前停止，`--report` 只能与 `--dry-run` 一起使用。
+- `document`：分享 Markdown 及图片、读取文档与评论、撤销文档分享。通过 `threadshare document --help` 了解 `share`、`read`、`reviews`、`revoke` 四个动作。
 - `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。
 - `analyze`：在本机生成单个 session 的 Turn、Tool、Skill、retry 与 rollback 证据报告，不上传内容，也不调用外部模型。文本格式供人阅读；`--format json` 返回供 Agent 使用的 `threadshare-session-analysis@v1`。
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
@@ -376,17 +217,12 @@ Paseo agent 必须使用完整 UUID 或唯一 UUID 前缀。Threadshare 会通�
 
 ## Agent 接入参考
 
-仓库内置的 `threadshare` Skill 会告诉 Codex 和 Codex Cloud 如何定位、分析、分享和验证会话，以及如何
-执行需要逐步确认的 Team Memory 工作流。Skill 优先使用已安装的 CLI，不存在时回退到 `npx`；源文件
-位于 [`skills/threadshare`](./skills/threadshare)。
-
-MCP client 可以启动 `threadshare insights mcp --stdio`，暴露稳定的 Insights 与交互式 Team
-Memory 操作；分享仍由 CLI 完成。两种执行入口都会向 Agent 返回结构化结果，用户只需描述想得到的
-结果，不需要先选择工具名。
+仓库内置的 `threadshare` Skill 帮助 Codex 和 Codex Cloud 定位、预览、分享和读取会话及 Markdown 文档，并收集评审反馈、继续完善原文。
+优先使用已安装的 CLI，不存在时回退到 `npx`；源文件位于 [`skills/threadshare`](./skills/threadshare)。
 
 ## 隐私与分享边界
 
-Viewer 链接只读且不会公开列出，但它不是带鉴权的私密链接。任何获得链接的人都能读取对应会话。
+Viewer 链接不会公开列出，但不带访问鉴权。聊天 Viewer 只读；任何获得文档链接的人都能阅读并追加评审评论。
 
 分享默认没有到期时间，也没有撤销 capability。`--expires` 增加逻辑访问截止时间；`--revoke` 创建由客户端保管、只在创建时展示一次的 capability。不要把 capability token 放进 URL、会话正文、Issue 或日志。
 
@@ -439,7 +275,7 @@ cd ..
 npm run deploy:fc
 ```
 
-FC 负责代理私有 OSS 的读写。建议使用独立 RAM 身份，并将权限限制为 `shares/` 前缀的 `GetObject`、`PutObject` 和 `DeleteObject`。
+FC 负责代理私有 OSS 的读写。将 RAM 身份的对象权限限制在聊天及文档前缀，并授予评论分页及清理所需的 ListObjects/ListBucket 权限。按[部署指南](./docs/document-sharing-guide.md#后端与部署)配置文档清理定时器与函数超时。
 
 `fc/.licell/`、`.void/` 和 `.wrangler/` 下的本地部署状态已被 Git 忽略，不应提交。
 
@@ -453,6 +289,17 @@ npm run deploy:void
 ```
 
 ## 协议与 API
+
+聊天分享与文档评审使用各自独立、带版本的协议：
+
+| 数据 | 格式 | Schema |
+|---|---|---|
+| 聊天对话 | `threadshare-history@v1` | [History](./schema/threadshare-history.v1.schema.json) |
+| 固定文档快照及图片清单 | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| 单条选区评论 | `threadshare-document-comment@v1` | [Document `$defs.comment`](./schema/threadshare-document.v1.schema.json#/$defs/comment) |
+| 有界的文档与评论导出 | `threadshare-document-review@v1` | [Review export](./schema/threadshare-document-review.v1.schema.json) |
+
+### 聊天数据格式
 
 新的 producer 需要把原生会话转换为 `threadshare-history@v1`。规范文件位于 [`schema/threadshare-history.v1.schema.json`](./schema/threadshare-history.v1.schema.json)。
 
@@ -475,7 +322,7 @@ Entry 可以表示消息、工具调用、思考、待办、活动或上下文�
 
 旧 Paseo v1 格式只用于迁移兼容。新的 producer 必须使用 `threadshare-history@v1`，Threadshare 运行时不依赖 Paseo。
 
-### HTTP API
+### 聊天 HTTP API
 
 ```text
 POST   /api/v1/shares       -> { "id": "<uuid>", "expiresAt"?: "...", "revocable"?: true }
@@ -493,6 +340,34 @@ Viewer                      -> /?id=<uuid>#message-<entry-id>
 历史读取响应使用 `Cache-Control: no-store`，避免共享会话被中间缓存保留。
 
 公开部署时应在网关或 CDN 配置限流。
+
+### 文档与评论 HTTP API
+
+```text
+POST   /api/v1/documents/uploads                 -> {id, uploadToken, uploadExpiresAt}
+PUT    /api/v1/documents/:id/uploads/markdown     -> 204
+PUT    /api/v1/documents/:id/uploads/assets/:sha  -> 204
+POST   /api/v1/documents/:id/publish              -> {id, revision, expiresAt, revocable}
+GET    /api/v1/documents/:id                      -> threadshare-document@v1
+GET    /api/v1/documents/:id/assets/:sha          -> 声明过的图片字节
+GET    /api/v1/documents/:id/comments             -> threadshare-document-comments@v1
+GET    /api/v1/documents/:id/comments/:commentId  -> threadshare-document-comment@v1
+PUT    /api/v1/documents/:id/comments/:commentId  -> 新建 201 / 相同重试 200 / 冲突 409
+DELETE /api/v1/documents/:id                      -> Bearer 撤销凭证有效时返回 204
+Viewer                                          -> /document.html?id=<uuid>#comment-<commentId>
+```
+
+先声明上传：JSON 包含 `title`、`markdown: {sha256, bytes}` 和 `assets: [{source, sha256, bytes, contentType}]`。可选的 `expiresInSeconds`、`revokeTokenSha256` 也放在 JSON 中，不使用聊天分享的生命周期请求头。
+
+上传声明的字节并发布时使用 `Authorization: Bearer <uploadToken>`。上传凭证一小时后到期，与撤销凭证相互独立。发布前会核验 Markdown 和全部本地图片，通过后快照才可读取。
+
+评论 PUT 接收 `{revision, anchor, authorName, body}`。选区采用 `document-anchor-text@1` 中的 UTF-16 偏移，不是 Markdown 源码偏移；服务端核验引文及上下文。评论不可修改，名字是自行填写的署名。
+
+评论分页包含 `format`、`revision`、`comments`、`hasMore` 和 `nextCursor`，通过 `limit`（1–100）及不透明 `cursor` 续读。CLI 的 `threadshare-document-review@v1` 导出另含 `complete` 和遍历信息。
+
+文档链接默认返回 HTML；带 `?format=agent` 或明确优先接受 `text/markdown` 时，返回含原文与评论上下文的 Markdown。网页单次导出最多 500 条评论并提示续读，不能将部分导出当成全部反馈。
+
+文档、图片、评论读取均为 `no-store`；不可用、过期或撤销的文档返回 404。浏览器写入要求同源。FC/OSS 与 Cloudflare/R2 使用同一协议，限制及部署要求见[文档分享手册](./docs/document-sharing-guide.md)。
 
 ### Paseo 作为 Producer
 

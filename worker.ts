@@ -21,24 +21,29 @@ import {
   mergeVary,
   selectAgentTranscript,
 } from "./src/agent-transcript.mjs";
+import { createDocumentService, sweepDocuments } from './src/document-service.mjs';
+import { documentR2Store } from './src/document-r2-store.mjs';
+import { documentAgentResponse } from './src/document-read.mjs';
 
 interface R2StoredObject {
   body: ReadableStream<Uint8Array> | null;
 }
 
 interface ChatShareBucket {
+  list(options: { prefix: string; limit: number; cursor?: string }): Promise<any>;
   get(key: string): Promise<R2StoredObject | null>;
   put(
     key: string,
-    value: string,
-    options: { httpMetadata: { contentType: string } },
-  ): Promise<void>;
+    value: string | Uint8Array,
+    options: { httpMetadata: { contentType: string }; onlyIf?: { etagDoesNotMatch: string } },
+  ): Promise<any>;
   delete(key: string): Promise<void>;
 }
 
 interface Env {
   ASSETS: Fetcher;
   THREADSHARE_BUCKET: ChatShareBucket;
+  THREADSHARE_DOCUMENT_CLEANUP_BATCH_SIZE?: string;
 }
 
 interface WorkerOptions {
@@ -173,8 +178,30 @@ async function revokeShare(id: string, authorization: string | null, env: Env): 
 
 export function createWorker({ now = Date.now }: WorkerOptions = {}) {
   return {
+    async scheduled(_event, env): Promise<void> {
+      const store = documentR2Store(env.THREADSHARE_BUCKET);
+      const saved = await store.get('document-maintenance-cursor.json');
+      const cursor = saved ? JSON.parse(new TextDecoder().decode(saved)).cursor : null;
+      await sweepDocuments(store, { cursor, now, batchSize: Number(env.THREADSHARE_DOCUMENT_CLEANUP_BATCH_SIZE ?? 50),
+        onProgress: (cursor) => env.THREADSHARE_BUCKET.put('document-maintenance-cursor.json', JSON.stringify({cursor}), { httpMetadata: { contentType: JSON_CONTENT_TYPE } }) });
+    },
     async fetch(request, env): Promise<Response> {
       const url = new URL(request.url);
+      if (url.pathname.startsWith('/api/v1/documents') || ['/document.html', '/document'].includes(url.pathname)) {
+        const service = createDocumentService(documentR2Store(env.THREADSHARE_BUCKET), { now });
+        if (url.pathname.startsWith('/api/')) return (await service(request)) ?? jsonResponse(404, { error: 'Not found' });
+        if (!['GET', 'HEAD'].includes(request.method)) return viewerMethodNotAllowed();
+        if (selectAgentTranscript(url.searchParams, request.headers.get('accept') ?? undefined)) {
+          try { return await documentAgentResponse(request, service); }
+          catch (error) { return new Response('Document unavailable', { status: error.status ?? 500, headers: { 'cache-control': 'no-store' } }); }
+        }
+        const asset = await env.ASSETS.fetch(request);
+        const headers = new Headers(asset.headers);
+        headers.set('cache-control', 'no-store'); headers.set('vary', 'Accept');
+        headers.set('referrer-policy', 'no-referrer');
+        headers.set('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+        return new Response(request.method === 'HEAD' ? null : asset.body, { status: asset.status, headers });
+      }
       const isViewerDocument = url.pathname === "/" || url.pathname === "/index.html";
       if (isViewerDocument) {
         const agentSelected = selectAgentTranscript(

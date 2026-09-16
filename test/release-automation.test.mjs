@@ -57,6 +57,8 @@ const expectedPackageFiles = [
   "package.json",
   "schema/session-facts-delta.v1.schema.json",
   "schema/session-facts-delta.v2.schema.json",
+  "schema/threadshare-document-review.v1.schema.json",
+  "schema/threadshare-document.v1.schema.json",
   "schema/threadshare-history.v1.schema.json",
   "schema/threadshare-insights-activity-request.v1.schema.json",
   "schema/threadshare-insights-activity.v1.schema.json",
@@ -97,6 +99,9 @@ const expectedPackageFiles = [
   "src/agent-transcript.mjs",
   "src/canonical-json.mjs",
   "src/cli-contract.mjs",
+  "src/document-command.mjs",
+  "src/document-model.mjs",
+  "src/document-read.mjs",
   "src/history-selection.mjs",
   "src/insights-agent-spec.mjs",
   "src/insights-command.mjs",
@@ -229,7 +234,7 @@ test("locks npm pack to the exact public root files", () => {
     { integrity, files: expectedPackageFiles },
   );
   assert.deepEqual(
-    validatePackOutput([{ ...packed, size: 400 * 1024, unpackedSize: 1920 * 1024 }], {
+    validatePackOutput([{ ...packed, size: 448 * 1024, unpackedSize: 2048 * 1024 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
@@ -254,14 +259,14 @@ test("locks npm pack to the exact public root files", () => {
     /package files/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, size: 400 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, size: 448 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),
     /compressed size/,
   );
   assert.throws(
-    () => validatePackOutput([{ ...packed, unpackedSize: 1920 * 1024 + 1 }], {
+    () => validatePackOutput([{ ...packed, unpackedSize: 2048 * 1024 + 1 }], {
       name: "@team-harness/threadshare",
       version: "0.4.2",
     }),

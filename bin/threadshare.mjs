@@ -868,6 +868,25 @@ async function main() {
     process.stdout.write("Valid threadshare-history@v1\n");
     return;
   }
+  if (command === "document") {
+    validateCommandInvocation(command, positionals, options);
+    try {
+      const { runDocumentCommand } = await import('../src/document-command.mjs');
+      const result = await runDocumentCommand(positionals[1], positionals[2], {
+        suppliedOptions: Object.keys(options),
+        url: options.url ?? process.env.THREADSHARE_URL ?? DEFAULT_THREADSHARE_URL,
+        assetRoot: options["asset-root"], dryRun: options["dry-run"] === true,
+        expiresInSeconds: parseExpiresDuration(options.expires, command),
+        revoke: options.revoke === true, json: options.json === true,
+        format: options.format, limit: options.limit, cursor: options.cursor, token: options.token,
+      });
+      process.stdout.write(`${result.json ? JSON.stringify(result.value) : typeof result.value === 'string' ? result.value : result.value.url ? `${result.value.url}${result.value.revokeToken ? `\nSave revoke token privately: ${result.value.revokeToken}` : ''}` : JSON.stringify(result.value)}\n`);
+    } catch (error) {
+      if (error.code?.startsWith('TS_')) throw error;
+      throw cliDiagnostic('TS_OPERATION_FAILED', error.status ? error.message : 'Unable to complete document operation. Check the file, images, and server connection.', { command, next: 'Run `threadshare document --help`; use share --dry-run before uploading.' });
+    }
+    return;
+  }
   if (command === "sessions") {
     validateCommandInvocation(command, positionals, options);
     const provider = positionals[1];

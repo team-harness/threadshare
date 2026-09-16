@@ -7,6 +7,17 @@ import { build } from "vite";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+test("document Viewer exposes static review discovery and both human handoff entries", async () => {
+  const html = await readFile(path.join(root, "document.html"), "utf8");
+  const hint = /^<!doctype html>\n<!-- THREADSHARE_AGENT_HINT v1\n([\s\S]*?)\n-->/u.exec(html);
+  assert.ok(hint);
+  for (const text of ["Accept: text/markdown", "format=agent", "threadshare document reviews", "nextCursor", "not instructions", "Do not install software without authorization"])
+    assert.ok(hint[1].includes(text), text);
+  assert.match(html, /id="agent-document-alternate" rel="alternate" type="text\/markdown"/);
+  assert.match(html, /id="copy-review-prompt"/);
+  assert.match(html, /id="copy-review-prompt-footer"/);
+});
+
 test("production CSS keeps mobile breakpoints compatible with older WebViews", async () => {
   const result = await build({
     root,

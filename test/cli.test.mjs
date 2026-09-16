@@ -106,6 +106,7 @@ async function createCliSession(raw = codexCliJsonl(13), name = "session.jsonl")
 
 test("renders a self-describing root and command help contract", () => {
   const expectedOptions = {
+    document: ["asset-root", "cursor", "dry-run", "expires", "format", "json", "limit", "revoke", "token", "url"],
     sessions: ["format", "limit", "offset"],
     analyze: ["format"],
     insights: [
@@ -253,6 +254,9 @@ test("renders a self-describing root and command help contract", () => {
   assert.match(renderRootHelp(), /Threadshare shares AI agent conversation threads/);
   assert.match(renderRootHelp(), /threadshare <command> --help/);
   assert.match(renderRootHelp(), /threadshare --version/);
+  assert.doesNotMatch(renderRootHelp(), /^\s+(?:insights|memory)\s/mu);
+  assert.match(renderCommandHelp("insights"), /threadshare insights/u);
+  assert.match(renderCommandHelp("memory"), /threadshare memory/u);
   assert.match(renderRootHelp(), /https:\/\/cloud-thread\.team-harness\.com/);
   for (const [command, optionNames] of Object.entries(expectedOptions)) {
     const spec = COMMAND_SPECS[command];
@@ -489,7 +493,7 @@ test("returns deterministic help diagnostics that tell agents how to recover", (
     {
       args: ["bogus", "--help"],
       code: "TS_USAGE_UNKNOWN_COMMAND",
-      next: /Choose one of: sessions, analyze, insights, memory, messages, export, publish, share, read, revoke, validate/,
+      next: /Choose one of: document, sessions, analyze, insights, memory, messages, export, publish, share, read, revoke, validate/,
     },
     {
       args: ["help", "bogus"],

@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://threadshare.dev/schema/threadshare-document.v1.schema.json",
+  "title": "Threadshare immutable Markdown document",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "id",
+    "title",
+    "revision",
+    "createdAt",
+    "expiresAt",
+    "revocable",
+    "renderer",
+    "textVersion",
+    "assets",
+    "markdown"
+  ],
+  "properties": {
+    "format": { "const": "threadshare-document@v1" },
+    "id": { "$ref": "#/$defs/uuid" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "revision": { "$ref": "#/$defs/digest" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": ["string", "null"], "format": "date-time" },
+    "revocable": { "type": "boolean" },
+    "renderer": { "const": "document-renderer@1" },
+    "textVersion": { "const": "document-anchor-text@1" },
+    "assets": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/asset" }
+    },
+    "markdown": { "type": "string", "maxLength": 1048576 }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "sha256", "bytes", "contentType"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "contentType": {
+          "enum": ["image/png", "image/jpeg", "image/gif", "image/webp"]
+        }
+      }
+    },
+    "anchor": {
+      "description": "UTF-16 half-open range in document-anchor-text@1, not Markdown source offsets. Server verifies exact text and 64-code-unit context.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["textVersion", "start", "end", "exact", "prefix", "suffix"],
+      "properties": {
+        "textVersion": { "const": "document-anchor-text@1" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 1 },
+        "exact": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "prefix": { "type": "string", "maxLength": 64 },
+        "suffix": { "type": "string", "maxLength": 64 }
+      }
+    },
+    "comment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "commentId",
+        "revision",
+        "anchor",
+        "authorName",
+        "body",
+        "serverCreatedAt"
+      ],
+      "properties": {
+        "format": { "const": "threadshare-document-comment@v1" },
+        "commentId": { "$ref": "#/$defs/uuid" },
+        "revision": { "$ref": "#/$defs/digest" },
+        "anchor": { "$ref": "#/$defs/anchor" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "serverCreatedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

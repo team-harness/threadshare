@@ -32,6 +32,8 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "package.json",
   "schema/session-facts-delta.v1.schema.json",
   "schema/session-facts-delta.v2.schema.json",
+  "schema/threadshare-document-review.v1.schema.json",
+  "schema/threadshare-document.v1.schema.json",
   "schema/threadshare-history.v1.schema.json",
   "schema/threadshare-insights-activity-request.v1.schema.json",
   "schema/threadshare-insights-activity.v1.schema.json",
@@ -72,6 +74,9 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "src/agent-transcript.mjs",
   "src/canonical-json.mjs",
   "src/cli-contract.mjs",
+  "src/document-command.mjs",
+  "src/document-model.mjs",
+  "src/document-read.mjs",
   "src/history-selection.mjs",
   "src/insights-agent-spec.mjs",
   "src/insights-command.mjs",
@@ -237,11 +242,11 @@ export function validatePackOutput(packOutput, metadata) {
     throw new Error(`npm package files must exactly match the ${expectedFiles.length}-file allowlist`);
   }
   if (metadata.kind !== "platform") {
-    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 400 * 1024) {
-      throw new Error("npm root package compressed size must not exceed 400 KiB");
+    if (!Number.isSafeInteger(packed.size) || packed.size < 1 || packed.size > 448 * 1024) {
+      throw new Error("npm root package compressed size must not exceed 448 KiB");
     }
-    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 1920 * 1024) {
-      throw new Error("npm root package unpacked size must not exceed 1.875 MiB");
+    if (!Number.isSafeInteger(packed.unpackedSize) || packed.unpackedSize < 1 || packed.unpackedSize > 2048 * 1024) {
+      throw new Error("npm root package unpacked size must not exceed 2 MiB");
     }
   }
   return { files, integrity: requireIntegrity(packed.integrity, "npm pack integrity") };

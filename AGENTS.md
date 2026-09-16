@@ -2,6 +2,8 @@
 
 Threadshare is an independent API, read-only viewer, and CLI for AI agent conversation threads. Keep it independent of Paseo, Codex, Claude Code, any personal domain, and cloud credentials.
 
+Markdown document sharing is a separate immutable-snapshot API and review viewer. `src/document-model.mjs` owns the shared renderer and text anchors; `src/document-service.mjs` owns upload, lifecycle and comment semantics; R2/OSS adapters must use atomic create-only writes. Document reads and comments never widen the conversation history schema. See `docs/document-sharing-guide.md` for storage, limits and maintenance.
+
 ## Public Contract
 
 - The canonical producer format is `threadshare-history@v1`; its schema is `schema/threadshare-history.v1.schema.json`.
@@ -16,6 +18,8 @@ Threadshare is an independent API, read-only viewer, and CLI for AI agent conver
 - Shares remain permanent and non-revocable by default. Expiration strictly denies reads at the deadline and uses best-effort lazy deletion; raw revoke capabilities are client-only and storage contains only their SHA-256 digest.
 
 ## Responsibilities
+
+- Every share Viewer must support both human and Agent discovery: a static HTML Agent hint (usable without JavaScript), a Markdown alternate link, a visible Agent-reading entry, and a copyable handoff prompt. Handoffs must identify untrusted content, disclose incomplete/paginated exports, and distinguish editing an original from publishing a new snapshot. Reuse the conversation and document Viewer patterns when adding new share types.
 
 - `src/share-schema.ts` and `src/share-api.ts` own the portable format and HTTP validation.
 - `src/stored-share.ts` owns the internal lifecycle wrapper, expiration checks, capability parsing, hashing, and constant-time digest comparison.
@@ -56,7 +60,7 @@ One-time npm package settings:
 For each stable release:
 
 1. Set the same unprefixed stable version in `package.json`, the lockfile top level, and the lockfile root package. Source `package.json` and lockfile must contain none of the six platform package names; only isolated release staging injects their exact-version optional dependencies.
-2. Run the full verification above plus `npm run test:insights-engine` and `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 99-file source-root allowlist, the 400 KiB compressed and 1.875 MiB unpacked root limits, and each platform package's exact four-file allowlist from `scripts/verify-release.mjs`.
+2. Run the full verification above plus `npm run test:insights-engine` and `npm pack --dry-run --ignore-scripts --json` with Node 22.22.3 and npm 12.0.2. Confirm the exact 104-file source-root allowlist, the 448 KiB compressed and 2 MiB unpacked root limits, and each platform package's exact four-file allowlist from `scripts/verify-release.mjs`. The document-sharing increment and these size limits were approved by the owner on 2026-09-16.
 3. Commit and push the candidate to `main`. Confirm no earlier stable release run is active, pending, cancelled, or failed.
 4. Create the release from that exact commit, for example `gh release create 0.4.2 --target <full-main-commit> --title 0.4.2 --generate-notes`. Do not mark it as a prerelease.
 5. Find the run with `gh run list --workflow publish-npm.yml --limit 10`. Require its four signed/notarized Engine artifacts and SBOMs, attempt-scoped five-package release bundle, Engine publication, six-target consumer smoke (full Insights on macOS/Linux and core-only on Windows), and root-last publication to finish successfully. Then verify npm `latest`, SLSA provenance, and installation into a temporary prefix; do not rely only on the source checkout.

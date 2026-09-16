@@ -48,6 +48,8 @@ Agent 调用 CLI。选择哪条执行通道是 Agent 的工作，不应变成用
 
 实现细节、协议字段和验收记录属于开发者文档：
 
+- [Markdown 文档分享与协同 Review 使用手册](./document-sharing-guide.md)
+- [Markdown 文档分享与协同 Review 设计](./document-sharing-review-design.md)
 - [Team Memory 提案](./team-memory-proposal.md)
 - [Team Memory Phase 1 设计](./team-memory-phase1-design.md)
 - [Team Memory Phase 2 设计](./team-memory-phase2-design.md)
