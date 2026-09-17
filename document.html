@@ -58,7 +58,12 @@ Revise the original Markdown in the owner's workspace; this shared snapshot cann
       <aside id="reviews" aria-label="Document reviews">
         <div class="review-heading">
           <h2>Reviews</h2>
-          <button id="refresh" type="button">Refresh</button>
+          <div class="review-actions">
+            <button id="refresh" type="button">Refresh</button>
+            <button id="review-close" type="button" aria-label="Close reviews">
+              <span aria-hidden="true">×</span> Close
+            </button>
+          </div>
         </div>
         <p class="hint">
           Select a passage, then add a comment. Names are self-declared; anyone

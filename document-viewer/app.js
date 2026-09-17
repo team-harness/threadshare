@@ -176,6 +176,11 @@ function showReviews() {
   $("reviews").hidden = false;
   $("review-toggle").setAttribute("aria-expanded", "true");
 }
+$("review-close").onclick = () => {
+  $("reviews").classList.add("mobile-closed");
+  $("review-toggle").setAttribute("aria-expanded", "false");
+  $("review-toggle").focus({ preventScroll: true });
+};
 $("review-toggle").onclick = () => {
   if (matchMedia("(max-width:680px)").matches) {
     const closed = $("reviews").classList.toggle("mobile-closed");

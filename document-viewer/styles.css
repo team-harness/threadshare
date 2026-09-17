@@ -272,6 +272,14 @@ blockquote {
   background: transparent;
   font-size: 12px;
 }
+.review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#review-close {
+  display: none;
+}
 #reviews-status,
 #status,
 #comment-status {
@@ -462,6 +470,21 @@ textarea {
   }
   #reviews.mobile-closed {
     display: none;
+  }
+  #review-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 76px;
+    min-height: 44px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: white;
+    font-size: 14px;
+  }
+  #review-close span {
+    font-size: 22px;
   }
   #composer {
     top: 0;
