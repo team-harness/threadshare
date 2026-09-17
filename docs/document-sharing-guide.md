@@ -55,6 +55,10 @@ CLI 和后端需同时包含本次更新。现有聊天分享的路径、5 MiB �
 
 FC 部署使用托管 `nodejs20` 运行时与 `dist/native.cjs` 入口（`npm run deploy:fc` 已固定这两个参数），通过原生事件的 Base64 标记无损传输图片请求和响应。不要改用会将请求体转换为 UTF-8 字符串的 HTTP 包装层；文字请求通过不代表图片传输正确。
 
+FC 原生 HTTP 网关会自动回显请求的 Origin，并与函数返回的响应头合并。对于原本允许任意来源的公开聊天响应，原生适配层在请求带 Origin 时省略重复的 `Access-Control-Allow-Origin: *`，让网关只返回一条来源；没有 Origin 的 CLI 请求保留原响应。此行为只适用于 FC 原生入口，不得移到 CF 或共享应用层。网关默认还会返回 `Access-Control-Allow-Credentials: true`，公开聊天接口不使用 Cookie 或浏览器身份鉴权；不要将这种兼容处理用于未来需要凭据认证的接口。文档写入仍校验同源，撤销仍需要 capability。
+
+聊天分享的部署验收必须覆盖实际自定义域名和真实浏览器，不能仅凭 CLI 上传成功判定。运行 `node scripts/smoke-share-cors.mjs https://your-service.example`，在浏览器打开打印的本机地址；脚本验证跨域预检、可读的 400 错误、201 创建、GET 回读和有效期响应头。只上传 60 秒到期的空合成会话，并撤销拿到 ID 的测试分享。可同时传入 CF 与 FC 地址比较。文档评论仍需在文档页面同源验收。
+
 1. Cloudflare：`npm run build:cloudflare` 后使用现有 Wrangler 部署流程；同一私有 R2 bucket 增加文档前缀，配置已包含每 15 分钟清理 cron。
 2. FC：`npm run build:fc` 后使用现有部署流程；同一私有 OSS bucket，IAM 还需要 ListObjects/ListBucket 权限。默认公开地址按 HTTPS + Host 解释；HTTP 入口或会重写 Host 的网关必须设置 `THREADSHARE_PUBLIC_ORIGIN` 为实际公开 origin（例如 `https://review.example.com`），不含路径。配置名为 `threadshare-document-cleanup` 的 Timer 触发器，每 15 分钟调用函数；HTTP 请求不能调用该清理入口。
 3. R2 用条件 PUT，OSS 用签名的 `x-oss-forbid-overwrite:true`。每条评论独立对象，409 冲突不能覆盖旧评论。OSS bucket 不应启用会禁用 forbid-overwrite 语义的版本管理配置；部署前验证条件写入。

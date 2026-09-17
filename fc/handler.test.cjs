@@ -3,6 +3,7 @@ const { createHash } = require("node:crypto");
 const test = require("node:test");
 
 const { createHandler } = require("./dist/index.cjs");
+const { createNativeHandler } = require("./dist/native.cjs");
 
 const NOW = Date.parse("2026-08-01T10:00:00.000Z");
 const REVOKE_TOKEN = Buffer.alloc(32, 17).toString("base64url");
@@ -37,7 +38,7 @@ function createTestHandler(options = {}) {
   };
   const fetchImpl = options.fetchImpl ?? defaultFetchImpl;
   return {
-    handler: createHandler({
+    handler: (options.native ? createNativeHandler : createHandler)({
       environment,
       fetchImpl,
       logger: options.logger,
@@ -63,6 +64,50 @@ function history() {
     entries: [],
   };
 }
+
+test("native FC lets the gateway supply a single origin only for public CORS responses", async () => {
+  const { handler } = createTestHandler({ native: true, now: () => NOW });
+  const origin = "http://localhost:3000";
+  const preflight = await handler(Buffer.from(JSON.stringify({
+    rawPath: "/api/v1/shares", httpMethod: "OPTIONS", headers: { origin },
+  })));
+  assert.equal(preflight.statusCode, 204);
+  assert.equal(preflight.headers["access-control-allow-origin"], undefined);
+  assert.equal(preflight.headers["access-control-allow-methods"], "POST, OPTIONS");
+  assert.equal(preflight.headers["access-control-allow-headers"],
+    "content-type, x-threadshare-expires-in, x-threadshare-revoke-token-sha256");
+  assert.equal(Object.keys(preflight.headers).filter(key => key.toLowerCase() === "access-control-allow-origin").length, 0);
+  for (const headers of [{ Origin: origin }, { ORIGIN: "null" }]) {
+    const response = await handler({ rawPath: "/api/v1/shares", httpMethod: "OPTIONS", headers });
+    assert.equal(response.headers["access-control-allow-origin"], undefined);
+  }
+  const cli = await handler({ rawPath: "/api/v1/shares", httpMethod: "OPTIONS" });
+  assert.equal(cli.headers["access-control-allow-origin"], "*");
+  // The shared constant must survive a native browser request unchanged.
+  const portable = await createTestHandler().handler({ rawPath: "/api/v1/shares", httpMethod: "OPTIONS" });
+  assert.equal(portable.headers["access-control-allow-origin"], "*");
+
+  const rejected = await handler({ rawPath: "/api/v1/shares", httpMethod: "POST",
+    headers: { origin, "content-type": "application/json" }, body: "{}" });
+  assert.equal(rejected.statusCode, 400);
+  assert.equal(rejected.headers["access-control-allow-origin"], undefined);
+
+  const created = await handler({ rawPath: "/api/v1/shares", httpMethod: "POST",
+    headers: { origin, "content-type": "application/json", "x-threadshare-expires-in": "60" },
+    body: JSON.stringify(history()) });
+  assert.equal(created.statusCode, 201);
+  assert.equal(created.headers["access-control-allow-origin"], undefined);
+  const { id } = JSON.parse(created.body);
+  const loaded = await handler({ rawPath: `/api/v1/shares/${id}`, httpMethod: "GET", headers: { origin } });
+  assert.equal(loaded.headers["access-control-allow-origin"], undefined);
+  assert.equal(loaded.headers["access-control-expose-headers"], "x-threadshare-expires-at");
+  assert.equal(loaded.isBase64Encoded, true);
+  assert.deepEqual(JSON.parse(Buffer.from(loaded.body, "base64")), history());
+
+  const denied = await handler({ rawPath: `/api/v1/shares/${id}`, httpMethod: "DELETE", headers: { origin } });
+  assert.equal(denied.statusCode, 404);
+  assert.equal(Object.keys(denied.headers).some(key => /^access-control-/i.test(key)), false);
+});
 
 test("isolates document flowchart frames with their own CSP", async () => {
   const { handler } = createTestHandler();
