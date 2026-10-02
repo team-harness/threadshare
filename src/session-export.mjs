@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseTree } from "jsonc-parser";
+import { createScanner, masks } from "@team-harness/sensitive-guard";
 import {
   SESSION_UUID_IN_TEXT_PATTERN,
   SESSION_UUID_PATTERN,
@@ -12,6 +13,7 @@ export { resolveSessionFile } from "./session-files.mjs";
 export const THREADSHARE_HISTORY_FORMAT = "threadshare-history@v1";
 
 const entryProvenance = new WeakMap();
+const shareScanner = createScanner();
 
 const HIDDEN_USER_MESSAGE_TAGS = new Set([
   "codex_internal_context",
@@ -191,6 +193,12 @@ function isSensitiveKey(key) {
 }
 
 export function redactSecrets(value) {
+  // 先执行分享的严格规则，避免库对示例值、短 token 和低熵凭据的豁免降低现有保护。
+  // 通用密钥和个人信息由 sensitive-guard 检测；沿用预检计数依赖的统一标记。
+  return shareScanner.redactSync(redactShareCredentials(value), { mask: masks.plain }).text;
+}
+
+function redactShareCredentials(value) {
   return value
     .replace(
       /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,

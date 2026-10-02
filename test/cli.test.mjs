@@ -2150,3 +2150,23 @@ test("redacts common credentials embedded in visible text", () => {
   );
   assert.doesNotMatch(exported, new RegExp(`${revokeToken}|${jsonRevokeToken}`));
 });
+
+test("redacts sensitive-guard PII findings in exported visible text", () => {
+  const history = exportClaudeJsonl(
+    JSON.stringify({
+      type: "user",
+      uuid: "user-pii",
+      timestamp: "2026-07-30T00:00:01.000Z",
+      message: {
+        role: "user",
+        content: "联系人 alice@corp.cn，手机号 13812345678，身份证 11010519491231002X",
+      },
+    }),
+    { exportedAt: "2026-07-30T01:00:00.000Z" },
+  );
+
+  assert.equal(
+    history.entries[0].markdown,
+    "联系人 [REDACTED]，手机号 [REDACTED]，身份证 [REDACTED]",
+  );
+});
