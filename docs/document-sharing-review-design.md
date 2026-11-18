@@ -1,4 +1,4 @@
-# Markdown 文档分享与协同 Review 设计
+# Markdown 与 HTML 文档分享与协同 Review 设计
 
 状态：v1 已按本文实现 CLI、共享服务、FC/CF 适配、批注 Viewer 和 Agent 导出；线上部署与 npm 发布未执行。部署环境验收仍需确认 OSS 权限/版本管理、FC 网关大小和 WAF 配置。
 
@@ -6,7 +6,7 @@
 
 用户让 Agent 分享一个本地 Markdown 文档及其本地图片，获得可公开访问的链接。接收者无需登录，可以选中文字并署名评论；再次打开页面时加载已有评论。发布者让 Agent 读取原文及 Review，形成修改建议，按用户指令修改本地文件。
 
-已确认：固定文档快照；修改后重新分享产生新链接；持链接者可追加评论；名字仅为自填署名；本地图片同步上传；每条评论独立存储；复用 OSS/R2，不引入数据库。
+已确认：固定文档快照；修改后重新分享产生新链接；持链接者可追加评论；名字仅为自填署名；本地图片同步上传；每条评论独立存储；复用 OSS/R2，不引入数据库。HTML 预览使用独立的 `threadshare-document@v2`，不复用 Markdown 锚点评论协议。
 
 v1 不提供原链接内更新文档、评论编辑/删除/解决状态、账号、通知、实时共同编辑或跨版本迁移评论。整份分享支持撤销与过期。远程图片保留原链接，明确不属于固定附件快照。
 
@@ -16,6 +16,7 @@ v1 不提供原链接内更新文档、评论编辑/删除/解决状态、账号
 |---|---|
 | Document snapshot | 发布时的 Markdown、渲染/锚点协议版本及附件清单；发布后不可变，不与聊天 history 混用 |
 | Attachment | 当前分享内按内容摘要标识的本地图片；跨分享不共享访问权或生命周期 |
+| HTML snapshot | UTF-8 HTML 字节快照；使用 `html-document-renderer@1` 在沙箱 iframe 中预览，不提供锚点评论 |
 | Comment | 一条不可变的署名意见，绑定 snapshot revision 与文本锚点；不是已验证身份的审批 |
 | Anchor | 规范化可见文本中的区间与引用上下文；不是任意 DOM selector |
 | Review export | 某次读取收集的原文、锚点及评论集合；不是并发写入下的数据库快照 |
@@ -43,7 +44,7 @@ document read 返回原文与附件引用；reviews 返回原文引用和评论�
 
 ## 4. Markdown 与图片快照
 
-使用 Markdown AST 解析内联图片及引用式图片，不用正则扫描所有链接。支持 PNG/JPEG/WebP/GIF，按内容签名与尺寸头识别，不只信扩展名；服务端不执行完整像素解码。SVG、HTML img、data URL 和非 HTTP(S) 远程图片在预检中拒绝，不静默忽略。
+使用 Markdown AST 解析内联图片及引用式图片，不用正则扫描所有链接。支持 PNG/JPEG/WebP/GIF，按内容签名与尺寸头识别，不只信扩展名；服务端不执行完整像素解码。SVG、HTML img、data URL 和非 HTTP(S) 远程图片在预检中拒绝，不静默忽略。HTML 使用独立的 4 MiB UTF-8 字节限制，不声明图片附件。
 
 相对路径按 Markdown 所在目录解析并 realpath；默认本地附件根为该目录，可显式指定 asset-root 以包含常见的 ../assets。绝对路径、符号链接逃逸根目录、设备文件和非普通文件拒绝；错误只在本地显示必要路径，远端不保留本机绝对路径。普通链接不会当附件上传。
 
@@ -61,6 +62,7 @@ document read 返回原文与附件引用；reviews 返回原文引用和评论�
 |---|---|
 | POST /api/v1/documents/uploads | JSON 声明内容/附件摘要、长度、类型与生命周期，创建有 TTL 的上传会话，返回 id/upload capability |
 | PUT /api/v1/documents/:id/uploads/markdown | 带 upload Bearer 上传固定 Markdown，校验声明摘要与预算 |
+| PUT /api/v1/documents/:id/uploads/html | 带 upload Bearer 上传固定 HTML，校验 UTF-8、摘要与预算 |
 | PUT /api/v1/documents/:id/uploads/assets/:digest | 带 upload Bearer 上传声明内的图片；同摘要重复请求幂等 |
 | POST /api/v1/documents/:id/publish | 校验所有对象存在且匹配声明，最后创建 immutable document.json，返回分享结果 |
 | GET /api/v1/documents/:id | 返回已发布文档的 canonical JSON；草稿、过期、撤销均 404 |
@@ -107,6 +109,8 @@ anchor = `{textVersion,start,end,exact,prefix,suffix}`，prefix/suffix 各最多
 
 v1 不支持对图片像素框选，读者可在图片说明段落发表评论。渲染器升级必须保留旧 anchor 版本的解释方式；无法定位时显示引用与“无法定位”，不猜测另一个段落。重叠但不相同的选区保留独立组，高亮避免覆盖破坏 DOM；用 Range/overlay 或同等非破坏式实现并验证浏览器兼容性。
 
+HTML v2 不生成规范文本流。页面只显示固定快照状态并隐藏评论控件，内容通过 `/api/v1/documents/:id/html` 加载到没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe 中。预览响应头由 CSP 禁止网络、表单、外部 frame、object 和 base 等能力。父页面不把共享 HTML 传给 `innerHTML`。
+
 ## 8. 评论读取与 Agent 导出
 
 `GET /api/v1/documents/:id/comments?cursor=...&limit=...` 每页最多 100 条，cursor 绑定 document id、版本和底层分页参数，限制长度并校验，不暴露任意 bucket prefix。对象列表顺序不等于评论时间顺序，UI 按 createdAt/commentId 排列已加载项；有后续页必须显示“仍在加载”，不得把部分数量当总量。
@@ -123,7 +127,7 @@ Agent 结果应区分“评论者提出的问题”“原文事实”“Agent �
 
 ## 9. 安全、轻量与兼容
 
-原始 HTML 禁用，Markdown URL 白名单，评论/name 用 textContent；限制解析深度与资源量。CSP 不允许文档脚本执行，链接设置 noreferrer，私有 bucket 不开公开读。正文、评论、附件均检查父文档生命周期并返回 no-store；已被读者保存的内容不承诺可撤回。
+Markdown 原始 HTML 禁用，Markdown URL 白名单，评论/name 用 textContent；HTML v2 使用 sandbox iframe 和限制性 CSP，私有 bucket 不开公开读。正文、评论、附件均检查父文档生命周期并返回 no-store；已被读者保存的内容不承诺可撤回。
 
 页面为独立静态资产，建议首屏 JS+CSS gzip 合计不超过 150 KiB（不含正文/图片），不引入 SPA 框架或 WebSocket。图片不阻塞文字首屏，批注布局对长文按可见区域计算，避免每次滚动重排全部评论。
 

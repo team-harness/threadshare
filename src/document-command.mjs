@@ -11,6 +11,7 @@ import {
   UUID,
   validatePublicDocument,
   DOCUMENT_RENDERER,
+  HTML_DOCUMENT_RENDERER,
   ANCHOR_VERSION,
 } from "./document-model.mjs";
 import {
@@ -54,13 +55,43 @@ async function readSnapshot(file, limit) {
   }
 }
 export async function prepareDocument(file, { assetRoot } = {}) {
+  const extension = path.extname(file).toLowerCase();
   check(
-    path.extname(file).toLowerCase() === ".md",
-    "Only .md documents are supported",
+    [".md", ".markdown", ".html", ".htm"].includes(extension),
+    "Only .md, .markdown, .html, or .htm documents are supported",
   );
   const documentPath = await realpath(file);
+  const primaryBytes = await readSnapshot(
+    documentPath,
+    extension === ".html" || extension === ".htm" ? LIMITS.html : LIMITS.markdown,
+  );
+  if (extension === ".html" || extension === ".htm") {
+    let html;
+    try {
+      html = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(primaryBytes);
+    } catch {
+      check(false, "HTML must be UTF-8");
+    }
+    const titleMatch = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+    const title = (titleMatch?.[1] ?? path.basename(file, extension))
+      .replace(/<[^>]+>/g, "")
+      .trim()
+      .slice(0, 200)
+      .replace(/[\uD800-\uDBFF]$/, "") || "Document";
+    return {
+      kind: "html",
+      declaration: {
+        title,
+        html: { sha256: await sha256(primaryBytes), bytes: primaryBytes.length },
+        assets: [],
+      },
+      htmlBytes: primaryBytes,
+      data: new Map(),
+      externalImages: [],
+    };
+  }
   const root = await realpath(assetRoot ?? path.dirname(documentPath));
-  const markdownBytes = await readSnapshot(documentPath, LIMITS.markdown);
+  const markdownBytes = primaryBytes;
   let markdown;
   try {
     markdown = new TextDecoder("utf-8", {
@@ -130,6 +161,7 @@ export async function prepareDocument(file, { assetRoot } = {}) {
     .slice(0, 200)
     .replace(/[\uD800-\uDBFF]$/, "");
   return {
+    kind: "markdown",
     declaration: {
       title,
       markdown: {
@@ -202,7 +234,7 @@ export async function runDocumentCommand(action, reference, options = {}) {
   }
   if (action === "share") {
     const prepared = await prepareDocument(reference, options);
-    const { declaration, data, markdownBytes } = prepared;
+    const { declaration, data, markdownBytes, htmlBytes } = prepared;
     if (options.expiresInSeconds !== undefined)
       declaration.expiresInSeconds = options.expiresInSeconds;
     const token = options.revoke ? randomBytes(32).toString("base64url") : null;
@@ -214,7 +246,10 @@ export async function runDocumentCommand(action, reference, options = {}) {
           dryRun: true,
           valid: true,
           title: declaration.title,
-          markdownBytes: markdownBytes.length,
+          ...(prepared.kind === "html"
+            ? { htmlBytes: htmlBytes.length }
+            : { markdownBytes: markdownBytes.length }),
+          kind: prepared.kind,
           localImages: declaration.assets.length,
           uniqueImageCount: data.size,
           imageBytes: [...data.values()].reduce(
@@ -250,13 +285,17 @@ export async function runDocumentCommand(action, reference, options = {}) {
         `Document upload failed (${response.status}); no publication was attempted`,
       );
     };
-    await put("markdown", markdownBytes, "text/markdown; charset=utf-8");
-    for (const [digest, image] of data)
-      await put(
-        `assets/${digest}`,
-        image,
-        declaration.assets.find((item) => item.sha256 === digest).contentType,
-      );
+    if (prepared.kind === "html") {
+      await put("html", htmlBytes, "text/html; charset=utf-8");
+    } else {
+      await put("markdown", markdownBytes, "text/markdown; charset=utf-8");
+      for (const [digest, image] of data)
+        await put(
+          `assets/${digest}`,
+          image,
+          declaration.assets.find((item) => item.sha256 === digest).contentType,
+        );
+    }
     const url = `${endpoint.origin}/document.html?id=${upload.id}`;
     let published;
     try {
@@ -278,12 +317,16 @@ export async function runDocumentCommand(action, reference, options = {}) {
               expires <= Date.now() + options.expiresInSeconds * 1000) &&
           published.revision ===
             (await sha256(
-              JSON.stringify({
-                markdown: declaration.markdown,
-                assets: declaration.assets,
-                renderer: DOCUMENT_RENDERER,
-                textVersion: ANCHOR_VERSION,
-              }),
+              JSON.stringify(
+                prepared.kind === "html"
+                  ? { html: declaration.html, renderer: HTML_DOCUMENT_RENDERER }
+                  : {
+                      markdown: declaration.markdown,
+                      assets: declaration.assets,
+                      renderer: DOCUMENT_RENDERER,
+                      textVersion: ANCHOR_VERSION,
+                    },
+              ),
             )),
         "Document publication could not be verified",
       );
@@ -346,13 +389,13 @@ export async function runDocumentCommand(action, reference, options = {}) {
       ),
     );
     check(
-      doc.format === "threadshare-document@v1" &&
-        typeof doc.markdown === "string",
+      (doc.format === "threadshare-document@v1" && typeof doc.markdown === "string") ||
+        (doc.format === "threadshare-document@v2" && typeof doc.html === "string"),
       "Invalid document response",
     );
     return {
       json: format === "json",
-      value: format === "json" ? doc : doc.markdown,
+      value: format === "json" ? doc : doc.markdown ?? JSON.stringify(doc.html),
     };
   }
   const limit = options.limit === undefined ? 1000 : Number(options.limit);

@@ -155,6 +155,13 @@ h1 {
   line-height: 1.85;
   overflow-wrap: anywhere;
 }
+#html-document-frame {
+  display: block;
+  width: 100%;
+  min-height: 70vh;
+  border: 1px solid var(--border);
+  background: #fff;
+}
 #document h1 {
   font-size: 27px;
 }

@@ -2,6 +2,7 @@ import MarkdownIt from "markdown-it";
 
 export const DOCUMENT_LIMITS = Object.freeze({
   markdown: 1024 * 1024,
+  html: 4 * 1024 * 1024,
   image: 4 * 1024 * 1024,
   total: 32 * 1024 * 1024,
   images: 32,
@@ -10,6 +11,7 @@ export const DOCUMENT_LIMITS = Object.freeze({
 });
 export const ANCHOR_VERSION = "document-anchor-text@1";
 export const DOCUMENT_RENDERER = "document-renderer@1";
+export const HTML_DOCUMENT_RENDERER = "html-document-renderer@1";
 export const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const DIGEST = /^[0-9a-f]{64}$/;
@@ -207,6 +209,51 @@ export function validateAnchor(text, anchor) {
 }
 
 export function validatePublicDocument(doc) {
+  check(doc && typeof doc === "object" && !Array.isArray(doc));
+  if (doc.format === "threadshare-document@v2") {
+    exactKeys(doc, [
+      "format",
+      "id",
+      "title",
+      "revision",
+      "createdAt",
+      "expiresAt",
+      "revocable",
+      "renderer",
+      "textVersion",
+      "assets",
+      "html",
+    ]);
+    check(
+      UUID.test(doc.id) &&
+        DIGEST.test(doc.revision) &&
+        doc.renderer === HTML_DOCUMENT_RENDERER &&
+        doc.textVersion === null,
+      "Unsupported document rendering version",
+    );
+    check(
+      typeof doc.title === "string" &&
+        doc.title.length > 0 &&
+        doc.title.length <= 200 &&
+        typeof doc.revocable === "boolean",
+    );
+    check(
+      typeof doc.createdAt === "string" &&
+        Number.isFinite(Date.parse(doc.createdAt)) &&
+        (doc.expiresAt === null ||
+          (typeof doc.expiresAt === "string" &&
+            Number.isFinite(Date.parse(doc.expiresAt)))),
+    );
+    check(
+      typeof doc.html === "string" &&
+        bytes(doc.html).length > 0 &&
+        bytes(doc.html).length <= DOCUMENT_LIMITS.html,
+      "HTML exceeds 4 MiB",
+      413,
+    );
+    check(Array.isArray(doc.assets) && doc.assets.length === 0);
+    return doc;
+  }
   exactKeys(doc, [
     "format",
     "id",

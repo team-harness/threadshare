@@ -34,6 +34,7 @@ export const EXPECTED_PACKAGE_FILES = Object.freeze([
   "schema/session-facts-delta.v2.schema.json",
   "schema/threadshare-document-review.v1.schema.json",
   "schema/threadshare-document.v1.schema.json",
+  "schema/threadshare-document.v2.schema.json",
   "schema/threadshare-history.v1.schema.json",
   "schema/threadshare-insights-activity-request.v1.schema.json",
   "schema/threadshare-insights-activity.v1.schema.json",

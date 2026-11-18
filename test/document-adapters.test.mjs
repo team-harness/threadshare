@@ -299,6 +299,53 @@ for (const adapter of ["r2", "oss", "oss-native"])
         .status,
       200,
     );
+    const html = "<!doctype html><html><head><title>Adapter HTML</title></head><body><h1>Snapshot</h1></body></html>";
+    const htmlUpload = await (
+      await call(`${root}/uploads`, "POST", {
+        title: "Adapter HTML",
+        html: { sha256: await sha256(html), bytes: Buffer.byteLength(html) },
+        assets: [],
+      })
+    ).json();
+    const htmlPut = await fetchAdapter(
+      new Request(
+        `https://test.local${root}/${htmlUpload.id}/uploads/html`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${htmlUpload.uploadToken}`,
+            "content-type": "text/html",
+          },
+          body: html,
+        },
+      ),
+    );
+    assert.equal(htmlPut.status, 204);
+    assert.equal(
+      (
+        await call(
+          `${root}/${htmlUpload.id}/publish`,
+          "POST",
+          undefined,
+          htmlUpload.uploadToken,
+        )
+      ).status,
+      201,
+    );
+    const htmlDoc = await (await call(`${root}/${htmlUpload.id}`)).json();
+    assert.equal(htmlDoc.format, "threadshare-document@v2");
+    assert.equal(htmlDoc.html, html);
+    const htmlPreview = await call(`${root}/${htmlUpload.id}/html`);
+    assert.equal(htmlPreview.status, 200);
+    assert.match(
+      htmlPreview.headers.get("content-security-policy") ?? "",
+      /sandbox allow-scripts/,
+    );
+    assert.equal(await htmlPreview.text(), html);
+    assert.deepEqual(
+      (await (await call(`${root}/${htmlUpload.id}/comments`)).json()).comments,
+      [],
+    );
     time += 60000;
     assert.equal((await call(`${root}/${upload.id}`)).status, 404);
     await sweepDocuments(store, { now: () => time });
