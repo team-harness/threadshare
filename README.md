@@ -8,6 +8,7 @@ Threadshare helps people and AI agents get on the same page—with the context b
 |---|---|---|
 | **Agent conversations** | Bring a teammate up to speed on a discussion, decision, or investigation without retelling the whole story. | Share a Codex, Claude Code, or Paseo conversation as a browser link. People read the context; another Agent can pick up the discussion. |
 | **Markdown documents and images** | Review a proposal, requirements, or plan you drafted with your Agent. | Share the document, collect the team's comments beside selected passages, then bring the feedback back to your Agent to improve the original. |
+| **HTML document previews** | Share a fixed visual rendering of an HTML artifact. | Open the snapshot in an isolated sandboxed iframe. HTML previews do not support anchored comments. |
 
 Use [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) by default, or self-host
 when you need your own domain and storage.
@@ -142,9 +143,9 @@ Paseo sharing requires the local `paseo` CLI and a reachable daemon. Threadshare
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-### Share a Markdown Document for Review
+### Share a Markdown or HTML Document
 
-Write with your Agent, review with your team, then bring the feedback back to your Agent. Use this workflow for design proposals, implementation plans, product requirements, or team guides.
+Write with your Agent, review with your team, then bring the feedback back to your Agent. Markdown supports anchored comments. HTML is available for fixed visual previews and is rendered in a sandboxed iframe without parent-page DOM access.
 
 | Step | What you do |
 |---|---|
@@ -165,6 +166,7 @@ For direct CLI use:
 
 ```bash
 threadshare document share docs/design.md --dry-run --json
+threadshare document share docs/preview.html --json
 threadshare document share docs/design.md --revoke --expires 7d --json
 threadshare document reviews '<document-url>' --format agent
 ```
@@ -172,6 +174,11 @@ threadshare document reviews '<document-url>' --format agent
 Local PNG/JPEG/WebP/GIF images are uploaded with the Markdown. External images load only when the reader
 chooses to load them. Each link is a fixed snapshot: edit locally and share again for a new version.
 Comments are append-only. To revoke a share, save its `revokeToken` privately when sharing.
+
+HTML files (`.html` and `.htm`) are uploaded as `threadshare-document@v2` snapshots with a 4 MiB UTF-8
+limit. The Viewer loads the preview from a dedicated response with a restrictive CSP and uses a sandboxed iframe with scripts enabled but without
+`allow-same-origin`. HTML snapshots do not support text anchors or comments. Agent and CLI Markdown output
+JSON-quotes HTML so shared markup remains data instead of executable output.
 
 The CLI and server must both include the document-sharing update; this source change does not update an
 older npm installation or deploy the hosted service automatically. See the
@@ -226,12 +233,12 @@ Only Codex- and Claude-backed Paseo agents are supported. A running agent produc
 ## Agent Integration Reference
 
 The bundled `threadshare` Skill helps Codex and Codex Cloud locate, preview, share, and read
-conversations and Markdown documents, collect reviews, and apply feedback. It uses the installed CLI when available and falls back to `npx`.
+conversations and Markdown or HTML documents, collect Markdown reviews, and apply feedback. It uses the installed CLI when available and falls back to `npx`.
 The source lives in [`skills/threadshare`](./skills/threadshare).
 
 ## Privacy and Sharing Model
 
-Viewer URLs are unlisted, but not access-controlled. Conversation viewers are read-only; anyone with a document link can read it and append review comments.
+Viewer URLs are unlisted, but not access-controlled. Conversation viewers are read-only; anyone with a Markdown document link can read it and append review comments. HTML preview links are read-only.
 
 By default, a share has no expiration and no revoke capability. `--expires` adds a logical read deadline; `--revoke` creates a client-held capability whose raw value is shown only at creation. Do not place capability tokens in URLs, transcripts, issue trackers, or logs.
 
@@ -304,7 +311,8 @@ Conversation sharing and document review have separate versioned contracts:
 | Data | Format | Schema |
 |---|---|---|
 | Conversation | `threadshare-history@v1` | [History](./schema/threadshare-history.v1.schema.json) |
-| Immutable document and image manifest | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| Immutable Markdown document and image manifest | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| Immutable HTML document snapshot | `threadshare-document@v2` | [HTML document](./schema/threadshare-document.v2.schema.json) |
 | One anchored comment | `threadshare-document-comment@v1` | [Document `$defs.comment`](./schema/threadshare-document.v1.schema.json#/$defs/comment) |
 | Bounded document and review export | `threadshare-document-review@v1` | [Review export](./schema/threadshare-document-review.v1.schema.json) |
 
@@ -355,24 +363,26 @@ Configure rate limits at the hosting edge for publicly exposed instances.
 ```text
 POST   /api/v1/documents/uploads                 -> {id, uploadToken, uploadExpiresAt}
 PUT    /api/v1/documents/:id/uploads/markdown     -> 204
+PUT    /api/v1/documents/:id/uploads/html         -> 204
 PUT    /api/v1/documents/:id/uploads/assets/:sha  -> 204
 POST   /api/v1/documents/:id/publish              -> {id, revision, expiresAt, revocable}
-GET    /api/v1/documents/:id                      -> threadshare-document@v1
+GET    /api/v1/documents/:id                      -> threadshare-document@v1 or @v2
+GET    /api/v1/documents/:id/html                 -> raw HTML v2 preview with response-header CSP
 GET    /api/v1/documents/:id/assets/:sha          -> declared image bytes
 GET    /api/v1/documents/:id/comments             -> threadshare-document-comments@v1
 GET    /api/v1/documents/:id/comments/:commentId  -> threadshare-document-comment@v1
 PUT    /api/v1/documents/:id/comments/:commentId  -> 201 new / 200 identical retry / 409 conflict
 DELETE /api/v1/documents/:id                      -> 204 with a valid Bearer revoke capability
-Viewer                                          -> /document.html?id=<uuid>#comment-<commentId>
+Viewer                                          -> /document.html?id=<uuid>#comment-<commentId> (Markdown)
 ```
 
-Create an upload declaration with `title`, `markdown: {sha256, bytes}`, and `assets: [{source, sha256, bytes, contentType}]`. Optional `expiresInSeconds` and `revokeTokenSha256` belong in this JSON, not the conversation lifecycle headers.
+Create an upload declaration with either `markdown: {sha256, bytes}` or `html: {sha256, bytes}`. Markdown declarations may include `assets: [{source, sha256, bytes, contentType}]`; HTML declarations must use an empty asset list. Optional `expiresInSeconds` and `revokeTokenSha256` belong in this JSON, not the conversation lifecycle headers.
 
-Upload the declared bytes and publish using `Authorization: Bearer <uploadToken>`. The upload token expires after one hour and is separate from the revoke token. Publishing validates the Markdown and all local images before exposing the snapshot.
+Upload the declared bytes and publish using `Authorization: Bearer <uploadToken>`. The upload token expires after one hour and is separate from the revoke token. Publishing validates the Markdown and all local images, or validates UTF-8 HTML, before exposing the snapshot. HTML is stored as `html.txt` and is never inserted into the parent Viewer DOM.
 
 A comment PUT accepts `{revision, anchor, authorName, body}`. Anchors use UTF-16 offsets in `document-anchor-text@1`, not Markdown source offsets; the server verifies the quoted text and context. Comments are immutable, and names are self-declared.
 
-Comment pages contain `format`, `revision`, `comments`, `hasMore`, and `nextCursor`; use `limit` (1–100) and the opaque `cursor` to continue. CLI review exports add `complete` and traversal metadata under `threadshare-document-review@v1`.
+Comment pages contain `format`, `revision`, `comments`, `hasMore`, and `nextCursor`; use `limit` (1–100) and the opaque `cursor` to continue. HTML v2 returns an empty comment page and rejects comment writes because it has no canonical text anchor stream. CLI review exports add `complete` and traversal metadata under `threadshare-document-review@v1`.
 
 The document URL returns HTML by default, or Markdown with document and review context for `?format=agent` or an explicitly preferred `Accept: text/markdown`. Web exports include at most 500 comments and disclose continuation; never assume a partial export is complete.
 

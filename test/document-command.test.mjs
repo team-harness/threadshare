@@ -98,6 +98,73 @@ test("CLI shares a frozen Markdown/image snapshot, reads and revokes through HTT
     404,
   );
 });
+test("CLI shares an HTML snapshot and keeps Agent output inert", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "document-html-cli-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "preview.html");
+  const html = "<!doctype html><html><head><title>Preview</title></head><body><h1>Hello</h1><script>window.parent.postMessage('bad','*')</script></body></html>";
+  await writeFile(file, html);
+  const service = createDocumentService(memoryStore());
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const response = await service(
+      new Request(`http://127.0.0.1:${server.address().port}${req.url}`, {
+        method: req.method,
+        headers: req.headers,
+        ...(!["GET", "HEAD"].includes(req.method)
+          ? { body: Buffer.concat(chunks) }
+          : {}),
+      }),
+    );
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const cli = async (...args) =>
+    JSON.parse(
+      (
+        await exec(process.execPath, [
+          "bin/threadshare.mjs",
+          "document",
+          ...args,
+        ])
+      ).stdout,
+    );
+  const dry = await cli("share", file, "--dry-run", "--json", "--url", base);
+  assert.equal(dry.kind, "html");
+  assert.equal(dry.htmlBytes, Buffer.byteLength(html));
+  const shared = await cli("share", file, "--json", "--url", base);
+  const read = await cli("read", shared.url, "--format", "json");
+  assert.equal(read.format, "threadshare-document@v2");
+  assert.equal(read.html, html);
+  const markdown = await exec(process.execPath, [
+    "bin/threadshare.mjs",
+    "document",
+    "read",
+    shared.url,
+    "--format",
+    "markdown",
+  ]);
+  assert.equal(JSON.parse(markdown.stdout), html);
+  const reviews = await cli("reviews", shared.url, "--format", "json");
+  assert.deepEqual(reviews.comments, []);
+  assert.equal(reviews.complete, true);
+  const put = await fetch(
+    `${base}/api/v1/documents/${shared.id}/comments/${crypto.randomUUID()}`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    },
+  );
+  assert.equal(put.status, 409);
+});
 test("asset-root is explicit, realpath bounded, and bytes are frozen before upload", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "document-assets-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

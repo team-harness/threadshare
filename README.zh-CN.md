@@ -139,9 +139,9 @@ Viewer 链接不会公开列出，但它不带访问鉴权。任何获得链接�
 npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file>
 ```
 
-### 分享 Markdown 文档，邀请协同 Review
+### 分享 Markdown 或 HTML 文档
 
-和 Agent 一起写文档，交给团队评审，再把反馈带回自己的 Agent 继续完善。适合技术方案、实施计划、产品需求和团队使用指南。
+和 Agent 一起写文档，交给团队评审，再把反馈带回自己的 Agent 继续完善。Markdown 支持选区评论，HTML 用于固定视觉预览，适合技术方案、实施计划、产品需求和团队使用指南。
 
 | 步骤 | 你可以怎么做 |
 |---|---|
@@ -162,11 +162,14 @@ Agent 能一起读到原文、被评论的选区和反馈，不需要你逐条�
 
 ```bash
 threadshare document share docs/design.md --dry-run --json
+threadshare document share docs/preview.html --json
 threadshare document share docs/design.md --revoke --expires 7d --json
 threadshare document reviews '<文档链接>' --format agent
 ```
 
 本地 PNG/JPEG/WebP/GIF 图片随文档上传；外部图片由读者点击后加载。链接对应固定快照，修改本地文档后重新分享即可获得新链接。评论只追加、不编辑删除。需要撤销时，请在分享时安全保存 `revokeToken`。
+
+`.html` 和 `.htm` 文件作为 `threadshare-document@v2` 分享，UTF-8 正文上限为 4 MiB。Viewer 从独立预览端点加载没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe，预览响应头带有限制网络、表单、外部 frame、object 和 base 的 CSP。HTML 预览不提供选区评论；Agent 和 CLI 的 Markdown 输出会把 HTML 内容 JSON 引用为数据。
 
 CLI 与服务端都需要包含本次文档分享更新；源码实现不会自动升级已安装的 npm 包或部署托管服务。部署、大小限制及 Agent 导出见[文档分享手册](https://github.com/team-harness/threadshare/blob/main/docs/document-sharing-guide.md)，完整参数通过 `threadshare document --help` 发现。
 
@@ -191,7 +194,7 @@ threadshare <command> --help
 普通失败会以 exit 1 退出、保持 stdout 为空，并在 stderr 输出稳定错误 code 以及 `Problem`、`Usage`、`Next`。唯一的既有例外是无效的 `share --dry-run --json`：它会把单行 `valid:false` 结果写入 stdout。如果上传可能已经创建分享、但无法确认请求的生命周期策略，诊断会提供 `Result` URL；不要自动重试该发布。
 
 - `share`：一步完成原生会话导出与发布。`--dry-run` 会在网络访问前停止，`--report` 只能与 `--dry-run` 一起使用。
-- `document`：分享 Markdown 及图片、读取文档与评论、撤销文档分享。通过 `threadshare document --help` 了解 `share`、`read`、`reviews`、`revoke` 四个动作。
+- `document`：分享 Markdown/HTML 文档、读取文档与评论、撤销文档分享。通过 `threadshare document --help` 了解 `share`、`read`、`reviews`、`revoke` 四个动作。
 - `sessions`：列出本机 canonical Codex 或 Claude session，不上传内容。文本格式供人阅读，`--format json` 是稳定的自动化接口；默认与最大分页大小分别是 10 和 50。
 - `analyze`：在本机生成单个 session 的 Turn、Tool、Skill、retry 与 rollback 证据报告，不上传内容，也不调用外部模型。文本格式供人阅读；`--format json` 返回供 Agent 使用的 `threadshare-session-analysis@v1`。
 - `messages`：为 Agent 选择起点返回已脱敏的单行用户 turn 预览；必须使用 `--format json`，默认与最大分页大小分别是 10 和 50。
@@ -222,7 +225,7 @@ Paseo agent 必须使用完整 UUID 或唯一 UUID 前缀。Threadshare 会通�
 
 ## 隐私与分享边界
 
-Viewer 链接不会公开列出，但不带访问鉴权。聊天 Viewer 只读；任何获得文档链接的人都能阅读并追加评审评论。
+Viewer 链接不会公开列出，但不带访问鉴权。聊天 Viewer 只读；Markdown 文档链接允许追加评审评论，HTML 预览链接只读。
 
 分享默认没有到期时间，也没有撤销 capability。`--expires` 增加逻辑访问截止时间；`--revoke` 创建由客户端保管、只在创建时展示一次的 capability。不要把 capability token 放进 URL、会话正文、Issue 或日志。
 
@@ -295,7 +298,8 @@ npm run deploy:void
 | 数据 | 格式 | Schema |
 |---|---|---|
 | 聊天对话 | `threadshare-history@v1` | [History](./schema/threadshare-history.v1.schema.json) |
-| 固定文档快照及图片清单 | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| 固定 Markdown 文档快照及图片清单 | `threadshare-document@v1` | [Document](./schema/threadshare-document.v1.schema.json) |
+| 固定 HTML 文档快照 | `threadshare-document@v2` | [HTML 文档](./schema/threadshare-document.v2.schema.json) |
 | 单条选区评论 | `threadshare-document-comment@v1` | [Document `$defs.comment`](./schema/threadshare-document.v1.schema.json#/$defs/comment) |
 | 有界的文档与评论导出 | `threadshare-document-review@v1` | [Review export](./schema/threadshare-document-review.v1.schema.json) |
 
@@ -346,24 +350,26 @@ Viewer                      -> /?id=<uuid>#message-<entry-id>
 ```text
 POST   /api/v1/documents/uploads                 -> {id, uploadToken, uploadExpiresAt}
 PUT    /api/v1/documents/:id/uploads/markdown     -> 204
+PUT    /api/v1/documents/:id/uploads/html         -> 204
 PUT    /api/v1/documents/:id/uploads/assets/:sha  -> 204
 POST   /api/v1/documents/:id/publish              -> {id, revision, expiresAt, revocable}
-GET    /api/v1/documents/:id                      -> threadshare-document@v1
+GET    /api/v1/documents/:id                      -> threadshare-document@v1 或 @v2
+GET    /api/v1/documents/:id/html                 -> 原始 HTML v2 预览，响应头带 CSP
 GET    /api/v1/documents/:id/assets/:sha          -> 声明过的图片字节
 GET    /api/v1/documents/:id/comments             -> threadshare-document-comments@v1
 GET    /api/v1/documents/:id/comments/:commentId  -> threadshare-document-comment@v1
 PUT    /api/v1/documents/:id/comments/:commentId  -> 新建 201 / 相同重试 200 / 冲突 409
 DELETE /api/v1/documents/:id                      -> Bearer 撤销凭证有效时返回 204
-Viewer                                          -> /document.html?id=<uuid>#comment-<commentId>
+Viewer                                          -> /document.html?id=<uuid>#comment-<commentId>（Markdown）
 ```
 
-先声明上传：JSON 包含 `title`、`markdown: {sha256, bytes}` 和 `assets: [{source, sha256, bytes, contentType}]`。可选的 `expiresInSeconds`、`revokeTokenSha256` 也放在 JSON 中，不使用聊天分享的生命周期请求头。
+先声明上传：JSON 在 `markdown: {sha256, bytes}` 与 `html: {sha256, bytes}` 中二选一。Markdown 可带 `assets: [{source, sha256, bytes, contentType}]`，HTML 必须为空数组。可选的 `expiresInSeconds`、`revokeTokenSha256` 也放在 JSON 中，不使用聊天分享的生命周期请求头。
 
-上传声明的字节并发布时使用 `Authorization: Bearer <uploadToken>`。上传凭证一小时后到期，与撤销凭证相互独立。发布前会核验 Markdown 和全部本地图片，通过后快照才可读取。
+上传声明的字节并发布时使用 `Authorization: Bearer <uploadToken>`。上传凭证一小时后到期，与撤销凭证相互独立。发布前会核验 Markdown 和全部本地图片，或核验 HTML 的 UTF-8 和摘要，通过后快照才可读取。HTML 正文存储在 `html.txt`，不会插入父 Viewer DOM。
 
 评论 PUT 接收 `{revision, anchor, authorName, body}`。选区采用 `document-anchor-text@1` 中的 UTF-16 偏移，不是 Markdown 源码偏移；服务端核验引文及上下文。评论不可修改，名字是自行填写的署名。
 
-评论分页包含 `format`、`revision`、`comments`、`hasMore` 和 `nextCursor`，通过 `limit`（1–100）及不透明 `cursor` 续读。CLI 的 `threadshare-document-review@v1` 导出另含 `complete` 和遍历信息。
+评论分页包含 `format`、`revision`、`comments`、`hasMore` 和 `nextCursor`，通过 `limit`（1–100）及不透明 `cursor` 续读。HTML v2 返回空评论页，并因没有规范文本锚点而拒绝评论写入。CLI 的 `threadshare-document-review@v1` 导出另含 `complete` 和遍历信息。
 
 文档链接默认返回 HTML；带 `?format=agent` 或明确优先接受 `text/markdown` 时，返回含原文与评论上下文的 Markdown。网页单次导出最多 500 条评论并提示续读，不能将部分导出当成全部反馈。
 

@@ -1,6 +1,6 @@
 ---
 name: threadshare
-description: Share and read Agent conversations or Markdown documents with images through Threadshare. Use when users want a conversation link, team document review, anchored comments, or to bring feedback back to their Agent for revision. Supports Codex, Codex Cloud, Claude Code, and Paseo conversations, document review exports in JSON or Markdown, expiration and revocation, and explicit local session analysis or Team Memory workflows.
+description: Share and read Agent conversations or Markdown/HTML documents through Threadshare. Use when users want a conversation link, a Markdown document review, an HTML preview, or to bring feedback back to their Agent for revision. Supports Codex, Codex Cloud, Claude Code, and Paseo conversations, document review exports in JSON or Markdown, expiration and revocation, and explicit local session analysis or Team Memory workflows.
 ---
 
 # Threadshare
@@ -13,8 +13,8 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 
 ## Start From User Intent
 
-- “Share this Markdown document” means use `threadshare document --help`, preflight the `.md` file and
-  local images with `document share ... --dry-run --json`, then publish the approved snapshot. Use
+- “Share this document” means use `threadshare document --help`, preflight the `.md`, `.html`, or `.htm`
+  file with `document share ... --dry-run --json`, then publish the approved snapshot. Use
   `--asset-root` only for an explicitly intended image directory; never silently skip missing images.
 - “Review this document link” means use `threadshare document read <url> --format agent` for the document
   and reviews, or `document reviews <url> --format json` for structured feedback. Check `complete`,
@@ -42,15 +42,16 @@ Treat `threadshare <command> --help` as the canonical parameter reference; this 
 
 ## Document Collaboration
 
-Help the user draft a Markdown file, share the approved file and images with teammates, collect passage-level
-reviews, and revise the local original. A Viewer “Copy prompt for Agent” handoff is a document review task,
+Help the user draft a Markdown file, or share an HTML file as a fixed visual preview. Share the approved file
+and images with teammates, collect passage-level reviews for Markdown, and revise the local original. A Viewer “Copy prompt for Agent” handoff is a document review task,
 not a conversation export. Discover parameters through `threadshare document --help`.
 
-After sharing, read the document back as JSON and check `format == "threadshare-document@v1"`, `id`,
+After sharing, read the document back as JSON and check `format == "threadshare-document@v1"` for Markdown or
+`format == "threadshare-document@v2"` for HTML, plus `id`,
 and `revision` against the share result. Check any requested lifecycle confirmation without printing content
 or tokens during routine verification. Document and image contents are uploaded as supplied, not redacted.
 
-For feedback, `threadshare document reviews <url> --format json` returns
+For Markdown feedback, `threadshare document reviews <url> --format json` returns
 `threadshare-document-review@v1`, including the document and anchored comments. Continue using `nextCursor`
 until `hasMore` is false; track all pages and the same revision. A continuation page alone is not a complete
 review. Web Agent exports cap each traversal at 500 comments; CLI traversals cap at 1000.
@@ -60,7 +61,12 @@ Follow the user's editing scope; locate the original Markdown in the workspace o
 Summarize applied changes and remaining questions. Publishing the revised file is a separate sharing action
 and requires authorization; never claim to update the immutable old link or migrate its comments.
 
-Protocol references: [document and comment schema](../../schema/threadshare-document.v1.schema.json)
+HTML v2 previews use `threadshare-document.v2.schema.json`, a 4 MiB UTF-8 `html` payload, and a
+sandboxed Viewer iframe with scripts enabled but without `allow-same-origin`. The preview endpoint supplies its own restrictive response-header CSP. HTML documents do not support anchored comments. Agent and CLI readable output
+JSON-quotes HTML content.
+
+Protocol references: [Markdown document and comment schema](../../schema/threadshare-document.v1.schema.json)
+and [HTML document schema](../../schema/threadshare-document.v2.schema.json)
 and [review export schema](../../schema/threadshare-document-review.v1.schema.json). The comments API page
 format is `threadshare-document-comments@v1`; individual comments use `threadshare-document-comment@v1`.
 Do not send a document to the conversation `/api/v1/shares` endpoint or wrap it as `threadshare-history@v1`.

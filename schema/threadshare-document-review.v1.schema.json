@@ -19,7 +19,12 @@
   ],
   "properties": {
     "format": { "const": "threadshare-document-review@v1" },
-    "document": { "$ref": "threadshare-document.v1.schema.json" },
+    "document": {
+      "oneOf": [
+        { "$ref": "threadshare-document.v1.schema.json" },
+        { "$ref": "threadshare-document.v2.schema.json" }
+      ]
+    },
     "url": { "type": "string", "format": "uri" },
     "collectionStartedAt": { "type": "string", "format": "date-time" },
     "collectionFinishedAt": { "type": "string", "format": "date-time" },

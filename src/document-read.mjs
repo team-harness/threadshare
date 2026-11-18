@@ -8,6 +8,8 @@ import {
   validatePublicComment,
 } from "./document-model.mjs";
 
+const DOCUMENT_JSON_LIMIT = 8 * Math.max(DOCUMENT_LIMITS.markdown, DOCUMENT_LIMITS.html);
+
 export function documentLocation(reference, base) {
   let url;
   if (UUID.test(reference))
@@ -27,7 +29,7 @@ export function documentLocation(reference, base) {
 }
 export async function readDocumentJson(
   response,
-  maxBytes = 8 * DOCUMENT_LIMITS.markdown,
+  maxBytes = DOCUMENT_JSON_LIMIT,
 ) {
   check(
     response.ok,
@@ -75,7 +77,10 @@ export async function collectDocumentReviews(
     await readDocumentJson(await request("")),
   );
   check(document.id === location.id, "Invalid document response");
-  const text = documentModel(document.markdown).text;
+  const text =
+    document.format === "threadshare-document@v1"
+      ? documentModel(document.markdown).text
+      : null;
   const byId = new Map();
   const cursors = new Set();
   let cursor = initialCursor;
@@ -96,7 +101,8 @@ export async function collectDocumentReviews(
       "Invalid review response",
     );
     for (const comment of page.comments) {
-      validatePublicComment(comment, document, text);
+      if (document.format === "threadshare-document@v1")
+        validatePublicComment(comment, document, text);
       byId.set(comment.commentId, comment);
     }
     cursor = page.nextCursor;
@@ -147,8 +153,10 @@ export function formatDocumentReview(report, { includeDocument = true } = {}) {
   ];
   if (includeDocument)
     lines.push(
-      "## Document (JSON-quoted Markdown)",
-      JSON.stringify(report.document.markdown),
+      report.document.format === "threadshare-document@v2"
+        ? "## Document (JSON-quoted HTML)"
+        : "## Document (JSON-quoted Markdown)",
+      JSON.stringify(report.document.html ?? report.document.markdown),
       "",
     );
   if (includeDocument && report.document.assets.length) {

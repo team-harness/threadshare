@@ -2,6 +2,7 @@ import {
   ANCHOR_VERSION,
   DOCUMENT_RENDERER,
   DOCUMENT_LIMITS as LIMITS,
+  HTML_DOCUMENT_RENDERER,
   UUID,
   DIGEST,
   bytes,
@@ -19,6 +20,8 @@ const headers = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };
+const HTML_DOCUMENT_CSP =
+  "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'";
 const reply = (status, value) =>
   new Response(value === undefined ? null : JSON.stringify(value), {
     status,
@@ -86,8 +89,15 @@ async function jsonBody(request, limit = 32768) {
 function validateDeclaration(value) {
   exactKeys(
     value,
-    ["title", "markdown", "assets", "expiresInSeconds", "revokeTokenSha256"],
-    ["title", "markdown", "assets"],
+    [
+      "title",
+      "markdown",
+      "html",
+      "assets",
+      "expiresInSeconds",
+      "revokeTokenSha256",
+    ],
+    ["title", "assets"],
   );
   check(
     typeof value.title === "string" &&
@@ -104,10 +114,25 @@ function validateDeclaration(value) {
       "Invalid file size or digest",
     );
   };
-  exactKeys(value.markdown, ["sha256", "bytes"]);
-  size(value.markdown, LIMITS.markdown);
   check(
-    Array.isArray(value.assets) && value.assets.length <= LIMITS.images,
+    (value.markdown !== undefined) !== (value.html !== undefined),
+    "Declare exactly one Markdown or HTML payload",
+  );
+  if (value.html !== undefined) {
+    exactKeys(value.html, ["sha256", "bytes"]);
+    size(value.html, LIMITS.html);
+    check(
+      !value.assets || (Array.isArray(value.assets) && value.assets.length === 0),
+      "HTML documents cannot declare image assets",
+    );
+    value.assets = [];
+  } else {
+    exactKeys(value.markdown, ["sha256", "bytes"]);
+    size(value.markdown, LIMITS.markdown);
+  }
+  check(
+    Array.isArray(value.assets) &&
+      (value.html !== undefined || value.assets.length <= LIMITS.images),
     "At most 32 local images are supported",
   );
   const sources = new Set();
@@ -137,13 +162,13 @@ function validateDeclaration(value) {
     );
     hashes.set(asset.sha256, `${asset.bytes}:${asset.contentType}`);
   }
+  const primaryBytes = value.markdown?.bytes ?? value.html.bytes;
   check(
-    value.markdown.bytes +
+    primaryBytes +
       [...hashes.values()].reduce(
         (n, entry) => n + Number(entry.split(":")[0]),
         0,
-      ) <=
-      LIMITS.total,
+      ) <= LIMITS.total,
     "Document exceeds 32 MiB",
     413,
   );
@@ -219,6 +244,16 @@ export function createDocumentService(
     return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
       raw,
     );
+  }
+  async function html(id) {
+    const raw = await store.get(keyFor(id, "html.txt"));
+    check(raw !== null, "HTML is not uploaded", 409);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw);
+  }
+  async function htmlBytes(id) {
+    const raw = await store.get(keyFor(id, "html.txt"));
+    check(raw !== null, "HTML is not uploaded", 409);
+    return raw;
   }
   async function comments(id, cursor, limit) {
     const prefix = keyFor(id, "comments/");
@@ -300,15 +335,19 @@ export function createDocumentService(
       if (
         request.method === "PUT" &&
         (tail === "/uploads/markdown" ||
+          tail === "/uploads/html" ||
           /^\/uploads\/assets\/[0-9a-f]{64}$/.test(tail))
       ) {
         const upload = await draft(id, request);
         const isMarkdown = tail === "/uploads/markdown";
+        const isHtml = tail === "/uploads/html";
         const digest = tail.split("/").at(-1);
         const expected = isMarkdown
           ? upload.markdown
+          : isHtml
+            ? upload.html
           : upload.assets.find((asset) => asset.sha256 === digest);
-        check(expected, "Image was not declared");
+        check(expected, isHtml ? "HTML was not declared" : "Image was not declared");
         const data = await boundedBody(request, expected.bytes);
         check(
           data.length === expected.bytes &&
@@ -336,20 +375,31 @@ export function createDocumentService(
               ),
             "Every local image must be declared",
           );
-        } else
+        } else if (!isHtml)
           check(
             imageMetadata(data).contentType === expected.contentType,
             "Image content type does not match declaration",
           );
+        else {
+          try {
+            new TextDecoder("utf-8", { fatal: true }).decode(data);
+          } catch {
+            check(false, "HTML must be UTF-8");
+          }
+        }
         const key = keyFor(
           id,
-          isMarkdown ? "markdown.txt" : `assets/${digest}`,
+          isMarkdown ? "markdown.txt" : isHtml ? "html.txt" : `assets/${digest}`,
         );
         if (
           !(await store.create(
             key,
             data,
-            isMarkdown ? "text/markdown; charset=utf-8" : expected.contentType,
+            isMarkdown
+              ? "text/markdown; charset=utf-8"
+              : isHtml
+                ? "text/html; charset=utf-8"
+                : expected.contentType,
           ))
         ) {
           check(
@@ -368,38 +418,54 @@ export function createDocumentService(
           "Document already expired",
           410,
         );
-        const content = await markdown(id);
-        check(
-          (await sha256(content)) === upload.markdown.sha256,
-          "Markdown digest mismatch",
-          409,
-        );
-        for (const asset of upload.assets)
-          check(
-            (await store.get(keyFor(id, `assets/${asset.sha256}`))) !== null,
-            "Images are not fully uploaded",
-            409,
-          );
+        const isHtml = upload.html !== undefined;
+        const content = isHtml ? await htmlBytes(id) : await markdown(id);
+        const expectedDigest = isHtml ? upload.html.sha256 : upload.markdown.sha256;
+        check((await sha256(content)) === expectedDigest, "Document digest mismatch", 409);
+        if (!isHtml)
+          for (const asset of upload.assets)
+            check(
+              (await store.get(keyFor(id, `assets/${asset.sha256}`))) !== null,
+              "Images are not fully uploaded",
+              409,
+            );
         const revision = await sha256(
-          JSON.stringify({
-            markdown: upload.markdown,
-            assets: upload.assets,
-            renderer: DOCUMENT_RENDERER,
-            textVersion: ANCHOR_VERSION,
-          }),
+          JSON.stringify(
+            isHtml
+              ? { html: upload.html, renderer: HTML_DOCUMENT_RENDERER }
+              : {
+                  markdown: upload.markdown,
+                  assets: upload.assets,
+                  renderer: DOCUMENT_RENDERER,
+                  textVersion: ANCHOR_VERSION,
+                },
+          ),
         );
-        const doc = {
-          format: "threadshare-document@v1",
-          id,
-          title: upload.title,
-          revision,
-          createdAt: upload.createdAt,
-          expiresAt: upload.expiresAt,
-          revocable: !!upload.revokeTokenSha256,
-          renderer: DOCUMENT_RENDERER,
-          textVersion: ANCHOR_VERSION,
-          assets: upload.assets,
-        };
+        const doc = isHtml
+          ? {
+              format: "threadshare-document@v2",
+              id,
+              title: upload.title,
+              revision,
+              createdAt: upload.createdAt,
+              expiresAt: upload.expiresAt,
+              revocable: !!upload.revokeTokenSha256,
+              renderer: HTML_DOCUMENT_RENDERER,
+              textVersion: null,
+              assets: [],
+            }
+          : {
+              format: "threadshare-document@v1",
+              id,
+              title: upload.title,
+              revision,
+              createdAt: upload.createdAt,
+              expiresAt: upload.expiresAt,
+              revocable: !!upload.revokeTokenSha256,
+              renderer: DOCUMENT_RENDERER,
+              textVersion: ANCHOR_VERSION,
+              assets: upload.assets,
+            };
         await store.create(
           keyFor(id, "document.json"),
           JSON.stringify(doc),
@@ -428,7 +494,22 @@ export function createDocumentService(
       }
       const doc = await available(id);
       if (request.method === "GET" && tail === "")
-        return reply(200, { ...doc, markdown: await markdown(id) });
+        return reply(
+          200,
+          doc.format === "threadshare-document@v2"
+            ? { ...doc, html: await html(id) }
+            : { ...doc, markdown: await markdown(id) },
+        );
+      if (request.method === "GET" && tail === "/html") {
+        check(doc.format === "threadshare-document@v2", "HTML was not declared", 404);
+        return new Response(await html(id), {
+          headers: {
+            ...headers,
+            "content-type": "text/html; charset=utf-8",
+            "content-security-policy": HTML_DOCUMENT_CSP,
+          },
+        });
+      }
       if (request.method === "GET" && /^\/assets\/[0-9a-f]{64}$/.test(tail)) {
         const digest = tail.split("/").at(-1);
         const asset = doc.assets.find((item) => item.sha256 === digest);
@@ -444,6 +525,14 @@ export function createDocumentService(
         });
       }
       if (request.method === "GET" && tail === "/comments") {
+        if (doc.format === "threadshare-document@v2")
+          return reply(200, {
+            format: "threadshare-document-comments@v1",
+            revision: doc.revision,
+            comments: [],
+            nextCursor: null,
+            hasMore: false,
+          });
         check(
           [...url.searchParams.keys()].every((k) =>
             ["cursor", "limit"].includes(k),
@@ -474,6 +563,11 @@ export function createDocumentService(
         return reply(200, publicComment(comment));
       }
       if (request.method === "PUT" && commentId) {
+        check(
+          doc.format !== "threadshare-document@v2",
+          "HTML documents do not support anchored comments",
+          409,
+        );
         check(UUID.test(commentId), "Invalid comment ID");
         const input = await jsonBody(request, LIMITS.comment);
         exactKeys(input, ["revision", "anchor", "authorName", "body"]);

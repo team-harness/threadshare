@@ -15,6 +15,7 @@ import { sha256, documentModel } from "../src/document-model.mjs";
 
 import { memoryStore } from "./helpers/document-store.mjs";
 const md = "# Design\n\nHello 😀 world.";
+const html = "<!doctype html><html><head><title>Preview</title></head><body><h1>Hello</h1></body></html>";
 async function setup() {
   const store = memoryStore();
   const service = createDocumentService(store);
@@ -63,6 +64,178 @@ async function setup() {
   );
   return { store, service, request, upload };
 }
+test("HTML documents publish as v2 snapshots and reject anchored comments", async () => {
+  const store = memoryStore();
+  const service = createDocumentService(store);
+  const request = (path, method = "GET", body, token) =>
+    service(
+      new Request(`https://test.local/api/v1/documents${path}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    );
+  const declaration = {
+    title: "Preview",
+    html: { sha256: await sha256(html), bytes: Buffer.byteLength(html) },
+    assets: [],
+  };
+  const upload = await (await request("/uploads", "POST", declaration)).json();
+  const put = await service(
+    new Request(
+      `https://test.local/api/v1/documents/${upload.id}/uploads/html`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${upload.uploadToken}`,
+          "content-type": "text/html",
+        },
+        body: html,
+      },
+    ),
+  );
+  assert.equal(put.status, 204);
+  assert.equal(
+    (
+      await request(`/${upload.id}/publish`, "POST", undefined, upload.uploadToken)
+    ).status,
+    201,
+  );
+  const doc = await (await request(`/${upload.id}`)).json();
+  assert.equal(doc.format, "threadshare-document@v2");
+  assert.equal(doc.renderer, "html-document-renderer@1");
+  assert.equal(doc.textVersion, null);
+  assert.deepEqual(doc.assets, []);
+  assert.equal(doc.html, html);
+  const preview = await service(
+    new Request(`https://test.local/api/v1/documents/${upload.id}/html`),
+  );
+  assert.equal(preview.status, 200);
+  assert.match(preview.headers.get("content-type") ?? "", /text\/html/);
+  assert.match(
+    preview.headers.get("content-security-policy") ?? "",
+    /sandbox allow-scripts/,
+  );
+  assert.equal(await preview.text(), html);
+  const comments = await (await request(`/${upload.id}/comments?limit=1`)).json();
+  assert.deepEqual(comments.comments, []);
+  assert.equal(
+    (
+      await request(`/${upload.id}/comments/${crypto.randomUUID()}`, "PUT", {
+        revision: doc.revision,
+        authorName: "Reviewer",
+        body: "Feedback",
+        anchor: null,
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    new TextDecoder().decode(await store.get(`documents/${upload.id}/html.txt`)),
+    html,
+  );
+});
+test("HTML publication verifies the declared digest for UTF-8 documents with a BOM", async () => {
+  const store = memoryStore();
+  const service = createDocumentService(store);
+  const source = "\uFEFF<!doctype html><html><body>BOM</body></html>";
+  const sourceBytes = new TextEncoder().encode(source);
+  const request = (path, method = "GET", body, token) =>
+    service(
+      new Request(`https://test.local/api/v1/documents${path}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    );
+  const upload = await (
+    await request("/uploads", "POST", {
+      title: "BOM",
+      html: { sha256: await sha256(sourceBytes), bytes: sourceBytes.length },
+      assets: [],
+    })
+  ).json();
+  assert.equal(
+    (
+      await service(
+        new Request(`https://test.local/api/v1/documents/${upload.id}/uploads/html`, {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${upload.uploadToken}`,
+            "content-type": "text/html; charset=utf-8",
+          },
+          body: sourceBytes,
+        }),
+      )
+    ).status,
+    204,
+  );
+  assert.equal(
+    (
+      await request(`/${upload.id}/publish`, "POST", undefined, upload.uploadToken)
+    ).status,
+    201,
+  );
+});
+test("large valid HTML snapshots remain readable after JSON serialization", async () => {
+  const store = memoryStore();
+  const service = createDocumentService(store);
+  const request = (path, method = "GET", body, token) =>
+    service(
+      new Request(`https://test.local/api/v1/documents${path}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    );
+  const largeHtml = `<pre>${"\u0001".repeat(1_500_000)}</pre>`;
+  const upload = await (
+    await request("/uploads", "POST", {
+      title: "Large HTML",
+      html: {
+        sha256: await sha256(largeHtml),
+        bytes: Buffer.byteLength(largeHtml),
+      },
+      assets: [],
+    })
+  ).json();
+  const put = await service(
+    new Request(`https://test.local/api/v1/documents/${upload.id}/uploads/html`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${upload.uploadToken}`,
+        "content-type": "text/html",
+      },
+      body: largeHtml,
+    }),
+  );
+  assert.equal(put.status, 204);
+  assert.equal(
+    (
+      await request(`/${upload.id}/publish`, "POST", undefined, upload.uploadToken)
+    ).status,
+    201,
+  );
+  const report = await collectDocumentReviews(
+    {
+      id: upload.id,
+      base: "https://test.local",
+      url: `https://test.local/document.html?id=${upload.id}`,
+    },
+    { fetchImpl: (url, options) => service(new Request(url, options)) },
+  );
+  assert.equal(report.document.html, largeHtml);
+  assert.equal(report.complete, true);
+});
 test("publish, concurrent append, idempotent retry, anchor validation and revoke", async () => {
   const { request, upload } = await setup();
   const doc = await (await request(`/${upload.id}`)).json();
@@ -199,6 +372,16 @@ test("review exports satisfy shipped schemas and identify bounded/continuation c
       await readFile(
         new URL(
           "../schema/threadshare-document.v1.schema.json",
+          import.meta.url,
+        ),
+      ),
+    ),
+  );
+  ajv.addSchema(
+    JSON.parse(
+      await readFile(
+        new URL(
+          "../schema/threadshare-document.v2.schema.json",
           import.meta.url,
         ),
       ),
