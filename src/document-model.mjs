@@ -2,7 +2,7 @@ import MarkdownIt from "markdown-it";
 
 export const DOCUMENT_LIMITS = Object.freeze({
   markdown: 1024 * 1024,
-  html: 4 * 1024 * 1024,
+  html: 32 * 1024 * 1024,
   image: 4 * 1024 * 1024,
   total: 32 * 1024 * 1024,
   images: 32,
@@ -248,7 +248,7 @@ export function validatePublicDocument(doc) {
       typeof doc.html === "string" &&
         bytes(doc.html).length > 0 &&
         bytes(doc.html).length <= DOCUMENT_LIMITS.html,
-      "HTML exceeds 4 MiB",
+      "HTML exceeds 32 MiB",
       413,
     );
     check(Array.isArray(doc.assets) && doc.assets.length === 0);

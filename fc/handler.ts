@@ -32,6 +32,8 @@ import { createDocumentService, sweepDocuments } from '../src/document-service.m
 import { documentAgentResponse } from '../src/document-read.mjs';
 import { FLOWCHART_FRAME_CSP, FLOWCHART_FRAME_HTML } from '../document-viewer/frame-html.mjs';
 
+const DOCUMENT_REQUEST_MAX_BYTES = 32 * 1024 * 1024;
+
 type Environment = Record<string, string | undefined>;
 type StaticAssets = Record<
   string,
@@ -397,7 +399,7 @@ export function createHandler({
             'content-security-policy': FLOWCHART_FRAME_CSP,
           }, body: method === 'HEAD' ? undefined : FLOWCHART_FRAME_HTML };
         }
-        if (event.body && Buffer.byteLength(event.body, event.isBase64Encoded ? 'base64' : 'utf8') > 4 * 1024 * 1024) {
+        if (event.body && Buffer.byteLength(event.body, event.isBase64Encoded ? 'base64' : 'utf8') > DOCUMENT_REQUEST_MAX_BYTES) {
           return json(413, { error: 'Document request is too large' }, false);
         }
         // Explicit public origin also supports gateways that rewrite Host.

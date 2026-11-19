@@ -175,7 +175,7 @@ Local PNG/JPEG/WebP/GIF images are uploaded with the Markdown. External images l
 chooses to load them. Each link is a fixed snapshot: edit locally and share again for a new version.
 Comments are append-only. To revoke a share, save its `revokeToken` privately when sharing.
 
-HTML files (`.html` and `.htm`) are uploaded as `threadshare-document@v2` snapshots with a 4 MiB UTF-8
+HTML files (`.html` and `.htm`) are uploaded as `threadshare-document@v2` snapshots with a 32 MiB UTF-8
 limit. The Viewer loads the preview from a dedicated response with a restrictive CSP and uses a sandboxed iframe with scripts enabled but without
 `allow-same-origin`. HTML snapshots do not support text anchors or comments. Agent and CLI Markdown output
 JSON-quotes HTML so shared markup remains data instead of executable output.

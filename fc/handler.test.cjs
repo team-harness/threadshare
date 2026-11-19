@@ -423,6 +423,23 @@ test("rejects a declared oversized body before reading it", async () => {
   assert.equal(bodyRead, false);
 });
 
+test("allows document gateway bodies up to 32 MiB and rejects the next byte", async () => {
+  const { handler } = createTestHandler();
+  const atLimit = await handler({
+    rawPath: "/api/v1/documents/missing",
+    httpMethod: "GET",
+    body: "x".repeat(32 * 1024 * 1024),
+  });
+  assert.equal(atLimit.statusCode, 404);
+
+  const overLimit = await handler({
+    rawPath: "/api/v1/documents/missing",
+    httpMethod: "GET",
+    body: "x".repeat(32 * 1024 * 1024 + 1),
+  });
+  assert.equal(overLimit.statusCode, 413);
+});
+
 test("logs storage failures while returning a stable JSON error", async () => {
   const errors = [];
   const { handler } = createTestHandler({

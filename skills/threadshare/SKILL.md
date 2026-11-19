@@ -61,7 +61,7 @@ Follow the user's editing scope; locate the original Markdown in the workspace o
 Summarize applied changes and remaining questions. Publishing the revised file is a separate sharing action
 and requires authorization; never claim to update the immutable old link or migrate its comments.
 
-HTML v2 previews use `threadshare-document.v2.schema.json`, a 4 MiB UTF-8 `html` payload, and a
+HTML v2 previews use `threadshare-document.v2.schema.json`, a 32 MiB UTF-8 `html` payload, and a
 sandboxed Viewer iframe with scripts enabled but without `allow-same-origin`. The preview endpoint supplies its own restrictive response-header CSP. HTML documents do not support anchored comments. Agent and CLI readable output
 JSON-quotes HTML content.
 
