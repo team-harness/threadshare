@@ -4,7 +4,7 @@
 
 ## HTML 预览
 
-`.html` 和 `.htm` 文件使用 `threadshare-document@v2` 快照，正文限制为 4 MiB UTF-8。Viewer 把内容加载到没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe 中。HTML 预览端点通过响应头施加限制网络、表单、外部 frame、object 和 base 的 CSP。共享 HTML 只能作为该 iframe 的预览，不会通过父页面 `innerHTML` 执行。
+`.html` 和 `.htm` 文件使用 `threadshare-document@v2` 快照，正文限制为 32 MiB UTF-8。Viewer 把内容加载到没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe 中。HTML 预览端点通过响应头施加限制网络、表单、外部 frame、object 和 base 的 CSP。共享 HTML 只能作为该 iframe 的预览，不会通过父页面 `innerHTML` 执行。
 
 HTML 没有服务端可复现的规范文本流，因此不提供选区评论。`read` 和 Agent review 导出会 JSON 引用 HTML 内容，避免把共享内容当作 Agent 指令或可执行 Markdown。
 
@@ -36,7 +36,7 @@ threadshare document revoke '<链接>' --token '<保存的 token>' --json
 | 内容 | v1 上限或处理方式 |
 |---|---|
 | Markdown | UTF-8 `.md`，1 MiB |
-| HTML | UTF-8 `.html`/`.htm`，4 MiB；无图片附件清单 |
+| HTML | UTF-8 `.html`/`.htm`，32 MiB；无图片附件清单 |
 | 本地图片 | PNG、JPEG、WebP、GIF；最多 32 个不同引用，每张 4 MiB、1600 万像素 |
 | 合计 | Markdown＋去重后的本地图片最多 32 MiB |
 | 评论 | 4000 个 UTF-16 字符、16 KiB 正文，整个请求最多 32 KiB |
@@ -70,7 +70,7 @@ FC 原生 HTTP 网关会自动回显请求的 Origin，并与函数返回的响�
 2. FC：`npm run build:fc` 后使用现有部署流程；同一私有 OSS bucket，IAM 还需要 ListObjects/ListBucket 权限。默认公开地址按 HTTPS + Host 解释；HTTP 入口或会重写 Host 的网关必须设置 `THREADSHARE_PUBLIC_ORIGIN` 为实际公开 origin（例如 `https://review.example.com`），不含路径。配置名为 `threadshare-document-cleanup` 的 Timer 触发器，每 15 分钟调用函数；HTTP 请求不能调用该清理入口。
 3. R2 用条件 PUT，OSS 用签名的 `x-oss-forbid-overwrite:true`。每条评论独立对象，409 冲突不能覆盖旧评论。OSS bucket 不应启用会禁用 forbid-overwrite 语义的版本管理配置；部署前验证条件写入。
 4. 配置网关/WAF 的每 IP 上传和评论限速，以及 bucket 容量与费用告警。无登录追加接口不提供身份防冒用；进程内计数器不冒充分布式限流。
-5. 对 FC/网关确认二进制 PUT 及 ≥4 MiB 请求上限，避免中间网关在代码前截断。本地与模拟适配器验证不替代实际部署环境的容量与权限探针。
+5. 对 FC/网关确认二进制 PUT 及 ≥32 MiB 请求上限，避免中间网关在代码前截断。本地与模拟适配器验证不替代实际部署环境的容量与权限探针。
 
 存储布局：`documents/<id>/upload.json`、`markdown.txt` 或 `html.txt`、`assets/<sha256>`、`document.json`、`comments/<uuid>.json`。清理索引单独位于 `document-maintenance/<id>.json`，游标位于 `document-maintenance-cursor.json`。
 

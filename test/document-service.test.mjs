@@ -1,5 +1,5 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import test from "node:test";
 import {
   createDocumentService,
   sweepDocuments,
@@ -11,7 +11,7 @@ import {
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { readFile } from "node:fs/promises";
-import { sha256, documentModel } from "../src/document-model.mjs";
+import { sha256, documentModel, validatePublicDocument } from "../src/document-model.mjs";
 
 import { memoryStore } from "./helpers/document-store.mjs";
 const md = "# Design\n\nHello 😀 world.";
@@ -136,6 +136,27 @@ test("HTML documents publish as v2 snapshots and reject anchored comments", asyn
   assert.equal(
     new TextDecoder().decode(await store.get(`documents/${upload.id}/html.txt`)),
     html,
+  );
+});
+
+test("HTML snapshots accept the 32 MiB boundary and reject the next byte", () => {
+  const atLimit = "x".repeat(32 * 1024 * 1024);
+  const base = {
+    format: "threadshare-document@v2",
+    id: "00000000-0000-4000-8000-000000000000",
+    title: "Boundary",
+    revision: "a".repeat(64),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: null,
+    revocable: false,
+    renderer: "html-document-renderer@1",
+    textVersion: null,
+    assets: [],
+  };
+  assert.equal(validatePublicDocument({ ...base, html: atLimit }).html, atLimit);
+  assert.throws(
+    () => validatePublicDocument({ ...base, html: `${atLimit}x` }),
+    /HTML exceeds 32 MiB/,
   );
 });
 test("HTML publication verifies the declared digest for UTF-8 documents with a BOM", async () => {
