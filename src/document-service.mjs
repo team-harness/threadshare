@@ -34,6 +34,62 @@ const decode = (raw) =>
 const keyFor = (id, suffix) => `documents/${id}/${suffix}`;
 const missing = () => check(false, "Document was not found", 404);
 
+// Resolve the public document URL to a native HTML response when its immutable
+// snapshot is an HTML document. Markdown documents continue to use the Review
+// Viewer, and Agent negotiation is handled by the caller before this helper.
+export async function nativeHtmlDocumentResponse(request, service) {
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  if (!UUID.test(id ?? "")) return null;
+  const metadataUrl = new URL(`/api/v1/documents/${id}/metadata`, url);
+  const metadata = await service(
+    new Request(metadataUrl, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    }),
+  );
+  if (!metadata) return null;
+  if (metadata.status !== 200) {
+    if (request.method === "HEAD")
+      return new Response(null, {
+        status: metadata.status,
+        headers: metadata.headers,
+      });
+    return metadata;
+  }
+  let document;
+  try {
+    document = await metadata.json();
+  } catch {
+    return new Response(null, {
+      status: 500,
+      headers: { ...headers, "content-type": JSON_TYPE },
+    });
+  }
+  if (
+    !document ||
+    typeof document !== "object" ||
+    Array.isArray(document) ||
+    document.id !== id
+  )
+    return new Response(null, {
+      status: 500,
+      headers: { ...headers, "content-type": JSON_TYPE },
+    });
+  if (document.format === "threadshare-document@v1") return null;
+  if (document.format !== "threadshare-document@v2")
+    return new Response(null, {
+      status: 500,
+      headers: { ...headers, "content-type": JSON_TYPE },
+    });
+  return service(
+    new Request(new URL(`/api/v1/documents/${id}/html`, url), {
+      method: request.method,
+      headers: request.headers,
+    }),
+  );
+}
+
 async function boundedBody(request, limit) {
   const length = request.headers.get("content-length");
   check(
@@ -493,6 +549,8 @@ export function createDocumentService(
         return reply(204);
       }
       const doc = await available(id);
+      if (request.method === "GET" && tail === "/metadata")
+        return reply(200, doc);
       if (request.method === "GET" && tail === "")
         return reply(
           200,
@@ -500,13 +558,14 @@ export function createDocumentService(
             ? { ...doc, html: await html(id) }
             : { ...doc, markdown: await markdown(id) },
         );
-      if (request.method === "GET" && tail === "/html") {
+      if (["GET", "HEAD"].includes(request.method) && tail === "/html") {
         check(doc.format === "threadshare-document@v2", "HTML was not declared", 404);
-        return new Response(await html(id), {
+        return new Response(request.method === "HEAD" ? null : await html(id), {
           headers: {
             ...headers,
             "content-type": "text/html; charset=utf-8",
             "content-security-policy": HTML_DOCUMENT_CSP,
+            vary: "Accept",
           },
         });
       }

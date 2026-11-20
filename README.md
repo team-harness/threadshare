@@ -8,7 +8,7 @@ Threadshare helps people and AI agents get on the same page—with the context b
 |---|---|---|
 | **Agent conversations** | Bring a teammate up to speed on a discussion, decision, or investigation without retelling the whole story. | Share a Codex, Claude Code, or Paseo conversation as a browser link. People read the context; another Agent can pick up the discussion. |
 | **Markdown documents and images** | Review a proposal, requirements, or plan you drafted with your Agent. | Share the document, collect the team's comments beside selected passages, then bring the feedback back to your Agent to improve the original. |
-| **HTML document previews** | Share a fixed visual rendering of an HTML artifact. | Open the snapshot in an isolated sandboxed iframe. HTML previews do not support anchored comments. |
+| **HTML document previews** | Share a fixed visual rendering of an HTML artifact. | Open the snapshot as an isolated native sandboxed H5 page. HTML previews do not support anchored comments. |
 
 Use [cloud-thread.team-harness.com](https://cloud-thread.team-harness.com) by default, or self-host
 when you need your own domain and storage.
@@ -145,7 +145,7 @@ npx --yes @team-harness/threadshare@latest share codex <session-id-or-jsonl-file
 
 ### Share a Markdown or HTML Document
 
-Write with your Agent, review with your team, then bring the feedback back to your Agent. Markdown supports anchored comments. HTML is available for fixed visual previews and is rendered in a sandboxed iframe without parent-page DOM access.
+Write with your Agent, review with your team, then bring the feedback back to your Agent. Markdown supports anchored comments. HTML is available for fixed visual previews and opens as a native sandboxed page without parent-page DOM access.
 
 | Step | What you do |
 |---|---|
@@ -176,7 +176,7 @@ chooses to load them. Each link is a fixed snapshot: edit locally and share agai
 Comments are append-only. To revoke a share, save its `revokeToken` privately when sharing.
 
 HTML files (`.html` and `.htm`) are uploaded as `threadshare-document@v2` snapshots with a 32 MiB UTF-8
-limit. The Viewer loads the preview from a dedicated response with a restrictive CSP and uses a sandboxed iframe with scripts enabled but without
+limit. The shared `/document.html?id=<uuid>` URL serves the snapshot as a native response with a restrictive CSP and scripts enabled without
 `allow-same-origin`. HTML snapshots do not support text anchors or comments. Agent and CLI Markdown output
 JSON-quotes HTML so shared markup remains data instead of executable output.
 

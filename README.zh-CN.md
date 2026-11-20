@@ -169,7 +169,7 @@ threadshare document reviews '<文档链接>' --format agent
 
 本地 PNG/JPEG/WebP/GIF 图片随文档上传；外部图片由读者点击后加载。链接对应固定快照，修改本地文档后重新分享即可获得新链接。评论只追加、不编辑删除。需要撤销时，请在分享时安全保存 `revokeToken`。
 
-`.html` 和 `.htm` 文件作为 `threadshare-document@v2` 分享，UTF-8 正文上限为 32 MiB。Viewer 从独立预览端点加载没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe，预览响应头带有限制网络、表单、外部 frame、object 和 base 的 CSP。HTML 预览不提供选区评论；Agent 和 CLI 的 Markdown 输出会把 HTML 内容 JSON 引用为数据。
+`.html` 和 `.htm` 文件作为 `threadshare-document@v2` 分享，UTF-8 正文上限为 32 MiB。`/document.html?id=<uuid>` 直接返回没有 `allow-same-origin`、仅允许脚本执行的原生 sandbox H5 页面，响应头带有限制网络、表单、外部 frame、object 和 base 的 CSP。HTML 预览不提供选区评论；Agent 和 CLI 的 Markdown 输出会把 HTML 内容 JSON 引用为数据。
 
 CLI 与服务端都需要包含本次文档分享更新；源码实现不会自动升级已安装的 npm 包或部署托管服务。部署、大小限制及 Agent 导出见[文档分享手册](https://github.com/team-harness/threadshare/blob/main/docs/document-sharing-guide.md)，完整参数通过 `threadshare document --help` 发现。
 
