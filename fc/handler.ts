@@ -28,7 +28,7 @@ import {
 } from "../src/agent-transcript.mjs";
 import staticAssets from "./static-assets";
 import { documentOssStore } from './document-oss-store';
-import { createDocumentService, sweepDocuments } from '../src/document-service.mjs';
+import { createDocumentService, nativeHtmlDocumentResponse, sweepDocuments } from '../src/document-service.mjs';
 import { documentAgentResponse } from '../src/document-read.mjs';
 import { FLOWCHART_FRAME_CSP, FLOWCHART_FRAME_HTML } from '../document-viewer/frame-html.mjs';
 
@@ -422,11 +422,15 @@ export function createHandler({
         else if (!['GET', 'HEAD'].includes(method)) return viewerMethodNotAllowed();
         else if (selectAgentTranscript(searchParams, acceptHeader(event))) response = await documentAgentResponse(request, service);
         else {
-          const result = staticResponse('/document.html', method, assets, searchParams);
-          result.headers['cache-control'] = 'no-store'; result.headers.vary = 'Accept';
-          result.headers['referrer-policy'] = 'no-referrer';
-          result.headers['content-security-policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-          return result;
+          const nativeHtml = await nativeHtmlDocumentResponse(request, service);
+          if (nativeHtml) response = nativeHtml;
+          else {
+            const result = staticResponse('/document.html', method, assets, searchParams);
+            result.headers['cache-control'] = 'no-store'; result.headers.vary = 'Accept';
+            result.headers['referrer-policy'] = 'no-referrer';
+            result.headers['content-security-policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: http:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            return result;
+          }
         }
         return { statusCode: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) };
       }

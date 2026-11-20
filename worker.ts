@@ -21,7 +21,7 @@ import {
   mergeVary,
   selectAgentTranscript,
 } from "./src/agent-transcript.mjs";
-import { createDocumentService, sweepDocuments } from './src/document-service.mjs';
+import { createDocumentService, nativeHtmlDocumentResponse, sweepDocuments } from './src/document-service.mjs';
 import { documentR2Store } from './src/document-r2-store.mjs';
 import { documentAgentResponse } from './src/document-read.mjs';
 import { FLOWCHART_FRAME_CSP, FLOWCHART_FRAME_HTML } from './document-viewer/frame-html.mjs';
@@ -203,6 +203,8 @@ export function createWorker({ now = Date.now }: WorkerOptions = {}) {
           try { return await documentAgentResponse(request, service); }
           catch (error) { return new Response('Document unavailable', { status: error.status ?? 500, headers: { 'cache-control': 'no-store' } }); }
         }
+        const nativeHtml = await nativeHtmlDocumentResponse(request, service);
+        if (nativeHtml) return nativeHtml;
         const asset = await env.ASSETS.fetch(request);
         const headers = new Headers(asset.headers);
         headers.set('cache-control', 'no-store'); headers.set('vary', 'Accept');

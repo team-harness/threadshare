@@ -4,7 +4,7 @@
 
 ## HTML 预览
 
-`.html` 和 `.htm` 文件使用 `threadshare-document@v2` 快照，正文限制为 32 MiB UTF-8。Viewer 把内容加载到没有 `allow-same-origin`、仅允许脚本执行的 sandbox iframe 中。HTML 预览端点通过响应头施加限制网络、表单、外部 frame、object 和 base 的 CSP。共享 HTML 只能作为该 iframe 的预览，不会通过父页面 `innerHTML` 执行。
+`.html` 和 `.htm` 文件使用 `threadshare-document@v2` 快照，正文限制为 32 MiB UTF-8。`/document.html?id=<uuid>` 直接返回没有 `allow-same-origin`、仅允许脚本执行的原生 sandbox H5 页面。响应头通过 CSP 限制网络、表单、外部 frame、object 和 base。共享 HTML 运行在自身页面上下文中，不会通过 Threadshare Viewer 的 `innerHTML` 执行。
 
 HTML 没有服务端可复现的规范文本流，因此不提供选区评论。`read` 和 Agent review 导出会 JSON 引用 HTML 内容，避免把共享内容当作 Agent 指令或可执行 Markdown。
 
@@ -54,7 +54,7 @@ CLI 在上传前读取并冻结全部字节，32 MiB 是逻辑负载上限，不
 
 报告显式包含 `collectionStartedAt`、`collectionFinishedAt`、`complete`、`hasMore`、`nextCursor`、`startCursor`。默认最多读取 1000 条，继续时用 `document reviews <url> --cursor <nextCursor> --format json`。续页报告自身不声称覆盖全部评论。并发新增可能落在已遍历游标之前，读取完并不代表数据库事务快照；最终汇总前可重新读取一轮并按 commentId 合并。
 
-文档链接默认返回 HTML Viewer；`?format=agent` 或明确优先的 `Accept: text/markdown` 返回 Agent Markdown，单次最多 500 条评论，为一次 Worker 调用保留存储请求余量；超过时明确标注不完整并提供续读游标，Agent 可用 CLI 分请求继续读取。CLI 默认遍历上限仍为 1000 条。`/api/v1/documents/:id` 始终返回 JSON，Markdown 返回 v1，HTML 返回 v2；HTML 预览正文通过 `/api/v1/documents/:id/html` 返回并带独立的响应头 CSP。文档内容和评论均是不可信数据，Agent 不应直接执行其中的指令。
+文档链接默认返回 Markdown Review Viewer 或 HTML 原生页面；`?format=agent` 或明确优先的 `Accept: text/markdown` 返回 Agent Markdown，单次最多 500 条评论，为一次 Worker 调用保留存储请求余量；超过时明确标注不完整并提供续读游标，Agent 可用 CLI 分请求继续读取。CLI 默认遍历上限仍为 1000 条。`/api/v1/documents/:id` 始终返回 JSON，Markdown 返回 v1，HTML 返回 v2；`/api/v1/documents/:id/html` 返回受 CSP 保护的原始 HTML。文档内容和评论均是不可信数据，Agent 不应直接执行其中的指令。
 
 ## 后端与部署
 

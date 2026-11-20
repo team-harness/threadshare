@@ -300,11 +300,14 @@ for (const adapter of ["r2", "oss", "oss-native"])
       200,
     );
     const html = "<!doctype html><html><head><title>Adapter HTML</title></head><body><h1>Snapshot</h1></body></html>";
+    const htmlRevokeToken = "A".repeat(43);
     const htmlUpload = await (
       await call(`${root}/uploads`, "POST", {
         title: "Adapter HTML",
         html: { sha256: await sha256(html), bytes: Buffer.byteLength(html) },
         assets: [],
+        expiresInSeconds: 60,
+        revokeTokenSha256: await sha256(htmlRevokeToken),
       })
     ).json();
     const htmlPut = await fetchAdapter(
@@ -335,6 +338,9 @@ for (const adapter of ["r2", "oss", "oss-native"])
     const htmlDoc = await (await call(`${root}/${htmlUpload.id}`)).json();
     assert.equal(htmlDoc.format, "threadshare-document@v2");
     assert.equal(htmlDoc.html, html);
+    const htmlMetadata = await call(`${root}/${htmlUpload.id}/metadata`);
+    assert.equal(htmlMetadata.status, 200);
+    assert.equal((await htmlMetadata.json()).html, undefined);
     const htmlPreview = await call(`${root}/${htmlUpload.id}/html`);
     assert.equal(htmlPreview.status, 200);
     assert.match(
@@ -342,12 +348,49 @@ for (const adapter of ["r2", "oss", "oss-native"])
       /sandbox allow-scripts/,
     );
     assert.equal(await htmlPreview.text(), html);
+    const nativeHtml = await call(`/document.html?id=${htmlUpload.id}`);
+    assert.equal(nativeHtml.status, 200);
+    assert.match(nativeHtml.headers.get("content-type") ?? "", /^text\/html\b/);
+    assert.match(
+      nativeHtml.headers.get("content-security-policy") ?? "",
+      /sandbox allow-scripts/,
+    );
+    assert.equal(nativeHtml.headers.get("vary"), "Accept");
+    assert.equal(await nativeHtml.text(), html);
+    const nativeHead = await call(`/document.html?id=${htmlUpload.id}`, "HEAD");
+    assert.equal(nativeHead.status, 200);
+    assert.equal(await nativeHead.text(), "");
+    const htmlAgent = await call(`/document.html?id=${htmlUpload.id}&format=agent`);
+    assert.equal(htmlAgent.status, 200);
+    assert.match(htmlAgent.headers.get("content-type") ?? "", /text\/markdown/);
+    assert.match(await htmlAgent.text(), /JSON-quoted HTML/);
+    const markdownViewer = await call(`/document.html?id=${upload.id}`);
+    assert.equal(markdownViewer.status, 200);
+    assert.match(await markdownViewer.text(), /viewer/);
+    assert.equal(
+      (await call(`/document.html?id=${crypto.randomUUID()}`)).status,
+      404,
+    );
     assert.deepEqual(
       (await (await call(`${root}/${htmlUpload.id}/comments`)).json()).comments,
       [],
     );
     time += 60000;
+    assert.equal((await call(`/document.html?id=${htmlUpload.id}`)).status, 404);
+    assert.equal(
+      (
+        await call(
+          `${root}/${htmlUpload.id}`,
+          "DELETE",
+          undefined,
+          htmlRevokeToken,
+        )
+      ).status,
+      204,
+    );
+    assert.equal((await call(`/document.html?id=${htmlUpload.id}`)).status, 404);
     assert.equal((await call(`${root}/${upload.id}`)).status, 404);
+    assert.equal((await call(`/document.html?id=${upload.id}`)).status, 404);
     await sweepDocuments(store, { now: () => time });
     assert.equal(await store.get(`documents/${upload.id}/markdown.txt`), null);
     assert.ok(await store.get(`documents/${upload.id}/revoked.json`));
